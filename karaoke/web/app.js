@@ -160,7 +160,6 @@ function updateTransport() {
     button.classList.toggle('selected', button.dataset.mix === state.mix);
     button.setAttribute('aria-pressed', String(button.dataset.mix === state.mix));
   });
-  $('mix-description').textContent = {karaoke:'背景音乐＋伴唱，你来唱主旋律。',instrumental:'只留背景音乐，所有演唱都交给你。',original:'主唱与伴唱一起播放，先听一遍找感觉。',custom:'按你的习惯调好了，换歌也会保留。'}[state.mix];
   renderMixer();
   updateCover();
 }
@@ -312,6 +311,13 @@ async function fullscreen() {
 }
 $('fullscreen').onclick = fullscreen;
 $('exit-fullscreen').onclick = fullscreen;
+// Move the same timeline so fullscreen keeps its clock, seek handlers and state.
+const seekRow = $('seek').closest('.seek-row');
+const seekHome = seekRow.parentElement;
+document.addEventListener('fullscreenchange', () => {
+  const target = document.fullscreenElement === $('player-stage') ? $('fullscreen-progress') : seekHome;
+  target.append(seekRow);
+});
 document.addEventListener('keydown', event => {
   if (['INPUT','TEXTAREA','BUTTON'].includes(event.target.tagName) || event.ctrlKey || event.metaKey || event.altKey) return;
   if (event.code === 'Space') { event.preventDefault(); togglePlay(); }
