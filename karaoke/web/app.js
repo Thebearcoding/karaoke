@@ -46,8 +46,7 @@ function renderStorage() {
   $('storage-usage').textContent = `${gib(storage.used_bytes)} / ${gib(storage.limit_bytes)} GiB`;
   $('storage-meter').max = storage.limit_bytes;
   $('storage-meter').value = storage.used_bytes;
-  $('storage-note').textContent = storage.can_prepare ? '自动清理久未使用的歌曲，保留待唱歌曲。' : '准备空间不足。可移除待唱歌曲、提高上限或释放硬盘空间。';
-  $('storage-note').classList.toggle('storage-warning', !storage.can_prepare);
+  $('storage-note').hidden = storage.can_prepare;
   if (document.activeElement !== $('storage-limit')) $('storage-limit').value = storage.limit_bytes/1024**3;
 }
 
@@ -95,12 +94,12 @@ function renderLibrary() {
   const songs = library.filter(song => (!search || `${song.title} ${song.artist}`.toLocaleLowerCase().includes(search)) &&
     (filter === 'all' || (filter === 'ready' ? song.job_id : song.language === filter)));
   $('library-count').textContent = `${songs.length} 首${filter === 'ready' ? '已准备' : '歌曲'}`;
-  $('library-heading').textContent = search ? '找到这些好歌' : '从一首喜欢的开始';
+  $('library-heading').textContent = search ? '搜索结果' : '曲库';
   $('song-grid').innerHTML = songs.map(song => `<article class="song-card">
     <div class="song-poster">${song.poster ? `<img src="${escape(song.poster)}" alt="" loading="lazy">` : `<span class="poster-initial">${escape(song.title.slice(0,1))}</span>`}
-      <span class="poster-type">${escape(song.language === 'Chinese' ? 'MANDARIN' : song.language === 'Japanese' ? 'JAPANESE' : 'ENGLISH')}</span><span class="poster-duration">${time(song.duration)}</span>
+      <span class="poster-duration">${time(song.duration)}</span>
       <button class="add-song" data-song="${escape(song.id)}" aria-label="点歌：${escape(song.title)}" title="加入歌单">${icon('plus')}</button></div>
-    <div class="song-detail"><h3>${escape(song.title)}</h3><div class="song-info-row"><span class="song-artist">${escape(song.artist || '音乐视频')}</span><span class="${song.job_id ? 'ready-label' : 'prepare-label'}">${song.job_id ? '● 可以直接唱' : '首次准备'}</span></div></div></article>`).join('');
+    <div class="song-detail"><h3>${escape(song.title)}</h3><div class="song-info-row"><span class="song-artist">${escape(song.artist)}</span><span class="${song.job_id ? 'ready-label' : 'prepare-label'}">${song.job_id ? '● 已准备' : '需准备'}</span></div></div></article>`).join('');
   $('search-empty').hidden = songs.length > 0;
   $('youtube-search').href = `https://www.youtube.com/results?search_query=${encodeURIComponent(query + ' official music video')}`;
   $('bilibili-search').href = `https://search.bilibili.com/all?keyword=${encodeURIComponent(query + ' MV')}`;
@@ -124,7 +123,8 @@ function renderQueue() {
   $('nav-count').textContent = state.entries.length;
   $('queue-empty').hidden = state.entries.length > 0;
   const preparing = state.entries.filter(e => ['running','queued'].includes(e.status)).length;
-  $('queue-badge').textContent = preparing ? `${preparing} 首准备中` : state.entries.length ? '按歌单顺序播放' : '等你点歌';
+  $('queue-badge').textContent = `${preparing} 首准备中`;
+  $('queue-badge').hidden = !preparing;
   if (signature === queueSignature) return;
   queueSignature = signature;
   $('queue-list').innerHTML = state.entries.map((entry, i) => {
@@ -139,12 +139,12 @@ function renderQueue() {
 
 function updateTransport() {
   const song = current();
-  $('now-title').textContent = song?.title || (state.entries.length ? '歌单准备好了' : '留一个位置，给你的声音');
-  $('now-artist').textContent = song?.artist || (state.entries.length ? '点击播放，开始今晚第一首' : '还没有正在播放的歌');
+  $('now-title').textContent = song?.title || '未播放';
+  $('now-artist').textContent = song?.artist || '';
   $('now-art').style.backgroundImage = song?.poster ? `url("${song.poster}")` : '';
   $('now-art').querySelector('span').hidden = Boolean(song?.poster);
-  $('player-title').textContent = song?.title || '下一首，轮到你。';
-  $('player-artist').textContent = song?.artist || '先点一首喜欢的歌';
+  $('player-title').textContent = song?.title || '未播放';
+  $('player-artist').textContent = song?.artist || '';
   $('play-icon').setAttribute('href', state.playing && (remote || player.unlocked) ? '#i-pause' : '#i-play');
   $('play-toggle').setAttribute('aria-label', state.playing && (remote || player.unlocked) ? '暂停' : '播放');
   $('play-toggle').disabled = state.entries.length === 0;
@@ -167,7 +167,8 @@ function updateTransport() {
 function updateCover() {
   const song = current();
   $('screen-cover').hidden = Boolean(song?.status === 'completed' && !loading && !loadError && !remote && player.unlocked && player.buffers);
-  $('screen-status').textContent = remote ? '遥控模式 · 声音由播放页面输出' : loadError || (!song ? '好歌不怕晚，等你开口。' : song.status === 'failed' ? '这首歌准备失败，可以重试或切下一首' : song.status !== 'completed' ? statusText(song) : loading ? '加载音轨，马上开唱…' : '舞台准备好了。');
+  $('screen-status').textContent = remote ? '遥控模式' : loadError || (!song ? '请先点歌' : song.status !== 'completed' ? statusText(song) : loading ? '加载音轨…' : '');
+  $('screen-status').hidden = !$('screen-status').textContent;
   $('screen-start').hidden = remote || !song || song.status !== 'completed' || loading;
   $('screen-start').firstChild.textContent = loadError ? '重试加载 ' : '开始唱 ';
 }
@@ -328,7 +329,7 @@ window.addEventListener('resize', () => switchView(view));
 const events = new EventSource('/v1/room/events');
 events.addEventListener('room', event => {
   $('connection-dot').classList.add('online');
-  $('connection-text').textContent = remote ? '遥控模式' : '本机房间 · 在线';
+  $('connection-text').textContent = remote ? '遥控模式' : '在线';
   acceptState(JSON.parse(event.data));
 });
 events.onerror = () => { $('connection-dot').classList.remove('online'); $('connection-text').textContent = '正在重连'; };
