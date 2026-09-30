@@ -110,12 +110,15 @@ class Pipeline:
                 result = subprocess.run([str(a) for a in command], cwd=ROOT.parent,
                     stdout=log, stderr=subprocess.STDOUT, timeout=timeout)
             if result.returncode:
+                with (self.output/f'{name}.log').open('rb') as log:
+                    log.seek(0, 2)
+                    log.seek(max(0, log.tell()-16384))
+                    diagnostic = log.read().decode(errors='replace')
                 if name == 'download':
-                    with (self.output/'download.log').open('rb') as log:
-                        log.seek(0, 2)
-                        log.seek(max(0, log.tell()-16384))
-                        diagnostic = log.read().decode(errors='replace')
                     raise StageFailure(name, download_failure(diagnostic))
+                if name == 'align_words' and any(message in diagnostic for message in (
+                        'Empty alignment audio', 'FFmpeg failed to read "[]"')):
+                    raise StageFailure(name, '歌词对齐失败：歌词时间范围内没有有效音频，请检查歌词与视频版本')
                 raise StageFailure(name, f'{name} 阶段失败；具体错误已保存在任务日志中')
         except subprocess.TimeoutExpired as error:
             raise StageFailure(name, f'{name} 阶段超过允许的处理时间') from error
@@ -170,6 +173,8 @@ class Pipeline:
 
     def prepare_text(self, metadata, duration):
         from anchors_from_asr import anchors_from_words
+        from transcribe_lyrics import filter_silent_transcription
+        import soundfile as sf
         self.run('package_two_stems', [sys.executable, ROOT/'exact_stems.py', 'build',
             '--source', self.source, '--vocals-estimate', self.vocals, '--output', self.output/'two-stems'])
         self.run('resample_vocals', ['ffmpeg', '-v', 'error', '-nostdin', '-i', self.vocals,
@@ -182,6 +187,9 @@ class Pipeline:
         started = time.perf_counter()
         try:
             transcription = json.loads((self.output/'asr/transcription.json').read_text())
+            audio, rate = sf.read(self.output/'vocals-16k.wav', dtype='float32')
+            transcription, rejected = filter_silent_transcription(transcription, audio, rate)
+            write_json(self.output/'asr/filtered.json', dict(transcription=transcription, rejected=rejected))
             lyrics = prepare_song_text(self.request, metadata, transcription, duration,
                 catalog_root=self.catalog_root, model=self.text_model)
             self.phase(song_info=dict(title=lyrics['title'], artist=lyrics['artist'],

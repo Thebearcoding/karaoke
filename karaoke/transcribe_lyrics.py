@@ -3,10 +3,34 @@
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 import time
 
 from openai import OpenAI
+
+
+def filter_silent_transcription(data, audio, sample_rate):
+    """Reject ASR hallucinations in digital silence, preserving even quiet speech."""
+    filtered, rejected = dict(data), []
+    for kind in ('segments', 'words'):
+        filtered[kind] = []
+        for item in data.get(kind) or []:
+            start, end = item['start'], item['end']
+            if not all(math.isfinite(t) for t in (start, end)) or end < start:
+                reason = 'invalid_time_range'
+            else:
+                # Include nearby audio for imprecise or zero-duration ASR times.
+                left = max(0, math.floor((start-.25)*sample_rate))
+                right = min(len(audio), math.ceil((end+.25)*sample_rate))
+                reason = ('outside_audio' if right <= left else
+                          'digital_silence' if not audio[left:right].any() else None)
+            if reason:
+                rejected.append(dict(kind=kind, reason=reason, item=item))
+            else:
+                filtered[kind].append(item)
+    filtered['text'] = ''.join(item.get('text', '') for item in filtered['segments'])
+    return filtered, rejected
 
 
 def main():

@@ -126,6 +126,14 @@ def test_download_failure_has_actionable_reason_without_raw_diagnostics(tmp_path
     assert (tmp_path/'download.log').exists()
 
 
+def test_empty_alignment_error_identifies_the_failed_stage(tmp_path):
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    with pytest.raises(StageFailure, match='歌词对齐失败.*没有有效音频') as caught:
+        pipeline.run('align_words', [sys.executable, '-c',
+            'import sys;print(\'Empty alignment audio for lyric lines 1-1\');sys.exit(1)'])
+    assert caught.value.stage == 'align_words'
+
+
 @pytest.mark.parametrize('tags,expected', [
     ({'track': 'Tagged song', 'artist': 'Tagged singer'}, ('Tagged song', 'Tagged singer')),
     ({'artists': ['Singer A', 'Singer B']}, ('A new video', 'Singer A · Singer B')),

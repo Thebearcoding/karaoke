@@ -31,22 +31,11 @@ def json_number(value):
     raise TypeError(f'Cannot serialize {type(value).__name__}')
 
 
-def voice_bounds(audio):
-    frames = audio[:len(audio)//320*320].reshape(-1, 320)
-    rms = np.sqrt(np.mean(frames**2, axis=1))
-    active = binary_closing(rms > max(.008, np.quantile(rms, .9)*.18), structure=np.ones(15))
-    changes = np.diff(np.r_[False, active, False].astype(int))
-    runs = [(a*.02, b*.02) for a, b in zip(np.flatnonzero(changes == 1), np.flatnonzero(changes == -1))
-            if b-a >= 30]
-    return (max(0., runs[0][0]-.35), min(len(audio)/16000, runs[-1][1]+.4)) if runs else (0., len(audio)/16000)
-
-
 def alignment_blocks(anchors, audio):
     """Keep ASR-supported verses apart; unresolved runs share adjacent context."""
     count = len(anchors)
     valid = lambda i: anchors[i]['status'] == 'candidate'
     first = 0
-    voice_start, voice_end = voice_bounds(audio)
     blocks = []
     while first < count:
         stop = first+1
@@ -68,10 +57,10 @@ def alignment_blocks(anchors, audio):
         # ASR often stops before a held final syllable; retain its acoustic tail.
         tail_padding = 3.0 if context_stop == count else .6
         end = min(len(audio)/16000, anchors[context_stop-1]['end']+tail_padding) if valid(context_stop-1) else len(audio)/16000
-        if context_first == 0:
-            begin = max(begin, voice_start)
-        if context_stop == count:
-            end = min(end, voice_end)
+        # A global loudness threshold can miss quiet opening/closing lyrics.
+        # Keep the anchor context; never trim it to estimated voice bounds.
+        if not np.isfinite([begin, end]).all() or round(begin*16000) >= round(end*16000):
+            raise ValueError(f'Empty alignment audio for lyric lines {first+1}-{stop}: {begin}-{end}s')
         blocks.append((first, stop, context_first, context_stop, begin, end))
         first = stop
     return blocks
@@ -160,6 +149,8 @@ def main():
         started = time.perf_counter()
         cues, raw_blocks, units = [], [], []
         for first, stop, context_first, context_stop, begin, end in blocks:
+            print(json.dumps({'song': Path(job['lyrics']).stem, 'lines': [first+1, stop],
+                              'window': [begin, end]}), flush=True)
             result = model.align(audio[round(begin*16000):round(end*16000)],
                 '\n'.join(lyrics['lines'][context_first:context_stop]), language=language,
                 original_split=True, regroup=False, token_step=80, max_word_dur=4.,
@@ -175,8 +166,6 @@ def main():
             units.extend(local_units)
             raw_blocks.append({'range': [first, stop], 'context': [context_first, context_stop],
                                'source_range': [begin, end], 'result': result.to_dict()})
-            print(json.dumps({'song': Path(job['lyrics']).stem, 'lines': [first+1, stop],
-                              'window': [begin, end]}), flush=True)
         if args.device == 'mps':
             torch.mps.synchronize()
         elapsed = time.perf_counter()-started

@@ -17,6 +17,8 @@ from lyric_progress import map_words, build as build_progress
 from align_lyric_phonemes import guided_scores, protect_units
 from phoneme_progress import reading_parts, japanese_phone_groups, spoken_units
 from align_repeated_lyrics import agree_onset, audible, reference_pairs
+from align_lyrics_whisper import alignment_blocks
+from transcribe_lyrics import filter_silent_transcription
 from word_onset_metrics import score_onsets, word_events
 
 
@@ -355,6 +357,41 @@ class WordOnsetScoring(unittest.TestCase):
 
 
 class AlignmentIntegrity(unittest.TestCase):
+    def test_asr_silence_filter_keeps_quiet_speech_and_nearby_collapsed_words(self):
+        audio = np.zeros(5*16000, dtype='float32')
+        audio[16000:2*16000] = 1e-7
+        spoken = dict(start=1., end=2., text='Soft singing', word='soft')
+        nearby = dict(start=2.1, end=2.1, text='', word='ending')
+        hallucinated = dict(start=4., end=4.1, text='Invented', word='invented')
+        outside = dict(start=8., end=9., text='Outside', word='outside')
+        data = {kind: [spoken, nearby, hallucinated, outside] for kind in ('segments', 'words')}
+        filtered, rejected = filter_silent_transcription(data, audio, 16000)
+        for kind in data:
+            self.assertEqual(filtered[kind], [spoken, nearby])
+            self.assertEqual(len(data[kind]), 4)
+        self.assertEqual(filtered['text'], 'Soft singing')
+        self.assertEqual([r['reason'] for r in rejected],
+                         ['digital_silence', 'outside_audio', 'digital_silence', 'outside_audio'])
+
+    def test_quiet_opening_and_closing_lines_keep_their_audio(self):
+        audio = np.zeros(10*16000, dtype='float32')
+        audio[16000:2*16000] = .001
+        audio[4*16000:6*16000] = .1
+        audio[8*16000:9*16000] = .001
+        anchors = [dict(start=1., end=2., status='candidate'),
+                   dict(start=8., end=9., status='candidate')]
+        blocks = alignment_blocks(anchors, audio)
+        self.assertEqual(len(blocks), 2)
+        for block, anchor in zip(blocks, anchors):
+            begin, end = block[-2:]
+            self.assertLess(begin, anchor['start'])
+            self.assertGreaterEqual(end, anchor['end'])
+            self.assertGreater(len(audio[round(begin*16000):round(end*16000)]), 0)
+
+    def test_out_of_audio_anchor_fails_before_model_inference(self):
+        with self.assertRaisesRegex(ValueError, 'Empty alignment audio.*1-1'):
+            alignment_blocks([dict(start=20., end=21., status='candidate')], np.zeros(16000))
+
     def test_silence_does_not_invent_word_times(self):
         audio=np.zeros((32000,2),dtype='float32')
         times,cue=activity(audio,16000)
