@@ -100,6 +100,7 @@ curl -sS http://127.0.0.1:8746/v1/jobs/任务UUID
 | `backing_vocals_preview` | 伴唱 MP3 |
 | `lead_vocals_preview` | 主唱 MP3 |
 | `subtitles` | 包含逐字／词时间的 JSON |
+| `poster` | 可选的本地 JPEG 封面：优先视频缩略图，获取失败时截取 MV 画面 |
 
 文件接口支持 HTTP Range，可直接交给播放器或下载。处理完成前访问文件返回 409；未发布的内部文件无法通过文件接口读取。
 

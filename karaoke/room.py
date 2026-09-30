@@ -114,7 +114,9 @@ class Room:
             artist=inputs.get('artist') or result.get('artist') or song_info.get('artist') or featured.get('artist', ''),
             url=inputs['url'], status=job['status'], active_stages=job.get('active_stages', []),
             error=job.get('error'), duration=result.get('duration_seconds') or song_info.get('duration_seconds', 0),
-            poster=featured.get('poster'), lyrics_need_review=result.get('quality', {}).get(
+            poster=(f"/v1/jobs/{job['id']}/artifacts/poster"
+                    if job['status'] == 'completed' and 'poster' in result.get('artifacts', {})
+                    else featured.get('poster')), lyrics_need_review=result.get('quality', {}).get(
                 'lyrics_provenance', {}).get('needs_review', False),
             artifacts={key: f"/v1/jobs/{job['id']}/artifacts/{key}"
                        for key in result.get('artifacts', {})})
@@ -148,11 +150,11 @@ class Room:
             info = self.describe(dict(id=job['id'], job_id=job['id']))
             if song:
                 if ready:
-                    song.update(job_id=job['id'], duration=info['duration'])
+                    song.update(job_id=job['id'], duration=info['duration'], poster=info['poster'])
             else:
                 song = dict(id=job['id'], job_id=job['id'] if ready else None, title=info['title'], artist=info['artist'],
                     url=info['url'], duration=info['duration'], language=result.get('language', ''),
-                    poster=None)
+                    poster=info['poster'])
                 songs.append(song)
                 by_url[song['url']] = song
         return songs

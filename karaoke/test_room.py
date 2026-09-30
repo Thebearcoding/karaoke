@@ -22,6 +22,32 @@ def ready_job(store, url=URL):
                         duration_seconds=10, artifacts=artifacts))
 
 
+def test_poster_survives_cleanup_and_browsing_does_not_refresh_lru(tmp_path):
+    app = create_app(tmp_path, version='test')
+    store = app.state.store
+    job = ready_job(store)
+    folder = store.root/job['id']
+    (folder/'poster.jpg').write_bytes(b'cover')
+    job['result']['artifacts']['poster'] = dict(path='poster.jpg', bytes=5, sha256='fixture')
+    store.update(job['id'], result=job['result'], last_accessed_at='2000-01-01T00:00:00Z')
+    store.cache.compact(store.read(job['id']))
+    with TestClient(app) as client:
+        song = next(s for s in client.get('/v1/library').json()['songs'] if s['job_id'] == job['id'])
+        poster = song['poster']
+        assert poster == f"/v1/jobs/{job['id']}/artifacts/poster"
+        response = client.get(poster)
+        assert response.status_code == 200 and response.content == b'cover'
+        assert response.headers['content-type'] == 'image/jpeg'
+        assert store.read(job['id'])['last_accessed_at'] == '2000-01-01T00:00:00Z'
+        assert not store.cache.leases
+        entry = client.post('/v1/room/entries', json={'job_id':job['id']}).json()['entries'][0]
+        assert entry['poster'] == poster
+        store.update(job['id'], status='evicted')
+        assert client.get(poster).status_code == 410
+        song = next(s for s in client.get('/v1/library').json()['songs'] if s['id'] == job['id'])
+        assert song['poster'] is None and song['job_id'] is None
+
+
 def test_playlist_duplicate_song_order_and_stale_end_event(tmp_path):
     app = create_app(tmp_path, worker_command=fake_worker, version='test')
     job = ready_job(app.state.store)

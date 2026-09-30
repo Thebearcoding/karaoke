@@ -132,9 +132,10 @@ class SongCache:
         self.limit = value
         self.enforce()
 
-    def acquire(self, job_id):
+    def acquire(self, job_id, *, record_access=True):
         self.leases[job_id] += 1
-        self.store.touch(job_id)
+        if record_access:
+            self.store.touch(job_id)
 
     def release(self, job_id):
         self.leases[job_id] -= 1

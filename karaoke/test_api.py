@@ -1,5 +1,8 @@
 import json
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import subprocess
 import sys
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -14,7 +17,7 @@ from karaoke.job_schema import JobRequest, video_url
 from karaoke.song_sources import SongText, find_verified_lyrics, prepare_song_text
 from karaoke.align_lyric_phonemes import protect_line_order
 from karaoke.cache import CacheFull, GIB
-from karaoke.pipeline import Pipeline, StageFailure
+from karaoke.pipeline import Pipeline, StageFailure, create_poster
 
 
 URL = 'https://www.youtube.com/watch?v=n5sjpCQhTDk'
@@ -132,6 +135,42 @@ def test_empty_alignment_error_identifies_the_failed_stage(tmp_path):
         pipeline.run('align_words', [sys.executable, '-c',
             'import sys;print(\'Empty alignment audio for lyric lines 1-1\');sys.exit(1)'])
     assert caught.value.stage == 'align_words'
+
+
+def test_poster_uses_thumbnail_or_video_frame_and_failure_is_optional(tmp_path):
+    from PIL import Image
+    thumbnail = tmp_path/'thumbnail.jpg'
+    video = tmp_path/'video.mp4'
+    Image.new('RGB', (80, 40), 'red').save(thumbnail)
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=blue:s=80x40:d=1',
+                    '-c:v', 'mpeg4', str(video)], check=True)
+
+    class Handler(SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(tmp_path), **kwargs)
+
+        def log_message(self, *args):
+            pass
+
+    with ThreadingHTTPServer(('127.0.0.1', 0), Handler) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f'http://127.0.0.1:{server.server_port}'
+        poster = tmp_path/'poster.jpg'
+        try:
+            assert create_poster(tmp_path/'missing.mp4', poster, thumbnail=base+'/thumbnail.jpg')
+            with Image.open(poster) as image:
+                red, _, blue = image.getpixel((0, 0))
+                assert red > 240 and blue < 10
+            assert create_poster(video, poster, thumbnail=base+'/missing.jpg', seconds=0)
+            with Image.open(poster) as image:
+                red, _, blue = image.getpixel((0, 0))
+                assert blue > 240 and red < 10
+            assert not create_poster(tmp_path/'missing.mp4', tmp_path/'absent.jpg')
+            assert not (tmp_path/'absent.jpg').exists()
+        finally:
+            server.shutdown()
+            thread.join()
 
 
 @pytest.mark.parametrize('tags,expected', [

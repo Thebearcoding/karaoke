@@ -74,6 +74,28 @@ def download_failure(log):
     return '视频下载失败，请稍后重试或换一个视频链接'
 
 
+def create_poster(source, output, *, thumbnail=None, seconds=30):
+    """Cache the video thumbnail, falling back to a frame; artwork is optional."""
+    output = Path(output)
+    temporary = output.with_name('.poster.tmp.jpg')
+    candidates = [(thumbnail, [])] if thumbnail and thumbnail.startswith(('https://', 'http://')) else []
+    candidates.append((source, ['-ss', str(seconds)]))
+    for media, options in candidates:
+        try:
+            result = subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-y', *options,
+                '-i', str(media), '-frames:v', '1', '-vf',
+                'scale=960:540:force_original_aspect_ratio=decrease', '-q:v', '3', str(temporary)],
+                capture_output=True, timeout=15)
+            if result.returncode == 0 and temporary.is_file() and temporary.stat().st_size:
+                temporary.replace(output)
+                return True
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            temporary.unlink(missing_ok=True)
+    return False
+
+
 class Pipeline:
     def __init__(self, request, output, *, separator_python=None, device='auto', text_model='gpt-5-mini',
                  max_duration=900, catalog_root=ROOT, cookies_file=None):
@@ -167,6 +189,8 @@ class Pipeline:
         duration = float(probe['format']['duration'])
         if not 0 < duration <= self.max_duration+1:
             raise StageFailure('download', f'视频时长必须介于 0 和 {self.max_duration} 秒之间')
+        create_poster(self.source, self.output/'poster.jpg', thumbnail=metadata.get('thumbnail'),
+                      seconds=min(30, duration*.1))
         write_json(self.output/'source.json', dict(url=url, sha256=file_hash(self.source),
                                                  duration=duration, probe=probe))
         return metadata, duration
@@ -324,6 +348,8 @@ class Pipeline:
             backing_vocals='stems/backing-vocals.wav', lead_vocals='stems/lead.wav',
             instrumental_preview='stems/instrumental.mp3', backing_vocals_preview='stems/backing-vocals.mp3',
             lead_vocals_preview='stems/lead.mp3', subtitles='cues.json')
+        if (self.output/'poster.jpg').is_file():
+            artifacts['poster'] = 'poster.jpg'
         result = dict(title=lyrics['title'], artist=lyrics['artist'], language=lyrics['language'],
             duration_seconds=duration, mv_audio=self.request['mv_audio'], shared_preview_gain=gain,
             artifacts={key: dict(path=value, bytes=(self.output/value).stat().st_size,

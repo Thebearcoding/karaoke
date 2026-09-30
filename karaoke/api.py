@@ -240,10 +240,10 @@ class StorageLimit(BaseModel):
 
 
 class LeasedFileResponse(FileResponse):
-    def __init__(self, *args, cache, job_id, **kwargs):
+    def __init__(self, *args, cache, job_id, record_access=True, **kwargs):
         super().__init__(*args, **kwargs)
         self.cache, self.job_id = cache, job_id
-        cache.acquire(job_id)
+        cache.acquire(job_id, record_access=record_access)
 
     async def __call__(self, scope, receive, send):
         try:
@@ -372,6 +372,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
         if not path.is_relative_to(folder) or not path.is_file():
             raise HTTPException(404, 'Artifact is unavailable')
         return LeasedFileResponse(path, cache=store.cache, job_id=str(job_id),
+                            record_access=name != 'poster',
                             media_type=mimetypes.guess_type(path.name)[0] or 'application/octet-stream',
                             filename=path.name, content_disposition_type='inline')
 
