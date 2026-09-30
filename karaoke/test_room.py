@@ -73,6 +73,28 @@ def test_wait_for_preparation_then_play_pause_seek_mix_and_persist(tmp_path):
         assert empty['entries'] == [] and empty['current_id'] is None
 
 
+def test_independent_levels_preserve_playback_persist_and_presets_reset_them(tmp_path):
+    app = create_app(tmp_path, version='test')
+    job = ready_job(app.state.store)
+    with TestClient(app) as client:
+        entry = client.post('/v1/room/entries', json={'job_id':job['id']}).json()['entries'][0]
+        client.post('/v1/room/commands', json={'action':'play'})
+        before = client.post('/v1/room/commands', json={'action':'ready','entry_id':entry['id']}).json()
+        changed = client.post('/v1/room/commands', json={'action':'levels','levels':{'backing_vocals':.35}}).json()
+        assert changed['levels'] == dict(instrumental=1,backing_vocals=.35,lead_vocals=0)
+        assert changed['started_at'] == before['started_at'] and changed['position'] == before['position']
+        changed = client.post('/v1/room/commands', json={'action':'levels','levels':{'instrumental':.8,'lead_vocals':.2}}).json()
+        assert changed['mix'] == 'custom' and changed['levels']['backing_vocals'] == .35
+        assert client.post('/v1/room/commands', json={'action':'levels','levels':{'lead_vocals':1.1}}).status_code == 422
+        assert client.post('/v1/room/commands', json={'action':'levels','levels':{}}).status_code == 422
+    with TestClient(create_app(tmp_path, version='test')) as client:
+        assert client.get('/v1/room').json()['levels'] == changed['levels']
+        original = client.post('/v1/room/commands', json={'action':'mix','mix':'original'}).json()
+        assert original['levels'] == dict(instrumental=1,backing_vocals=1,lead_vocals=1)
+        muted = client.post('/v1/room/commands', json={'action':'levels', 'levels':dict(instrumental=0,backing_vocals=0,lead_vocals=0)}).json()
+        assert all(value == 0 for value in muted['levels'].values())
+
+
 def test_pending_preparation_follows_playlist_without_interrupting_current(tmp_path):
     store = Store(tmp_path)
     worker = Worker(store)

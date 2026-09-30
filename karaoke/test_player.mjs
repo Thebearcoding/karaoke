@@ -36,6 +36,14 @@ test('stems begin together; mode and volume changes do not restart or seek', asy
   assert.deepEqual(p.gains.map(g=>g.gain.value),[1,0,0]);assert.equal(p.master.gain.value,.4);
   p.apply({...state,mix:'original'},clockOffset());
   assert.deepEqual(p.gains.map(g=>g.gain.value),[1,1,1]);assert.deepEqual(p.sources,originalSources);
+  p.apply({...state,mix:'custom',levels:{instrumental:.8,backing_vocals:.35,lead_vocals:.2}},clockOffset());
+  assert.deepEqual(p.gains.map(g=>g.gain.value),[.8,.35,.2]);
+  assert.deepEqual(p.sources,originalSources);assert.equal(p.video.currentTime,originalPosition);
+  assert.equal(p.master.gain.value,.4);
+  p.setLevels({backing_vocals:0});
+  assert.deepEqual(p.gains.map(g=>g.gain.value),[.8,0,.2]);
+  p.apply({...state,levels:{instrumental:0,backing_vocals:0,lead_vocals:0}},clockOffset());
+  assert.ok(p.gains.every(g=>g.gain.value===0));assert.deepEqual(p.sources,originalSources);
 });
 
 test('seek and pause stop all previous sources; end notification fires once', async () => {

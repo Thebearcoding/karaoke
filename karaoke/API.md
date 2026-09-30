@@ -25,10 +25,14 @@ API 的依赖文件只安装服务依赖。新检出请按[安装说明](../SETU
 | `POST /v1/room/entries` | 传入 `{ "url": "..." }` 点新歌，或 `{ "job_id": "..." }` 复用已准备歌曲 |
 | `POST /v1/room/commands` | `play`、`pause`、`seek`、`next`、`select`、`remove`、`reorder`、`mix`、`ready`、`retry` |
 | `GET /v1/room/events` | 推送 `event: room`；空闲时只发连接保活注释 |
+| `GET /v1/storage` | 缓存使用量、上限、受保护与可回收容量、准备空间是否足够 |
+| `POST /v1/storage` | `{ "limit_gib": 10 }` 修改并持久化上限，返回新的房间快照 |
 
 `pause`、`seek`、`next`、`ready` 必须带 `entry_id`，防止旧播放器事件影响新歌曲。`reorder` 传入完整的 `order` ID 数组，可带 `revision` 拒绝过期操作；当前歌曲保持首位。`mix` 接受 `instrumental`（纯伴奏）、`karaoke`（伴奏＋伴唱）、`original`（三轨一起播放）。
 
-预处理队列按歌单中尚未开始的歌曲重新排序，不中断当前处理。播放抵达未准备好的歌曲时等待；媒体加载完成后由播放页发送 `ready`，从设定位置起播，不把预处理／加载耗时算入歌曲时间。移除点歌项不删除已生成文件；已经提交的预处理仍会完成，以便再次点播。
+`levels` 独立调整三个声部，支持部分更新，例如 `{ "action": "levels", "levels": { "backing_vocals": 0.35, "lead_vocals": 0.2 } }`。键为 `instrumental`、`backing_vocals`、`lead_vocals`，值为 0–1 的有限数。房间快照中的 `levels` 包含全部三个值，手动设置不对应预设时 `mix` 为 `custom`。切歌、暂停、定位不改变音量；选择 `mix` 预设则重置三个值。`storage` 随房间 SSE 快照推送，前端不轮询。
+
+预处理队列按歌单中尚未开始的歌曲重新排序，不中断当前处理。播放抵达未准备好的歌曲时等待；媒体加载完成后由播放页发送 `ready`，从设定位置起播，不把预处理／加载耗时算入歌曲时间。移除点歌项解除缓存保护；已提交的预处理仍会完成，成品可按 LRU 回收。
 
 浏览器用同一个 Web Audio 时钟播放三条 MP3 试听音轨，MV 静音跟随。普通页面负责播放；`/?remote=1` 只点歌和控制，不发声。完整说明见 [APP.md](APP.md)。
 
@@ -79,6 +83,8 @@ curl -sS http://127.0.0.1:8746/v1/jobs/任务UUID
 ```
 
 状态依次为 `queued`、`running`、`completed`；失败为 `failed`，通过 `error.code` 与 `error.message` 获取原因。`active_stages` 会显示当前正在下载、分离、整理歌词、对齐还是渲染。同一首歌的独立步骤可并行，因此可能同时显示两个阶段。
+
+被 LRU 回收的任务为 `evicted`，原文件接口返回 HTTP 410。重新提交同链接或用原 `job_id` 点歌会重新准备。缓存不足导致准备中断时错误码为 `cache_full`；不会删除待唱歌曲来掩盖空间不足。默认上限、统计范围和运行中写入限制见 [缓存说明](APP.md#本地缓存上限)。
 
 完成后的 `result.artifacts` 每项包含 `url`、`bytes`、`sha256`：
 
@@ -134,6 +140,7 @@ with httpx.Client(timeout=30) as client:
 | `OPENAI_API_KEY` | ASR 和自动歌词整理需要 |
 | `KARAOKE_TEXT_MODEL` | 默认 `gpt-5-mini`；仅负责元数据／歌词文本整理 |
 | `KARAOKE_DATA_DIR` | 默认 `karaoke/service-data`，保存 SQLite 任务状态和每个任务的文件 |
+| `KARAOKE_CACHE_MAX_GIB` | 初次创建缓存设置时的容量上限，默认 `10` GiB；之后以页面保存的值为准 |
 | `KARAOKE_PORT` | 默认 `8746` |
 | `KARAOKE_HOST` | 默认 `127.0.0.1`；需要局域网设备点歌时可显式设为 `0.0.0.0` |
 | `KARAOKE_CORS_ORIGINS` | 允许调用接口的前端来源，逗号分隔；默认允许本地 8745 预览页 |

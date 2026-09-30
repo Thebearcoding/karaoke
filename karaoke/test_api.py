@@ -13,6 +13,7 @@ from karaoke.exact_stems import validate_preview
 from karaoke.job_schema import JobRequest, video_url
 from karaoke.song_sources import SongText, find_verified_lyrics, prepare_song_text
 from karaoke.align_lyric_phonemes import protect_line_order
+from karaoke.cache import CacheFull, GIB
 
 
 URL = 'https://www.youtube.com/watch?v=n5sjpCQhTDk'
@@ -229,3 +230,126 @@ def test_cross_line_refinement_falls_back_without_inventing_times():
 def test_exact_fifteen_milliseconds_is_not_a_floating_point_conflict():
     cues = [dict(text=str(t), units=[dict(start=t,end=t+.01)]) for t in [1.,1.015]]
     assert protect_line_order(cues,cues)[1] == []
+
+
+def cache_fixture(store, suffix):
+    job, _ = store.create(JobRequest(url='https://youtu.be/0000000000'+suffix, title=suffix, force=True), 'test')
+    (store.root/job['id']/'mv.mp4').write_bytes(b'x'*2048)
+    return store.update(job['id'], status='completed', last_accessed_at='2020-01-0'+suffix,
+        result=dict(title=suffix, duration_seconds=10,
+                    artifacts={'mv':dict(path='mv.mp4',bytes=2048,sha256='fixture')}))
+
+
+def test_lru_uses_real_access_persists_and_evicted_song_can_be_requested_again(tmp_path):
+    app = create_app(tmp_path, worker_command=fake_worker, version='test')
+    store = app.state.store
+    first, second, third = [cache_fixture(store, str(i)) for i in (1,2,3)]
+    with TestClient(app) as client:
+        # Reading a list is not a song access. Fetching media, including a range, is.
+        response = client.get(f"/v1/jobs/{first['id']}/artifacts/mv", headers={'Range':'bytes=0-3'})
+        assert response.status_code == 206 and response.content == b'xxxx'
+        assert not store.cache.leases
+        client.get('/v1/library')
+        store.cache.enforce()
+        store.cache.set_limit(store.cache.stats['used_bytes'] - store.cache.size(store.root/second['id']))
+        assert store.read(first['id'])['status'] == store.read(third['id'])['status'] == 'completed'
+        assert store.read(second['id'])['status'] == 'evicted'
+        assert not (store.root/second['id']).exists()
+        assert client.get(f"/v1/jobs/{second['id']}/artifacts/mv").status_code == 410
+        library = client.get('/v1/library').json()['songs']
+        assert next(s for s in library if s['id']==first['id'])['job_id']
+        assert next(s for s in library if s['id']==second['id'])['job_id'] is None
+        assert Store(tmp_path).read(first['id'])['last_accessed_at'] == store.read(first['id'])['last_accessed_at']
+        # A stale library button can transparently enqueue the evicted song again.
+        store.cache.set_limit(GIB)
+        retried = client.post('/v1/room/entries', json={'job_id':second['id']}).json()['entries'][0]
+        assert retried['job_id'] != second['id']
+        assert finished(client,retried['job_id'])['status'] == 'completed'
+
+
+def test_lru_protects_playlist_running_jobs_and_active_downloads(tmp_path):
+    app = create_app(tmp_path, version='test')
+    store = app.state.store
+    first, second, downloaded = [cache_fixture(store,str(i)) for i in (1,2,3)]
+    active, _ = store.create(JobRequest(url=URL, force=True), 'test')
+    store.update(active['id'], status='running')
+    (store.root/active['id']/'working.wav').write_bytes(b'w'*2048)
+    room = app.state.room.read()
+    room.update(entries=[dict(id='playing',job_id=first['id']),dict(id='waiting',job_id=second['id'])],current_id='playing')
+    app.state.room.save(room)
+    store.cache.acquire(downloaded['id'])
+    store.cache.enforce()
+    used = store.cache.stats['used_bytes']
+    with pytest.raises(CacheFull):
+        store.cache.set_limit(used-1)
+    store.cache.limit = used-1
+    assert not store.cache.enforce()
+    assert all((store.root/j['id']).exists() for j in (first,second,downloaded,active))
+    store.cache.release(downloaded['id'])
+    assert store.cache.enforce()
+    assert store.read(downloaded['id'])['status'] == 'evicted'
+    assert all((store.root/j['id']).exists() for j in (first,second,active))
+
+
+def test_compaction_keeps_outputs_and_bounded_logs_without_following_symlinks(tmp_path):
+    store = Store(tmp_path/'cache')
+    job = cache_fixture(store,'1')
+    folder = store.root/job['id']
+    (folder/'raw').mkdir()
+    (folder/'raw/input.wav').write_bytes(b'working')
+    (folder/'worker.log').write_bytes(b'l'*100000)
+    outside = tmp_path/'precious.wav'
+    outside.write_bytes(b'keep me')
+    (folder/'raw/link').symlink_to(outside)
+    store.cache.compact(job)
+    assert (folder/'mv.mp4').read_bytes() == b'x'*2048
+    assert (folder/'request.json').exists() and (folder/'worker.log').stat().st_size == 65536
+    assert not (folder/'raw').exists() and outside.read_bytes() == b'keep me'
+    store.update(job['id'], status='failed', result=None, error=dict(code='cache_full'))
+    store.cache.compact(store.read(job['id']))
+    assert not (folder/'mv.mp4').exists()
+    store.cache.set_limit(1)
+    assert not folder.exists()
+    assert store.read(job['id'])['status'] == 'failed'
+    assert store.read(job['id'])['error']['code'] == 'cache_full'
+
+
+def test_oversized_worker_is_stopped_cleaned_and_queue_can_continue(tmp_path):
+    def writer(folder):
+        return [sys.executable,'-c',
+                'import pathlib,sys,time;pathlib.Path(sys.argv[1],"working.wav").write_bytes(b"x"*400000);time.sleep(30)',str(folder)]
+    app = create_app(tmp_path, worker_command=writer, version='test', cache_limit_bytes=200000)
+    with TestClient(app) as client:
+        data = client.post('/v1/room/entries',json={'url':URL}).json()
+        job = finished(client,data['entries'][0]['job_id'])
+        assert job['status'] == 'failed' and job['error']['code'] == 'cache_full'
+        assert app.state.worker.process is None
+        assert not (tmp_path/job['id']/'working.wav').exists()
+        assert client.get('/v1/storage').json()['used_bytes'] < 200000
+        app.state.worker.command = fake_worker
+        retry = client.post('/v1/room/commands',json={'action':'retry','entry_id':data['entries'][0]['id']}).json()
+        assert finished(client,retry['entries'][0]['job_id'])['status'] == 'completed'
+
+
+def test_cache_limit_setting_is_validated_and_survives_restart(tmp_path):
+    with TestClient(create_app(tmp_path,version='test')) as client:
+        assert client.post('/v1/storage',json={'limit_gib':0}).status_code == 422
+        saved = client.post('/v1/storage',json={'limit_gib':2}).json()
+        assert saved['storage']['limit_bytes'] == 2*GIB
+    with TestClient(create_app(tmp_path,version='test')) as client:
+        assert client.get('/v1/storage').json()['limit_bytes'] == 2*GIB
+
+
+def test_low_free_disk_blocks_processing_without_evicting_the_playlist(tmp_path):
+    def must_not_start(folder):
+        raise AssertionError('The worker must not start without disk headroom')
+    app = create_app(tmp_path, worker_command=must_not_start, version='test')
+    pinned = cache_fixture(app.state.store,'1')
+    with TestClient(app) as client:
+        client.post('/v1/room/entries',json={'job_id':pinned['id']})
+        with patch('karaoke.cache.shutil.disk_usage', return_value=SimpleNamespace(free=GIB//2)):
+            response = client.post('/v1/room/entries',json={'url':URL}).json()
+            job = finished(client,response['entries'][-1]['job_id'])
+            assert job['status'] == 'failed' and job['error']['code'] == 'cache_full'
+            assert client.get('/v1/storage').json()['can_prepare'] is False
+        assert (tmp_path/pinned['id']/'mv.mp4').exists()

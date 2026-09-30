@@ -36,7 +36,7 @@ def file_hash(path):
 def pipeline_fingerprint():
     digest = hashlib.sha256(b'karaoke-url-api-v1')
     for path in [p for p in sorted(ROOT.glob('*.py'))
-                 if not p.name.startswith('test_') and p.name not in ('api.py', 'room.py')] + [
+                 if not p.name.startswith('test_') and p.name not in ('api.py', 'room.py', 'cache.py')] + [
             ROOT/'subtitle-styles.json', ROOT/'experiments/cjk-onsets-v003/run.py',
             ROOT/'experiments/cjk-onsets-v003/protocol.json']:
         digest.update(path.name.encode())

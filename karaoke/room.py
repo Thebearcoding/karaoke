@@ -11,15 +11,29 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .job_schema import JobRequest
 
+PRESETS = {
+    'instrumental': dict(instrumental=1., backing_vocals=0., lead_vocals=0.),
+    'karaoke': dict(instrumental=1., backing_vocals=1., lead_vocals=0.),
+    'original': dict(instrumental=1., backing_vocals=1., lead_vocals=1.),
+}
+
+
+class StemLevels(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    instrumental: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    backing_vocals: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    lead_vocals: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+
 
 class RoomCommand(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    action: Literal['play', 'pause', 'seek', 'next', 'select', 'remove', 'reorder', 'mix', 'ready', 'retry']
+    action: Literal['play', 'pause', 'seek', 'next', 'select', 'remove', 'reorder', 'mix', 'levels', 'ready', 'retry']
     entry_id: str | None = None
     position: float = Field(default=0, ge=0, allow_inf_nan=False)
     order: list[str] | None = None
     revision: int | None = None
     mix: Literal['karaoke', 'instrumental', 'original'] | None = None
+    levels: StemLevels | None = None
 
 
 class AddSong(BaseModel):
@@ -66,7 +80,9 @@ class Room:
 
     def read(self):
         with self.store.connect() as db:
-            return json.loads(db.execute('SELECT state FROM room WHERE id=1').fetchone()[0])
+            state = json.loads(db.execute('SELECT state FROM room WHERE id=1').fetchone()[0])
+        state.setdefault('levels', PRESETS.get(state['mix'], PRESETS['karaoke']).copy())
+        return state
 
     def save(self, state):
         state['revision'] += 1
@@ -105,7 +121,8 @@ class Room:
     def snapshot(self):
         state = self.read()
         return {**state, 'entries': [self.describe(e) for e in state['entries']],
-                'server_time': time.time(), 'preparation_job': self.worker.current}
+                'server_time': time.time(), 'preparation_job': self.worker.current,
+                'storage': self.store.cache.snapshot()}
 
     @staticmethod
     def featured():
@@ -116,20 +133,24 @@ class Room:
         songs = self.featured()
         by_url = {s['url']: s for s in songs}
         for job in self.store.list(1000):
-            if job['status'] != 'completed':
+            if job['status'] not in ('completed', 'evicted'):
                 continue
-            artifacts = job['result'].get('artifacts', {})
-            if not all((self.store.root/job['id']/a['path']).is_file() for a in artifacts.values()):
+            result = job.get('result') or {}
+            artifacts = result.get('artifacts', {})
+            ready = job['status'] == 'completed' and bool(artifacts) and all(
+                (self.store.root/job['id']/a['path']).is_file() for a in artifacts.values())
+            if job['status'] == 'completed' and not ready:
                 continue
             song = by_url.get(job['input']['url'])
             if song and song.get('job_id'):
                 continue
             info = self.describe(dict(id=job['id'], job_id=job['id']))
             if song:
-                song.update(job_id=job['id'], duration=info['duration'])
+                if ready:
+                    song.update(job_id=job['id'], duration=info['duration'])
             else:
-                song = dict(id=job['id'], job_id=job['id'], title=info['title'], artist=info['artist'],
-                    url=info['url'], duration=info['duration'], language=job['result'].get('language', ''),
+                song = dict(id=job['id'], job_id=job['id'] if ready else None, title=info['title'], artist=info['artist'],
+                    url=info['url'], duration=info['duration'], language=result.get('language', ''),
                     poster=None)
                 songs.append(song)
                 by_url[song['url']] = song
@@ -143,9 +164,13 @@ class Room:
             raise HTTPException(409, '歌单最多保留 100 首，请先移除一些歌曲')
         if request.job_id:
             job = self.store.read(request.job_id)
-            if not job or job['status'] != 'completed':
+            if job and job['status'] == 'evicted':
+                job, cached = self.store.create(JobRequest(**{**job['input'], 'force': False}), self.version)
+                if not cached:
+                    self.worker.queue.put_nowait(job['id'])
+            elif not job or job['status'] != 'completed':
                 raise HTTPException(404, '这首歌尚未准备好')
-            if not all((self.store.root/job['id']/a['path']).is_file()
+            if job['status'] == 'completed' and not all((self.store.root/job['id']/a['path']).is_file()
                        for a in job['result']['artifacts'].values()):
                 raise HTTPException(409, '这首歌的文件已不可用，请重新提交链接')
         else:
@@ -157,6 +182,7 @@ class Room:
             if not cached:
                 self.worker.queue.put_nowait(job['id'])
         state['entries'].append(dict(id=str(uuid4()), job_id=job['id']))
+        self.store.touch(job['id'])
         self.save(state)
         return self.snapshot()
 
@@ -217,6 +243,13 @@ class Room:
             if command.mix is None:
                 raise HTTPException(422, '请选择人声模式')
             state['mix'] = command.mix
+            state['levels'] = PRESETS[command.mix].copy()
+        elif action == 'levels':
+            values = command.levels.model_dump(exclude_none=True) if command.levels else {}
+            if not values:
+                raise HTTPException(422, '请提供至少一个音轨音量')
+            state['levels'].update(values)
+            state['mix'] = next((name for name, levels in PRESETS.items() if levels == state['levels']), 'custom')
         elif action == 'retry':
             old = self.store.read(entry['job_id'])
             if old['status'] != 'failed':
@@ -225,5 +258,11 @@ class Room:
             entry['job_id'] = job['id']
             if not cached:
                 self.worker.queue.put_nowait(job['id'])
+        if action in ('play', 'select', 'ready', 'next'):
+            selected = next((e for e in state['entries'] if e['id'] == state['current_id']), None)
+            if selected:
+                self.store.touch(selected['job_id'])
         self.save(state)
+        if action in ('next', 'remove', 'select', 'retry'):
+            self.store.cache.enforce()
         return self.snapshot()

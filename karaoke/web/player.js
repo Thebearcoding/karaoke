@@ -9,6 +9,7 @@ export class Player {
     this.anchor = null;
     this.unlocked = false;
     this.mode = 'karaoke';
+    this.levels = {instrumental:1, backing_vocals:1, lead_vocals:0};
     const tick = () => {
       if (this.anchor !== null && this.context.state === 'running') {
         const position = Math.max(0, this.context.currentTime - this.anchor);
@@ -38,7 +39,7 @@ export class Player {
       gain.connect(this.master);
       return gain;
     });
-    this.setMix(this.mode);
+    this.setLevels(this.levels);
   }
 
   async unlock() {
@@ -54,8 +55,15 @@ export class Player {
 
   setMix(mode) {
     this.mode = mode;
+    this.setLevels({instrumental:1, backing_vocals:mode === 'instrumental' ? 0 : 1, lead_vocals:mode === 'original' ? 1 : 0});
+  }
+
+  setLevels(levels) {
+    for (const name of ['instrumental', 'backing_vocals', 'lead_vocals']) {
+      if (Number.isFinite(levels[name])) this.levels[name] = Math.min(1, Math.max(0, levels[name]));
+    }
     if (!this.gains) return;
-    const values = [1, mode === 'instrumental' ? 0 : 1, mode === 'original' ? 1 : 0];
+    const values = ['instrumental', 'backing_vocals', 'lead_vocals'].map(name => this.levels[name]);
     values.forEach((value, i) => this.gains[i].gain.setTargetAtTime(value, this.context.currentTime, 0.02));
   }
 
@@ -110,7 +118,8 @@ export class Player {
   }
 
   apply(state, clockOffset) {
-    this.setMix(state.mix);
+    if (state.levels) this.setLevels(state.levels);
+    else this.setMix(state.mix);
     if (!this.buffers || this.entry?.id !== state.current_id) return;
     const position = Math.min(this.entry.duration, state.position +
       (state.playing && state.started_at ? Math.max(0, Date.now()/1000 + clockOffset - state.started_at) : 0));

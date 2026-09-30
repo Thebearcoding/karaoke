@@ -6,10 +6,50 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&
 const time = seconds => `${Math.floor(Math.max(0, seconds || 0)/60)}:${String(Math.floor(Math.max(0, seconds || 0)%60)).padStart(2,'0')}`;
 const remote = new URLSearchParams(location.search).get('remote') === '1';
 const stages = {download:'下载视频', decode_audio:'提取音频', separate_music:'分离伴奏', separate_lead:'分离主唱', package_two_stems:'整理音轨', package_three_stems:'整理音轨', resample_vocals:'整理人声', transcribe:'识别歌词', prepare_lyrics:'整理歌词', align_words:'对齐歌词', align_phonemes:'对齐起唱时间', align_repeats:'检查重复段落', align_context:'校准字幕', render:'生成字幕 MV'};
-let state = {entries:[], current_id:null, playing:false, position:0, started_at:null, mix:'karaoke', revision:0};
+let state = {entries:[], current_id:null, playing:false, position:0, started_at:null, mix:'karaoke', levels:{instrumental:1,backing_vocals:1,lead_vocals:0}, revision:0};
 let library = [], filter = 'all', view = 'library', clockOffset = 0, readySent = null, loading = false, loadError = '', seeking = false;
 let toastTimer, librarySignature = '', queueSignature = '';
+let pendingLevels = {}, sendingLevels = {}, levelTimer = null, levelsBusy = false;
+let levelRequest = Promise.resolve();
 const current = () => state.entries.find(e => e.id === state.current_id);
+const effectiveLevels = () => ({...state.levels, ...sendingLevels, ...pendingLevels});
+
+function renderMixer() {
+  const levels = effectiveLevels();
+  player.setLevels(levels);
+  document.querySelectorAll('[data-level]').forEach(input => {
+    input.value = levels[input.dataset.level];
+    const percentage = `${Math.round(Number(input.value)*100)}%`;
+    $(`value-${input.dataset.level}`).textContent = percentage;
+    input.setAttribute('aria-valuetext', percentage);
+  });
+}
+
+async function flushLevels() {
+  levelTimer = null;
+  if (levelsBusy || !Object.keys(pendingLevels).length) return;
+  levelsBusy = true;
+  sendingLevels = pendingLevels;
+  pendingLevels = {};
+  levelRequest = command('levels', {levels:sendingLevels});
+  await levelRequest;
+  sendingLevels = {};
+  levelsBusy = false;
+  renderMixer();
+  if (Object.keys(pendingLevels).length) levelTimer = setTimeout(flushLevels, 80);
+}
+
+function renderStorage() {
+  const storage = state.storage;
+  if (!storage?.limit_bytes) return;
+  const gib = bytes => (bytes/1024**3).toLocaleString('zh-CN', {maximumFractionDigits:2});
+  $('storage-usage').textContent = `${gib(storage.used_bytes)} / ${gib(storage.limit_bytes)} GiB`;
+  $('storage-meter').max = storage.limit_bytes;
+  $('storage-meter').value = storage.used_bytes;
+  $('storage-note').textContent = storage.can_prepare ? '自动清理久未使用的歌曲，保留待唱歌曲。' : '准备空间不足。可移除待唱歌曲、提高上限或释放硬盘空间。';
+  $('storage-note').classList.toggle('storage-warning', !storage.can_prepare);
+  if (document.activeElement !== $('storage-limit')) $('storage-limit').value = storage.limit_bytes/1024**3;
+}
 
 function toast(message) {
   $('toast').textContent = message;
@@ -120,7 +160,8 @@ function updateTransport() {
     button.classList.toggle('selected', button.dataset.mix === state.mix);
     button.setAttribute('aria-pressed', String(button.dataset.mix === state.mix));
   });
-  $('mix-description').textContent = {karaoke:'背景音乐＋伴唱，你来唱主旋律。',instrumental:'只留背景音乐，所有演唱都交给你。',original:'主唱与伴唱一起播放，先听一遍找感觉。'}[state.mix];
+  $('mix-description').textContent = {karaoke:'背景音乐＋伴唱，你来唱主旋律。',instrumental:'只留背景音乐，所有演唱都交给你。',original:'主唱与伴唱一起播放，先听一遍找感觉。',custom:'按你的习惯调好了，换歌也会保留。'}[state.mix];
+  renderMixer();
   updateCover();
 }
 
@@ -158,7 +199,7 @@ async function syncPlayback() {
       await command('ready', {entry_id:song.id});
     }
     if (!state.playing || state.started_at) readySent = null;
-    player.apply(state, clockOffset);
+    player.apply({...state, levels:effectiveLevels()}, clockOffset);
     updateTransport();
   } catch (error) {
     if (state.current_id !== song.id) return;
@@ -171,10 +212,10 @@ function acceptState(updated) {
   if (updated.revision < state.revision) return;
   state = updated;
   clockOffset = state.server_time - Date.now()/1000;
-  renderQueue(); updateTransport();
+  renderQueue(); updateTransport(); renderStorage();
   if (!player.anchor) updateTime(state.position);
   syncPlayback();
-  const signature = state.entries.map(e => `${e.job_id}:${e.status}`).join('|');
+  const signature = state.entries.map(e => `${e.job_id}:${e.status}`).join('|') + `:${state.storage?.revision}`;
   if (signature !== librarySignature) { librarySignature = signature; refreshLibrary(); }
 }
 
@@ -241,14 +282,32 @@ $('screen-start').onclick = async () => { if (await activate()) { if (!state.pla
 $('next-song').onclick = async () => { await activate(); await command('next'); };
 $('now-song').onclick = () => switchView('player');
 for (const id of ['restart','transport-restart']) $(id).onclick = () => command('seek', {position:0});
-document.querySelectorAll('[data-mix]').forEach(button => button.onclick = () => command('mix', {mix:button.dataset.mix}));
+document.querySelectorAll('[data-mix]').forEach(button => button.onclick = async () => {
+  clearTimeout(levelTimer); levelTimer = null; pendingLevels = {};
+  await levelRequest;
+  await command('mix', {mix:button.dataset.mix});
+});
+document.querySelectorAll('[data-level]').forEach(input => input.oninput = () => {
+  pendingLevels[input.dataset.level] = Number(input.value);
+  renderMixer();
+  if (!levelTimer) levelTimer = setTimeout(flushLevels, 80);
+});
+$('storage-form').onsubmit = async event => {
+  event.preventDefault();
+  $('storage-save').disabled = true;
+  try {
+    acceptState(await request('/v1/storage', {limit_gib:Number($('storage-limit').value)}));
+    toast('缓存上限已保存，旧缓存会自动清理');
+  } catch (error) { toast(error.message); }
+  finally { $('storage-save').disabled = false; }
+};
 $('seek').oninput = () => { seeking = true; $('current-time').textContent = time(Number($('seek').value)); };
 $('seek').onchange = async () => { await command('seek', {position:Number($('seek').value)}); seeking = false; };
 $('volume').oninput = () => { player.setVolume(Number($('volume').value)); $('volume-value').textContent = Math.round(player.volume*100); };
 $('mute').onclick = () => { $('volume').value = player.volume ? 0 : 0.8; $('volume').oninput(); };
 async function fullscreen() {
   switchView('player');
-  try { if (document.fullscreenElement) await document.exitFullscreen(); else await $('screen').requestFullscreen(); }
+  try { if (document.fullscreenElement) await document.exitFullscreen(); else await $('player-stage').requestFullscreen(); }
   catch { toast('当前浏览器不支持全屏播放'); }
 }
 $('fullscreen').onclick = fullscreen;

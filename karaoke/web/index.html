@@ -46,17 +46,24 @@
       <div class="filters" role="group" aria-label="筛选歌曲"><button data-filter="all" class="selected">全部</button><button data-filter="ready">可以直接唱</button><button data-filter="Chinese">华语</button><button data-filter="Japanese">日语</button><button data-filter="English">英语</button></div>
       <div class="song-grid" id="song-grid" aria-live="polite"></div>
       <div class="search-empty" id="search-empty" hidden><h3>把你想唱的带进来。</h3><p>找到喜欢的视频，复制链接到上面的输入框。</p><div><a id="youtube-search" target="_blank" rel="noopener noreferrer">去 YouTube 找 <span>↗</span></a><a id="bilibili-search" target="_blank" rel="noopener noreferrer">去 Bilibili 找 <span>↗</span></a></div></div>
-      <p class="library-footnote">第一次点的歌会先准备伴奏与字幕。准备好的歌，下次直接唱。</p>
+      <p class="library-footnote">第一次点的歌会先准备伴奏与字幕。缓存里的歌，下次直接唱。</p>
     </section>
 
     <section class="main-panel player-panel" id="player-view" hidden aria-label="播放器">
       <div class="section-heading player-heading"><div><p class="eyebrow">THE STAGE IS YOURS</p><h1 id="player-title">下一首，轮到你。</h1><p id="player-artist">先点一首喜欢的歌</p></div><button class="icon-button" id="fullscreen" aria-label="全屏播放" title="全屏 · F"><svg class="icon"><use href="#i-full"/></svg></button></div>
+      <div class="player-stage" id="player-stage">
       <div class="screen" id="screen">
         <video id="video" playsinline muted preload="metadata" aria-label="卡拉 OK 字幕 MV"></video>
         <div class="screen-cover" id="screen-cover"><div class="record-art"><div class="record-label"><span class="brand-mark"><i></i><i></i><i></i><i></i></span></div></div><p id="screen-status">好歌不怕晚，等你开口。</p><button class="primary" id="screen-start" hidden>开始唱 <svg class="icon"><use href="#i-play"/></svg></button></div>
         <button class="screen-exit icon-button" id="exit-fullscreen" aria-label="退出全屏"><svg class="icon"><use href="#i-full"/></svg></button>
       </div>
       <div class="player-options"><div><span class="option-label">人声模式</span><div class="mix-switch" role="group" aria-label="人声模式"><button data-mix="instrumental">纯伴奏</button><button data-mix="karaoke" class="selected">保留伴唱</button><button data-mix="original">原唱</button></div></div><button id="restart" class="text-button"><svg class="icon"><use href="#i-restart"/></svg>重唱这首</button></div>
+      <div class="stem-mixer" role="group" aria-label="分别调节音轨音量">
+        <label class="stem-control" for="level-instrumental"><span>伴奏</span><output id="value-instrumental" for="level-instrumental">100%</output><input id="level-instrumental" data-level="instrumental" type="range" min="0" max="1" step="0.01" value="1" aria-label="伴奏音量"></label>
+        <label class="stem-control" for="level-backing_vocals"><span>伴唱</span><output id="value-backing_vocals" for="level-backing_vocals">100%</output><input id="level-backing_vocals" data-level="backing_vocals" type="range" min="0" max="1" step="0.01" value="1" aria-label="伴唱音量"></label>
+        <label class="stem-control" for="level-lead_vocals"><span>主唱 <small>原唱声音</small></span><output id="value-lead_vocals" for="level-lead_vocals">0%</output><input id="level-lead_vocals" data-level="lead_vocals" type="range" min="0" max="1" step="0.01" value="0" aria-label="主唱音量"></label>
+      </div>
+      </div>
       <div class="player-bottom"><p id="mix-description">背景音乐＋伴唱，你来唱主旋律。</p><span>空格 暂停 · N 下一首 · F 全屏</span></div>
       <p class="quality-note" id="quality-note" hidden>这首歌的歌词由音频自动识别，可能有听错的字。</p>
     </section>
@@ -66,6 +73,13 @@
       <div id="queue-list" class="queue-list"></div>
       <div id="queue-empty" class="queue-empty"><div class="queue-empty-lines"><i></i><i></i><i></i></div><h3>好听的，排在一起。</h3><p>点一首歌，它就会出现在这里。<br>准备完成后，按顺序开唱。</p></div>
       <div class="queue-foot"><span class="small-dot"></span><p>准备在后台进行<br><span>唱完自动接下一首</span></p><a id="remote-link" href="/?remote=1" target="_blank" rel="noopener">遥控点歌 ↗</a></div>
+      <details class="storage-panel">
+        <summary><span>本地缓存</span><span id="storage-usage">正在读取</span></summary>
+        <progress id="storage-meter" max="1" value="0" aria-label="歌曲缓存使用量"></progress>
+        <p id="storage-note">自动清理久未使用的歌曲，保留待唱歌曲。</p>
+        <form id="storage-form"><label for="storage-limit">容量上限</label><input id="storage-limit" type="number" min="1" max="4096" step="1" value="10" required><span>GiB</span><button type="submit" id="storage-save">保存</button></form>
+        <p class="storage-scope">包含预处理临时文件；不含模型和旧实验数据。</p>
+      </details>
     </aside>
   </main>
 
