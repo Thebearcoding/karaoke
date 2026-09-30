@@ -112,7 +112,7 @@ async function refreshLibrary() {
 }
 
 function statusText(entry) {
-  if (entry.status === 'failed') return '准备失败 · 可以重试';
+  if (entry.status === 'failed') return entry.error?.message || '准备失败，请重试';
   if (entry.status === 'completed') return entry.id === state.current_id ? (state.playing ? '正在播放' : '已暂停') : '已准备';
   if (entry.status === 'queued') return '等待准备';
   return (entry.active_stages || []).map(s => stages[s] || '正在准备').join(' · ') || '开始准备';

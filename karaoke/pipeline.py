@@ -60,6 +60,20 @@ class StageFailure(RuntimeError):
         self.stage = stage
 
 
+def download_failure(log):
+    """Expose actionable causes without publishing raw URLs, headers or credentials."""
+    diagnostic = log.lower()
+    if any(text in diagnostic for text in ('unable to connect to proxy', 'proxyerror', 'tunnel connection failed')):
+        return '下载被网络代理拒绝，请检查服务的代理设置后重试'
+    if any(text in diagnostic for text in ('sign in', 'login required', 'login_required')):
+        return '视频站点要求登录验证，请配置下载登录信息后重试'
+    if any(text in diagnostic for text in ('video unavailable', 'private video', 'video is unavailable')):
+        return '视频当前无法访问，请换一个可公开播放的链接'
+    if any(text in diagnostic for text in ('timed out', 'connection reset', 'temporary failure in name resolution')):
+        return '连接视频站点超时或中断，请稍后重试'
+    return '视频下载失败，请稍后重试或换一个视频链接'
+
+
 class Pipeline:
     def __init__(self, request, output, *, separator_python=None, device='auto', text_model='gpt-5-mini',
                  max_duration=900, catalog_root=ROOT, cookies_file=None):
@@ -91,6 +105,12 @@ class Pipeline:
                 result = subprocess.run([str(a) for a in command], cwd=ROOT.parent,
                     stdout=log, stderr=subprocess.STDOUT, timeout=timeout)
             if result.returncode:
+                if name == 'download':
+                    with (self.output/'download.log').open('rb') as log:
+                        log.seek(0, 2)
+                        log.seek(max(0, log.tell()-16384))
+                        diagnostic = log.read().decode(errors='replace')
+                    raise StageFailure(name, download_failure(diagnostic))
                 raise StageFailure(name, f'{name} 阶段失败；具体错误已保存在任务日志中')
         except subprocess.TimeoutExpired as error:
             raise StageFailure(name, f'{name} 阶段超过允许的处理时间') from error

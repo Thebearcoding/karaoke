@@ -91,6 +91,8 @@ export KARAOKE_DEVICE=auto
 
 保持一个 Uvicorn 进程、一个处理 worker；不要对同一数据目录使用多 worker。需要局域网遥控时再显式设置 `KARAOKE_HOST=0.0.0.0`，手机访问 `http://电脑IP:8746/?remote=1`。
 
+网页能打开只说明本地服务正常，不代表下载网络可用。若日志出现 `Unable to connect to proxy` / `Tunnel connection failed: 403 Forbidden`，检查启动进程继承的代理环境。通过 Codex 启动长期服务时，应使用已获准访问视频站点的运行环境；不要把工具临时注入的受限代理当作应用代理，也不要在应用代码里擅自删除用户的代理设置。可在同一运行环境先执行 `python -m yt_dlp --ignore-config --skip-download --print title 视频URL` 验证。
+
 ## 6. 测试与范围
 
 安装开发依赖、主环境 PyTorch 和 SOFA 源码后：

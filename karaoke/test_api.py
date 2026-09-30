@@ -14,6 +14,7 @@ from karaoke.job_schema import JobRequest, video_url
 from karaoke.song_sources import SongText, find_verified_lyrics, prepare_song_text
 from karaoke.align_lyric_phonemes import protect_line_order
 from karaoke.cache import CacheFull, GIB
+from karaoke.pipeline import Pipeline, StageFailure
 
 
 URL = 'https://www.youtube.com/watch?v=n5sjpCQhTDk'
@@ -105,6 +106,24 @@ def test_failures_are_visible_and_retry_creates_new_job(tmp_path):
         second = client.post('/v1/jobs', json={'url': URL}).json()
         assert second['id'] != first['id']
         finished(client, second['id'])
+
+
+@pytest.mark.parametrize('diagnostic,reason', [
+    ("Unable to connect to proxy: Tunnel connection failed: 403 Forbidden", '网络代理'),
+    ("Sign in to confirm you're not a bot", '登录验证'),
+    ('ERROR: Video unavailable', '无法访问'),
+    ('ERROR: connection timed out', '超时'),
+    ('Unknown upstream error', '下载失败'),
+])
+def test_download_failure_has_actionable_reason_without_raw_diagnostics(tmp_path, diagnostic, reason):
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    # Exercise the failed subprocess path; no network or model is involved.
+    with pytest.raises(StageFailure) as caught:
+        pipeline.run('download', [sys.executable, '-c',
+            'import sys;print(sys.argv[1]);sys.exit(1)', diagnostic+' https://user:secret@example.invalid/'])
+    assert caught.value.stage == 'download' and reason in str(caught.value)
+    assert 'secret' not in str(caught.value) and 'example.invalid' not in str(caught.value)
+    assert (tmp_path/'download.log').exists()
 
 
 def test_restart_recovers_pending_and_marks_interrupted_jobs(tmp_path):
