@@ -212,8 +212,8 @@ class Worker:
                 log.flush()
                 if line.startswith(b'KARAOKE_PROGRESS '):
                     progress = json.loads(line[len(b'KARAOKE_PROGRESS '):])
-                    self.store.update(job_id, active_stages=progress.get('active_stages', []),
-                                      timings=progress.get('timings', {}))
+                    self.store.update(job_id, **{key: progress[key]
+                        for key in ('active_stages', 'timings', 'song_info') if key in progress})
             await self.process.wait()
 
         async def budget():

@@ -84,6 +84,8 @@ curl -sS http://127.0.0.1:8746/v1/jobs/任务UUID
 
 状态依次为 `queued`、`running`、`completed`；失败为 `failed`，通过 `error.code` 与 `error.message` 获取原因。`active_stages` 会显示当前正在下载、分离、整理歌词、对齐还是渲染。同一首歌的独立步骤可并行，因此可能同时显示两个阶段。
 
+取得下载元数据后，`song_info` 立即提供 `title`、`artist`、`duration_seconds`，并通过房间 SSE 更新歌单，不必等整首准备完成。优先使用视频的音乐标签，否则先显示视频标题；不把上传者当成原唱。歌词整理完成后再更新歌曲信息，用户填写的歌名／歌手始终优先。`input` 保持原请求，`result` 仍只在成品完成后提供。
+
 被 LRU 回收的任务为 `evicted`，原文件接口返回 HTTP 410。重新提交同链接或用原 `job_id` 点歌会重新准备。缓存不足导致准备中断时错误码为 `cache_full`；不会删除待唱歌曲来掩盖空间不足。默认上限、统计范围和运行中写入限制见 [缓存说明](APP.md#本地缓存上限)。
 
 完成后的 `result.artifacts` 每项包含 `url`、`bytes`、`sha256`：

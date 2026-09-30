@@ -107,12 +107,13 @@ class Room:
         if job is None:
             return dict(**entry, title='歌曲已不可用', artist='', status='failed', artifacts={})
         result, inputs = job.get('result') or {}, job['input']
-        title = result.get('title') or inputs.get('title') or '新点的歌'
+        song_info = job.get('song_info') or {}
         featured = next((s for s in self.featured() if s['url'] == inputs['url']), {})
-        return dict(**entry, title=title if title != '新点的歌' else featured.get('title', title),
-            artist=result.get('artist') or inputs.get('artist') or featured.get('artist', ''),
+        return dict(**entry,
+            title=inputs.get('title') or result.get('title') or song_info.get('title') or featured.get('title') or '新点的歌',
+            artist=inputs.get('artist') or result.get('artist') or song_info.get('artist') or featured.get('artist', ''),
             url=inputs['url'], status=job['status'], active_stages=job.get('active_stages', []),
-            error=job.get('error'), duration=result.get('duration_seconds', 0),
+            error=job.get('error'), duration=result.get('duration_seconds') or song_info.get('duration_seconds', 0),
             poster=featured.get('poster'), lyrics_need_review=result.get('quality', {}).get(
                 'lyrics_provenance', {}).get('needs_review', False),
             artifacts={key: f"/v1/jobs/{job['id']}/artifacts/{key}"

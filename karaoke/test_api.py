@@ -126,6 +126,34 @@ def test_download_failure_has_actionable_reason_without_raw_diagnostics(tmp_path
     assert (tmp_path/'download.log').exists()
 
 
+@pytest.mark.parametrize('tags,expected', [
+    ({'track': 'Tagged song', 'artist': 'Tagged singer'}, ('Tagged song', 'Tagged singer')),
+    ({'artists': ['Singer A', 'Singer B']}, ('A new video', 'Singer A · Singer B')),
+    ({}, ('A new video', '')),
+])
+def test_download_publishes_metadata_before_separation(tmp_path, monkeypatch, capsys, tags, expected):
+    monkeypatch.setenv('KARAOKE_EVENTS_STDOUT', '1')
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+
+    def download(*args, **kwargs):
+        pipeline.source.write_bytes(b'video fixture')
+        (tmp_path/'download/source.info.json').write_text(json.dumps(dict(
+            title='A new video', uploader='Not necessarily the singer', duration=120, **tags)))
+
+    probe = dict(streams=[dict(codec_type='video'), dict(codec_type='audio')], format=dict(duration='120'))
+    with patch.object(pipeline, 'run', side_effect=download), patch(
+            'karaoke.pipeline.subprocess.check_output', return_value=json.dumps(probe).encode()):
+        pipeline.download()
+    pipeline.phase('separate_music', True)
+    events = [json.loads(line.removeprefix('KARAOKE_PROGRESS '))
+              for line in capsys.readouterr().out.splitlines()]
+    info = dict(title=expected[0], artist=expected[1], duration_seconds=120)
+    assert events[0]['song_info'] == events[1]['song_info'] == info
+    assert events[0]['active_stages'] == [] and events[1]['active_stages'] == ['separate_music']
+    assert json.loads((tmp_path/'progress.json').read_text())['song_info'] == info
+    assert not (tmp_path/'result.json').exists()
+
+
 def test_restart_recovers_pending_and_marks_interrupted_jobs(tmp_path):
     store = Store(tmp_path)
     interrupted, _ = store.create(JobRequest(url=URL), 'test')

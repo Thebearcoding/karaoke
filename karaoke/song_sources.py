@@ -16,6 +16,13 @@ class SongText(BaseModel):
     lines: list[str]
 
 
+def video_song_info(metadata):
+    """Use supplied music tags or the video title; an uploader is not a singer."""
+    return dict(title=metadata.get('track') or metadata.get('title') or '',
+                artist=metadata.get('artist') or ' · '.join(metadata.get('artists') or []),
+                duration_seconds=metadata.get('duration') or 0)
+
+
 def find_verified_lyrics(url, duration, root):
     """Reuse a checked text only for the same video identity and duration."""
     if root is None:

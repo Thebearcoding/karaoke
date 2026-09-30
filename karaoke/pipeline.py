@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from .job_schema import JobRequest, video_url
-from .song_sources import prepare_song_text
+from .song_sources import prepare_song_text, video_song_info
 
 
 def write_json(path, value):
@@ -85,14 +85,19 @@ class Pipeline:
         self.device, self.text_model = device, text_model
         self.max_duration, self.catalog_root, self.cookies_file = max_duration, catalog_root, cookies_file
         self.active, self.timings, self.lock = set(), {}, threading.Lock()
+        self.song_info = {}
         self.source = self.output/'download/source.mkv'
         self.vocals = self.output/'music-separation/song/vocals.wav'
 
-    def phase(self, name, active):
+    def phase(self, name=None, active=False, *, song_info=None):
         with self.lock:
-            self.active.add(name) if active else self.active.discard(name)
+            if name is not None:
+                self.active.add(name) if active else self.active.discard(name)
+            if song_info is not None:
+                self.song_info = song_info
             progress = dict(active_stages=sorted(self.active),
-                updated_at=datetime.now(timezone.utc).isoformat(), timings=self.timings)
+                updated_at=datetime.now(timezone.utc).isoformat(), timings=self.timings,
+                song_info=self.song_info)
             write_json(self.output/'progress.json', progress)
             if os.getenv('KARAOKE_EVENTS_STDOUT') == '1':
                 print('KARAOKE_PROGRESS ' + json.dumps(progress), flush=True)
@@ -151,6 +156,7 @@ class Pipeline:
         if not self.source.exists() or not info_path.exists():
             raise StageFailure('download', '没有下载到完整视频；请检查链接、直播状态、时长或站点登录要求')
         metadata = json.loads(info_path.read_text())
+        self.phase(song_info=video_song_info(metadata))
         probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_streams',
             '-show_format', '-of', 'json', str(self.source)]))
         if not {'audio', 'video'} <= {s['codec_type'] for s in probe['streams']}:
@@ -178,6 +184,8 @@ class Pipeline:
             transcription = json.loads((self.output/'asr/transcription.json').read_text())
             lyrics = prepare_song_text(self.request, metadata, transcription, duration,
                 catalog_root=self.catalog_root, model=self.text_model)
+            self.phase(song_info=dict(title=lyrics['title'], artist=lyrics['artist'],
+                                      duration_seconds=duration))
             anchors = anchors_from_words(lyrics['lines'], transcription.get('words') or [],
                                          lyrics['language'], allow_missing=True)
             covered = sum(c['matched_fraction']*len(c['text']) for c in anchors)/max(1, sum(len(c['text']) for c in anchors))

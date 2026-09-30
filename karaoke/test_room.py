@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 import time
 
@@ -153,15 +154,54 @@ def test_sse_initial_snapshot_push_coalescing_and_disconnect():
 
 
 def test_progress_is_received_before_worker_exits(tmp_path):
+    info = dict(title='New video title', artist='Singer', duration_seconds=123)
     def event_worker(folder):
         return [sys.executable,'-u','-c',
-                'import time;print(\'KARAOKE_PROGRESS {"active_stages":["transcribe"],"timings":{}}\',flush=True);time.sleep(30)']
+                'import sys,time;print("KARAOKE_PROGRESS "+sys.argv[1],flush=True);'
+                'print(\'KARAOKE_PROGRESS {"active_stages":["transcribe"],"timings":{}}\',flush=True);time.sleep(30)',
+                json.dumps(dict(song_info=info))]
     with TestClient(create_app(tmp_path, worker_command=event_worker, version='test')) as client:
-        job = client.post('/v1/jobs',json={'url':URL}).json()
+        entry = client.post('/v1/room/entries',json={'url':URL}).json()['entries'][0]
         end = time.monotonic()+3
         while time.monotonic() < end:
-            state = client.get('/v1/jobs/'+job['id']).json()
+            state = client.get('/v1/jobs/'+entry['job_id']).json()
             if state['active_stages'] == ['transcribe']:
                 break
             time.sleep(.01)
         assert state['active_stages'] == ['transcribe'] and state['status'] == 'running'
+        # A later stage-only event must not erase the metadata or alter the input.
+        assert state['song_info'] == info and state['result'] is None
+        assert state['input']['title'] is None and state['input']['artist'] is None
+        visible = client.get('/v1/room').json()['entries'][0]
+        assert (visible['title'], visible['artist'], visible['duration']) == ('New video title', 'Singer', 123)
+
+
+def test_song_info_updates_push_to_room_and_preserve_user_overrides(tmp_path):
+    async def check():
+        app = create_app(tmp_path, version='test')
+        room, store = app.state.room, app.state.store
+        job, _ = store.create(JobRequest(url=URL), 'test')
+        state = room.read()
+        state['entries'] = [dict(id='entry', job_id=job['id'])]
+        room.save(state)
+        stream = room.updates.events(room.snapshot)
+
+        def entry(event):
+            return json.loads(event.split('data: ', 1)[1])['entries'][0]
+
+        assert entry(await anext(stream))['title'] == '新点的歌'
+        for title in ('Video title', 'Resolved song title'):
+            store.update(job['id'], status='running', song_info=dict(title=title, artist='Singer'))
+            assert entry(await asyncio.wait_for(anext(stream), 1))['title'] == title
+        store.update(job['id'], status='failed', error=dict(code='test', message='Test failure'))
+        assert entry(await anext(stream))['title'] == 'Resolved song title'
+        store.update(job['id'], status='completed', result=dict(title='Final title', artist='Final singer'))
+        assert entry(await anext(stream))['title'] == 'Final title'
+        await stream.aclose()
+
+        manual, _ = store.create(JobRequest(url=URL, title='My title', artist='My singer'), 'test')
+        store.update(manual['id'], song_info=dict(title='Detected title', artist='Detected singer'),
+                     result=dict(title='Final title', artist='Final singer'))
+        visible = room.describe(dict(id='manual', job_id=manual['id']))
+        assert (visible['title'], visible['artist']) == ('My title', 'My singer')
+    asyncio.run(check())
