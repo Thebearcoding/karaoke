@@ -1,0 +1,38 @@
+{
+  "repository": "https://github.com/jhuang448/LyricsAlignment-Multilingual",
+  "revision": "ca1a3923d6c8bf7d20eefa1080f3f104a6173d38",
+  "files": {
+    "README.md": {
+      "size": 3696,
+      "sha256": "b7bac43894d2c4c1fd35fbee9c43c568f5d02f2d7143b980327f8a6876bdc88c"
+    },
+    "model.py": {
+      "size": 8139,
+      "sha256": "a7c7f7db24cd26d80b975e2a3b0a13beeebc0f71117eb93d6bec480c5046862f"
+    },
+    "test.py": {
+      "size": 7873,
+      "sha256": "67ef636b212349026b5e949139a83667b2df263aebe7628a5c41c374a107225f"
+    },
+    "utils.py": {
+      "size": 12101,
+      "sha256": "1d48ae2799ccb713f31182371784b096ec0164e4ef0c4b5462428c85d1799b0e"
+    },
+    "data.py": {
+      "size": 7535,
+      "sha256": "4529d27b7d6318b4cebfb544e7068994eed6b0b6adeb8b7ed5e68c008149cdb3"
+    },
+    "phonemize.py": {
+      "size": 2476,
+      "sha256": "b139d9489a3662641199b9e773f033b60b3eded6bdd4582e9ddb5c961dadba7b"
+    },
+    "requirements.txt": {
+      "size": 157,
+      "sha256": "d1934a4ae3945a79cab748cdbbe727a920b2423fed092bb2c3b97808a3267242"
+    },
+    "checkpoints/checkpoint_Baseline": {
+      "size": 57491286,
+      "sha256": "d541bde0a0e2759c5eac1ee7b70e06169a2aada504bc2359a98c7de4344d4dfe"
+    }
+  }
+}

@@ -1,0 +1,14 @@
+# Typography, ASR and local Whisper alignment; optional Qwen uses an isolated environment.
+Pillow==12.3.0
+fonttools==4.63.0
+openai==1.109.1
+rapidfuzz==3.14.3
+pypinyin==0.55.0
+stable-ts==2.19.1
+openai-whisper==20250625
+opencc-python-reimplemented==0.1.7
+rangehttpserver==1.4.0
+pykakasi==2.3.0
+pyopenjtalk==0.4.1
+lightning==2.6.1
+textgrid==1.6.1

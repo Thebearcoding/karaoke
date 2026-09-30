@@ -1,0 +1,22 @@
+{
+  "url": "https://github.com/ariikamusic/SOFA_Models/releases/download/akm_ja_v001/akm_ja_v001.zip",
+  "archive_sha256": "c1d7ad16b73e6f21b0df93819e65b0cacdcb3d349990f89f51d77738b3c6ef8f",
+  "bytes": 377869091,
+  "files": [
+    {
+      "path": "karaoke/models/alignment/sofa/japanese/akm_ja_v001/dict.txt",
+      "bytes": 195,
+      "sha256": "7ff06153e5ef328d5e2714d18919d80408bce84933500714118a52fbb6dbefeb"
+    },
+    {
+      "path": "karaoke/models/alignment/sofa/japanese/akm_ja_v001/model.ckpt",
+      "bytes": 406082352,
+      "sha256": "f5276224ca689a0d63248794353f0c4626442c662e3897d31212d84104bd2d8b"
+    },
+    {
+      "path": "karaoke/models/alignment/sofa/japanese/akm_ja_v001/readme.txt",
+      "bytes": 106,
+      "sha256": "28237935c2c02142b7c9e0401cae1ab25244692ee391453113b3204e61b8dbf5"
+    }
+  ]
+}

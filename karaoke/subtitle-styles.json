@@ -1,0 +1,107 @@
+{
+  "version": 8,
+  "default_style": "cinema_focus",
+  "reference_width": 1280,
+  "strip_height": 200,
+  "bottom_margin": 40,
+  "safe_x": 0.08,
+  "minimum_font_size": 34,
+  "intro": {
+    "maximum_seconds": 6,
+    "minimum_seconds": 2,
+    "top": 48,
+    "height": 380,
+    "title_size": 80,
+    "title_minimum_size": 48,
+    "artist_size": 30,
+    "version_size": 24
+  },
+  "countdown": {
+    "minimum_silence_seconds": 8,
+    "dots": 3,
+    "step_seconds": 1,
+    "settle_seconds": 1,
+    "radius": 6,
+    "spacing": 22,
+    "above_text": 20
+  },
+  "styles": {
+    "cinema_focus": {
+      "label": "余韵 · 跟唱",
+      "description": "较厚宋体 · 暖白 · 清楚而安静的跟唱提示",
+      "size": 56,
+      "minimum_size": 48,
+      "single_line_floor": 52,
+      "balanced_wrap": true,
+      "tracking_em": 0.025,
+      "latin_tracking_em": 0.005,
+      "line_height": 1.24,
+      "baseline_inset": 44,
+      "alignment": "center",
+      "color": "#f6f4ec",
+      "progress_color": "#e59a24",
+      "outline_width": 1.4,
+      "outline_alpha": 0.88,
+      "shadow_blur": 3.2,
+      "shadow_alpha": 0.68,
+      "fade_in_ms": 0,
+      "fade_out_ms": 0,
+      "fonts": {
+        "Japanese": ["ヒラギノ明朝 ProN.ttc", 2],
+        "Chinese": ["Supplemental/Songti.ttc", 2],
+        "Latin": ["Supplemental/Georgia Bold.ttf", 0]
+      }
+    },
+    "cinema": {
+      "label": "余韵",
+      "description": "宋体 · 居中 · 安静地留在画面里",
+      "size": 42,
+      "tracking_em": 0.07,
+      "latin_tracking_em": 0.01,
+      "line_height": 1.45,
+      "alignment": "center",
+      "color": "#f5f1e9",
+      "fade_in_ms": 0,
+      "fade_out_ms": 0,
+      "fonts": {
+        "Japanese": ["ヒラギノ明朝 ProN.ttc", 0],
+        "Chinese": ["Supplemental/Songti.ttc", 6],
+        "Latin": ["Supplemental/Georgia.ttf", 0]
+      }
+    },
+    "clear": {
+      "label": "清晰",
+      "description": "黑体 · 居中 · 适合长时间跟唱",
+      "size": 44,
+      "tracking_em": 0.025,
+      "latin_tracking_em": 0.005,
+      "line_height": 1.4,
+      "alignment": "center",
+      "color": "#f7f6f2",
+      "fade_in_ms": 0,
+      "fade_out_ms": 0,
+      "fonts": {
+        "Japanese": ["ヒラギノ角ゴシック W3.ttc", 0],
+        "Chinese": ["Hiragino Sans GB.ttc", 0],
+        "Latin": ["HelveticaNeue.ttc", 0]
+      }
+    },
+    "stage": {
+      "label": "现场",
+      "description": "粗体 · 左对齐 · 更鲜明的存在感",
+      "size": 48,
+      "tracking_em": 0.005,
+      "latin_tracking_em": 0.005,
+      "line_height": 1.35,
+      "alignment": "left",
+      "color": "#c7ebe4",
+      "fade_in_ms": 0,
+      "fade_out_ms": 0,
+      "fonts": {
+        "Japanese": ["ヒラギノ角ゴシック W6.ttc", 0],
+        "Chinese": ["Hiragino Sans GB.ttc", 2],
+        "Latin": ["Avenir Next.ttc", 8]
+      }
+    }
+  }
+}

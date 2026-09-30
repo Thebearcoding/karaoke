@@ -1,0 +1,162 @@
+"""Compare fixed CJK display units across three acoustic contexts."""
+import copy
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import sys
+import time
+
+import numpy as np
+from scipy.signal import resample_poly
+import soundfile as sf
+import torch
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[1]
+sys.path.insert(0, str(ROOT))
+from align_lyric_phonemes import SingingAligner, protect_units
+from lyric_progress import canonical_positions
+from phoneme_progress import spoken_units
+from subtitles import presentation_cues
+
+
+def write(path, value):
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2)+'\n')
+
+
+def fixed_units(cue, language):
+    """Keep the previous display segmentation, including ambiguous compounds."""
+    parsed = spoken_units(cue['text'], language)
+    result = []
+    for old in cue['units']:
+        unit = {k: old[k] for k in ('first', 'stop', 'text')}
+        if old.get('phones'):
+            unit['phones'] = old['phones']
+        else:
+            parts = [p for p in parsed if old['first'] <= p['first'] and p['stop'] <= old['stop']]
+            normalize = lambda text: canonical_positions(text, language)[0]
+            if normalize(''.join(p['text'] for p in parts)) != normalize(old['text']):
+                raise ValueError('Cannot map pronunciation without changing display units')
+            unit['phones'] = [phone for part in parts for phone in part['phones']]
+        result.append(unit)
+    return result
+
+
+def process(job, model, protocol):
+    output = Path(job['output']) if job.get('output') else HERE / job['song']
+    output.mkdir(parents=True)
+    baseline = json.loads(Path(job['cues']).read_text())
+    cues = copy.deepcopy(baseline)
+    wave, rate = sf.read(job['audio'], dtype='float32', always_2d=True)
+    divisor = np.gcd(rate, 44100)
+    wave = resample_poly(wave.mean(axis=1), 44100//divisor, rate//divisor).astype('float32')
+    floor = max(1e-5, protocol['minimum_relative_rms']*float(np.sqrt(np.mean(wave**2))))
+    raw, decisions = [], []
+    started = time.perf_counter()
+    for line, (cue, old) in enumerate(zip(cues, baseline), 1):
+        attempts = []
+        try:
+            units = fixed_units(cue, job['language'])
+            for pad in protocol['context_padding_seconds']:
+                begin = max(0., cue['aligned_start']-pad)
+                end = min(len(wave)/44100, cue['aligned_end']+pad)
+                prediction = model.infer(wave[round(begin*44100):round(end*44100)], begin, units, cue)
+                guarded, reasons = protect_units(cue, prediction['units'], job['language'])
+                attempts.append(dict(padding=pad, guarded=guarded, reasons=reasons, **prediction))
+        except (ValueError, RuntimeError) as error:
+            attempts.append(dict(error=str(error)))
+        raw.append(dict(line=line, attempts=attempts))
+        for index, (unit, previous) in enumerate(zip(cue['units'], old['units'])):
+            decision = dict(line=line, unit=index+1, text=unit['text'], previous=previous['start'])
+            valid = [a['guarded'][index] for a in attempts if 'guarded' in a
+                     and a['guarded'][index]['timing_source'] == 'singing_phonemes']
+            if previous.get('timing_source') == 'repeated_lyric_audio':
+                decision['reason'] = 'preserve existing independent repeated-audio recovery'
+            elif len(valid) != len(protocol['context_padding_seconds']):
+                decision['reason'] = 'not all windows produced a usable boundary'
+            else:
+                starts = [v['start'] for v in valid]
+                start, end = float(np.median(starts)), float(np.median([v['end'] for v in valid]))
+                piece = wave[round(start*44100):round(end*44100)]
+                rms = float(np.sqrt(np.mean(piece**2))) if len(piece) else 0.
+                decision.update(proposals=starts, spread=max(starts)-min(starts), rms=rms)
+                if decision['spread'] > protocol['maximum_spread_seconds']:
+                    decision['reason'] = 'context disagreement'
+                elif abs(start-previous['start']) > protocol['maximum_change_seconds']:
+                    decision['reason'] = 'large change needs independent verification'
+                elif rms <= floor:
+                    decision['reason'] = 'insufficient audible vocal support'
+                else:
+                    unit.update(start=round(start, 3), end=round(end, 3),
+                                timing_source='singing_window_consensus')
+                    decision['reason'] = 'accepted three-window median'
+            decision['proposed'] = unit['start']
+            decisions.append(decision)
+        if line % 15 == 0:
+            print(job['song'], line, len(cues), flush=True)
+    old_units = [u for c in baseline for u in c['units']]
+    all_units = [u for c in cues for u in c['units']]
+    while True:
+        bad = {j for i in range(len(all_units)-1)
+               if all_units[i+1]['start']-all_units[i]['start'] < .015-1e-9
+               for j in (i, i+1)}
+        changed = [i for i in bad if all_units[i]['start'] != old_units[i]['start']]
+        if not changed:
+            if bad:
+                raise ValueError('Baseline contains unordered onsets')
+            break
+        for i in changed:
+            all_units[i].update(old_units[i])
+            decisions[i]['reason'] = 'reverted to preserve lyric order'
+    for i, unit in enumerate(all_units):
+        if i+1 < len(all_units):
+            unit['end'] = min(unit['end'], all_units[i+1]['start'])
+        if unit['end'] <= unit['start']:
+            raise ValueError('Non-positive voiced interval')
+        decisions[i]['final'] = unit['start']
+    for cue in cues:
+        cue.update(start=cue['units'][0]['start'], end=cue['units'][-1]['end'])
+    cues, presentation = presentation_cues(cues, job['duration'], lead=0., tail=0., bridge_gap=0.)
+    changes = [d for d in decisions if abs(d['final']-d['previous']) >= .005]
+    report = dict(song=job['song'], seconds=time.perf_counter()-started, lines=len(cues),
+        units=len(all_units), changed_at_least_5ms=len(changes),
+        changed_line_starts=sum(d['unit'] == 1 for d in changes),
+        changed_at_least_50ms=sum(abs(d['final']-d['previous']) >= .05 for d in changes),
+        preserved_repeat_units=sum(u.get('timing_source') == 'repeated_lyric_audio' for u in all_units),
+        accepted_window_units=sum(u.get('timing_source') == 'singing_window_consensus' for u in all_units),
+        maximum_change_ms=max((abs(d['final']-d['previous'])*1000 for d in decisions), default=0),
+        checkpoint=str(model.checkpoint), presentation=presentation,
+        accuracy=None, accuracy_note='No independent manual onset reference for these four songs; consistency is not accuracy')
+    write(output/'cues.json', cues)
+    write(output/'raw.json', raw)
+    write(output/'decisions.json', decisions)
+    write(output/'report.json', report)
+    print(json.dumps(report, ensure_ascii=False), flush=True)
+    return report
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--jobs', type=Path, default=HERE/'jobs.json')
+    parser.add_argument('--protocol', type=Path, default=HERE/'protocol.json')
+    parser.add_argument('--output', type=Path, default=HERE)
+    parser.add_argument('--device', choices=['mps', 'cpu', 'cuda'], default='mps')
+    args = parser.parse_args()
+    protocol = json.loads(args.protocol.read_text())
+    torch.set_num_threads(4)
+    torch.set_grad_enabled(False)
+    models, reports = {}, []
+    for job in json.loads(args.jobs.read_text()):
+        if job['language'] not in models:
+            models[job['language']] = SingingAligner(job['language'], args.device)
+        reports.append(process(job, models[job['language']], protocol))
+    args.output.mkdir(parents=True, exist_ok=True)
+    snapshot = args.output/'snapshot'
+    snapshot.mkdir()
+    sources = []
+    for name in ('align_lyric_phonemes.py', 'phoneme_progress.py', 'subtitles.py', 'lyric_progress.py'):
+        shutil.copy2(ROOT/name, snapshot/name)
+        sources.append(dict(file=name, sha256=hashlib.sha256((ROOT/name).read_bytes()).hexdigest()))
+    write(args.output/'report.json', dict(songs=reports, source_files=sources))

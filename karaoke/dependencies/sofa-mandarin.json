@@ -1,0 +1,27 @@
+{
+  "url": "https://github.com/qiuqiao/SOFA/releases/download/v1.0.1/pretrained_mandarin_singing.zip",
+  "archive_sha256": "63a8c6191fe6bdf29ac40af2955ef96816b8391596d94a4340e0f58dcf47f26e",
+  "bytes": 376818394,
+  "files": [
+    {
+      "path": "karaoke/models/alignment/sofa/mandarin/pretrained_mandarin_singing/data_providers.md",
+      "bytes": 322,
+      "sha256": "4b639134a13d96a55b1323938501646d185478eeff4d8419aaf4432029d05718"
+    },
+    {
+      "path": "karaoke/models/alignment/sofa/mandarin/pretrained_mandarin_singing/hparams.yaml",
+      "bytes": 2142,
+      "sha256": "fdb7445fd7335249b72b230b5a6b62043a61cfab08d948346831bde215b3bb7a"
+    },
+    {
+      "path": "karaoke/models/alignment/sofa/mandarin/pretrained_mandarin_singing/readme.md",
+      "bytes": 475,
+      "sha256": "5d5d904c764e82d87da539d7cbf11e7c874a6d4bf948483a3c0fe7bafad5aeb2"
+    },
+    {
+      "path": "karaoke/models/alignment/sofa/mandarin/pretrained_mandarin_singing/v1.0.0_mandarin_singing.ckpt",
+      "bytes": 406087984,
+      "sha256": "612cb69ef3503befc43286f0d90893b4b3ad959df07ed08799dba2bea69d2b51"
+    }
+  ]
+}

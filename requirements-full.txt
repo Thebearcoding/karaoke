@@ -1,0 +1,10 @@
+-r karaoke/requirements-api.txt
+-r karaoke/requirements.txt
+-r karaoke/requirements-subtitles.txt
+# Install matching torch / torchaudio wheels separately for your hardware.
+# Extra imports used by the pinned upstream alignment source.
+librosa==0.11.0
+einops==0.8.1
+PyYAML==6.0.3
+phonemizer==3.3.0
+matplotlib==3.11.1

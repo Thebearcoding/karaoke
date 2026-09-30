@@ -1,0 +1,15 @@
+{
+  "status": "Frozen before the four-song run; candidate, not accuracy-validated",
+  "context_padding_seconds": [
+    0.35,
+    0.6,
+    1.0
+  ],
+  "maximum_spread_seconds": 0.08,
+  "maximum_change_seconds": 0.4,
+  "minimum_relative_rms": 0.03,
+  "tokenization": "Preserve all previous display units; no equal-time splitting",
+  "first_onset": "Use model onset; do not pin to coarse line start",
+  "repeated_audio": "Preserve previous repeat-audio recovery",
+  "manual_adjustments": false
+}

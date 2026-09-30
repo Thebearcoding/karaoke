@@ -1,0 +1,229 @@
+"""One persistent karaoke room, with a playlist independent of preparation jobs."""
+import asyncio
+import json
+from pathlib import Path
+import time
+from typing import Literal
+from uuid import uuid4
+
+from fastapi import HTTPException
+from pydantic import BaseModel, ConfigDict, Field
+
+from .job_schema import JobRequest
+
+
+class RoomCommand(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    action: Literal['play', 'pause', 'seek', 'next', 'select', 'remove', 'reorder', 'mix', 'ready', 'retry']
+    entry_id: str | None = None
+    position: float = Field(default=0, ge=0, allow_inf_nan=False)
+    order: list[str] | None = None
+    revision: int | None = None
+    mix: Literal['karaoke', 'instrumental', 'original'] | None = None
+
+
+class AddSong(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    url: str | None = Field(default=None, max_length=2048)
+    job_id: str | None = None
+    title: str | None = Field(default=None, max_length=200)
+
+
+class Updates:
+    """Subscribers need the latest state, not an unbounded log of old snapshots."""
+    def __init__(self):
+        self.subscribers = set()
+
+    def publish(self):
+        for queue in tuple(self.subscribers):
+            if queue.empty():
+                queue.put_nowait(True)
+
+    async def events(self, snapshot):
+        queue = asyncio.Queue(maxsize=1)
+        self.subscribers.add(queue)
+        try:
+            while True:
+                yield 'event: room\ndata: ' + json.dumps(snapshot(), ensure_ascii=False) + '\n\n'
+                while True:
+                    try:
+                        await asyncio.wait_for(queue.get(), 15)
+                        break
+                    except asyncio.TimeoutError:
+                        yield ': keepalive\n\n'
+        finally:
+            self.subscribers.discard(queue)
+
+
+class Room:
+    def __init__(self, store, worker, version, updates):
+        self.store, self.worker, self.version, self.updates = store, worker, version, updates
+        with store.connect() as db:
+            db.execute('CREATE TABLE IF NOT EXISTS room (id INTEGER PRIMARY KEY, state TEXT NOT NULL)')
+            initial = dict(entries=[], current_id=None, playing=False, position=0,
+                           started_at=None, mix='karaoke', revision=0)
+            db.execute('INSERT OR IGNORE INTO room VALUES (1, ?)', (json.dumps(initial),))
+
+    def read(self):
+        with self.store.connect() as db:
+            return json.loads(db.execute('SELECT state FROM room WHERE id=1').fetchone()[0])
+
+    def save(self, state):
+        state['revision'] += 1
+        with self.store.connect() as db:
+            db.execute('UPDATE room SET state=? WHERE id=1', (json.dumps(state),))
+        self.worker.prioritize([e['job_id'] for e in state['entries']])
+        self.updates.publish()
+
+    @staticmethod
+    def position(state):
+        return state['position'] + (max(0, time.time()-state['started_at'])
+                                    if state['playing'] and state['started_at'] else 0)
+
+    def pause_on_shutdown(self):
+        state = self.read()
+        if state['playing']:
+            state.update(position=self.position(state), playing=False, started_at=None)
+            self.save(state)
+
+    def describe(self, entry):
+        job = self.store.read(entry['job_id'])
+        if job is None:
+            return dict(**entry, title='歌曲已不可用', artist='', status='failed', artifacts={})
+        result, inputs = job.get('result') or {}, job['input']
+        title = result.get('title') or inputs.get('title') or '新点的歌'
+        featured = next((s for s in self.featured() if s['url'] == inputs['url']), {})
+        return dict(**entry, title=title if title != '新点的歌' else featured.get('title', title),
+            artist=result.get('artist') or inputs.get('artist') or featured.get('artist', ''),
+            url=inputs['url'], status=job['status'], active_stages=job.get('active_stages', []),
+            error=job.get('error'), duration=result.get('duration_seconds', 0),
+            poster=featured.get('poster'), lyrics_need_review=result.get('quality', {}).get(
+                'lyrics_provenance', {}).get('needs_review', False),
+            artifacts={key: f"/v1/jobs/{job['id']}/artifacts/{key}"
+                       for key in result.get('artifacts', {})})
+
+    def snapshot(self):
+        state = self.read()
+        return {**state, 'entries': [self.describe(e) for e in state['entries']],
+                'server_time': time.time(), 'preparation_job': self.worker.current}
+
+    @staticmethod
+    def featured():
+        path = Path(__file__).with_name('web')/'catalog.json'
+        return json.loads(path.read_text()) if path.exists() else []
+
+    def library(self):
+        songs = self.featured()
+        by_url = {s['url']: s for s in songs}
+        for job in self.store.list(1000):
+            if job['status'] != 'completed':
+                continue
+            artifacts = job['result'].get('artifacts', {})
+            if not all((self.store.root/job['id']/a['path']).is_file() for a in artifacts.values()):
+                continue
+            song = by_url.get(job['input']['url'])
+            if song and song.get('job_id'):
+                continue
+            info = self.describe(dict(id=job['id'], job_id=job['id']))
+            if song:
+                song.update(job_id=job['id'], duration=info['duration'])
+            else:
+                song = dict(id=job['id'], job_id=job['id'], title=info['title'], artist=info['artist'],
+                    url=info['url'], duration=info['duration'], language=job['result'].get('language', ''),
+                    poster=None)
+                songs.append(song)
+                by_url[song['url']] = song
+        return songs
+
+    def add(self, request):
+        if bool(request.url) == bool(request.job_id):
+            raise HTTPException(422, '请提供视频链接或已准备好的歌曲')
+        state = self.read()
+        if len(state['entries']) >= 100:
+            raise HTTPException(409, '歌单最多保留 100 首，请先移除一些歌曲')
+        if request.job_id:
+            job = self.store.read(request.job_id)
+            if not job or job['status'] != 'completed':
+                raise HTTPException(404, '这首歌尚未准备好')
+            if not all((self.store.root/job['id']/a['path']).is_file()
+                       for a in job['result']['artifacts'].values()):
+                raise HTTPException(409, '这首歌的文件已不可用，请重新提交链接')
+        else:
+            try:
+                payload = JobRequest(url=request.url, title=request.title)
+            except ValueError as error:
+                raise HTTPException(422, '请输入有效的 YouTube 或 Bilibili 单个视频链接') from error
+            job, cached = self.store.create(payload, self.version)
+            if not cached:
+                self.worker.queue.put_nowait(job['id'])
+        state['entries'].append(dict(id=str(uuid4()), job_id=job['id']))
+        self.save(state)
+        return self.snapshot()
+
+    def command(self, command):
+        state = self.read()
+        if command.revision is not None and command.revision != state['revision']:
+            raise HTTPException(409, '歌单刚刚更新了，请再试一次')
+        current = next((e for e in state['entries'] if e['id'] == state['current_id']), None)
+        entry = next((e for e in state['entries'] if e['id'] == command.entry_id), None)
+        action = command.action
+        if action in ('pause', 'seek', 'ready', 'next') and command.entry_id != state['current_id']:
+            raise HTTPException(409, '已经切换到另一首歌')
+        if action in ('select', 'remove', 'retry') and entry is None:
+            raise HTTPException(404, '歌曲已从歌单移除')
+        if action == 'play':
+            if current is None and state['entries']:
+                state['current_id'] = state['entries'][0]['id']
+            if state['current_id'] is None:
+                raise HTTPException(409, '先点一首歌吧')
+            if not state['playing']:
+                state.update(playing=True, started_at=None)
+        elif action == 'pause':
+            state.update(position=self.position(state), playing=False, started_at=None)
+        elif action == 'seek':
+            if not current:
+                raise HTTPException(409, '还没有正在播放的歌')
+            duration = self.describe(current)['duration']
+            state.update(position=min(command.position, max(0, duration-.05)),
+                         started_at=time.time() if state['started_at'] else None)
+        elif action == 'ready':
+            if current and self.describe(current)['status'] == 'completed' and state['playing']:
+                if state['started_at'] is None:
+                    state['started_at'] = time.time()
+        elif action in ('next', 'select'):
+            if action == 'next':
+                state['entries'] = [e for e in state['entries'] if e['id'] != state['current_id']]
+                entry = state['entries'][0] if state['entries'] else None
+            else:
+                state['entries'].remove(entry)
+                state['entries'].insert(0, entry)
+            state.update(current_id=entry['id'] if entry else None, position=0,
+                         started_at=None, playing=bool(entry))
+        elif action == 'remove':
+            state['entries'].remove(entry)
+            if entry == current:
+                following = state['entries'][0] if state['entries'] else None
+                state.update(current_id=following['id'] if following else None, position=0,
+                             started_at=None, playing=state['playing'] and bool(following))
+        elif action == 'reorder':
+            ids = [e['id'] for e in state['entries']]
+            if not command.order or len(command.order) != len(ids) or set(command.order) != set(ids):
+                raise HTTPException(422, '排序必须包含歌单中的每一首歌，且不能重复')
+            if current and command.order[0] != current['id']:
+                raise HTTPException(409, '正在播放的歌曲保持在首位；请使用切歌')
+            by_id = {e['id']: e for e in state['entries']}
+            state['entries'] = [by_id[i] for i in command.order]
+        elif action == 'mix':
+            if command.mix is None:
+                raise HTTPException(422, '请选择人声模式')
+            state['mix'] = command.mix
+        elif action == 'retry':
+            old = self.store.read(entry['job_id'])
+            if old['status'] != 'failed':
+                raise HTTPException(409, '只有准备失败的歌曲需要重试')
+            job, cached = self.store.create(JobRequest(**old['input']), self.version)
+            entry['job_id'] = job['id']
+            if not cached:
+                self.worker.queue.put_nowait(job['id'])
+        self.save(state)
+        return self.snapshot()
