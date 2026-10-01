@@ -69,7 +69,7 @@ def alignment_blocks(anchors, audio):
 
 
 def stitch_blocks(lines, raw_blocks, duration, language):
-    """Resolve crossing core boundaries with an existing joint-window prediction."""
+    """Resolve crossings using existing predictions, without moving word times."""
     predictions, owners = [], [None]*len(lines)
     for block_index, block in enumerate(raw_blocks):
         first, stop = block['context']
@@ -111,22 +111,27 @@ def stitch_blocks(lines, raw_blocks, duration, language):
     while bad := conflicts(owners):
         repaired = False
         for index in sorted(bad):
-            for owner in dict.fromkeys(owners[index-1:index+1]):
-                prediction = predictions[owner]
-                if not all(i in prediction and prediction[i][1] for i in (index-1, index)):
-                    continue
-                words = prediction[index-1][1]+prediction[index][1]
-                if any(b['start']-a['start'] < .015-1e-9 for a, b in zip(words, words[1:])):
-                    continue
-                candidate = owners.copy()
-                candidate[index-1:index+1] = [owner, owner]
-                if not conflicts(candidate) < bad:
-                    continue
-                repairs.append(dict(lines=[index, index+1],
-                    previous_blocks=owners[index-1:index+1], selected_block=owner,
-                    context=raw_blocks[owner]['context'], source_range=raw_blocks[owner]['source_range']))
-                owners, repaired = candidate, True
-                break
+            # Prefer a joint prediction. If that introduces another crossing,
+            # an adjoining window may already have a valid single-line result.
+            for first, stop in ((index-1, index+1), (index-1, index), (index, index+1)):
+                for owner in dict.fromkeys(owners[index-1:index+1]+list(range(len(predictions)))):
+                    prediction = predictions[owner]
+                    if not all(i in prediction and prediction[i][1] for i in range(first, stop)):
+                        continue
+                    words = [w for i in range(first, stop) for w in prediction[i][1]]
+                    if any(b['start']-a['start'] < .015-1e-9 for a, b in zip(words, words[1:])):
+                        continue
+                    candidate = owners.copy()
+                    candidate[first:stop] = [owner]*(stop-first)
+                    if not conflicts(candidate) < bad:
+                        continue
+                    repairs.append(dict(lines=[first+1, stop],
+                        previous_blocks=owners[first:stop], selected_block=owner,
+                        context=raw_blocks[owner]['context'], source_range=raw_blocks[owner]['source_range']))
+                    owners, repaired = candidate, True
+                    break
+                if repaired:
+                    break
             if repaired:
                 break
         if not repaired:

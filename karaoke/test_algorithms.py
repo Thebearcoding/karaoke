@@ -444,6 +444,28 @@ class WordOnsetScoring(unittest.TestCase):
 
 
 class AlignmentIntegrity(unittest.TestCase):
+    def test_crossing_can_use_context_from_the_third_neighboring_window(self):
+        lines = ['first', 'middle', 'last']
+
+        def segment(text, start, end):
+            return dict(text=text, words=[dict(word=text, start=start, end=end)])
+
+        raw = [dict(range=[0, 1], context=[0, 2], source_range=[0., 6.], result=dict(segments=[
+                   segment('first', 0., 1.), segment('middle', 1.2, 2.)])),
+               dict(range=[1, 2], context=[1, 2], source_range=[0., 6.], result=dict(segments=[
+                   segment('middle', 1.2, 5.)])),
+               dict(range=[2, 3], context=[1, 3], source_range=[0., 6.], result=dict(segments=[
+                   segment('middle', .2, 2.), segment('last', 2.5, 3.5)]))]
+        cues, stitched, repairs = stitch_blocks(lines, raw, 6., 'English')
+        presentation_cues(cues, 6., lead=0, tail=0, bridge_gap=0)
+        words, report = build_progress(cues, stitched, 'English')
+        self.assertFalse(report['fallback_lines'])
+        self.assertEqual([(c['start'], c['end']) for c in cues], [(0., 1.), (1.2, 2.), (2.5, 3.5)])
+        self.assertEqual([c['units'][0]['start'] for c in words], [0., 1.2, 2.5])
+        self.assertEqual(repairs[0]['selected_block'], 0)
+        self.assertEqual(repairs[0]['lines'], [2, 2])
+        self.assertEqual(raw[1]['result']['segments'][0]['words'][0]['end'], 5.)
+
     def test_crossing_block_boundary_uses_one_complete_joint_prediction(self):
         lines = ['first tail', 'second line', 'last phrase']
 
