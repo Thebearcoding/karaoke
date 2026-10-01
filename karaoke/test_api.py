@@ -1011,6 +1011,16 @@ def test_successful_process_without_required_outputs_is_not_completed(tmp_path):
         assert finished(client, job_id)['status'] == 'failed'
 
 
+def test_mixed_language_wrapping_does_not_split_a_word_at_punctuation():
+    from karaoke.song_sources import transcript_lines
+    text = '甲乙丙丁戊己庚辛壬癸子丑寅卯辰 so-so-sorry,café don’t'
+    for language in ('Chinese', 'Japanese'):
+        lines = transcript_lines(dict(text=text), language)
+        assert ''.join(''.join(lines).split()) == ''.join(text.split())
+        for word in ('so-so-sorry', 'café', 'don’t'):
+            assert sum(word in line for line in lines) == 1
+
+
 def test_local_preview_can_submit_cross_origin(tmp_path):
     with TestClient(create_app(tmp_path, worker_command=fake_worker, version='test')) as client:
         headers = {'Origin': 'http://127.0.0.1:8745', 'Access-Control-Request-Method': 'POST',

@@ -9,6 +9,7 @@ from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, Field
 
 from .job_schema import provider_error, song_language, video_url
+from .subtitles import highlight_spans
 
 
 class SongText(BaseModel):
@@ -40,9 +41,19 @@ def transcript_lines(transcription, language):
     lines = []
     for text in texts:
         for phrase in re.split(r'(?<=[。！？!?；;])\s*|(?<=\.)\s+|\n+', text.strip()):
-            pattern = r'\S+\s*' if language == 'English' else r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*\s*|.\s*"
+            if language == 'English':
+                tokens = re.findall(r'\S+\s*', phrase)
+            else:
+                spans = dict(highlight_spans(phrase, 'English'))
+                tokens, cursor = [], 0
+                while cursor < len(phrase):
+                    stop = spans.get(cursor, cursor+1)
+                    while stop < len(phrase) and phrase[stop].isspace():
+                        stop += 1
+                    tokens.append(phrase[cursor:stop])
+                    cursor = stop
             line, size = '', 0
-            for token in re.findall(pattern, phrase):
+            for token in tokens:
                 weight = 1 if language == 'English' else len(token.strip())
                 if line and size+weight > (10 if language == 'English' else 18) and any(c.isalnum() for c in token):
                     lines.append(line.strip())

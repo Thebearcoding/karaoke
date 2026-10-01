@@ -1,9 +1,13 @@
 """Score fixed lyric-word onset events against independent reference times."""
 import math
-import re
 import unicodedata
 
 import numpy as np
+
+if __package__:
+    from .subtitles import highlight_spans
+else:
+    from subtitles import highlight_spans
 
 
 def canonical(text):
@@ -15,14 +19,13 @@ def word_events(cues):
     result = []
     for line, cue in enumerate(cues):
         groups = cue.get('units', [])
-        words = [m for m in re.finditer(r'\S+', cue['text']) if canonical(m[0])]
-        for word in words:
-            letters = [i for i in range(word.start(), word.end()) if cue['text'][i].isalnum()]
-            matches = [g for g in groups if g['first'] <= letters[0] and g['stop'] > letters[-1]]
+        words = list(highlight_spans(cue['text'], 'English'))
+        for first, stop in words:
+            matches = [g for g in groups if g['first'] <= first and g['stop'] >= stop]
             group = matches[0] if len(matches) == 1 else None
-            merged = bool(group and sum(group['first'] <= m.start() and group['stop'] >= m.end()
-                                        for m in words) > 1)
-            result.append(dict(id=len(result), line=line+1, text=word[0],
+            merged = bool(group and sum(group['first'] <= a and group['stop'] >= b
+                                        for a, b in words) > 1)
+            result.append(dict(id=len(result), line=line+1, text=cue['text'][first:stop],
                                start=group['start'] if group else None,
                                merged=merged, incomplete_highlight=group is None))
     return result

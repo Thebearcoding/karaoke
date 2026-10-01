@@ -16,6 +16,7 @@ from align_lyrics_whisper import alignment_blocks, sha
 from stage_progress import progress_items
 from word_onset_metrics import canonical
 from onset_consensus import context_scope_violations
+from subtitles import highlight_spans
 
 ROOT = Path(__file__).resolve().parent
 SINGING_ROOT = ROOT / 'research/word-onset-2026-09-18/lyrics-alignment-multilingual'
@@ -186,11 +187,13 @@ def align_job(aligner, job, full_song=False):
 
     def run_blocks(blocks, start_id=0):
         for block_id, (first, stop, left, right, begin, end) in enumerate(progress_items(blocks, 'context' if start_id else 'blocks'), start_id):
-            matches = [[m for m in re.finditer(r'\S+', s) if canonical(m[0])] for s in lines[left:right]]
-            words = [m[0] for row in matches for m in row]
+            matches = [list(highlight_spans(s, 'English')) for s in lines[left:right]]
+            words = [s[a:b] for s, row in zip(lines[left:right], matches) for a, b in row]
             try:
                 if any(not row for row in matches):
                     raise ValueError('Lyric lines must contain alignable text')
+                if canonical(''.join(words)) != canonical(''.join(lines[left:right])):
+                    raise ValueError('Unsupported text in English lyric alignment')
                 aligned, emissions, step = aligner.align(audio[round(begin*rate):round(end*rate)], words)
             except (ValueError, RuntimeError) as error:
                 failures.append(dict(lines=[first, stop], error=str(error)))
@@ -201,9 +204,9 @@ def align_job(aligner, job, full_song=False):
             cursor = 0
             for line in range(left, right):
                 units = []
-                for match in matches[line-left]:
+                for begin_char, end_char in matches[line-left]:
                     word = aligned[cursor]
-                    units.append(dict(text=match[0], first=match.start(), stop=match.end(),
+                    units.append(dict(text=lines[line][begin_char:end_char], first=begin_char, stop=end_char,
                                       start=word['start']+begin, end=word['end']+begin,
                                       confidence=word['confidence'], timing_source=aligner.method))
                     cursor += 1

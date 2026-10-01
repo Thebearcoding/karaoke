@@ -6,11 +6,13 @@ import unicodedata
 
 from pypinyin import lazy_pinyin
 import pykakasi
+from opencc import OpenCC
 
 from lyric_progress import canonical_positions
 
 ROOT = Path(__file__).resolve().parent
 KAKASI = pykakasi.kakasi()
+SPOKEN_CHINESE = OpenCC('tw2s')
 KANJI = r'[\u3400-\u9fff々〆]+'
 SMALL = 'ゃゅょぁぃぅぇぉゎ'
 
@@ -118,6 +120,13 @@ def mandarin_dictionary():
 
 def chinese_units(text):
     normalized, positions = canonical_positions(text,'Chinese')
+    # Taiwan's particle 著 is 着 (zhe), while 著作 remains 著 (zhu).
+    # Conversion needs the whole phrase; converting characters separately
+    # discards the evidence used by OpenCC's regional phrase dictionary.
+    spoken, _ = canonical_positions(SPOKEN_CHINESE.convert(text), 'Chinese')
+    if len(spoken) != len(normalized):
+        raise ValueError('Chinese pronunciation conversion changes display alignment')
+    normalized = spoken
     pinyins = lazy_pinyin(normalized,errors=lambda value:list(value))
     if len(pinyins) != len(positions):
         raise ValueError('Chinese pronunciation does not map to displayed characters')

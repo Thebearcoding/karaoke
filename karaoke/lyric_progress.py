@@ -5,6 +5,7 @@ from pathlib import Path
 import unicodedata
 
 from opencc import OpenCC
+from subtitles import highlight_spans
 
 CHINESE = OpenCC('t2s')
 
@@ -49,6 +50,16 @@ def map_words(cue, words, offset, language):
         units[-1]['text'] = cue['text'][units[-1]['first']:]
     if not units or any(b['start'] < a['start'] for a, b in zip(units, units[1:])):
         raise ValueError('No usable monotonic word timing')
+    # Whisper tokens may split a Latin word (e.g. "Moder" + "ato"). Keep
+    # its measured first onset and last end as one displayed word. A token
+    # spanning multiple words cannot be split without new acoustic evidence.
+    for first, stop in highlight_spans(cue['text'], 'English'):
+        indexes = [i for i, u in enumerate(units) if u['first'] < stop and u['stop'] > first]
+        if len(indexes) > 1:
+            left, right = indexes[0], indexes[-1]
+            if units[left]['first'] == first and units[right]['stop'] == stop:
+                units[left:right+1] = [dict(units[left], stop=stop, end=units[right]['end'],
+                                          text=cue['text'][first:stop])]
     # Keep display punctuation between model tokens, including the apostrophe
     # in split contractions. This changes only character spans, never onsets.
     units[0]['first'] = 0

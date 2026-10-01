@@ -285,7 +285,8 @@ class SubtitleIntegrity(unittest.TestCase):
                 units = map_words(cue, words, 0., language)
                 self.assertEqual(''.join(u['text'] for u in units), cue['text'])
                 self.assertEqual(normalized(''.join(u['text'] for u in units)), normalized(cue['text']))
-                self.assertEqual([u['start'] for u in units], [1., 2., 3., 4.])
+                self.assertEqual([u['start'] for u in units], [1., 2., 4.])
+                self.assertEqual(units[1]['end'], 3.8)
                 for unit in units:
                     self.assertEqual(unit['text'], cue['text'][unit['first']:unit['stop']])
                 with self.assertRaisesRegex(ValueError, 'differs'):
@@ -304,6 +305,31 @@ class SubtitleIntegrity(unittest.TestCase):
         self.assertEqual(result[1]['units'], [])
         self.assertEqual(report['timed_lines'], 1)
         self.assertEqual(report['fallback_lines'][0]['line'], 2)
+
+    def test_word_progress_coalesces_subwords_without_splitting_merged_onsets(self):
+        cue = dict(text='唱 Moderato yo,no', start=0., end=6.)
+        words = [dict(word=text, start=float(i), end=i+.7)
+                 for i, text in enumerate(['唱', 'Moder', 'ato', 'yo', 'no'])]
+        units = map_words(cue, words, 0., 'Chinese')
+        self.assertEqual([u['text'] for u in units], ['唱 ', 'Moderato ', 'yo,', 'no'])
+        self.assertEqual([u['start'] for u in units], [0., 1., 3., 4.])
+        self.assertEqual(units[1]['end'], 2.7)
+        self.assertFalse(highlight_coverage_errors([dict(cue, units=units)], 'Chinese'))
+        cue = dict(text='two words', start=0., end=1.)
+        units = map_words(cue, [dict(word='two words', start=0., end=.7)], 0., 'English')
+        self.assertEqual(len(units), 1)
+        self.assertTrue(highlight_coverage_errors([dict(cue, units=units)], 'English'))
+
+    def test_traditional_chinese_pronunciation_uses_phrase_context(self):
+        from unittest.mock import patch
+        from phoneme_progress import chinese_units
+        dictionary = {word: [word] for word in ('tou', 'zhe', 'guang', 'yu', 'zhu', 'zuo')}
+        with patch('phoneme_progress.mandarin_dictionary', return_value=dictionary):
+            text = '透著光與著作'
+            units = chinese_units(text)
+        self.assertEqual([u['reading'] for u in units], ['tou', 'zhe', 'guang', 'yu', 'zhu', 'zuo'])
+        self.assertEqual(''.join(u['text'] for u in units), text)
+        self.assertEqual([text[u['first']:u['stop']] for u in units], list(text))
 
     def test_highlights_preserve_words_characters_and_japanese_reading_groups(self):
         for language, parts in [
@@ -461,13 +487,14 @@ class WordOnsetScoring(unittest.TestCase):
         self.assertFalse(score['passed'])
 
     def test_one_highlight_for_two_words_is_scored_twice(self):
-        events = word_events([dict(text='hello world', units=[
-            dict(first=0, stop=11, start=1.)])])
         reference = [dict(id=0, text='hello', start=1.), dict(id=1, text='world', start=1.8)]
-        score = score_onsets(reference, events)['summary']
-        self.assertEqual(score['units'], 2)
-        self.assertEqual(score['pco']['50'], .5)
-        self.assertEqual(score['merged_units'], 2)
+        for text in ('hello world', 'hello,world'):
+            with self.subTest(text=text):
+                events = word_events([dict(text=text, units=[dict(first=0, stop=11, start=1.)])])
+                score = score_onsets(reference, events)['summary']
+                self.assertEqual(score['units'], 2)
+                self.assertEqual(score['pco']['50'], .5)
+                self.assertEqual(score['merged_units'], 2)
 
     def test_frame_quantization_can_change_a_boundary_hit(self):
         reference = [dict(id=0, text='hello', start=1.)]
@@ -636,15 +663,15 @@ class AlignmentIntegrity(unittest.TestCase):
         from align_english_onsets import align_job
         from onset_consensus import blend_cues
 
-        lines = ['“ Come … back ! ”', "Don't go…"]
-        expected = ['Come', 'back', "Don't", 'go…']
+        lines = ['“ Come … back ! ”', "Don't go…", 'Feel so,so-sorry!']
+        expected = ['Come', 'back', "Don't", 'go', 'Feel', 'so', 'so-sorry']
         aligned = [dict(text=word, start=float(i+1), end=i+1.5, confidence=.9)
                    for i, word in enumerate(expected)]
         aligner = SimpleNamespace(method='singing', device='cpu', onset_ratio=.02,
             model_identity={}, align=Mock(return_value=(aligned, None, .02)))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            sf.write(root/'audio.wav', np.zeros(6*16000), 16000)
+            sf.write(root/'audio.wav', np.zeros(9*16000), 16000)
             (root/'lyrics.json').write_text(json.dumps(dict(language='English', lines=lines)))
             job = dict(audio=str(root/'audio.wav'), lyrics=str(root/'lyrics.json'), output=str(root/'onsets'))
             report = align_job(aligner, job, full_song=True)
@@ -652,7 +679,8 @@ class AlignmentIntegrity(unittest.TestCase):
             self.assertEqual(aligner.align.call_args.args[1], expected)
             cues = json.loads((root/'onsets/cues.json').read_text())
             self.assertEqual([''.join(u['text'] for u in c['units']) for c in cues], lines)
-            self.assertEqual([u['start'] for c in cues for u in c['units']], [1., 2., 3., 4.])
+            self.assertEqual([u['start'] for c in cues for u in c['units']], [1., 2., 3., 4., 5., 6., 7.])
+            self.assertFalse(highlight_coverage_errors(cues, 'English'))
             blend_cues(cues, cues, max_disagreement=.2, primary_weight=.75)
 
             aligner.align.reset_mock()
