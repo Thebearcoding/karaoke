@@ -343,9 +343,11 @@ def probe(path, data_dir, base, job_id):
         print(json.dumps(evidence, ensure_ascii=False), flush=True)
 
 
-def run_audio(path, data_dir, base):
+def run_audio(path, data_dir, base, *, case_url=None):
     """Stop at the first software failure; retain an independent audio ledger."""
     from karaoke.api import Store
+    if case_url is not None:
+        case_url = video_url(case_url)
     store = Store(data_dir)
     with path.with_suffix('.lock').open('a') as lock, httpx.Client(timeout=30) as client:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -354,6 +356,9 @@ def run_audio(path, data_dir, base):
             selection = [dict(url=c['url'], language=c['language']) for c in state['cases']]
             if hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest() != state['selection_sha256']:
                 raise ValueError('Fixed case selection changed')
+            candidates_scope = [c for c in state['cases'] if case_url is None or video_url(c['url']) == case_url]
+            if not candidates_scope:
+                raise ValueError('Focused source is not in the fixed selection')
             health = client.get(base+'/health').raise_for_status().json()
             version = health['pipeline_version']
             state['audio_pipeline_version'] = version
@@ -364,7 +369,7 @@ def run_audio(path, data_dir, base):
             if state['audio_passed_current_version'] == len(state['cases']):
                 print(f'All {len(state["cases"])} audio cases passed on {version}', flush=True)
                 return
-            if path.with_name('audio.pause').exists():
+            if case_url is None and path.with_name('audio.pause').exists():
                 print('Audio regression paused', flush=True)
                 return
             if any(c.get('audio_attempts') and c['audio_attempts'][-1]['status'] in ('running', 'submitted')
@@ -372,11 +377,11 @@ def run_audio(path, data_dir, base):
                 print('Reconcile the unfinished audio attempt before starting another', flush=True)
                 return
             if any(c.get('audio_attempts') and c['audio_attempts'][-1]['status'] == 'failed' and
-                   c['audio_attempts'][-1]['pipeline_version'] == version for c in state['cases']):
+                   c['audio_attempts'][-1]['pipeline_version'] == version for c in candidates_scope):
                 print('Repair the audio failure before resuming this pipeline version', flush=True)
                 return
             candidates = []
-            for case in state['cases']:
+            for case in candidates_scope:
                 attempts = case.get('audio_attempts', [])
                 if attempts and attempts[-1]['status'] == 'passed_audio' and attempts[-1]['pipeline_version'] == version:
                     continue
@@ -416,6 +421,7 @@ def run_audio(path, data_dir, base):
                 evidence['pipeline_version'] = version
                 save(folder/'audio-verification.json', evidence)
                 attempt.update(status='passed_audio', finished_at=stamp(), evidence=evidence)
+                state['audio_passed_current_version'] += 1
                 if not cached_full:
                     result = json.loads((folder/'audio-result.json').read_text())
                     store.update(job['id'], status='audio_ready', pipeline_version=version, audio_result=result,
@@ -433,7 +439,7 @@ def run_audio(path, data_dir, base):
             if room['current_id'] != entry['id'] and any(e['id']==entry['id'] for e in room['entries']):
                 client.post(base+'/v1/room/commands',json=dict(action='remove',entry_id=entry['id'],revision=room['revision'])).raise_for_status()
             print(json.dumps({k:attempt.get(k) for k in ('job_id','status','error')},ensure_ascii=False),flush=True)
-            if attempt['status'] in ('failed','blocked'):
+            if case_url is not None or attempt['status'] in ('failed','blocked'):
                 return
 
 
@@ -612,7 +618,10 @@ def main():
     parser.add_argument('--base-url', default='http://127.0.0.1:8746')
     parser.add_argument('--seed', type=int, default=20261001)
     parser.add_argument('--job-id', help='A registered, queued job for an audio-only probe')
+    parser.add_argument('--case-url', help='Verify only this frozen audio case, preserving batch pause files')
     args = parser.parse_args()
+    if args.case_url and args.action != 'audio-run':
+        parser.error('--case-url requires audio-run')
     args.manifest.parent.mkdir(parents=True, exist_ok=True)
     if args.action == 'sample':
         sample(args.manifest, args.data_dir, args.seed)
@@ -621,7 +630,7 @@ def main():
             parser.error('probe requires --job-id')
         probe(args.manifest, args.data_dir, args.base_url.rstrip('/'), args.job_id)
     elif args.action == 'audio-run':
-        run_audio(args.manifest, args.data_dir, args.base_url.rstrip('/'))
+        run_audio(args.manifest, args.data_dir, args.base_url.rstrip('/'), case_url=args.case_url)
     else:
         run(args.manifest, args.data_dir, args.base_url.rstrip('/'))
 

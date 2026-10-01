@@ -913,6 +913,23 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
     soak.run_audio(manifest,data,'http://test')
     assert len(calls)==3
     assert store.read(calls[-1])['input']['url']==cases[1]['url']
+    # Focus another known failure without clearing the batch hold or quietly
+    # resubmitting the unchanged failure in the previous case.
+    pause = manifest.with_name('audio.pause')
+    pause.write_text('hold batch')
+    soak.run_audio(manifest,data,'http://test')
+    assert len(calls)==3
+    soak.run_audio(manifest,data,'http://test',case_url=cases[2]['url'])
+    assert len(calls)==4 and pause.read_text()=='hold batch'
+    assert store.read(calls[-1])['input']['url']==cases[2]['url']
+    saved=json.loads(manifest.read_text())
+    assert saved['audio_passed_current_version']==1
+    assert saved['cases'][1]['audio_attempts'][-1]['status']=='failed'
+    assert saved['cases'][2]['audio_attempts'][-1]['status']=='passed_audio'
+    assert all(c['attempts']==[] for c in saved['cases'])
+    assert room.read()['entries']==[]
+    with pytest.raises(ValueError,match='fixed selection'):
+        soak.run_audio(manifest,data,'http://test',case_url=URL)
 
 
 def test_partial_song_information_updates_preserve_language_and_title(tmp_path):
