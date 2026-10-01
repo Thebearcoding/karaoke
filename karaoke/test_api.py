@@ -771,6 +771,19 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
         'from pathlib import Path; from karaoke.tools.soak import verify_outputs; '
         f'verify_outputs(None, "", Path({str(tmp_path)!r}), {{"id":"job"}}, audio_only=True)'],
         cwd=Path(__file__).resolve().parent.parent, env=env, check=True, capture_output=True)
+    # A complete phrase collapsed into one positive interval also passed the
+    # old text/monotonicity gates. Checksums must not make it a valid highlight.
+    subtitle_path = folder/'cues.json'
+    original = subtitle_path.read_text()
+    subtitle_path.write_text(json.dumps([dict(text='Hello world', start=.1, end=.12,
+        units=[dict(text='Hello world', first=0, stop=11, start=.1, end=.12)])]))
+    result['artifacts']['subtitles'].update(bytes=subtitle_path.stat().st_size, sha256=file_hash(subtitle_path))
+    (folder/'audio-result.json').write_text(json.dumps(result))
+    with pytest.raises(ValueError, match='independent highlights'):
+        verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
+    subtitle_path.write_text(original)
+    result['artifacts']['subtitles'].update(bytes=subtitle_path.stat().st_size, sha256=file_hash(subtitle_path))
+    (folder/'audio-result.json').write_text(json.dumps(result))
     repeat_path.write_text(json.dumps(dict(status='failed')))
     with pytest.raises(ValueError, match='repetitions'):
         verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)

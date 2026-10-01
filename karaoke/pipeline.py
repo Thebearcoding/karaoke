@@ -508,7 +508,7 @@ class Pipeline:
 
     def align(self, lyrics, duration):
         from lyric_progress import build
-        from subtitles import presentation_cues, countdown_events, normalized
+        from subtitles import presentation_cues, countdown_events, normalized, highlight_coverage_errors
         language = lyrics['language']
         output = self.output
         write_json(output/'alignment-jobs.json', [dict(audio=str(output/'vocals-16k.wav'),
@@ -571,6 +571,10 @@ class Pipeline:
         for cue in cues:
             if normalized(''.join(u['text'] for u in cue['units'])) != normalized(cue['text']):
                 raise StageFailure('align_words', '逐字时间轴遗漏了歌词')
+        highlight_errors = highlight_coverage_errors(cues, language)
+        write_json(output/'highlight-validation.json', dict(errors=highlight_errors))
+        if highlight_errors:
+            raise StageFailure('align_words', '部分字词缺少独立的高亮起点；对齐诊断已保留')
         repeats = json.loads((output/'asr/lyric-repeats.json').read_text())
         missing = missing_repetitions(repeats['reference_lines'], cues, repeats['words'], language, duration)
         write_json(output/'lyric-repeat-validation.json', dict(missing=missing))

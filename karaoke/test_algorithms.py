@@ -9,7 +9,7 @@ from align import activity, align_lines
 from dsp import apply_masks, istft, masks_for, stft
 from exact_stems import exact_split, reconstruction_report
 from phonetic_align import FormantSynth, alignment_features, align_phonetic, templates
-from subtitles import countdown_events, countdown_state, lyric_cues, presentation_cues, read_ahead_state, timestamp, write_captions
+from subtitles import countdown_events, countdown_state, highlight_coverage_errors, lyric_cues, presentation_cues, read_ahead_state, timestamp, write_captions
 from match_video_lyrics import caption_similarity, strongest_cluster
 from anchors_from_asr import anchors_from_words
 from three_stems import check_three
@@ -304,6 +304,41 @@ class SubtitleIntegrity(unittest.TestCase):
         self.assertEqual(result[1]['units'], [])
         self.assertEqual(report['timed_lines'], 1)
         self.assertEqual(report['fallback_lines'][0]['line'], 2)
+
+    def test_highlights_preserve_words_characters_and_japanese_reading_groups(self):
+        for language, parts in [
+            ('Chinese', ['你', 'Hello', '世', '界']),
+            ('English', ["'café' ", "don't ", 'Ooh-ooh']),
+            ('English', ['Cafe\u0301—', 'world']),
+            ('Japanese', ['東京', 'で', 'Hello']),
+        ]:
+            with self.subTest(language=language, parts=parts):
+                units, cursor = [], 0
+                for part in parts:
+                    units.append(dict(text=part, first=cursor, stop=cursor+len(part)))
+                    cursor += len(part)
+                cue = dict(text=''.join(parts), units=units)
+                self.assertEqual(highlight_coverage_errors([cue], language), [])
+                # The same complete text cannot be published as one highlight.
+                cue['units'] = [dict(text=cue['text'], first=0, stop=len(cue['text']))]
+                self.assertTrue(highlight_coverage_errors([cue], language))
+
+    def test_highlight_validation_rejects_collapsed_split_and_invalid_spans(self):
+        text = 'feel so,I feel so,so'
+        cue = dict(text=text, units=[dict(text=text, first=0, stop=len(text),
+                                         start=216.12, end=216.14)])
+        for language in ('Chinese', 'English', 'Japanese'):
+            with self.subTest(language=language):
+                errors = highlight_coverage_errors([cue], language)
+                self.assertEqual([e['text'] for e in errors], ['feel', 'so', 'I', 'feel', 'so', 'so'])
+        cue = dict(text="don't", units=[dict(text="don'", first=0, stop=4),
+                                       dict(text='t', first=4, stop=5)])
+        self.assertTrue(highlight_coverage_errors([cue], 'English'))
+        cue['units'] = []
+        self.assertTrue(highlight_coverage_errors([cue], 'English'))
+        for unit in (dict(text="don't", first=0, stop=6), dict(text='other', first=0, stop=5)):
+            cue['units'] = [unit]
+            self.assertEqual(highlight_coverage_errors([cue], 'English')[0]['reason'], 'invalid display span')
 
     def test_display_holds_preserve_acoustic_times_and_instrumental_gaps(self):
         cues = [{'text': '甲', 'start': 1., 'end': 2., 'status': 'candidate'},

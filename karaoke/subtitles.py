@@ -12,6 +12,58 @@ def normalized(text):
                    if unicodedata.category(c)[0] in ('L', 'N') or c == "'")
 
 
+def highlight_spans(text, language):
+    """Display atoms: Latin words and Chinese characters, in source offsets.
+
+    Japanese reading groups are chosen by the pronunciation model, not here.
+    Apostrophes and hyphens inside a Latin word do not create another onset.
+    """
+    def latin(char):
+        return unicodedata.name(char, '').startswith('LATIN ') or char.isdecimal()
+
+    index = 0
+    while index < len(text):
+        first = index
+        char = text[index]
+        index += 1
+        if latin(char):
+            while index < len(text):
+                char = text[index]
+                if latin(char) or unicodedata.category(char).startswith('M'):
+                    index += 1
+                elif char in "'’‐-" and index+1 < len(text) and latin(text[index+1]):
+                    index += 1
+                else:
+                    break
+            yield first, index
+        elif language == 'Chinese' and unicodedata.name(char, '').startswith(
+                ('CJK UNIFIED IDEOGRAPH', 'CJK COMPATIBILITY IDEOGRAPH')):
+            yield first, index
+
+
+def highlight_coverage_errors(cues, language):
+    """Reject merged/missing/split display atoms, independent of timing accuracy."""
+    errors = []
+    for line, cue in enumerate(cues, 1):
+        text, units = cue['text'], cue.get('units', [])
+        if any(not isinstance(u.get('first'), int) or not isinstance(u.get('stop'), int)
+               or not 0 <= u['first'] < u['stop'] <= len(text)
+               or u['text'] != text[u['first']:u['stop']] for u in units):
+            errors.append(dict(line=line, reason='invalid display span'))
+            continue
+        for first, stop in highlight_spans(text, language):
+            covering = [u for u in units if u['first'] < stop and u['stop'] > first]
+            if len(covering) == 1:
+                unit = covering[0]
+                outside = text[unit['first']:first]+text[stop:unit['stop']]
+                if unit['first'] <= first and unit['stop'] >= stop and not any(
+                        char.isalnum() for char in outside):
+                    continue
+            errors.append(dict(line=line, first=first, stop=stop, text=text[first:stop],
+                               reason='word or character lacks an independent highlight'))
+    return errors
+
+
 def lyric_cues(lines, units, duration):
     expected = ''.join(normalized(line) for line in lines)
     observed = ''.join(normalized(unit['text']) for unit in units)

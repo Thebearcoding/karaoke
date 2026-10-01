@@ -199,7 +199,7 @@ def verify_stems(paths, expected_hash):
 
 
 def verify_outputs(client, base, data_dir, job, *, audio_only=False):
-    from karaoke.subtitles import normalized
+    from karaoke.subtitles import normalized, highlight_coverage_errors
     folder = (data_dir/job['id']).resolve()
     result = json.loads((folder/('audio-result.json' if audio_only else 'result.json')).read_text())
     required = REQUIRED-{'mv'} if audio_only else REQUIRED
@@ -235,6 +235,8 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False):
         raise ValueError('Non-monotonic word onsets')
     if any(normalized(''.join(u['text'] for u in c['units'])) != normalized(c['text']) for c in cues):
         raise ValueError('Subtitle units omit lyric text')
+    if highlight_coverage_errors(cues, result['language']):
+        raise ValueError('Subtitle words or characters lack independent highlights')
     if result.get('language') == 'English':
         from karaoke.onset_consensus import context_scope_violations
         if context_scope_violations(cues, result['quality'].get('english_context_scope')):
@@ -458,7 +460,7 @@ def record_failure(attempt, job, folder):
     for pattern in ('asr/*.json', 'alignment/*.json', 'phonemes/*.json', 'context/**/*.json',
                     'repeated-lyrics/*.json', 'english-onsets/*.json',
                     'lyrics.json', 'anchors.json', 'word-cues.json', 'ordered-cues.json', 'quality.json',
-                    'lyric-repeat-validation.json'):
+                    'lyric-repeat-validation.json', 'highlight-validation.json'):
         for path in folder.glob(pattern):
             try:
                 if path.stat().st_size <= 2*1024**2:
