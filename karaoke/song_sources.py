@@ -41,6 +41,21 @@ def transcript_lines(transcription, language):
     return lines
 
 
+def independent_transcript_support(transcription, report, language):
+    """Score full-recording text against words from separate recovery requests."""
+    recovery = report.get('recovery') or {}
+    if not recovery.get('triggered') or not any(
+            not c.get('word_times_discarded', True) for c in recovery.get('chunks', [])):
+        return None
+    from anchors_from_asr import text_units
+    from rapidfuzz.distance import Levenshtein
+    expected = text_units(' '.join(s['text'] for s in transcription.get('segments', [])) or
+                          transcription.get('text', ''), language)
+    observed = [u for w in transcription.get('words', []) for u in text_units(w['word'], language)]
+    matched = sum(b.src_end-b.src_start for b in Levenshtein.opcodes(expected, observed) if b.tag == 'equal')
+    return min(matched/max(1, len(expected)), matched/max(1, len(observed)))
+
+
 def video_song_info(metadata):
     """Use supplied music tags or the video title; an uploader is not a singer."""
     info = dict(title=metadata.get('track') or metadata.get('title') or '',

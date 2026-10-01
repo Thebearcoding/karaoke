@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from .job_schema import JobRequest, provider_error, song_language, video_url
-from .song_sources import prepare_song_text, video_song_info
+from .song_sources import independent_transcript_support, prepare_song_text, transcript_lines, video_song_info
 from .stage_progress import parse_progress
 from .cache import can_restore_video
 from .stage_cache import StageCache
@@ -396,7 +396,8 @@ class Pipeline:
             catalog = list((self.catalog_root/'lyrics').glob('*.json')) if self.catalog_root else []
             with self.checkpoints.stage('prepare_lyrics',
                     inputs=[self.output/'asr/transcription.json', self.output/'vocals-16k.wav',
-                            *sorted((self.output/'asr').glob('initial-transcription.json'))],
+                            *sorted((self.output/'asr').glob('initial-transcription.json')),
+                            *sorted((self.output/'asr').glob('run.json'))],
                     outputs=[self.output/'lyrics.json', self.output/'anchors.json', self.output/'asr/filtered.json',
                              self.output/'asr/anchor-recovery.json'],
                     config=dict(request=self.request,
@@ -422,6 +423,18 @@ class Pipeline:
         from anchor_recovery import recover_anchor_words
         import soundfile as sf
         transcription = json.loads((self.output/'asr/transcription.json').read_text())
+        report_path = self.output/'asr/run.json'
+        report = json.loads(report_path.read_text()) if report_path.is_file() else {}
+        initial_path = self.output/'asr/initial-transcription.json'
+        initial = json.loads(initial_path.read_text()) if initial_path.is_file() else None
+        if initial and report.get('recovery', {}).get('text_selection', {}).get('selected') == 'initial_transcription':
+            original_segments = initial.get('segments') or []
+            original_text = ''.join(s['text'] for s in original_segments)
+            if ''.join(original_text.split()) == ''.join(transcription.get('text', '').split()):
+                # Recovery kept the original text but flattened its boundaries.
+                # Restore them for silence filtering only, keeping independent
+                # recovered word times as the alignment evidence.
+                transcription = dict(transcription, segments=original_segments)
         language = song_language(transcription.get('language'))
         if language:
             self.phase(song_info=dict(language=language))
@@ -431,11 +444,9 @@ class Pipeline:
         lyrics = prepare_song_text(self.request, metadata, transcription, duration,
             catalog_root=self.catalog_root, model=self.text_model)
         candidates = {'transcription': transcription.get('words') or []}
-        initial_path = self.output/'asr/initial-transcription.json'
-        if lyrics['provenance']['kind'] != 'asr_draft' and initial_path.is_file():
+        if lyrics['provenance']['kind'] != 'asr_draft' and initial:
             # Recovery of one bad passage need not discard usable whole-song
             # anchors. Only compare them against independently supplied lyrics.
-            initial = json.loads(initial_path.read_text())
             if song_language(initial.get('language')) == lyrics['language']:
                 initial, _ = filter_silent_transcription(initial, audio, rate)
                 words = [w for w in initial.get('words') or [] if 0 <= w['start'] < w['end'] <= duration]
@@ -454,6 +465,23 @@ class Pipeline:
             _, anchors, covered = recover_anchor_words(None,
                 self.output/'vocals-16k.wav', lyrics['lines'], candidates[selected], lyrics['language'],
                 recovery_path, self.checkpoints, .55, duration)
+        if covered < .55 and lyrics['provenance']['kind'] == 'video_description':
+            # Optional metadata can contain a diary or synopsis. Only replace
+            # it when separately recognized words corroborate the ASR text;
+            # the text must never qualify by matching its own original times.
+            support = independent_transcript_support(transcription, report, lyrics['language'])
+            if support is not None and support >= .55:
+                rejected_description = dict(lines=lyrics['lines'], provenance=lyrics['provenance'],
+                                            anchor_coverage=covered)
+                lyrics = dict(lyrics, lines=transcript_lines(transcription, lyrics['language']),
+                    provenance=dict(kind='asr_draft', needs_review=True, text_transform='whitespace_only',
+                        transcription_sha256=lyrics['provenance']['transcription_sha256'],
+                        independent_word_support=support, rejected_description=rejected_description))
+                anchors = anchors_from_words(lyrics['lines'], candidates['transcription'],
+                                             lyrics['language'], allow_missing=True)
+                covered = sum(c['matched_fraction']*len(c['text']) for c in anchors)/max(1, sum(map(len, lyrics['lines'])))
+                selected = 'independently_corroborated_transcription'
+                matches[selected] = (anchors, covered)
         write_json(self.output/'asr/filtered.json', dict(transcription=transcription, rejected=rejected,
             anchor_source=selected, anchor_coverage={name: match[1] for name, match in matches.items()},
             final_anchor_coverage=covered))

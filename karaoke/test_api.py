@@ -1076,6 +1076,85 @@ def test_description_lyrics_select_existing_lines_without_rewriting(tmp_path, se
                 pipeline.prepare_lyrics(dict(description=description), 5)
 
 
+@pytest.mark.parametrize('evidence', ['independent', 'same_request', 'mismatched', 'user_supplied'])
+def test_bad_description_uses_only_independently_corroborated_transcript(tmp_path, evidence):
+    import soundfile as sf
+    prose = ['今天在海边旅行', '明年我们搬去另一个城市']
+    lines = ['清风吹过树林', '晚霞染红天空']
+    request = dict(url=URL)
+    if evidence == 'user_supplied':
+        request.update(lyrics=prose, language='zh')
+    pipeline = Pipeline(request, tmp_path/'job', catalog_root=None)
+    folder = pipeline.output/'asr'
+    folder.mkdir()
+    words = [dict(word=text, start=1+2*i, end=2+2*i) for i, text in enumerate(lines)]
+    transcription = dict(language='Chinese', segments=[dict(text=' '.join(lines), start=0., end=5.)], words=words)
+    if evidence == 'mismatched':
+        transcription['segments'][0]['text'] = '另一段完全不同的转录'
+    (folder/'transcription.json').write_text(json.dumps(transcription))
+    (folder/'run.json').write_text(json.dumps(dict(recovery=dict(
+        triggered=evidence != 'same_request', chunks=[dict(word_times_discarded=False)]))))
+    sf.write(pipeline.output/'vocals-16k.wav', np.ones(5000)*.1, 1000)
+    parsed = SongText(title='Song', artist='Singer', lyric_line_numbers=[1, 2])
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))], model='test', usage=None)
+    with patch('karaoke.song_sources.OpenAI') as client:
+        client.return_value.beta.chat.completions.parse.return_value = response
+        if evidence != 'independent':
+            with pytest.raises(StageFailure, match='匹配不足'):
+                pipeline.prepare_lyrics(dict(description='\n'.join(prose)), 5.)
+            return
+        pipeline.prepare_lyrics(dict(description='\n'.join(prose)), 5.)
+    result = json.loads((pipeline.output/'lyrics.json').read_text())
+    assert result['lines'] == [' '.join(lines)]
+    assert result['title'] == 'Song' and result['artist'] == 'Singer'
+    provenance = result['provenance']
+    assert provenance['kind'] == 'asr_draft' and provenance['needs_review']
+    assert provenance['independent_word_support'] == 1.
+    assert provenance['rejected_description']['lines'] == prose
+    assert provenance['rejected_description']['anchor_coverage'] < .55
+    anchors = json.loads((pipeline.output/'anchors.json').read_text())
+    assert [(c['start'], c['end']) for c in anchors] == [(1., 4.)]
+
+
+@pytest.mark.parametrize('same_text', [True, False])
+def test_reused_asr_text_keeps_silence_boundaries_but_uses_recovered_word_times(tmp_path, same_text):
+    import soundfile as sf
+    pipeline = Pipeline(dict(url=URL), tmp_path/'job', catalog_root=None)
+    folder = pipeline.output/'asr'
+    folder.mkdir()
+    segments = [dict(text='Hello there.', start=1., end=2.),
+                dict(text='Quiet ending.', start=2.5, end=3.),
+                dict(text='Invented credits.', start=5., end=5.5)]
+    text = ' '.join(s['text'] for s in segments) if same_text else 'Different uncorroborated transcript.'
+    words = [dict(word=text, start=a, end=b) for text,a,b in
+             [('Hello',1.1,1.4), ('there.',1.4,1.8), ('Quiet',2.5,2.7), ('ending.',2.7,3.)]]
+    (folder/'initial-transcription.json').write_text(json.dumps(dict(
+        language='English', segments=segments, words=[dict(word='Broken times', start=0., end=0.)])))
+    (folder/'transcription.json').write_text(json.dumps(dict(language='English', text=text,
+        segments=[dict(text=text, start=0., end=6.)], words=words)))
+    (folder/'run.json').write_text(json.dumps(dict(recovery=dict(triggered=True,
+        text_selection=dict(selected='initial_transcription'), chunks=[dict(word_times_discarded=False)]))))
+    audio = np.zeros(6000)
+    audio[1000:2000] = .1
+    audio[2500:3000] = 1e-7
+    sf.write(pipeline.output/'vocals-16k.wav', audio, 1000, subtype='FLOAT')
+    parsed = SongText(title='Song', artist='Singer')
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))], model='test', usage=None)
+    with patch('karaoke.song_sources.OpenAI') as client:
+        client.return_value.beta.chat.completions.parse.return_value = response
+        if not same_text:
+            with pytest.raises(StageFailure, match='匹配不足'):
+                pipeline.prepare_lyrics({}, 6.)
+            assert json.loads((pipeline.output/'lyrics.json').read_text())['lines'] == [text]
+            return
+        pipeline.prepare_lyrics({}, 6.)
+    assert json.loads((pipeline.output/'lyrics.json').read_text())['lines'] == ['Hello there.', 'Quiet ending.']
+    anchors = json.loads((pipeline.output/'anchors.json').read_text())
+    assert [(c['start'],c['end']) for c in anchors] == [(1.1,1.8), (2.5,3.)]
+    rejected = json.loads((folder/'filtered.json').read_text())['rejected']
+    assert [(r['reason'],r['item']['text']) for r in rejected] == [('digital_silence','Invented credits.')]
+
+
 @pytest.mark.parametrize('initial_state', ['valid', 'backward', 'wrong_language', 'out_of_bounds'])
 def test_independent_lyrics_can_reuse_valid_original_asr_anchors(tmp_path, initial_state):
     import soundfile as sf
