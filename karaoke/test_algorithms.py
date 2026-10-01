@@ -996,6 +996,49 @@ class AlignmentIntegrity(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'Coarse lyric onsets'):
                     protect_line_order(words, words)
 
+    def test_unresolved_crossing_realigns_with_context_but_changes_only_core_lines(self):
+        from copy import deepcopy
+        from unittest.mock import Mock
+
+        lines = ['left', 'context', 'first', 'second', 'after', 'tail']
+        old_times = [(1., 1.5), (2., 2.5), (3., 5.4), (4.7, 6.4), (7., 7.5), (8., 8.5)]
+        def result(times, offset=0.):
+            return dict(segments=[dict(text=text, words=[dict(word=text, start=a-offset, end=b-offset)])
+                                  for text, (a, b) in zip(lines, times)])
+        raw = [dict(range=[i, i+1], context=[i, i+1], source_range=[0., 10.],
+                    result=dict(segments=[s])) for i, s in enumerate(result(old_times)['segments'])]
+        original = deepcopy(raw)
+        new_times = [(1.1, 1.6), (2.2, 2.7), (3.2, 4.8), (4.9, 6.2), (7.1, 7.6), (8.1, 8.6)]
+        for failure in (None, 'text', 'crossing', 'neighbour', 'outside_audio', 'missing'):
+            with self.subTest(failure=failure):
+                candidate = result(new_times, .4)
+                if failure == 'text': candidate['segments'][2]['words'][0]['word'] = 'changed'
+                if failure == 'crossing': candidate['segments'][3]['words'][0]['start'] = 3.6
+                if failure == 'neighbour': candidate['segments'][2]['words'][0]['start'] = 1.6
+                if failure == 'outside_audio': candidate['segments'][-1]['words'][0]['end'] = 9.
+                if failure == 'missing': candidate = None
+                align = Mock(return_value=candidate)
+                cues, stitched, repairs = stitch_blocks(lines, raw, 10., 'English', align)
+                align.assert_called_once()
+                self.assertEqual(align.call_args.args, (.4, 9.1, '\n'.join(lines)))
+                self.assertEqual(raw, original)
+                self.assertEqual(repairs[-1]['accepted'], failure is None)
+                self.assertEqual(repairs[-1]['result'], candidate)
+                if failure is None:
+                    expected = old_times[:2]+new_times[2:4]+old_times[4:]
+                    self.assertEqual([(c['start'], c['end']) for c in cues], expected)
+                    words, report = build_progress(cues, stitched, 'English')
+                    self.assertFalse(report['fallback_lines'])
+                    self.assertEqual([c['units'][0]['start'] for c in words], [a for a, _ in expected])
+                    presentation_cues(cues, 10., lead=0, tail=0, bridge_gap=0)
+                    again = Mock()
+                    stitch_blocks(lines, stitched, 10., 'English', again)
+                    again.assert_not_called()
+                else:
+                    self.assertEqual([(c['start'], c['end']) for c in cues], old_times)
+                    with self.assertRaisesRegex(ValueError, 'overlap'):
+                        presentation_cues(cues, 10., lead=0, tail=0, bridge_gap=0)
+
     def test_asr_silence_filter_keeps_quiet_speech_and_nearby_collapsed_words(self):
         audio = np.zeros(5*16000, dtype='float32')
         audio[16000:2*16000] = 1e-7

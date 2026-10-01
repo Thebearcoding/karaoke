@@ -195,12 +195,13 @@ def alignment_blocks(anchors, audio):
     return blocks
 
 
-def stitch_blocks(lines, raw_blocks, duration, language):
-    """Resolve crossings using existing predictions, without moving word times."""
+def stitch_blocks(lines, raw_blocks, duration, language, align=None):
+    """Use existing predictions, then bounded joint inference; never move times."""
     if any(not any(c.isalnum() for c in line) for line in lines):
         raise ValueError('Lyric lines must contain alignable text')
-    predictions, owners = [], [None]*len(lines)
-    for block_index, block in enumerate(raw_blocks):
+    raw_blocks = list(raw_blocks)
+
+    def prediction_for(block):
         first, stop = block['context']
         offset = block['source_range'][0]
         segments = block['result']['segments']
@@ -214,7 +215,11 @@ def stitch_blocks(lines, raw_blocks, duration, language):
             except ValueError:
                 words = []  # Retain the failure for the normal word-mapping gate.
             prediction[index] = (cue, words)
-        predictions.append(prediction)
+        return prediction
+
+    predictions, owners = [], [None]*len(lines)
+    for block_index, block in enumerate(raw_blocks):
+        predictions.append(prediction_for(block))
         for index in range(*block['range']):
             if owners[index] is not None:
                 raise ValueError(f'Duplicate core lyric line: {index}')
@@ -236,7 +241,7 @@ def stitch_blocks(lines, raw_blocks, duration, language):
                 bad.add(i)
         return bad
 
-    repairs = []
+    repairs, attempted = [], set()
     while bad := conflicts(owners):
         repaired = False
         for index in sorted(bad):
@@ -262,6 +267,50 @@ def stitch_blocks(lines, raw_blocks, duration, language):
                 if repaired:
                     break
             if repaired:
+                break
+        if not repaired and align is not None:
+            for index in sorted(bad-attempted):
+                attempted.add(index)
+                # Neighbouring phrases establish the boundary; only the two
+                # conflicting core lines may change. Replacing context lines
+                # can merely move the crossing to the edge of the new crop.
+                first, stop = max(0, index-3), min(len(lines), index+3)
+                context = [predictions[owners[i]][i][0] for i in range(first, stop)]
+                if any(c['status'] != 'candidate' for c in context):
+                    continue
+                begin = max(0., min(c['start'] for c in context)-.6)
+                end = min(duration, max(c['end'] for c in context)+.6)
+                if not 0 < end-begin <= 45:
+                    continue
+                result = align(begin, end, '\n'.join(lines[first:stop]),
+                               gap_padding=None, dynamic_heads=True, max_word_dur=None, word_dur_factor=None)
+                block = dict(range=[index-1, index+1], context=[first, stop],
+                             source_range=[begin, end], result=result)
+                report = dict(method='joint_context_retry', accepted=False, **block)
+                repairs.append(report)
+                if result is None or [normalized(''.join(w['word'] for w in s['words']))
+                        for s in result['segments']] != [normalized(line) for line in lines[first:stop]]:
+                    continue
+                if any(not np.isfinite([w['start'], w['end']]).all() or
+                       not 0 <= w['start'] <= w['end'] <= end-begin+.001
+                       for s in result['segments'] for w in s['words']):
+                    continue
+                prediction = prediction_for(block)
+                if any(not prediction[i][1] for i in range(index-1, index+1)):
+                    continue
+                words = [w for i in range(index-1, index+1) for w in prediction[i][1]]
+                if any(b['start']-a['start'] < .015-1e-9 for a, b in zip(words, words[1:])):
+                    continue
+                owner = len(predictions)
+                predictions.append(prediction)
+                candidate = owners.copy()
+                candidate[index-1:index+1] = [owner, owner]
+                if not conflicts(candidate) < bad:
+                    predictions.pop()
+                    continue
+                report['accepted'] = True
+                raw_blocks.append(block)
+                owners, repaired = candidate, True
                 break
         if not repaired:
             break  # Never invent times or relax the downstream quality gate.
@@ -396,7 +445,8 @@ def main():
         output.mkdir(parents=True)
         (output/'raw.json').write_text(json.dumps(raw_blocks, ensure_ascii=False, indent=2, default=json_number)+'\n')
         (output/'units.json').write_text(json.dumps(units, ensure_ascii=False, indent=2, default=json_number)+'\n')
-        cues, raw_blocks, boundary_repairs = stitch_blocks(lyrics['lines'], raw_blocks, duration, lyrics['language'])
+        cues, raw_blocks, boundary_repairs = stitch_blocks(
+            lyrics['lines'], raw_blocks, duration, lyrics['language'], align_audio)
         if args.device == 'mps':
             torch.mps.synchronize()
         elapsed = time.perf_counter()-started
