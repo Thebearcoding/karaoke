@@ -114,6 +114,8 @@ class Store:
             folder = self.root/job_id
             folder.mkdir()
             (folder/'request.json').write_text(json.dumps(payload.model_dump(), ensure_ascii=False)+'\n')
+            if not payload.force:
+                self.cache.reuse_download(folder, payload.url)
             db.execute('INSERT INTO jobs VALUES (?,?,?,?,?)',
                        (job_id, key, 'queued', stamp, json.dumps(doc, ensure_ascii=False)))
         return doc, False
@@ -177,6 +179,7 @@ class Worker:
             folder = self.store.root/job_id
             job = self.store.update(job_id, status='running', started_at=now())
             try:
+                (folder/'error.json').unlink(missing_ok=True)
                 if not self.store.cache.enforce(self.store.cache.headroom):
                     raise CacheFull('歌曲缓存或硬盘剩余空间不足；请移除待唱歌曲、提高上限或释放磁盘后重试')
                 command = self.command(folder) if self.command else [sys.executable, '-u', '-m',
@@ -277,7 +280,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
     store = Store(data_dir or os.getenv('KARAOKE_DATA_DIR', str(ROOT/'service-data')), cache_limit_bytes)
     if version is None:
         from .pipeline import pipeline_fingerprint
-        settings = {key: os.getenv(key) for key in ('KARAOKE_TEXT_MODEL', 'KARAOKE_DEVICE',
+        settings = {key: os.getenv(key) for key in ('KARAOKE_TEXT_MODEL', 'KARAOKE_ASR_FALLBACK_MODEL', 'KARAOKE_DEVICE',
             'KARAOKE_DISABLE_LYRIC_CATALOG', 'KARAOKE_FONT_FILE', 'KARAOKE_SEPARATOR_PYTHON')}
         version = hashlib.sha256((pipeline_fingerprint()+json.dumps(settings, sort_keys=True)).encode()).hexdigest()
     worker = Worker(store, worker_command)

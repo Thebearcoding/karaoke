@@ -88,6 +88,10 @@ curl -sS http://127.0.0.1:8746/v1/jobs/任务UUID
 
 `stage_progress` 按阶段提供实测计数，例如 `{"separate_music":{"completed":12,"total":40,"unit":"chunks","detail":null}}`。下载按视频／音频分别计字节，分离计已处理音频块，对齐计已处理段落／行，渲染计已送入编码器的帧。`total` 缺失时不计算百分比；加载模型、在线歌词请求、封装与校验仅提供阶段或 `detail`。这些是当前步骤的工作量，不能相加当作整首歌的时间百分比。只有成品通过校验后才会进入 `completed`。
 
+语音识别出现长串重复循环时，用 `gpt-4o-transcribe` 在整首上下文中恢复歌词文本（可用 `KARAOKE_ASR_FALLBACK_MODEL` 配置），同时把 Whisper 的粗定位改为 30 秒片段、最多 3 路并发；仍循环的片段不提供词时间。恢复文本不带词时间，`recording_bounds` 只是录音范围，后续仍由声学强制对齐生成起唱时间。恢复过程记录在 `asr/run.json`，持续异常会明确失败。失败任务保留转录、整理后的歌词、粗定位和日志供复现，计入缓存预算；不因排障永久保留大体积中间音频。
+
+失败任务中已经验证完整的视频下载也暂存于同一缓存预算内。重试相同 URL 时先核对文件 SHA-256，再复用本地视频，避免重复下载触发站点限制；这些原视频同样优先参与 LRU 回收。`force: true` 不复用失败任务的下载。
+
 房间快照也包含每首运行任务的 `stage_progress`，通过 SSE 更新。进度来自子进程的结构化标准输出；计数更新通常限频为每 0.5 秒一次，阶段切换立即推送。前端不轮询，不根据经过的时间伪造进度。
 
 曲库从入队开始就包含歌曲，状态可以是 `queued`、`running`、`completed`、`failed`、`video_evicted` 或 `evicted`；静态目录中尚未提交的歌曲为 `unprepared`。同一视频只展示最近一次任务。`job_id` 也可指向尚未完成的任务，再次点播时复用该任务，不重复下载或处理；只有 `status == "completed"` 才表示已准备好。房间 SSE 快照的 `library` 与 `GET /v1/library` 使用同一份数据，元数据、语言分类和进度一并推送。
@@ -154,6 +158,7 @@ with httpx.Client(timeout=30) as client:
 |---|---|
 | `OPENAI_API_KEY` | ASR 和自动歌词整理需要 |
 | `KARAOKE_TEXT_MODEL` | 默认 `gpt-5-mini`；仅负责元数据／歌词文本整理 |
+| `KARAOKE_ASR_FALLBACK_MODEL` | 默认 `gpt-4o-transcribe`；仅在识别出现长串重复时恢复整首文本 |
 | `KARAOKE_DATA_DIR` | 默认 `karaoke/service-data`，保存 SQLite 任务状态和每个任务的文件 |
 | `KARAOKE_CACHE_MAX_GIB` | 初次创建缓存设置时的容量上限，默认 `10` GiB；之后以页面保存的值为准 |
 | `KARAOKE_PORT` | 默认 `8746` |

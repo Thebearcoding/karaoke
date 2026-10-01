@@ -21,6 +21,7 @@ from karaoke.align_lyric_phonemes import protect_line_order
 from karaoke.cache import CacheFull, GIB, can_restore_video
 from karaoke.pipeline import Pipeline, StageFailure, create_poster, file_hash
 from karaoke.stage_progress import PREFIX, parse_progress, progress_items
+from karaoke.transcribe_lyrics import repetition_loop, transcribe
 
 
 URL = 'https://www.youtube.com/watch?v=n5sjpCQhTDk'
@@ -604,6 +605,84 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
     assert all((folder/name).read_bytes() == data for name, data in before.items())
 
 
+@pytest.mark.parametrize('fallback_text', ['恢复的歌词', '哒'*100])
+def test_repetitive_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, fallback_text):
+    import soundfile as sf
+    audio = tmp_path/'audio.wav'
+    sf.write(audio, np.zeros(65000), 1000)
+    output = tmp_path/'asr'
+    output.mkdir()
+    calls = []
+    def create(**kwargs):
+        name = kwargs['file'].name
+        calls.append((name, kwargs['model']))
+        if kwargs['model'] != 'whisper-1':
+            assert 'timestamp_granularities' not in kwargs
+            data = dict(text=fallback_text)
+        elif name == str(audio) or name.endswith('chunk-00030.mp3'):
+            data = dict(language='chinese', segments=[dict(start=0,end=1,text='呜'*100)], words=[])
+        else:
+            assert kwargs['language'] == 'zh'
+            data = dict(segments=[dict(start=1,end=2,text='歌词')],
+                        words=[dict(start=1,end=2,word='歌词')])
+        return SimpleNamespace(model_dump=lambda: data)
+    client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create)))
+    if repetition_loop(dict(segments=[dict(text=fallback_text)])):
+        with pytest.raises(ValueError, match='文本重试仍有重复异常'):
+            transcribe(client, audio, 'auto', '', output)
+        return
+    data, recovery = transcribe(client, audio, 'auto', '', output)
+    assert recovery['triggered'] and len(calls) == 5
+    assert [(w['start'],w['end']) for w in data['words']] == [(1,2),(61,62)]
+    assert data['segments'] == [dict(text='恢复的歌词', start=0., end=65., timing_source='recording_bounds')]
+    assert len(recovery['chunks']) == 3 and recovery['chunks'][1]['word_times_discarded']
+    assert recovery['text_model'] == 'gpt-4o-transcribe'
+    assert not list(output.glob('chunk-*.mp3'))
+    assert (output/'initial-transcription.json').exists()
+
+
+def test_normal_choruses_do_not_trigger_asr_retry(tmp_path):
+    data = dict(segments=[dict(text='唱到这一句，接着唱下一句')]*8,
+                words=[dict(start=1,end=2,word='唱')])
+    assert not repetition_loop(data)
+    audio = tmp_path/'audio.mp3'
+    audio.write_bytes(b'input')
+    with patch('karaoke.transcribe_lyrics.OpenAI') as client:
+        client.audio.transcriptions.create.return_value.model_dump.return_value = data
+        actual, recovery = transcribe(client, audio, 'zh', '', tmp_path)
+        assert actual == data and not recovery['triggered']
+        client.audio.transcriptions.create.assert_called_once()
+
+
+@pytest.mark.parametrize('corrupt', [False, True])
+def test_failed_job_reuses_only_verified_downloads_on_retry(tmp_path, corrupt):
+    store = Store(tmp_path)
+    old, _ = store.create(JobRequest(url=URL), 'old')
+    source = tmp_path/old['id']
+    (source/'download').mkdir()
+    video = source/'download/source.mkv'
+    video.write_bytes(b'downloaded video')
+    (source/'source.json').write_text(json.dumps(dict(url=URL, duration=10, sha256=file_hash(video))))
+    (source/'download/source.info.json').write_text(json.dumps(dict(title='Cached recording')))
+    store.cache.compact(store.update(old['id'], status='failed'))
+    if corrupt:
+        video.write_bytes(b'corrupt')
+    retried, _ = store.create(JobRequest(url=URL), 'new')
+    folder = tmp_path/retried['id']
+    assert (folder/'download/source.mkv').exists() is not corrupt
+    if not corrupt:
+        pipeline = Pipeline(retried['input'], folder)
+        with patch.object(pipeline, 'run', side_effect=AssertionError('Must not download again')):
+            metadata, duration = pipeline.download(artwork=False)
+        assert metadata['title'] == 'Cached recording' and duration == 10
+        # Eviction of the old failed job's video must not affect the queued retry.
+        store.cache.enforce()
+        store.cache.set_limit(store.cache.stats['used_bytes']-1)
+        assert not video.exists() and (folder/'download/source.mkv').read_bytes() == b'downloaded video'
+    forced, _ = store.create(JobRequest(url=URL, force=True), 'new')
+    assert not (tmp_path/forced['id']/'download').exists()
+
+
 def test_lru_uses_real_access_persists_and_evicted_song_can_be_requested_again(tmp_path):
     app = create_app(tmp_path, worker_command=fake_worker, version='test')
     store = app.state.store
@@ -670,8 +749,11 @@ def test_compaction_keeps_outputs_and_bounded_logs_without_following_symlinks(tm
     assert (folder/'request.json').exists() and (folder/'worker.log').stat().st_size == 65536
     assert not (folder/'raw').exists() and outside.read_bytes() == b'keep me'
     store.update(job['id'], status='failed', result=None, error=dict(code='cache_full'))
+    (folder/'asr').mkdir()
+    (folder/'asr/transcription.json').write_text('{"words": []}')
     store.cache.compact(store.read(job['id']))
     assert not (folder/'mv.mp4').exists()
+    assert (folder/'asr/transcription.json').exists()
     store.cache.set_limit(1)
     assert not folder.exists()
     assert store.read(job['id'])['status'] == 'failed'

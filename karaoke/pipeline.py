@@ -191,6 +191,21 @@ class Pipeline:
                                           duration_seconds=sf.info(audio).duration)])
 
     def download(self, *, artwork=True, format_id=None):
+        cached = self.output/'source.json'
+        if cached.exists() and self.source.is_file() and (self.output/'download/source.info.json').is_file():
+            started = time.perf_counter()
+            source = json.loads(cached.read_text())
+            if source.get('input_url', source['url']) == self.request['url'] and source['sha256'] == file_hash(self.source):
+                if not 0 < source['duration'] <= self.max_duration+1:
+                    raise StageFailure('download', '缓存视频超过当前时长上限')
+                metadata = json.loads((self.output/'download/source.info.json').read_text())
+                self.phase(song_info=video_song_info(metadata))
+                if artwork and not (self.output/'poster.jpg').exists():
+                    create_poster(self.source, self.output/'poster.jpg', seconds=min(30, source['duration']*.1))
+                self.timings['reuse_download'] = round(time.perf_counter()-started, 3)
+                return metadata, source['duration']
+        if (self.output/'download').exists():
+            shutil.rmtree(self.output/'download')
         (self.output/'download').mkdir()
         url = self.request['url']
         if url.startswith('https://b23.tv/'):
@@ -232,7 +247,7 @@ class Pipeline:
         if artwork:
             create_poster(self.source, self.output/'poster.jpg', thumbnail=metadata.get('thumbnail'),
                           seconds=min(30, duration*.1))
-        write_json(self.output/'source.json', dict(url=url, sha256=file_hash(self.source),
+        write_json(self.output/'source.json', dict(url=url, input_url=self.request['url'], sha256=file_hash(self.source),
                                                  duration=duration, probe=probe))
         return metadata, duration
 
@@ -265,10 +280,10 @@ class Pipeline:
             anchors = anchors_from_words(lyrics['lines'], transcription.get('words') or [],
                                          lyrics['language'], allow_missing=True)
             covered = sum(c['matched_fraction']*len(c['text']) for c in anchors)/max(1, sum(len(c['text']) for c in anchors))
-            if covered < .55 or not any(c['status'] == 'candidate' for c in anchors):
-                raise StageFailure('prepare_lyrics', '歌词与这个视频的演唱匹配不足；请提交本版本的 lyrics 后重试')
             write_json(self.output/'lyrics.json', lyrics)
             write_json(self.output/'anchors.json', anchors)
+            if covered < .55 or not any(c['status'] == 'candidate' for c in anchors):
+                raise StageFailure('prepare_lyrics', '歌词与这个视频的演唱匹配不足；请提交本版本的 lyrics 后重试')
         finally:
             with self.lock:
                 self.timings['prepare_lyrics'] = round(time.perf_counter()-started, 3)

@@ -1,5 +1,7 @@
 """Bounded song cache. Only managed job directories are eligible for deletion."""
 from collections import Counter
+import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -90,6 +92,11 @@ class SongCache:
         """Keep published outputs and bounded diagnostics; discard working audio."""
         folder = self.folder(job['id'])
         keep = {'request.json', 'result.json', 'error.json', 'worker.log'}
+        if job['status'] == 'failed':
+            keep.update({'lyrics.json', 'anchors.json'})
+            keep.update(p.relative_to(folder).as_posix() for p in (folder/'asr').glob('*.json'))
+            if (folder/'source.json').is_file():
+                keep.update({'source.json', 'download/source.mkv', 'download/source.info.json', 'poster.jpg'})
         keep.update(a['path'] for name, a in (job.get('result') or {}).get('artifacts', {}).items()
                     if name != 'mv' or not job.get('restore_video'))
         if not folder.exists():
@@ -109,6 +116,30 @@ class SongCache:
             elif path.is_dir() and not any(path.iterdir()):
                 path.rmdir()
 
+    def reuse_download(self, folder, url):
+        """A retry can reuse a verified local download even if the website is unavailable."""
+        for job in reversed(self.store.list(-1, 'failed')):
+            if job['input']['url'] != url:
+                continue
+            source = self.folder(job['id'])
+            try:
+                metadata = json.loads((source/'source.json').read_text())
+                info = json.loads((source/'download/source.info.json').read_text())
+                video = source/'download/source.mkv'
+                if video.is_symlink():
+                    continue
+                with video.open('rb') as stream:
+                    if hashlib.file_digest(stream, 'sha256').hexdigest() != metadata['sha256']:
+                        continue
+            except (OSError, KeyError, ValueError):
+                continue
+            (folder/'download').mkdir()
+            os.link(video, folder/'download/source.mkv')
+            metadata['input_url'] = url
+            (folder/'source.json').write_text(json.dumps(metadata))
+            (folder/'download/source.info.json').write_text(json.dumps(info))
+            return
+
     def enforce(self, reserve=0):
         jobs = self.store.list(-1)
         protected = self.protected(jobs)
@@ -123,16 +154,20 @@ class SongCache:
             if used + reserve <= self.limit and free >= self.minimum_free + reserve:
                 break
             folder = self.folder(job['id'])
-            if job['status'] != 'completed' or not can_restore_video(folder, job.get('result')):
+            if job['status'] == 'failed' and (folder/'download/source.mkv').is_file():
+                video = folder/'download/source.mkv'
+            elif job['status'] == 'completed' and can_restore_video(folder, job.get('result')):
+                video = folder/job['result']['artifacts']['mv']['path']
+            else:
                 continue
-            video = folder/job['result']['artifacts']['mv']['path']
             size = video.stat().st_size if video.is_file() else 0
             video.unlink(missing_ok=True)
             used -= size
             sizes[job['id']] -= size
             free = shutil.disk_usage(self.store.root).free
-            job.update(status='video_evicted', restore_video=True)
-            self.store.update(job['id'], status='video_evicted', restore_video=True, evicted_at=time.time())
+            if job['status'] == 'completed':
+                job.update(status='video_evicted', restore_video=True)
+                self.store.update(job['id'], status='video_evicted', restore_video=True, evicted_at=time.time())
         for job in candidates:
             if used + reserve <= self.limit and free >= self.minimum_free + reserve:
                 break
