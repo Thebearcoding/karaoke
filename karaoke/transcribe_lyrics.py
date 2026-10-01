@@ -226,8 +226,25 @@ def transcribe(client, audio, language, hint, output):
     recovery = dict(triggered=False, chunks=[])
     if not unusable(data):
         return data, recovery
-    report_progress(detail='识别结果异常，分段重试')
     (output/'initial-transcription.json').write_text(json.dumps(data, ensure_ascii=False)+'\n')
+    # Verify against the uploaded recording, before an empty tail can trigger
+    # another whole-song request. Do not use a loudness threshold: weak words
+    # remain evidence. Invalid timestamps still need recovery, not deletion.
+    from io import BytesIO
+    import soundfile as sf
+    pcm, rate = sf.read(BytesIO(subprocess.check_output(['ffmpeg', '-v', 'error', '-nostdin',
+        '-i', str(audio), '-c:a', 'pcm_f32le', '-f', 'wav', '-'])), dtype='float32')
+    filtered, rejected = filter_silent_transcription(data, pcm, rate)
+    applied = bool(rejected) and all(r['reason'] == 'digital_silence' for r in rejected)
+    recovery['silence_filter'] = dict(applied=applied, rejected=len(rejected))
+    (output/'silence-filter.json').write_text(json.dumps(dict(
+        audio_sha256=digest(audio), sample_rate=rate, applied=applied, rejected=rejected),
+        ensure_ascii=False)+'\n')
+    if applied:
+        data = filtered
+        if not unusable(data):
+            return data, recovery
+    report_progress(detail='识别结果异常，分段重试')
     # An unusable transcript's language detection is also untrusted. Preserve an
     # explicit user language, but let recovery re-detect automatic requests.
     duration = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',
@@ -235,7 +252,7 @@ def transcribe(client, audio, language, hint, output):
     repaired = repair_loop_window(data, audio, duration, recognize, output)
     if repaired is not None:
         data, report = repaired
-        return data, dict(triggered=True, text_model='whisper-1', loop_repair=report, chunks=[])
+        return data, dict(recovery, triggered=True, text_model='whisper-1', loop_repair=report)
     fallback_model = os.getenv('KARAOKE_ASR_FALLBACK_MODEL', 'gpt-4o-transcribe')
     # Keep full recording context for text: independent chunks can omit a split
     # syllable or duplicate the opening of the next lyric. Chunks only locate words.
@@ -305,7 +322,7 @@ def transcribe(client, audio, language, hint, output):
         raise ValueError('歌词文本遗漏了分段识别中的大量内容，无法生成完整歌词')
     segments = [dict(start=0., end=duration, text=text, timing_source='recording_bounds')]
     data.update(duration=duration, text=text, segments=segments, words=words)
-    return data, dict(triggered=True, text_model=fallback_model, language_evidence=dict(languages),
+    return data, dict(recovery, triggered=True, text_model=fallback_model, language_evidence=dict(languages),
                       text_selection=selection, chunks=[record for _, record in parts])
 
 
@@ -316,7 +333,7 @@ def filter_silent_transcription(data, audio, sample_rate):
         filtered[kind] = []
         for item in data.get(kind) or []:
             start, end = item['start'], item['end']
-            if not all(math.isfinite(t) for t in (start, end)) or end < start:
+            if not all(math.isfinite(t) for t in (start, end)) or not 0 <= start <= end:
                 reason = 'invalid_time_range'
             else:
                 # Include nearby audio for imprecise or zero-duration ASR times.

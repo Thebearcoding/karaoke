@@ -1929,6 +1929,57 @@ def test_normal_choruses_do_not_trigger_asr_retry(tmp_path, language):
         client.audio.transcriptions.create.assert_called_once()
 
 
+@pytest.mark.parametrize('tail', ['silence', 'quiet', 'quiet_stereo', 'negative_time', 'outside_audio'])
+def test_asr_checks_exact_silence_before_repeating_full_recording(tmp_path, tail):
+    from copy import deepcopy
+    import soundfile as sf
+    from karaoke.transcribe_lyrics import needs_recovery
+
+    audio, output = tmp_path/'audio.wav', tmp_path/'asr'
+    output.mkdir()
+    pcm = np.zeros(3*16000, dtype='float32')
+    pcm[8000:24000] = 1e-7
+    if tail.startswith('quiet'):
+        pcm[40000:] = 1e-7
+    if tail == 'quiet_stereo':
+        pcm = np.column_stack((pcm, -pcm))  # Downmix cancellation is not silence.
+    sf.write(audio, pcm, 16000, subtype='FLOAT')
+    start = {'negative_time': -.1, 'outside_audio': 9.}.get(tail, 2.8)
+    initial = dict(language='english', text='Soft opening invented ending',
+        segments=[dict(start=.5, end=1.5, text='Soft opening'),
+                  dict(start=start, end=start, text=' invented ending')],
+        words=[dict(start=.5, end=1.5, word='opening'),
+               *[dict(start=start, end=start, word='invented') for _ in range(8)]])
+    original, calls = deepcopy(initial), []
+    assert needs_recovery(initial)
+
+    def create(**request):
+        calls.append(request['model'])
+        if request['model'] != 'whisper-1':
+            raise RuntimeError('still requires recovery')
+        return SimpleNamespace(model_dump=lambda: initial)
+
+    client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create)))
+    if tail == 'silence':
+        result, recovery = transcribe(client, audio, 'auto', '', output)
+        assert calls == ['whisper-1'] and not recovery['triggered']
+        assert result['words'] == original['words'][:1]
+        assert result['segments'] == original['segments'][:1]
+    else:
+        with pytest.raises(RuntimeError, match='still requires recovery'):
+            transcribe(client, audio, 'auto', '', output)
+        assert calls == ['whisper-1', 'gpt-4o-transcribe']
+    assert initial == original
+    assert json.loads((output/'initial-transcription.json').read_text()) == original
+    report = json.loads((output/'silence-filter.json').read_text())
+    assert report['applied'] == (tail == 'silence')
+    if tail == 'silence':
+        assert len(report['rejected']) == 9
+        assert {r['reason'] for r in report['rejected']} == {'digital_silence'}
+    if tail.startswith('quiet'):
+        assert not report['rejected']
+
+
 def test_asr_request_cache_checks_input_parameters_and_response(tmp_path):
     from karaoke.transcribe_lyrics import cached_recognition
     from karaoke.stage_cache import retained_files
