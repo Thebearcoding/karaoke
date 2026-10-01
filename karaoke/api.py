@@ -86,9 +86,22 @@ class Store:
             if not payload.force:
                 rows = db.execute("""SELECT doc FROM jobs WHERE
                     (cache_key=? AND status IN ('queued','running','completed'))
-                    OR json_extract(doc, '$.restore_video')=1 ORDER BY created_at DESC""", (key,)).fetchall()
+                    OR status='failed' OR json_extract(doc, '$.restore_video')=1 ORDER BY created_at DESC""", (key,)).fetchall()
                 for row in rows:
                     doc = json.loads(row[0])
+                    if doc['status'] == 'failed' and not doc.get('restore_video'):
+                        if {k: v for k, v in doc['input'].items() if k != 'force'} != key_payload:
+                            continue
+                        folder = self.root/doc['id']
+                        if not any((folder/'checkpoints').glob('*.json')):
+                            continue
+                        doc.update(status='queued', active_stages=[], stage_progress={}, timings={},
+                                   error=None, updated_at=now(), last_accessed_at=now(), pipeline_version=version,
+                                   attempt_count=doc.get('attempt_count', 1)+1)
+                        (folder/'request.json').write_text(json.dumps(doc['input'], ensure_ascii=False)+'\n')
+                        db.execute('UPDATE jobs SET cache_key=?, status=?, doc=? WHERE id=?',
+                                   (key, 'queued', json.dumps(doc, ensure_ascii=False), doc['id']))
+                        return doc, False
                     if doc.get('restore_video'):
                         if {k: v for k, v in doc['input'].items() if k != 'force'} != key_payload:
                             continue

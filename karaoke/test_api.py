@@ -115,6 +115,154 @@ def test_failures_are_visible_and_retry_creates_new_job(tmp_path):
         finished(client, second['id'])
 
 
+def test_retry_preserves_completed_stages_and_only_reruns_affected_work(tmp_path):
+    from karaoke.stage_cache import StageCache
+    store = Store(tmp_path)
+    job, _ = store.create(JobRequest(url=URL), 'v1')
+    folder = store.root/job['id']
+    source, separated, aligned = [folder/name for name in ('source.wav', 'separated.wav', 'cues.json')]
+    source.write_bytes(b'source')
+    cache = StageCache(folder)
+    with cache.stage('decode', inputs=[folder/'request.json'], outputs=[source]) as hit:
+        assert not hit
+        source.write_bytes(b'source')
+    with cache.stage('separate', inputs=[source], outputs=[separated], config={'model': 'v1'}) as hit:
+        assert not hit
+        separated.write_bytes(b'expensive output')
+    with pytest.raises(ValueError, match='broken alignment'):
+        with cache.stage('align', inputs=[separated], outputs=[aligned]):
+            aligned.write_text('partial')
+            raise ValueError('broken alignment')
+    store.cache.compact(store.update(job['id'], status='failed'))
+    assert separated.read_bytes() == b'expensive output'
+    assert not (folder/'checkpoints/align.json').exists()
+    retried, cached = store.create(JobRequest(url=URL), 'alignment-fix')
+    assert retried['id'] == job['id'] and not cached
+    assert retried['pipeline_version'] == 'alignment-fix'
+    resumed = StageCache(folder)
+    with resumed.stage('separate', inputs=[source], outputs=[separated], config={'model': 'v1'}) as hit:
+        assert hit  # A downstream algorithm update did not discard source/separation.
+    with resumed.stage('align', inputs=[separated], outputs=[aligned], config={'algorithm': 'v2'}) as hit:
+        assert not hit and not aligned.exists()
+        aligned.write_text('complete')
+    with resumed.stage('align', inputs=[separated], outputs=[aligned], config={'algorithm': 'v2'}) as hit:
+        assert hit
+    separated.write_bytes(b'corrupt')
+    with resumed.stage('separate', inputs=[source], outputs=[separated], config={'model': 'v1'}) as hit:
+        assert not hit and not separated.exists()
+        separated.write_bytes(b'repaired output')
+    with resumed.stage('align', inputs=[separated], outputs=[aligned], config={'algorithm': 'v2'}) as hit:
+        assert not hit  # Changed upstream content invalidates its dependents.
+        aligned.write_text('realigned')
+    forced, _ = store.create(JobRequest(url=URL, force=True), 'alignment-fix')
+    assert forced['id'] != job['id']
+
+
+def test_checkpoint_directory_can_gain_downstream_diagnostics_and_respects_budget(tmp_path):
+    from karaoke.stage_cache import StageCache
+    store = Store(tmp_path/'cache')
+    job, _ = store.create(JobRequest(url=URL), 'v1')
+    folder = store.root/job['id']
+    output = folder/'asr'
+    with StageCache(folder).stage('transcribe', inputs=[folder/'request.json'], outputs=[output]):
+        output.mkdir()
+        (output/'transcription.json').write_text('{"text":"hello"}')
+    (output/'filtered.json').write_text('{"text":"hello"}')
+    with StageCache(folder).stage('transcribe', inputs=[folder/'request.json'], outputs=[output]) as hit:
+        assert hit
+    store.cache.compact(store.update(job['id'], status='failed'))
+    store.cache.enforce()
+    assert store.cache.stats['used_bytes'] >= (output/'transcription.json').stat().st_size
+    store.cache.set_limit(1)
+    assert not folder.exists()  # Checkpoints never escape the shared LRU budget.
+
+
+def test_checkpoint_invalidates_changed_algorithm_without_discarding_inputs(tmp_path):
+    from karaoke.stage_cache import StageCache
+    source, output, code = [tmp_path/name for name in ('source', 'output', 'algorithm.py')]
+    source.write_bytes(b'original')
+    code.write_text('version = 1')
+    cache = StageCache(tmp_path)
+    for expected in (False, True, False):
+        with cache.stage('test', inputs=[source], outputs=[output], code=[code]) as hit:
+            assert hit is expected
+            if not hit:
+                assert not output.exists() and source.read_bytes() == b'original'
+                output.write_bytes(b'result')
+        if expected:
+            code.write_text('version = 2')
+
+
+def test_pipeline_reuses_decoded_audio_and_rebuilds_corrupted_stage(tmp_path):
+    import soundfile as sf
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    pipeline.source.parent.mkdir()
+    sf.write(pipeline.source, np.zeros((800, 2)), 8000, format='WAV', subtype='PCM_16')
+    output = tmp_path/'source-44100.wav'
+    command = ['ffmpeg', '-v', 'error', '-nostdin', '-i', pipeline.source,
+               '-ar', '44100', '-ac', '2', '-c:a', 'pcm_f32le', output]
+    pipeline.run('decode_audio', command)
+    expected = output.read_bytes()
+    with patch.object(pipeline, 'run_process', side_effect=AssertionError('Repeated expensive stage')):
+        pipeline.run('decode_audio', command)
+    assert 'decode_audio' in pipeline.checkpoints.reused
+    output.write_bytes(b'truncated')
+    pipeline.run('decode_audio', command)
+    assert output.read_bytes() == expected
+
+
+def test_soak_retries_changed_code_not_unchanged_failures_or_finished_cases():
+    from karaoke.tools.soak import eligible
+    assert eligible({'attempts': []}, 'v1', 100)
+    for status in ('passed', 'failed'):
+        case = {'attempts': [{'status': status, 'pipeline_version': 'v1'}]}
+        assert not eligible(case, 'v1', 100)
+        assert eligible(case, 'v2', 100)
+    case = {'attempts': [{'status': 'external', 'pipeline_version': 'v1', 'next_retry_at': 200}]}
+    assert not eligible(case, 'v2', 100)
+    assert eligible(case, 'v2', 201)
+
+
+def test_soak_selection_is_fixed_distinct_and_does_not_fill_missing_quota():
+    from karaoke.tools.soak import select_cases
+    pool = [dict(url=f'https://youtu.be/{i:011d}', title=f'Song {i}', language='English') for i in range(12)]
+    pool.append(pool[0].copy())
+    one = select_cases(pool, {'English': 8}, 42)
+    assert one == select_cases(list(reversed(pool)), {'English': 8}, 42)
+    assert len({c['url'] for c in one}) == 8
+    with pytest.raises(ValueError, match='distinct candidates'):
+        select_cases(pool, {'English': 20}, 42)
+
+
+def test_soak_observes_failed_job_when_library_no_longer_exposes_job_id():
+    import httpx
+    from karaoke.tools.soak import wait_job
+    calls = []
+    def respond(request):
+        calls.append(request.url.path)
+        if request.url.path.endswith('/events'):
+            return httpx.Response(200, text='data: '+json.dumps({'library': [
+                {'job_id': None, 'url': URL, 'status': 'failed'}]})+'\n\n')
+        return httpx.Response(200, json={'status': 'running' if len(calls)==1 else 'failed', 'input': {'url': URL}})
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        assert wait_job(client, 'http://test', 'job')['status'] == 'failed'
+    assert calls == ['/v1/jobs/job', '/v1/room/events', '/v1/jobs/job']
+
+
+def test_soak_checks_actual_stem_samples_not_only_pipeline_claim(tmp_path):
+    import soundfile as sf
+    from karaoke.exact_stems import pcm_sha
+    from karaoke.tools.soak import verify_stems
+    original = np.array([[.125, -.25], [.5, -.5]], dtype=np.float64)
+    paths = {name: tmp_path/(name+'.wav') for name in ('lead_vocals','backing_vocals','instrumental')}
+    for (name, path), gain in zip(paths.items(), (.25, .25, .5)):
+        sf.write(path, original*gain, 8000, subtype='DOUBLE')
+    assert verify_stems(paths, pcm_sha(original)) == pcm_sha(original)
+    sf.write(paths['lead_vocals'], original*.5, 8000, subtype='DOUBLE')
+    with pytest.raises(ValueError, match='bitwise'):
+        verify_stems(paths, pcm_sha(original))
+
+
 @pytest.mark.parametrize('diagnostic,reason', [
     ("Unable to connect to proxy: Tunnel connection failed: 403 Forbidden", '网络代理'),
     ("Sign in to confirm you're not a bot", '登录验证'),
@@ -172,7 +320,7 @@ while not pathlib.Path(sys.argv[1]).exists(): time.sleep(.01)
     errors = []
     def run():
         try:
-            pipeline.run('separate_lead', [sys.executable, '-c', code, str(release)], timeout=5)
+            pipeline.run_process('separate_lead', [sys.executable, '-c', code, str(release)], timeout=5)
         except Exception as error:
             errors.append(error)
     thread = threading.Thread(target=run)
@@ -232,7 +380,7 @@ def test_frontend_changes_invalidate_browser_cache_including_imports(tmp_path, m
 def test_empty_alignment_error_identifies_the_failed_stage(tmp_path):
     pipeline = Pipeline(dict(url=URL), tmp_path)
     with pytest.raises(StageFailure, match='歌词对齐失败.*没有有效音频') as caught:
-        pipeline.run('align_words', [sys.executable, '-c',
+        pipeline.run_process('align_words', [sys.executable, '-c',
             'import sys;print(\'Empty alignment audio for lyric lines 1-1\');sys.exit(1)'])
     assert caught.value.stage == 'align_words'
 
@@ -751,9 +899,12 @@ def test_compaction_keeps_outputs_and_bounded_logs_without_following_symlinks(tm
     store.update(job['id'], status='failed', result=None, error=dict(code='cache_full'))
     (folder/'asr').mkdir()
     (folder/'asr/transcription.json').write_text('{"words": []}')
+    (folder/'alignment').mkdir()
+    (folder/'alignment/raw.json').write_text('{"segments": []}')
     store.cache.compact(store.read(job['id']))
     assert not (folder/'mv.mp4').exists()
     assert (folder/'asr/transcription.json').exists()
+    assert (folder/'alignment/raw.json').exists()
     store.cache.set_limit(1)
     assert not folder.exists()
     assert store.read(job['id'])['status'] == 'failed'

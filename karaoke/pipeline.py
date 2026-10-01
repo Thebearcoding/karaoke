@@ -3,6 +3,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,7 @@ from .job_schema import JobRequest, song_language, video_url
 from .song_sources import prepare_song_text, video_song_info
 from .stage_progress import parse_progress
 from .cache import can_restore_video
+from .stage_cache import StageCache
 
 
 def write_json(path, value):
@@ -114,6 +116,52 @@ class Pipeline:
         self.song_info = {}
         self.source = self.output/'download/source.mkv'
         self.vocals = self.output/'music-separation/song/vocals.wav'
+        self.checkpoints = StageCache(self.output)
+
+    def stage_spec(self, name, command):
+        """Explicit inputs/outputs prevent a downstream fix from discarding upstream work."""
+        alignment_code = [ROOT/p for p in ('align_lyrics_whisper.py', 'align_lyric_phonemes.py',
+            'align_english_onsets.py', 'align_repeated_lyrics.py', 'phoneme_progress.py',
+            'phonetic_align.py', 'anchors_from_asr.py', 'subtitles.py', 'lyric_progress.py',
+            'onset_consensus.py', 'experiments/cjk-onsets-v003/run.py',
+            'experiments/cjk-onsets-v003/protocol.json')]
+        english = str(ROOT/'align_english_onsets.py') in [str(a) for a in command]
+        specs = {
+            'decode_audio': (['download/source.mkv'], ['source-44100.wav'], []),
+            'separate_music': (['source-44100.wav'], ['music-separation'], [ROOT/'benchmark_neural.py']),
+            'package_two_stems': (['download/source.mkv', 'music-separation/song/vocals.wav'],
+                                  ['two-stems'], [ROOT/'exact_stems.py']),
+            'resample_vocals': (['music-separation/song/vocals.wav'], ['vocals-16k.wav', 'vocals-asr.mp3'], []),
+            'transcribe': (['vocals-asr.mp3'], ['asr'], [ROOT/'transcribe_lyrics.py']),
+            'separate_lead': (['music-separation/song/vocals.wav'], ['lead-separation'], [ROOT/'benchmark_neural.py']),
+            'package_three_stems': (['two-stems', 'lead-separation/song/vocals.wav'],
+                                    ['stems'], [ROOT/'exact_stems.py', ROOT/'three_stems.py']),
+            'align_words': (['vocals-16k.wav', 'lyrics.json', 'anchors.json', 'alignment-jobs.json'],
+                            ['alignment'], alignment_code),
+            'align_phonemes': ((['vocals-16k.wav', 'lyrics.json', 'anchors.json', 'english-jobs.json'] if english else
+                                ['music-separation/song/vocals.wav', 'word-cues.json', 'phoneme-jobs.json']),
+                               ['english-onsets' if english else 'phonemes'], alignment_code),
+            'align_repeats': (['music-separation/song/vocals.wav', 'phonemes/cues.json', 'word-cues.json', 'repeat-jobs.json'],
+                              ['repeated-lyrics'], alignment_code),
+            'align_context': (['music-separation/song/vocals.wav', 'ordered-cues.json', 'context-jobs.json'],
+                              ['context'], alignment_code),
+        }
+        if name not in specs:
+            return None
+        inputs, outputs, code = specs[name]
+        config = dict(command=[str(a) for a in command])
+        if name in ('separate_music', 'separate_lead'):
+            model = 'vocals_mel_band_roformer' if name == 'separate_music' else 'karaoke_bs_roformer_anvuew'
+            code = code+[ROOT/f'models/pretrained/{model}.yaml']
+            weights = ROOT/f'models/pretrained/{model}.ckpt'
+            config['weights'] = (weights.stat().st_size, weights.stat().st_mtime_ns)
+        if name.startswith('align_'):
+            config['weights'] = [(str(p), p.stat().st_size, p.stat().st_mtime_ns)
+                for p in sorted((ROOT/'models/alignment').rglob('*')) if p.is_file() and p.suffix in ('.ckpt', '.pt')]
+        if name == 'transcribe':
+            config['fallback_model'] = os.getenv('KARAOKE_ASR_FALLBACK_MODEL', 'gpt-4o-transcribe')
+        return dict(inputs=[self.output/p for p in inputs], outputs=[self.output/p for p in outputs],
+                    config=config, code=code)
 
     def phase(self, name=None, active=False, *, song_info=None):
         with self.lock:
@@ -134,6 +182,19 @@ class Pipeline:
             print('KARAOKE_PROGRESS ' + json.dumps(progress), flush=True)
 
     def run(self, name, command, timeout=3600):
+        spec = self.stage_spec(name, command)
+        if spec is None:
+            return self.run_process(name, command, timeout)
+        started = time.perf_counter()
+        with self.checkpoints.stage(name, **spec) as reused:
+            if reused:
+                with self.lock:
+                    self.timings['reuse_'+name] = round(time.perf_counter()-started, 3)
+                    self.publish_progress()
+            else:
+                self.run_process(name, command, timeout)
+
+    def run_process(self, name, command, timeout=3600):
         self.phase(name, True)
         started = time.perf_counter()
         try:
@@ -252,9 +313,6 @@ class Pipeline:
         return metadata, duration
 
     def prepare_text(self, metadata, duration):
-        from anchors_from_asr import anchors_from_words
-        from transcribe_lyrics import filter_silent_transcription
-        import soundfile as sf
         self.run('package_two_stems', [sys.executable, ROOT/'exact_stems.py', 'build',
             '--source', self.source, '--vocals-estimate', self.vocals, '--output', self.output/'two-stems'])
         self.run('resample_vocals', ['ffmpeg', '-v', 'error', '-nostdin', '-i', self.vocals,
@@ -266,29 +324,45 @@ class Pipeline:
         self.phase('prepare_lyrics', True)
         started = time.perf_counter()
         try:
-            transcription = json.loads((self.output/'asr/transcription.json').read_text())
-            language = song_language(transcription.get('language'))
-            if language:
-                self.phase(song_info=dict(language=language))
-            audio, rate = sf.read(self.output/'vocals-16k.wav', dtype='float32')
-            transcription, rejected = filter_silent_transcription(transcription, audio, rate)
-            write_json(self.output/'asr/filtered.json', dict(transcription=transcription, rejected=rejected))
-            lyrics = prepare_song_text(self.request, metadata, transcription, duration,
-                catalog_root=self.catalog_root, model=self.text_model)
+            catalog = list((self.catalog_root/'lyrics').glob('*.json')) if self.catalog_root else []
+            with self.checkpoints.stage('prepare_lyrics',
+                    inputs=[self.output/'asr/transcription.json', self.output/'vocals-16k.wav'],
+                    outputs=[self.output/'lyrics.json', self.output/'anchors.json', self.output/'asr/filtered.json'],
+                    config=dict(request=self.request, metadata=metadata, duration=duration, model=self.text_model,
+                                implementation=inspect.getsource(type(self).prepare_lyrics)),
+                    code=[ROOT/p for p in ('song_sources.py', 'anchors_from_asr.py', 'transcribe_lyrics.py',
+                                           'subtitles.py', 'job_schema.py')] + catalog) as reused:
+                if not reused:
+                    self.prepare_lyrics(metadata, duration)
+            lyrics = json.loads((self.output/'lyrics.json').read_text())
             self.phase(song_info=dict(title=lyrics['title'], artist=lyrics['artist'],
                                       duration_seconds=duration, language=lyrics['language']))
-            anchors = anchors_from_words(lyrics['lines'], transcription.get('words') or [],
-                                         lyrics['language'], allow_missing=True)
-            covered = sum(c['matched_fraction']*len(c['text']) for c in anchors)/max(1, sum(len(c['text']) for c in anchors))
-            write_json(self.output/'lyrics.json', lyrics)
-            write_json(self.output/'anchors.json', anchors)
-            if covered < .55 or not any(c['status'] == 'candidate' for c in anchors):
-                raise StageFailure('prepare_lyrics', '歌词与这个视频的演唱匹配不足；请提交本版本的 lyrics 后重试')
         finally:
             with self.lock:
                 self.timings['prepare_lyrics'] = round(time.perf_counter()-started, 3)
             self.phase('prepare_lyrics', False)
         return lyrics
+
+    def prepare_lyrics(self, metadata, duration):
+        from anchors_from_asr import anchors_from_words
+        from transcribe_lyrics import filter_silent_transcription
+        import soundfile as sf
+        transcription = json.loads((self.output/'asr/transcription.json').read_text())
+        language = song_language(transcription.get('language'))
+        if language:
+            self.phase(song_info=dict(language=language))
+        audio, rate = sf.read(self.output/'vocals-16k.wav', dtype='float32')
+        transcription, rejected = filter_silent_transcription(transcription, audio, rate)
+        write_json(self.output/'asr/filtered.json', dict(transcription=transcription, rejected=rejected))
+        lyrics = prepare_song_text(self.request, metadata, transcription, duration,
+            catalog_root=self.catalog_root, model=self.text_model)
+        anchors = anchors_from_words(lyrics['lines'], transcription.get('words') or [],
+                                     lyrics['language'], allow_missing=True)
+        covered = sum(c['matched_fraction']*len(c['text']) for c in anchors)/max(1, sum(len(c['text']) for c in anchors))
+        write_json(self.output/'lyrics.json', lyrics)
+        write_json(self.output/'anchors.json', anchors)
+        if covered < .55 or not any(c['status'] == 'candidate' for c in anchors):
+            raise StageFailure('prepare_lyrics', '歌词与这个视频的演唱匹配不足；请提交本版本的 lyrics 后重试')
 
     def align(self, lyrics, duration):
         from lyric_progress import build
@@ -404,11 +478,25 @@ class Pipeline:
         for artifact in result['artifacts'].values():
             path = self.output/artifact['path']
             artifact.update(bytes=path.stat().st_size, sha256=file_hash(path))
-        result.update(processing_seconds=round(time.perf_counter()-started, 3), timings=self.timings)
+        result.update(processing_seconds=round(time.perf_counter()-started, 3), timings=self.timings,
+                      reused_stages=self.checkpoints.reused)
         write_json(self.output/'result.json', result)
         return result
 
     def render_video(self, result):
+        paths = {name: self.output/a['path'] for name, a in result['artifacts'].items()}
+        with self.checkpoints.stage('render',
+                inputs=[self.source, paths['instrumental'], paths['backing_vocals'], paths['subtitles']],
+                outputs=[paths['mv']],
+                config={**{key: result[key] for key in ('title', 'artist', 'language', 'mv_audio',
+                    'duration_seconds', 'shared_preview_gain')},
+                    'implementation': inspect.getsource(type(self).render_uncached)},
+                code=[ROOT/p for p in ('render_lyric_progress.py', 'render_subtitles.py', 'subtitles.py',
+                                      'subtitle_style.py', 'subtitle-styles.json')]) as reused:
+            if not reused:
+                self.render_uncached(result)
+
+    def render_uncached(self, result):
         import soundfile as sf
         paths = {name: self.output/a['path'] for name, a in result['artifacts'].items()}
         instrumental, rate = sf.read(paths['instrumental'], dtype='float32', always_2d=True)
@@ -419,6 +507,7 @@ class Pipeline:
         sf.write(mixed, instrumental, rate, subtype='FLOAT')
         write_json(self.output/'song-info.json', dict(title=result['title'], original_artist=result['artist']))
         rendered = self.output/'rendered-mv.mp4'
+        rendered.unlink(missing_ok=True)
         self.run('render', [sys.executable, ROOT/'render_lyric_progress.py', '--video', self.source,
             '--audio', mixed, '--cues', paths['subtitles'], '--song-info', self.output/'song-info.json',
             '--language', {'English': 'Latin'}.get(result['language'], result['language']),

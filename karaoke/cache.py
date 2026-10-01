@@ -8,6 +8,8 @@ import shutil
 import time
 from uuid import UUID
 
+from .stage_cache import retained_files
+
 GIB = 1024**3
 
 
@@ -93,8 +95,8 @@ class SongCache:
         folder = self.folder(job['id'])
         keep = {'request.json', 'result.json', 'error.json', 'worker.log'}
         if job['status'] == 'failed':
-            keep.update({'lyrics.json', 'anchors.json'})
-            keep.update(p.relative_to(folder).as_posix() for p in (folder/'asr').glob('*.json'))
+            keep.update(retained_files(folder))
+            keep.update(p.relative_to(folder).as_posix() for p in folder.rglob('*.json'))
             if (folder/'source.json').is_file():
                 keep.update({'source.json', 'download/source.mkv', 'download/source.info.json', 'poster.jpg'})
         keep.update(a['path'] for name, a in (job.get('result') or {}).get('artifacts', {}).items()
