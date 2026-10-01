@@ -144,7 +144,7 @@ class Pipeline:
         alignment_code = [ROOT/p for p in ('align_lyrics_whisper.py', 'align_lyric_phonemes.py',
             'align_english_onsets.py', 'align_repeated_lyrics.py', 'phoneme_progress.py',
             'phonetic_align.py', 'anchors_from_asr.py', 'subtitles.py', 'lyric_progress.py',
-            'onset_consensus.py', 'experiments/cjk-onsets-v003/run.py',
+            'onset_consensus.py', 'word_onset_metrics.py', 'experiments/cjk-onsets-v003/run.py',
             'experiments/cjk-onsets-v003/protocol.json')]
         english = str(ROOT/'align_english_onsets.py') in [str(a) for a in command]
         specs = {

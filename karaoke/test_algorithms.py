@@ -444,6 +444,38 @@ class WordOnsetScoring(unittest.TestCase):
 
 
 class AlignmentIntegrity(unittest.TestCase):
+    def test_english_phoneme_alignment_keeps_punctuation_out_of_spoken_words(self):
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from align_english_onsets import align_job
+        from onset_consensus import blend_cues
+
+        lines = ['“ Come … back ! ”', "Don't go…"]
+        expected = ['Come', 'back', "Don't", 'go…']
+        aligned = [dict(text=word, start=float(i+1), end=i+1.5, confidence=.9)
+                   for i, word in enumerate(expected)]
+        aligner = SimpleNamespace(method='singing', device='cpu', onset_ratio=.02,
+            model_identity={}, align=Mock(return_value=(aligned, None, .02)))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sf.write(root/'audio.wav', np.zeros(6*16000), 16000)
+            (root/'lyrics.json').write_text(json.dumps(dict(language='English', lines=lines)))
+            job = dict(audio=str(root/'audio.wav'), lyrics=str(root/'lyrics.json'), output=str(root/'onsets'))
+            report = align_job(aligner, job, full_song=True)
+            self.assertFalse(report['failures'])
+            self.assertEqual(aligner.align.call_args.args[1], expected)
+            cues = json.loads((root/'onsets/cues.json').read_text())
+            self.assertEqual([''.join(u['text'] for u in c['units']) for c in cues], lines)
+            self.assertEqual([u['start'] for c in cues for u in c['units']], [1., 2., 3., 4.])
+            blend_cues(cues, cues, max_disagreement=.2, primary_weight=.75)
+
+            aligner.align.reset_mock()
+            (root/'lyrics.json').write_text(json.dumps(dict(language='English', lines=['…'])))
+            report = align_job(aligner, dict(job, output=str(root/'invalid')), full_song=True)
+            self.assertIn('alignable text', report['failures'][0]['error'])
+            aligner.align.assert_not_called()
+
     def test_punctuation_only_row_cannot_shift_following_line_ownership(self):
         lines = ['first', '”', 'last']
         raw = [dict(range=[0, 3], context=[0, 3], source_range=[0., 5.], result=dict(segments=[
