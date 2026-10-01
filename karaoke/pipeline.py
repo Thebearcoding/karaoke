@@ -87,7 +87,10 @@ def download_failure(log):
         return '视频站点要求登录验证，请配置下载登录信息后重试'
     if any(text in diagnostic for text in ('video unavailable', 'private video', 'video is unavailable')):
         return '视频当前无法访问，请换一个可公开播放的链接'
-    if any(text in diagnostic for text in ('timed out', 'connection reset', 'temporary failure in name resolution')):
+    if any(text in diagnostic for text in ('failed to resolve', 'temporary failure in name resolution',
+                                           'nodename nor servname', 'name or service not known')):
+        return '无法解析视频站点地址，请检查网络或 DNS 后重试'
+    if any(text in diagnostic for text in ('timed out', 'connection reset')):
         return '连接视频站点超时或中断，请稍后重试'
     return '视频下载失败，请稍后重试或换一个视频链接'
 

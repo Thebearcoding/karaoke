@@ -179,6 +179,27 @@ def test_soak_preserves_failed_stage_diagnostics_after_cache_eviction(tmp_path):
     assert attempt['status'] == 'failed' and attempt['error'] == error
 
 
+@pytest.mark.parametrize('code,diagnostic,external', [
+    ('interrupted', '', True),
+    ('align_phonemes_failed', 'ImportError: dlopen(/tmp/module.so): system is shutting down', True),
+    ('align_phonemes_failed', 'ImportError: dlopen(/tmp/module.so): invalid code signature', False),
+    ('processing_failed', 'Lyric: system is shutting down', False),
+])
+def test_soak_host_shutdown_waits_before_retry_without_blocking_provider(tmp_path, code, diagnostic, external):
+    from karaoke.tools.soak import eligible, record_failure
+    (tmp_path/'worker.log').write_text(diagnostic)
+    attempt = dict(pipeline_version='v1', external_attempt=1)
+    error = dict(code=code, message='Original failure')
+    record_failure(attempt, dict(id=tmp_path.name, error=error), tmp_path)
+    assert attempt['error'] == error
+    assert attempt['status'] == ('external' if external else 'failed')
+    assert not eligible({'attempts': [attempt]}, 'v1', time.time())
+    if external:
+        assert attempt['retry_provider'] == 'local' and not attempt['provider_blocked']
+        assert time.time()+50 < attempt['next_retry_at'] < time.time()+70
+        assert eligible({'attempts': [attempt]}, 'v1', attempt['next_retry_at']+1)
+
+
 def test_retry_preserves_completed_stages_and_only_reruns_affected_work(tmp_path):
     from karaoke.stage_cache import StageCache
     store = Store(tmp_path)
@@ -369,6 +390,9 @@ def test_soak_checks_actual_stem_samples_not_only_pipeline_claim(tmp_path):
     ("Sign in to confirm you're not a bot", '登录验证'),
     ('ERROR: Video unavailable', '无法访问'),
     ('ERROR: connection timed out', '超时'),
+    ("Failed to resolve 'www.youtube.com' ([Errno 8] nodename nor servname provided, or not known)", 'DNS'),
+    ('Temporary failure in name resolution', 'DNS'),
+    ('Name or service not known', 'DNS'),
     ('Unknown upstream error', '下载失败'),
 ])
 def test_download_failure_has_actionable_reason_without_raw_diagnostics(tmp_path, diagnostic, reason):
@@ -380,6 +404,15 @@ def test_download_failure_has_actionable_reason_without_raw_diagnostics(tmp_path
     assert caught.value.stage == 'download' and reason in str(caught.value)
     assert 'secret' not in str(caught.value) and 'example.invalid' not in str(caught.value)
     assert (tmp_path/'download.log').exists()
+    if reason == 'DNS':
+        from karaoke.tools.soak import eligible, record_failure
+        # Also classify retained generic errors from workers predating the fix.
+        attempt = dict(pipeline_version='v1', external_attempt=1)
+        record_failure(attempt, dict(id=tmp_path.name,
+            error=dict(code='download_failed', message='Generic download failure')), tmp_path)
+        assert attempt['status'] == 'external' and attempt['provider_blocked']
+        assert not eligible({'attempts': [attempt]}, 'v2', time.time())
+        assert eligible({'attempts': [attempt]}, 'v1', attempt['next_retry_at']+1)
 
 
 def test_stage_counters_advance_after_work_and_do_not_finish_on_failure(monkeypatch, capsys):

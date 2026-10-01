@@ -271,9 +271,16 @@ def record_failure(attempt, job, folder):
             next_retry_at=time.time()+min(86400, 7200*2**(attempt['external_attempt']-1))
                 if error['retryable'] else None)
         return
+    if error['code'] == 'interrupted' or re.search(
+            r'^ImportError: dlopen\(.*system is shutting down', '\n'.join(logs), re.M):
+        attempt.update(status='external', retry_provider='local', provider_blocked=False,
+            next_retry_at=time.time()+min(3600, 60*2**(attempt['external_attempt']-1)))
+        return
     external_markers = ('sign in', 'login', 'http error 403', 'http error 429', 'video unavailable',
                         'private video', 'timed out', 'connection reset', 'proxy', '登录', '无法访问',
-                        '代理', '超时', 'risk control', '-352')
+                        '代理', '超时', 'risk control', '-352', 'failed to resolve',
+                        'temporary failure in name resolution', 'nodename nor servname',
+                        'name or service not known')
     if error['code'] == 'download_failed' and any(
             marker in (str(error)+' '.join(logs)).lower() for marker in external_markers):
         attempt['status'] = 'external'
