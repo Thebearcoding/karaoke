@@ -18,8 +18,8 @@ from karaoke.exact_stems import validate_preview
 from karaoke.job_schema import JobRequest, video_url
 from karaoke.song_sources import SongText, find_verified_lyrics, prepare_song_text, video_song_info
 from karaoke.align_lyric_phonemes import protect_line_order
-from karaoke.cache import CacheFull, GIB
-from karaoke.pipeline import Pipeline, StageFailure, create_poster
+from karaoke.cache import CacheFull, GIB, can_restore_video
+from karaoke.pipeline import Pipeline, StageFailure, create_poster, file_hash
 from karaoke.stage_progress import PREFIX, parse_progress, progress_items
 
 
@@ -441,12 +441,167 @@ def test_exact_fifteen_milliseconds_is_not_a_floating_point_conflict():
     assert protect_line_order(cues,cues)[1] == []
 
 
-def cache_fixture(store, suffix):
+def cache_fixture(store, suffix, *, restorable=False):
     job, _ = store.create(JobRequest(url='https://youtu.be/0000000000'+suffix, title=suffix, force=True), 'test')
-    (store.root/job['id']/'mv.mp4').write_bytes(b'x'*2048)
+    folder = store.root/job['id']
+    (folder/'mv.mp4').write_bytes(b'x'*2048)
+    result = dict(title=suffix, artist='Singer', language='English', duration_seconds=10,
+                  shared_preview_gain=.8, mv_audio='instrumental_backing',
+                  reconstruction={'source_pcm_sha256':'fixture'},
+                  artifacts={'mv':dict(path='mv.mp4',bytes=2048,sha256='fixture')})
+    if restorable:
+        for name in ('instrumental', 'backing_vocals', 'lead_vocals', 'instrumental_preview',
+                     'backing_vocals_preview', 'lead_vocals_preview', 'subtitles', 'poster'):
+            (folder/name).write_bytes(b'keep me')
+            result['artifacts'][name] = dict(path=name, bytes=7, sha256=file_hash(folder/name))
+        (folder/'result.json').write_text(json.dumps(result))
     return store.update(job['id'], status='completed', last_accessed_at='2020-01-0'+suffix,
-        result=dict(title=suffix, duration_seconds=10,
-                    artifacts={'mv':dict(path='mv.mp4',bytes=2048,sha256='fixture')}))
+                        result=result)
+
+
+def test_cache_evicts_all_video_lru_before_any_computed_audio(tmp_path):
+    store = Store(tmp_path)
+    first, second = [cache_fixture(store, str(i), restorable=True) for i in (1, 2)]
+    store.cache.enforce()
+    used = store.cache.stats['used_bytes']
+    store.cache.set_limit(used-1)
+    assert store.read(first['id'])['status'] == 'video_evicted'
+    assert store.read(second['id'])['status'] == 'completed'
+    store.cache.set_limit(used-2049)
+    assert store.read(second['id'])['status'] == 'video_evicted'
+    for job in (first, second):
+        assert not (tmp_path/job['id']/'mv.mp4').exists()
+        assert can_restore_video(tmp_path/job['id'], job['result'])
+    # Only when the entire video tier is exhausted may the older audio disappear.
+    store.cache.set_limit(used-4097)
+    assert store.read(first['id'])['status'] == 'evicted'
+    assert not store.read(first['id'])['restore_video']
+    assert not (tmp_path/first['id']).exists()
+    assert can_restore_video(tmp_path/second['id'], second['result'])
+
+
+def test_video_eviction_still_protects_queue_and_transfers(tmp_path):
+    app = create_app(tmp_path, version='test')
+    store = app.state.store
+    first, second = [cache_fixture(store, str(i), restorable=True) for i in (1, 2)]
+    room = app.state.room.read()
+    room['entries'] = [dict(id='waiting', job_id=first['id'])]
+    app.state.room.save(room)
+    store.cache.acquire(second['id'])
+    store.cache.enforce()
+    store.cache.limit = store.cache.stats['used_bytes']-1
+    assert not store.cache.enforce()
+    assert all((tmp_path/job['id']/'mv.mp4').exists() for job in (first, second))
+    store.cache.release(second['id'])
+    assert store.cache.enforce()
+    assert (tmp_path/first['id']/'mv.mp4').exists()
+    assert store.read(second['id'])['status'] == 'video_evicted'
+
+
+def test_video_restore_reuses_job_and_recovers_from_failure(tmp_path):
+    def failed_download(folder):
+        assert app.state.store.read(folder.name)['restore_video']
+        return [sys.executable, '-c', "import pathlib,sys; p=pathlib.Path(sys.argv[1]);"
+                "(p/'mv.mp4').write_bytes(b'partial');sys.exit(1)", str(folder)]
+    app = create_app(tmp_path, worker_command=failed_download, version='new-renderer')
+    store = app.state.store
+    job = cache_fixture(store, '1', restorable=True)
+    folder = tmp_path/job['id']
+    store.cache.enforce()
+    store.cache.set_limit(store.cache.stats['used_bytes']-1)
+    store.cache.set_limit(GIB)
+    with TestClient(app) as client:
+        song = next(s for s in client.get('/v1/library').json()['songs'] if s['id'] == job['id'])
+        assert song['job_id'] == job['id'] and song['status'] == 'video_evicted'
+        assert client.get(song['poster']).content == b'keep me'
+        assert client.get(f"/v1/jobs/{job['id']}/artifacts/mv").status_code == 410
+        assert client.get(f"/v1/jobs/{job['id']}/artifacts/lead_vocals").content == b'keep me'
+        entry = client.post('/v1/room/entries', json={'job_id':job['id']}).json()['entries'][0]
+        assert entry['job_id'] == job['id']
+        failed = finished(client, job['id'])
+        assert failed['status'] == 'failed' and failed['restore_video']
+        assert not (folder/'mv.mp4').exists()
+        assert can_restore_video(folder, store.read(job['id'])['result'])
+        def restored_download(folder):
+            return [sys.executable, '-c', '''import hashlib,json,pathlib,sys
+p=pathlib.Path(sys.argv[1]);result=json.loads((p/'result.json').read_text())
+(p/'mv.mp4').write_bytes(b'restored')
+result['artifacts']['mv'].update(bytes=8,sha256=hashlib.sha256(b'restored').hexdigest())
+(p/'result.json').write_text(json.dumps(result))
+''', str(folder)]
+        app.state.worker.command = restored_download
+        retried = client.post('/v1/room/commands', json={'action':'retry','entry_id':entry['id']}).json()
+        assert retried['entries'][0]['job_id'] == job['id']
+        assert finished(client, job['id'])['status'] == 'completed'
+        assert not store.read(job['id'])['restore_video']
+        assert client.get(f"/v1/jobs/{job['id']}/artifacts/mv").content == b'restored'
+        cached = client.post('/v1/jobs', json={**job['input'], 'force':False})
+        assert cached.status_code == 200 and cached.json()['id'] == job['id']
+        assert len(store.list()) == 1
+        assert all((folder/a['path']).read_bytes() == b'keep me'
+                   for name, a in job['result']['artifacts'].items() if name != 'mv')
+
+
+def test_video_restore_url_deduplicates_across_renderer_versions(tmp_path):
+    store = Store(tmp_path)
+    original = cache_fixture(store, '1', restorable=True)
+    store.cache.enforce()
+    store.cache.set_limit(store.cache.stats['used_bytes']-1)
+    request = JobRequest(**{**original['input'], 'force':False})
+    restored, cached = store.create(request, 'new-renderer')
+    duplicate, duplicate_cached = store.create(request, 'new-renderer')
+    assert restored['id'] == duplicate['id'] == original['id']
+    assert not cached and duplicate_cached and restored['restore_video']
+    assert restored['result'] == original['result']
+    changed, _ = store.create(request.model_copy(update={'mv_audio':'instrumental'}), 'new-renderer')
+    assert changed['id'] != original['id']
+    forced, _ = store.create(request.model_copy(update={'force':True}), 'new-renderer')
+    assert forced['id'] != original['id']
+
+
+@pytest.mark.parametrize('source_matches', [True, False])
+def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch, source_matches):
+    import shutil
+    import soundfile as sf
+    from karaoke.exact_stems import decode_source, pcm_sha
+    source = tmp_path/'original.mkv'
+    subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-f', 'lavfi', '-i',
+        'color=c=black:s=320x180:r=30:d=2', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2',
+        '-c:v', 'libx264', '-c:a', 'pcm_s16le', str(source)], check=True)
+    audio, rate, _ = decode_source(source)
+    store = Store(tmp_path/'cache')
+    job = cache_fixture(store, '1', restorable=True)
+    folder, result = store.root/job['id'], job['result']
+    result.update(duration_seconds=2)
+    result['reconstruction']['source_pcm_sha256'] = pcm_sha(audio) if source_matches else 'different-recording'
+    for name, level in [('instrumental', .5), ('backing_vocals', .25), ('lead_vocals', .25)]:
+        sf.write(folder/name, audio*level, rate, format='WAV', subtype='DOUBLE')
+    (folder/'subtitles').write_text(json.dumps([dict(text='Hello',start=0,end=2,
+        units=[dict(text='Hello',start=.5,end=1.5,first=0,stop=5)])]))
+    before = {}
+    for name, artifact in result['artifacts'].items():
+        if name != 'mv':
+            path = folder/artifact['path']
+            artifact.update(bytes=path.stat().st_size, sha256=file_hash(path))
+            before[name] = path.read_bytes()
+    (folder/'result.json').write_text(json.dumps(result))
+    (folder/'mv.mp4').unlink()
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    pipeline = Pipeline(job['input'], folder, separator_python='/missing/python')
+    def download(**kwargs):
+        pipeline.source.parent.mkdir()
+        shutil.copyfile(source, pipeline.source)
+    monkeypatch.setattr(pipeline, 'download', download)
+    if source_matches:
+        restored = pipeline.restore_video()
+        assert set(restored['video_restore']['timings']) == {'verify_video', 'render'}
+        assert (folder/'mv.mp4').stat().st_size > 2048
+        assert restored['artifacts']['mv']['sha256'] == file_hash(folder/'mv.mp4')
+    else:
+        with pytest.raises(StageFailure, match='音频与缓存版本不同'):
+            pipeline.restore_video()
+        assert not (folder/'mv.mp4').exists()
+    assert all((folder/name).read_bytes() == data for name, data in before.items())
 
 
 def test_lru_uses_real_access_persists_and_evicted_song_can_be_requested_again(tmp_path):

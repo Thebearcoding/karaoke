@@ -120,7 +120,7 @@ class Room:
             language=inputs.get('language') or result.get('language') or song_info.get('language') or featured.get('language', ''),
             error=job.get('error'), duration=result.get('duration_seconds') or song_info.get('duration_seconds', 0),
             poster=(f"/v1/jobs/{job['id']}/artifacts/poster"
-                    if job['status'] == 'completed' and 'poster' in result.get('artifacts', {})
+                    if (job['status'] == 'completed' or job.get('restore_video')) and 'poster' in result.get('artifacts', {})
                     else featured.get('poster')), lyrics_need_review=result.get('quality', {}).get(
                 'lyrics_provenance', {}).get('needs_review', False),
             artifacts={key: f"/v1/jobs/{job['id']}/artifacts/{key}"
@@ -157,7 +157,7 @@ class Room:
                 songs.append(song)
             song.update({key: info[key] for key in ('title', 'artist', 'url', 'language', 'duration',
                 'poster', 'status', 'active_stages', 'stage_progress', 'error')})
-            song['job_id'] = job['id'] if ready or job['status'] in ('queued', 'running') else None
+            song['job_id'] = job['id'] if ready or job.get('restore_video') or job['status'] in ('queued', 'running') else None
             if job['status'] == 'completed' and not ready:
                 song.update(status='evicted', poster=None)
         return songs
@@ -170,7 +170,7 @@ class Room:
             raise HTTPException(409, '歌单最多保留 100 首，请先移除一些歌曲')
         if request.job_id:
             job = self.store.read(request.job_id)
-            if job and job['status'] == 'evicted':
+            if job and (job['status'] in ('evicted', 'video_evicted') or job.get('restore_video')):
                 job, cached = self.store.create(JobRequest(**{**job['input'], 'force': False}), self.version)
                 if not cached:
                     self.worker.queue.put_nowait(job['id'])
@@ -266,7 +266,7 @@ class Room:
             old = self.store.read(entry['job_id'])
             if old['status'] != 'failed':
                 raise HTTPException(409, '只有准备失败的歌曲需要重试')
-            job, cached = self.store.create(JobRequest(**old['input']), self.version)
+            job, cached = self.store.create(JobRequest(**{**old['input'], 'force': False}), self.version)
             entry['job_id'] = job['id']
             if not cached:
                 self.worker.queue.put_nowait(job['id'])

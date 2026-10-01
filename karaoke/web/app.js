@@ -6,7 +6,7 @@ const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const time = seconds => `${Math.floor(Math.max(0, seconds || 0)/60)}:${String(Math.floor(Math.max(0, seconds || 0)%60)).padStart(2,'0')}`;
 const remote = new URLSearchParams(location.search).get('remote') === '1';
-const stages = {download:'下载视频', decode_audio:'提取音频', separate_music:'分离伴奏', separate_lead:'分离主唱', package_two_stems:'整理音轨', package_three_stems:'整理音轨', resample_vocals:'整理人声', transcribe:'识别歌词', prepare_lyrics:'整理歌词', align_words:'对齐歌词', align_phonemes:'对齐起唱时间', align_repeats:'检查重复段落', align_context:'校准字幕', render:'生成字幕 MV'};
+const stages = {download:'下载视频', verify_video:'核对视频版本', decode_audio:'提取音频', separate_music:'分离伴奏', separate_lead:'分离主唱', package_two_stems:'整理音轨', package_three_stems:'整理音轨', resample_vocals:'整理人声', transcribe:'识别歌词', prepare_lyrics:'整理歌词', align_words:'对齐歌词', align_phonemes:'对齐起唱时间', align_repeats:'检查重复段落', align_context:'校准字幕', render:'生成字幕 MV'};
 let state = {entries:[], current_id:null, playing:false, position:0, started_at:null, mix:'karaoke', levels:{instrumental:1,backing_vocals:1,lead_vocals:0}, revision:0};
 let library = [], filter = 'all', view = 'library', clockOffset = 0, readySent = null, loading = false, loadError = '', seeking = false;
 let toastTimer, librarySignature = '', queueSignature = '';
@@ -110,7 +110,7 @@ function renderLibrary() {
     librarySignature = signature;
     $('song-grid').innerHTML = songs.map(song => {
       const ready = song.status === 'completed';
-      const label = ready ? '● 已准备' : song.status === 'queued' ? '等待准备' : song.status === 'failed' ? '准备失败' : song.status === 'running' ? '' : '需准备';
+      const label = ready ? '● 已准备' : song.status === 'video_evicted' ? '待补视频' : song.status === 'queued' ? '等待准备' : song.status === 'failed' ? '准备失败' : song.status === 'running' ? '' : '需准备';
       return `<article class="song-card" data-card="${escape(song.id)}">
     <div class="song-poster">${song.poster ? `<img src="${escape(song.poster)}" alt="" loading="lazy">` : `<span class="poster-initial">${escape(song.title.slice(0,1))}</span>`}
       <span class="poster-duration">${time(song.duration)}</span>

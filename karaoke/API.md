@@ -90,13 +90,15 @@ curl -sS http://127.0.0.1:8746/v1/jobs/任务UUID
 
 房间快照也包含每首运行任务的 `stage_progress`，通过 SSE 更新。进度来自子进程的结构化标准输出；计数更新通常限频为每 0.5 秒一次，阶段切换立即推送。前端不轮询，不根据经过的时间伪造进度。
 
-曲库从入队开始就包含歌曲，状态可以是 `queued`、`running`、`completed`、`failed` 或 `evicted`；静态目录中尚未提交的歌曲为 `unprepared`。同一视频只展示最近一次任务。`job_id` 也可指向尚未完成的任务，再次点播时复用该任务，不重复下载或处理；只有 `status == "completed"` 才表示已准备好。房间 SSE 快照的 `library` 与 `GET /v1/library` 使用同一份数据，元数据、语言分类和进度一并推送。
+曲库从入队开始就包含歌曲，状态可以是 `queued`、`running`、`completed`、`failed`、`video_evicted` 或 `evicted`；静态目录中尚未提交的歌曲为 `unprepared`。同一视频只展示最近一次任务。`job_id` 也可指向尚未完成的任务，再次点播时复用该任务，不重复下载或处理；只有 `status == "completed"` 才表示已准备好。房间 SSE 快照的 `library` 与 `GET /v1/library` 使用同一份数据，元数据、语言分类和进度一并推送。
 
 语言优先采用用户指定值，再使用已生成结果、当前音频语言信息或已知曲目目录。处理时先读取所选音频轨的语言标签，ASR 返回后立即更新，歌词整理后再次确认。未知语言暂时只列在「全部」，不会按标题文字或字幕语言猜测演唱语言。
 
 取得下载元数据后，`song_info` 立即提供 `title`、`artist`、`duration_seconds`，并通过房间 SSE 更新歌单，不必等整首准备完成。优先使用视频的音乐标签，否则先显示视频标题；不把上传者当成原唱。歌词整理完成后再更新歌曲信息，用户填写的歌名／歌手始终优先。`input` 保持原请求，`result` 仍只在成品完成后提供。
 
-被 LRU 回收的任务为 `evicted`，原文件接口返回 HTTP 410。重新提交同链接或用原 `job_id` 点歌会重新准备。缓存不足导致准备中断时错误码为 `cache_full`；不会删除待唱歌曲来掩盖空间不足。默认上限、统计范围和运行中写入限制见 [缓存说明](APP.md#本地缓存上限)。
+LRU 优先回收视频：任务为 `video_evicted`、`restore_video: true`，仅 MV 接口返回 HTTP 410，其余音轨、字幕和封面仍可获取。提交相同输入（`force: false`）或用原 `job_id` 点歌，会复用原任务进入 `queued` / `running`，只下载、核对源音频指纹、重新合成视频；不会重跑模型。恢复沿用原先算好的结果，即使渲染器版本更新；成功后清除 `restore_video`，恢复耗时单列在 `result.video_restore`。恢复失败保留产物，房间的 `retry` 仍只补视频。源音频指纹不同报 `verify_video_failed`，可用 `force: true` 显式完整重做。
+
+视频回收后仍空间不足，才完整回收任务为 `evicted`，全部原文件接口返回 HTTP 410。重新提交同链接或用原 `job_id` 点歌会完整准备。缓存不足导致准备中断时错误码为 `cache_full`；不会删除待唱歌曲来掩盖空间不足。默认上限、统计范围和运行中写入限制见 [缓存说明](APP.md#本地缓存上限)。
 
 完成后的 `result.artifacts` 每项包含 `url`、`bytes`、`sha256`：
 

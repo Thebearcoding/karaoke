@@ -9,6 +9,30 @@ from uuid import UUID
 GIB = 1024**3
 
 
+def can_restore_video(folder, result):
+    """Only discard an MV when its expensive inputs and source identity survive."""
+    try:
+        artifacts = result['artifacts']
+        required = {'mv', 'instrumental', 'backing_vocals', 'lead_vocals', 'subtitles',
+                    'instrumental_preview', 'backing_vocals_preview', 'lead_vocals_preview'}
+        if not required <= artifacts.keys() or not result['reconstruction']['source_pcm_sha256']:
+            return False
+        if not result['language'] or not 0 < result['shared_preview_gain'] <= 1 or result['duration_seconds'] <= 0:
+            return False
+        video = (folder/artifacts['mv']['path']).resolve()
+        if not video.is_relative_to(folder):
+            return False
+        for name, artifact in artifacts.items():
+            if name == 'mv':
+                continue
+            path = (folder/artifact['path']).resolve()
+            if path == video or not path.is_relative_to(folder) or not path.is_file() or path.stat().st_size != artifact['bytes']:
+                return False
+        return True
+    except (KeyError, TypeError, OSError):
+        return False
+
+
 class CacheFull(RuntimeError):
     pass
 
@@ -66,7 +90,8 @@ class SongCache:
         """Keep published outputs and bounded diagnostics; discard working audio."""
         folder = self.folder(job['id'])
         keep = {'request.json', 'result.json', 'error.json', 'worker.log'}
-        keep.update(a['path'] for a in (job.get('result') or {}).get('artifacts', {}).values())
+        keep.update(a['path'] for name, a in (job.get('result') or {}).get('artifacts', {}).items()
+                    if name != 'mv' or not job.get('restore_video'))
         if not folder.exists():
             return
         for path in sorted(folder.rglob('*'), key=lambda p: len(p.parts), reverse=True):
@@ -91,8 +116,23 @@ class SongCache:
         used = sum(sizes.values())
         free = shutil.disk_usage(self.store.root).free
         candidates = sorted((j for j in jobs if j['id'] not in protected and
-                             j['status'] in ('completed', 'failed', 'evicted')),
+                             j['status'] in ('completed', 'video_evicted', 'failed', 'evicted')),
                             key=lambda j: (j.get('last_accessed_at', j['created_at']), j['id']))
+        # Exhaust cheap-to-rebuild video before discarding any computed audio/timings.
+        for job in candidates:
+            if used + reserve <= self.limit and free >= self.minimum_free + reserve:
+                break
+            folder = self.folder(job['id'])
+            if job['status'] != 'completed' or not can_restore_video(folder, job.get('result')):
+                continue
+            video = folder/job['result']['artifacts']['mv']['path']
+            size = video.stat().st_size if video.is_file() else 0
+            video.unlink(missing_ok=True)
+            used -= size
+            sizes[job['id']] -= size
+            free = shutil.disk_usage(self.store.root).free
+            job.update(status='video_evicted', restore_video=True)
+            self.store.update(job['id'], status='video_evicted', restore_video=True, evicted_at=time.time())
         for job in candidates:
             if used + reserve <= self.limit and free >= self.minimum_free + reserve:
                 break
@@ -104,8 +144,8 @@ class SongCache:
             used -= size
             sizes[job['id']] = 0
             free = shutil.disk_usage(self.store.root).free
-            self.store.update(job['id'], status='evicted' if job['status'] == 'completed' else job['status'],
-                              active_stages=[], evicted_at=time.time())
+            self.store.update(job['id'], status='evicted' if job.get('result') else job['status'],
+                              restore_video=False, active_stages=[], evicted_at=time.time())
         evictable = sum(sizes[j['id']] for j in candidates)
         stats = dict(used_bytes=used, limit_bytes=self.limit, evictable_bytes=evictable,
                      protected_bytes=sum(sizes.get(i, 0) for i in protected),

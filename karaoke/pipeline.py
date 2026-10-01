@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 from .job_schema import JobRequest, song_language, video_url
 from .song_sources import prepare_song_text, video_song_info
 from .stage_progress import parse_progress
+from .cache import can_restore_video
 
 
 def write_json(path, value):
@@ -189,7 +190,7 @@ class Pipeline:
         write_json(self.output/name, [dict(id='song', input=str(audio), input_sha256=file_hash(audio),
                                           duration_seconds=sf.info(audio).duration)])
 
-    def download(self):
+    def download(self, *, artwork=True, format_id=None):
         (self.output/'download').mkdir()
         url = self.request['url']
         if url.startswith('https://b23.tv/'):
@@ -209,7 +210,7 @@ class Pipeline:
             '--progress-template', 'postprocess:KARAOKE_STAGE_PROGRESS {"detail":"合并视频"}',
             '--write-info-json', '--no-overwrites', '--retries', '2', '--fragment-retries', '2',
             '--socket-timeout', '25', '--max-filesize', '2G', '--match-filter',
-            f'!is_live & duration <= {self.max_duration}', '-f', 'bv[height<=1080]+ba/b[height<=1080]',
+            f'!is_live & duration <= {self.max_duration}', '-f', format_id or 'bv[height<=1080]+ba/b[height<=1080]',
             '--merge-output-format', 'mkv', '--remux-video', 'mkv',
             '-o', self.output/'download/source.%(ext)s']
         if self.cookies_file:
@@ -228,8 +229,9 @@ class Pipeline:
         duration = float(probe['format']['duration'])
         if not 0 < duration <= self.max_duration+1:
             raise StageFailure('download', f'视频时长必须介于 0 和 {self.max_duration} 秒之间')
-        create_poster(self.source, self.output/'poster.jpg', thumbnail=metadata.get('thumbnail'),
-                      seconds=min(30, duration*.1))
+        if artwork:
+            create_poster(self.source, self.output/'poster.jpg', thumbnail=metadata.get('thumbnail'),
+                          seconds=min(30, duration*.1))
         write_json(self.output/'source.json', dict(url=url, sha256=file_hash(self.source),
                                                  duration=duration, probe=probe))
         return metadata, duration
@@ -267,7 +269,6 @@ class Pipeline:
                 raise StageFailure('prepare_lyrics', '歌词与这个视频的演唱匹配不足；请提交本版本的 lyrics 后重试')
             write_json(self.output/'lyrics.json', lyrics)
             write_json(self.output/'anchors.json', anchors)
-            write_json(self.output/'song-info.json', dict(title=lyrics['title'], original_artist=lyrics['artist']))
         finally:
             with self.lock:
                 self.timings['prepare_lyrics'] = round(time.perf_counter()-started, 3)
@@ -373,19 +374,6 @@ class Pipeline:
             self.align(lyrics, duration)
             packaging.result()
         stems = json.loads((self.output/'stems/manifest.json').read_text())
-        gain = stems['preview_shared_gain']
-        instrumental, rate = sf.read(self.output/'stems/instrumental.wav', dtype='float32', always_2d=True)
-        if self.request['mv_audio'] == 'instrumental_backing':
-            backing, _ = sf.read(self.output/'stems/backing-vocals.wav', dtype='float32', always_2d=True)
-            instrumental += backing
-        mixed = self.output/'render-mix.wav'
-        sf.write(mixed, instrumental, rate, subtype='FLOAT')
-        self.run('render', [sys.executable, ROOT/'render_lyric_progress.py', '--video', self.source,
-            '--audio', mixed, '--cues', self.output/'cues.json', '--song-info', self.output/'song-info.json',
-            '--language', {'English': 'Latin'}.get(lyrics['language'], lyrics['language']),
-            '--duration', duration, '--gain', gain, '--bottom-margin', '96', '--next-line', '--countdown',
-            '--output', self.output/'mv.mp4'])
-        mixed.unlink()
         artifacts = dict(mv='mv.mp4', instrumental='stems/instrumental.wav',
             backing_vocals='stems/backing-vocals.wav', lead_vocals='stems/lead.wav',
             instrumental_preview='stems/instrumental.mp3', backing_vocals_preview='stems/backing-vocals.mp3',
@@ -393,12 +381,60 @@ class Pipeline:
         if (self.output/'poster.jpg').is_file():
             artifacts['poster'] = 'poster.jpg'
         result = dict(title=lyrics['title'], artist=lyrics['artist'], language=lyrics['language'],
-            duration_seconds=duration, mv_audio=self.request['mv_audio'], shared_preview_gain=gain,
-            artifacts={key: dict(path=value, bytes=(self.output/value).stat().st_size,
-                       sha256=file_hash(self.output/value)) for key, value in artifacts.items()},
+            duration_seconds=duration, mv_audio=self.request['mv_audio'], shared_preview_gain=stems['preview_shared_gain'],
+            source_format=metadata.get('format_id'), artifacts={key: dict(path=value) for key, value in artifacts.items()},
             quality=json.loads((self.output/'quality.json').read_text()),
-            reconstruction=stems['reconstruction']['vocal_first'], device=self.device,
-            processing_seconds=round(time.perf_counter()-started, 3), timings=self.timings)
+            reconstruction=stems['reconstruction']['vocal_first'], device=self.device)
+        self.render_video(result)
+        for artifact in result['artifacts'].values():
+            path = self.output/artifact['path']
+            artifact.update(bytes=path.stat().st_size, sha256=file_hash(path))
+        result.update(processing_seconds=round(time.perf_counter()-started, 3), timings=self.timings)
+        write_json(self.output/'result.json', result)
+        return result
+
+    def render_video(self, result):
+        import soundfile as sf
+        paths = {name: self.output/a['path'] for name, a in result['artifacts'].items()}
+        instrumental, rate = sf.read(paths['instrumental'], dtype='float32', always_2d=True)
+        if result['mv_audio'] == 'instrumental_backing':
+            backing, _ = sf.read(paths['backing_vocals'], dtype='float32', always_2d=True)
+            instrumental += backing
+        mixed = self.output/'render-mix.wav'
+        sf.write(mixed, instrumental, rate, subtype='FLOAT')
+        write_json(self.output/'song-info.json', dict(title=result['title'], original_artist=result['artist']))
+        rendered = self.output/'rendered-mv.mp4'
+        self.run('render', [sys.executable, ROOT/'render_lyric_progress.py', '--video', self.source,
+            '--audio', mixed, '--cues', paths['subtitles'], '--song-info', self.output/'song-info.json',
+            '--language', {'English': 'Latin'}.get(result['language'], result['language']),
+            '--duration', result['duration_seconds'], '--gain', result['shared_preview_gain'],
+            '--bottom-margin', '96', '--next-line', '--countdown', '--output', rendered])
+        rendered.replace(paths['mv'])
+        mixed.unlink()
+
+    def restore_video(self):
+        """Rebuild only the discarded video; never run a model or change cached audio/cues."""
+        from .exact_stems import decode_source, pcm_sha
+        started = time.perf_counter()
+        result = json.loads((self.output/'result.json').read_text())
+        if not can_restore_video(self.output, result):
+            raise StageFailure('restore_video', '保留的音轨或字幕不完整，无法补回视频')
+        self.download(artwork=False, format_id=result.get('source_format'))
+        self.phase('verify_video', True)
+        verified = time.perf_counter()
+        try:
+            audio, _, _ = decode_source(self.source)
+            if pcm_sha(audio) != result['reconstruction']['source_pcm_sha256']:
+                raise StageFailure('verify_video', '下载的视频音频与缓存版本不同，已保留原音轨和字幕；需重新完整准备该版本')
+            del audio
+        finally:
+            self.timings['verify_video'] = round(time.perf_counter()-verified, 3)
+            self.phase('verify_video', False)
+        self.render_video(result)
+        artifact = result['artifacts']['mv']
+        path = self.output/artifact['path']
+        artifact.update(bytes=path.stat().st_size, sha256=file_hash(path))
+        result['video_restore'] = dict(processing_seconds=round(time.perf_counter()-started, 3), timings=self.timings)
         write_json(self.output/'result.json', result)
         return result
 
@@ -407,6 +443,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--request', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--restore-video', action='store_true')
     args = parser.parse_args()
     pipeline = Pipeline(json.loads(args.request.read_text()), args.output,
         separator_python=os.getenv('KARAOKE_SEPARATOR_PYTHON'), device=os.getenv('KARAOKE_DEVICE', 'auto'),
@@ -415,7 +452,7 @@ def main():
         catalog_root=None if os.getenv('KARAOKE_DISABLE_LYRIC_CATALOG') == '1' else ROOT,
         cookies_file=os.getenv('KARAOKE_COOKIES_FILE'))
     try:
-        pipeline.execute()
+        pipeline.restore_video() if args.restore_video else pipeline.execute()
     except Exception as error:
         write_json(args.output/'error.json', dict(code=getattr(error, 'stage', 'processing')+'_failed',
             message=str(error)[:600] if isinstance(error, (StageFailure, ValueError)) else

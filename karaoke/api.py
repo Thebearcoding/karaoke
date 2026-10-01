@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .cache import CacheFull, GIB, SongCache
+from .cache import CacheFull, GIB, SongCache, can_restore_video
 from .job_schema import JobRequest
 from .room import AddSong, Room, RoomCommand, Updates
 from .video_search import SourceVerificationUnavailable, VideoSearch
@@ -84,9 +84,24 @@ class Store:
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             if not payload.force:
-                rows = db.execute("SELECT doc FROM jobs WHERE cache_key=? AND status IN ('queued','running','completed') ORDER BY created_at DESC", (key,)).fetchall()
+                rows = db.execute("""SELECT doc FROM jobs WHERE
+                    (cache_key=? AND status IN ('queued','running','completed'))
+                    OR json_extract(doc, '$.restore_video')=1 ORDER BY created_at DESC""", (key,)).fetchall()
                 for row in rows:
                     doc = json.loads(row[0])
+                    if doc.get('restore_video'):
+                        if {k: v for k, v in doc['input'].items() if k != 'force'} != key_payload:
+                            continue
+                        if doc['status'] not in ('queued', 'running'):
+                            folder = self.root/doc['id']
+                            if not can_restore_video(folder, doc.get('result')):
+                                continue
+                            doc.update(status='queued', active_stages=[], stage_progress={}, timings={},
+                                       error=None, updated_at=now(), last_accessed_at=now())
+                            (folder/'request.json').write_text(json.dumps(doc['input'], ensure_ascii=False)+'\n')
+                            db.execute('UPDATE jobs SET cache_key=?, status=?, doc=? WHERE id=?',
+                                       (key, 'queued', json.dumps(doc, ensure_ascii=False), doc['id']))
+                            return doc, False
                     if doc['status'] != 'completed' or all(
                             (self.root/doc['id']/item['path']).is_file()
                             for item in doc['result']['artifacts'].values()):
@@ -129,7 +144,7 @@ class Worker:
             self.store.update(job['id'], status='failed', active_stages=[],
                 error=dict(code='interrupted', message='上次服务在处理时退出；可重新提交链接'))
         for job in self.store.list(100000):
-            if job['status'] in ('completed', 'failed'):
+            if job['status'] in ('completed', 'video_evicted', 'failed'):
                 self.store.cache.compact(job)
         self.store.cache.enforce()
         for job in self.store.list(100000, 'queued'):
@@ -160,12 +175,16 @@ class Worker:
             job_id = await self.queue.get()
             self.current = job_id
             folder = self.store.root/job_id
-            self.store.update(job_id, status='running', started_at=now())
+            job = self.store.update(job_id, status='running', started_at=now())
             try:
                 if not self.store.cache.enforce(self.store.cache.headroom):
                     raise CacheFull('歌曲缓存或硬盘剩余空间不足；请移除待唱歌曲、提高上限或释放磁盘后重试')
                 command = self.command(folder) if self.command else [sys.executable, '-u', '-m',
                     'karaoke.pipeline', '--request', str(folder/'request.json'), '--output', str(folder)]
+                if job.get('restore_video'):
+                    (folder/'result.json').write_text(json.dumps(job['result'], ensure_ascii=False)+'\n')
+                    if not self.command:
+                        command.append('--restore-video')
                 with (folder/'worker.log').open('wb') as log:
                     self.process = await asyncio.create_subprocess_exec(*command, cwd=ROOT.parent,
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
@@ -180,7 +199,7 @@ class Worker:
                         path = (folder/artifact['path']).resolve()
                         if not path.is_relative_to(folder) or not path.is_file() or path.stat().st_size != artifact['bytes']:
                             raise ValueError('Invalid result artifact')
-                    self.store.update(job_id, status='completed', active_stages=[], result=result,
+                    self.store.update(job_id, status='completed', active_stages=[], result=result, restore_video=False, error=None,
                                       completed_at=now(), last_accessed_at=now())
                 else:
                     error_path = folder/'error.json'
@@ -382,7 +401,9 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
             raise HTTPException(404, 'Unknown job')
         if doc['status'] == 'evicted':
             raise HTTPException(410, '歌曲缓存已回收，请重新点歌')
-        if doc['status'] != 'completed':
+        if doc.get('restore_video') and name == 'mv':
+            raise HTTPException(410, '视频缓存已回收，重新点歌即可补回')
+        if doc['status'] != 'completed' and not doc.get('restore_video'):
             raise HTTPException(409, 'Artifacts are available when the job completes')
         artifact = doc['result']['artifacts'].get(name)
         if artifact is None:
