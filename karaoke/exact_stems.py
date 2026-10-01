@@ -9,6 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import tempfile
 import time
 
 import numpy as np
@@ -127,6 +128,20 @@ def validate_preview(path, frames, channels, sample_rate):
                 decoded_peak=peak, padding_peak=padding_peak)
 
 
+def encode_preview(source, output, gain, frames, channels):
+    info = sf.info(source)
+    if (info.frames, info.channels) != (frames, channels):
+        raise ValueError('Preview input must preserve the complete master time axis')
+    # The LAME frontend records the full end padding, including padding that
+    # spans two MP3 frames. FFmpeg's wrapper can truncate that count.
+    with tempfile.TemporaryDirectory(prefix='.preview-', dir=Path(output).parent) as directory:
+        scaled = Path(directory)/'scaled.wav'
+        subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(source),
+            '-af', f'volume={gain:.17g}:precision=double', '-c:a', 'pcm_f32le', str(scaled)], check=True)
+        subprocess.run(['lame', '--silent', '--noreplaygain', '-V', '2', str(scaled), str(output)], check=True)
+    return validate_preview(output, frames, channels, info.samplerate)
+
+
 def build(source_path, estimate_path, output):
     source_path, estimate_path, output = (Path(p).resolve() for p in (source_path, estimate_path, output))
     if output.exists():
@@ -147,10 +162,7 @@ def build(source_path, estimate_path, output):
     previews = {}
     for name in ('vocals', 'backing'):
         path = output/f'{name}.mp3'
-        subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(output/f'{name}.wav'),
-            '-af', f'volume={gain:.17g}:precision=double', '-c:a', 'libmp3lame', '-q:a', '2',
-            str(path)], check=True)
-        previews[name] = validate_preview(path, len(source), source.shape[1], rate)
+        previews[name] = encode_preview(output/f'{name}.wav', path, gain, len(source), source.shape[1])
     manifest = {'schema_version': 1, 'source': {'path': str(source_path),
         'container_sha256': sha(source_path), 'decoder': decoder,
         'decoder_version': subprocess.check_output(['ffmpeg', '-version'], text=True).splitlines()[0],

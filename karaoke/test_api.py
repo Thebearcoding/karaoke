@@ -634,6 +634,22 @@ def test_preview_padding_never_hides_missing_or_non_silent_audio(tmp_path, extra
                 validate_preview(path, 10000, 2, 48000)
 
 
+@pytest.mark.parametrize('rate,frames,channels', [(48000,57600,2), (48000,57601,2),
+    (48000,57629,2), (48000,57646,2), (48000,57647,2), (44100,57629,1)])
+def test_preview_encoder_preserves_partial_final_frames(tmp_path, rate, frames, channels):
+    import soundfile as sf
+    from karaoke.three_stems import encode_preview
+
+    tone = .1*np.sin(2*np.pi*440*np.arange(frames)/rate)
+    source, output = tmp_path/'master.wav', tmp_path/'preview.mp3'
+    sf.write(source, np.repeat(tone[:,None], channels, axis=1), rate, subtype='DOUBLE')
+    report = encode_preview(source, output, .5, frames, channels)
+    assert report['decoded_length_delta_samples'] == 0
+    assert report['padding_peak'] == 0
+    assert .04 < report['decoded_peak'] < .06
+    assert sf.info(source).frames == frames and sf.info(source).subtype == 'DOUBLE'
+
+
 def test_cross_line_refinement_falls_back_without_inventing_times():
     prior = [dict(text=text, units=[dict(text=text, start=start, end=start+.3)])
              for text, start in [('first',1.), ('second',1.5), ('third',3.)]]

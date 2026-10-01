@@ -10,8 +10,8 @@ import time
 import numpy as np
 import soundfile as sf
 
-from exact_stems import (decode_source, exact_split, native_vocals,
-                         read_masters, reconstruction_report, sha, validate_preview)
+from exact_stems import (decode_source, encode_preview, exact_split, native_vocals,
+                         read_masters, reconstruction_report, sha)
 
 
 def check_three(source, lead, backing_vocals, instrumental):
@@ -21,13 +21,6 @@ def check_three(source, lead, backing_vocals, instrumental):
         'music_plus_backing_first': reconstruction_report(source, instrumental + backing_vocals, lead),
         'music_plus_lead_first': reconstruction_report(source, instrumental + lead, backing_vocals),
     }
-
-
-def encode_preview(source, output, gain, frames, channels):
-    subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(source),
-        '-af', f'volume={gain:.17g}:precision=double', '-c:a', 'libmp3lame',
-        '-q:a', '2', str(output)], check=True)
-    return validate_preview(output, frames, channels, sf.info(source).samplerate)
 
 
 def build(existing, estimate, output, video=None):
