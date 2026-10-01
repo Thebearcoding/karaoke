@@ -249,11 +249,52 @@ def align_job(aligner, job, full_song=False):
             report.update(accepted=block not in remaining, candidate_cues=cues[block[0]:block[1]])
         if remaining:
             failures.append(dict(lines=[b[:2] for b in remaining], error='Word timing falls outside acoustic phrase context'))
+
+    def order_conflicts():
+        units = [(i, u) for i, cue in enumerate(cues) for u in cue['units']]
+        return {(i, j) for (i, a), (j, b) in zip(units, units[1:]) if a['start'] >= b['start']}
+
+    boundary_retries = []
+    if scope_blocks and not failures:
+        for initial in sorted(order_conflicts()):
+            if initial not in order_conflicts():
+                continue
+            first, last = initial
+            before = order_conflicts()
+            for _ in range(12):
+                left, right = max(0, first-1), min(len(lines), last+2)
+                if any(anchors[i]['status'] != 'candidate' for i in (left, right-1)):
+                    break
+                begin, end = max(0., anchors[left]['start']-.6), min(len(audio)/rate, anchors[right-1]['end']+.6)
+                if not 0 < end-begin <= 45:
+                    break
+                previous = cues[first:last+1]
+                run_blocks([(first, last+1, left, right, begin, end)],
+                           start_id=len(blocks)+len(context_retries)+len(boundary_retries))
+                after = order_conflicts()
+                outside = context_scope_violations(cues, scope_blocks) if not failures else []
+                accepted = not failures and after < before and not outside
+                boundary_retries.append(dict(core=[first, last+1], context=[left, right],
+                    source_range=[begin, end], accepted=accepted, original_cues=previous,
+                    candidate_cues=cues[first:last+1], conflicts=sorted(after), outside_scope=outside))
+                if accepted:
+                    break
+                cues[first:last+1] = previous
+                # A local repair may move the crossing to its edge. Include
+                # that neighbor in the next joint decode; never commit the
+                # partial repair or enlarge the original acceptance bounds.
+                moved = [(a, b) for a, b in after-before if a < first <= b or a <= last < b]
+                if failures or outside or not moved:
+                    break
+                first = min(first, min(a for a, _ in moved))
+                last = max(last, max(b for _, b in moved))
+    if order_conflicts():
+        failures.append(dict(lines=sorted(order_conflicts()), error='Word onsets remain out of order'))
     if aligner.device == 'mps':
         torch.mps.synchronize()
     report = dict(method=aligner.method, device=aligner.device, seconds=time.perf_counter()-started,
                   full_song=full_song, failures=failures, scope_blocks=scope_blocks,
-                  context_retries=context_retries, audio_sha256=sha(job['audio']),
+                  context_retries=context_retries, boundary_retries=boundary_retries, audio_sha256=sha(job['audio']),
                   onset_ratio=aligner.onset_ratio,
                   anchors_sha256=sha(job['anchors']) if job.get('anchors') else None,
                   lyrics_sha256=sha(job['lyrics']), runner_sha256=sha(__file__),
