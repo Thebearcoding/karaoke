@@ -285,7 +285,10 @@ def record_failure(attempt, job, folder):
 def queue_cases(client, base, state, version, persist):
     """Use the same room API as a person's add button; no test-only queue limit."""
     room = client.get(base+'/v1/room').raise_for_status().json()
-    for case in state['cases']:
+    # Retry software regressions first without changing the fixed selection or room order.
+    cases = sorted(state['cases'], key=lambda case: not (
+        case['attempts'] and case['attempts'][-1]['status'] == 'failed'))
+    for case in cases:
         if len(room['entries']) >= 100:
             break
         last = case['attempts'][-1] if case['attempts'] else None

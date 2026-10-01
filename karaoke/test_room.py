@@ -80,6 +80,9 @@ def test_soak_adds_all_cases_to_room_and_only_removes_finished_owned_entries(tmp
     user_job = ready_job(app.state.store)
     state = {'provider_backoff': {}, 'cases': [dict(url=f'https://www.youtube.com/watch?v={i:011d}',
         title=f'Test {i}', provider='youtube', attempts=[]) for i in range(3)]}
+    original_urls = [case['url'] for case in state['cases']]
+    for case, status in zip(state['cases'], ('passed', 'failed', 'failed')):
+        case['attempts'].append(dict(status=status, pipeline_version='previous'))
     with TestClient(app) as client:
         user = client.post('/v1/room/entries', json={'job_id': user_job['id']}).json()['entries'][0]
         state['provider_backoff']['openai'] = time.time()+60
@@ -89,8 +92,10 @@ def test_soak_adds_all_cases_to_room_and_only_removes_finished_owned_entries(tmp
         queue_cases(client, 'http://testserver', state, 'test', lambda: None)
         entries = client.get('/v1/room').json()['entries']
         assert len(entries) == 4  # The abandoned queue=2 idea must not become an app limit.
-        attempts = [c['attempts'][0] for c in state['cases']]
+        attempts = [c['attempts'][-1] for c in state['cases']]
         assert {a['entry_id'] for a in attempts} == {e['id'] for e in entries[1:]}
+        assert [e['id'] for e in entries[1:]] == [attempts[i]['entry_id'] for i in (1, 2, 0)]
+        assert [case['url'] for case in state['cases']] == original_urls
         queue_cases(client, 'http://testserver', state, 'test', lambda: None)
         assert len(client.get('/v1/room').json()['entries']) == 4
         attempts[0]['status'] = 'passed'
