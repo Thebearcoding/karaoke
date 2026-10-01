@@ -1071,6 +1071,37 @@ def test_description_lyrics_select_existing_lines_without_rewriting(tmp_path, se
                 pipeline.prepare_lyrics(dict(description=description), 5)
 
 
+@pytest.mark.parametrize('initial_state', ['valid', 'backward', 'wrong_language', 'out_of_bounds'])
+def test_independent_lyrics_can_reuse_valid_original_asr_anchors(tmp_path, initial_state):
+    import soundfile as sf
+    lines = ['清风吹过树林', '晚霞染红天空']
+    pipeline = Pipeline(dict(url=URL, lyrics=lines, language='zh'), tmp_path/'job', catalog_root=None)
+    folder = pipeline.output/'asr'
+    folder.mkdir()
+    recovered = dict(language='Chinese', segments=[dict(text='完全不同', start=1, end=4)],
+                     words=[dict(word='完全不同', start=1, end=4)])
+    words = [dict(word=text, start=1+2*i, end=2+2*i) for i, text in enumerate(lines)]
+    if initial_state == 'backward':
+        words.reverse()
+    if initial_state == 'out_of_bounds':
+        for word in words:
+            word['end'] = 10
+    initial = dict(language='English' if initial_state == 'wrong_language' else 'Chinese',
+                   segments=[], words=words)
+    (folder/'transcription.json').write_text(json.dumps(recovered))
+    (folder/'initial-transcription.json').write_text(json.dumps(initial))
+    sf.write(pipeline.output/'vocals-16k.wav', np.ones(5000)*.1, 1000)
+    if initial_state != 'valid':
+        with pytest.raises(StageFailure, match='匹配不足'):
+            pipeline.prepare_lyrics({}, 5)
+        return
+    pipeline.prepare_lyrics({}, 5)
+    anchors = json.loads((pipeline.output/'anchors.json').read_text())
+    assert [(c['text'],c['start'],c['end']) for c in anchors] == [(lines[0],1,2),(lines[1],3,4)]
+    assert json.loads((folder/'filtered.json').read_text())['anchor_source'] == 'initial_transcription'
+    assert json.loads((pipeline.output/'lyrics.json').read_text())['lines'] == lines
+
+
 @pytest.mark.parametrize('language,text', [
     ('English', "One two three four five six seven eight nine ten eleven twelve. Don't lose déjà vu!"),
     ('Chinese', '甲乙丙丁戊己庚辛壬癸甲乙丙丁戊己庚辛壬癸，今天hello world不要漏字。'),

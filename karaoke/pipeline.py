@@ -395,7 +395,8 @@ class Pipeline:
         try:
             catalog = list((self.catalog_root/'lyrics').glob('*.json')) if self.catalog_root else []
             with self.checkpoints.stage('prepare_lyrics',
-                    inputs=[self.output/'asr/transcription.json', self.output/'vocals-16k.wav'],
+                    inputs=[self.output/'asr/transcription.json', self.output/'vocals-16k.wav',
+                            *sorted((self.output/'asr').glob('initial-transcription.json'))],
                     outputs=[self.output/'lyrics.json', self.output/'anchors.json', self.output/'asr/filtered.json'],
                     config=dict(request=self.request,
                                 metadata={k: metadata.get(k) for k in ('title', 'track', 'artist', 'artists', 'uploader', 'description')},
@@ -427,9 +428,26 @@ class Pipeline:
         write_json(self.output/'asr/filtered.json', dict(transcription=transcription, rejected=rejected))
         lyrics = prepare_song_text(self.request, metadata, transcription, duration,
             catalog_root=self.catalog_root, model=self.text_model)
-        anchors = anchors_from_words(lyrics['lines'], transcription.get('words') or [],
-                                     lyrics['language'], allow_missing=True)
-        covered = sum(c['matched_fraction']*len(c['text']) for c in anchors)/max(1, sum(len(c['text']) for c in anchors))
+        candidates = {'transcription': transcription.get('words') or []}
+        initial_path = self.output/'asr/initial-transcription.json'
+        if lyrics['provenance']['kind'] != 'asr_draft' and initial_path.is_file():
+            # Recovery of one bad passage need not discard usable whole-song
+            # anchors. Only compare them against independently supplied lyrics.
+            initial = json.loads(initial_path.read_text())
+            if song_language(initial.get('language')) == lyrics['language']:
+                initial, _ = filter_silent_transcription(initial, audio, rate)
+                words = [w for w in initial.get('words') or [] if 0 <= w['start'] < w['end'] <= duration]
+                if words and all(a['start'] <= b['start'] for a, b in zip(words, words[1:])):
+                    candidates['initial_transcription'] = words
+        matches = {}
+        for name, words in candidates.items():
+            cues = anchors_from_words(lyrics['lines'], words, lyrics['language'], allow_missing=True)
+            coverage = sum(c['matched_fraction']*len(c['text']) for c in cues)/max(1, sum(len(c['text']) for c in cues))
+            matches[name] = (cues, coverage)
+        selected = max(matches, key=lambda name: matches[name][1])
+        anchors, covered = matches[selected]
+        write_json(self.output/'asr/filtered.json', dict(transcription=transcription, rejected=rejected,
+            anchor_source=selected, anchor_coverage={name: match[1] for name, match in matches.items()}))
         write_json(self.output/'lyrics.json', lyrics)
         write_json(self.output/'anchors.json', anchors)
         if covered < .55 or not any(c['status'] == 'candidate' for c in anchors):
