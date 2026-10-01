@@ -148,6 +148,37 @@ def test_external_failures_retain_safe_causes_and_do_not_retry_as_software_bugs(
         assert not eligible(case, 'v3', attempt['next_retry_at']+1)
 
 
+def test_soak_preserves_failed_stage_diagnostics_after_cache_eviction(tmp_path):
+    import gzip
+    import shutil
+    from karaoke.tools.soak import record_failure
+
+    folder = tmp_path/'job'
+    folder.mkdir()
+    (folder/'worker.log').write_text('StageFailure: align_repeats failed\n')
+    traceback = 'Traceback:\nParameterError: No valid sub-sequence warping path\n'
+    (folder/'align_repeats.log').write_text('old progress\n'*4000+traceback)
+    (folder/'asr').mkdir()
+    (folder/'asr/transcription.json').write_text('{"language": "chinese"}')
+    (folder/'repeated-lyrics').mkdir()
+    (folder/'repeated-lyrics/run.json').write_text('{"attempts": []}')
+    (folder/'vocals.mp3').write_bytes(b'private audio')
+    attempt = dict(external_attempt=1)
+    error = dict(code='align_repeats_failed', message='Generic stage failure')
+    record_failure(attempt, dict(id='job', error=error), folder)
+    shutil.rmtree(folder)
+
+    with gzip.open(attempt['reproduction_file'], 'rt') as stream:
+        saved = json.load(stream)
+    assert saved['align_repeats.log'].endswith(traceback)
+    assert len(saved['align_repeats.log'].encode()) <= 16384
+    assert saved['asr/transcription.json'] == {'language': 'chinese'}
+    assert saved['repeated-lyrics/run.json'] == {'attempts': []}
+    assert 'vocals.mp3' not in saved
+    assert traceback in attempt['diagnostic_tail']
+    assert attempt['status'] == 'failed' and attempt['error'] == error
+
+
 def test_retry_preserves_completed_stages_and_only_reruns_affected_work(tmp_path):
     from karaoke.stage_cache import StageCache
     store = Store(tmp_path)

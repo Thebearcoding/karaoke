@@ -182,6 +182,34 @@ class SubtitleIntegrity(unittest.TestCase):
         self.assertEqual(agree_onset([3.1, 3.18], .04, 1., 4.), 3.14)
         self.assertIsNone(agree_onset([4.1, 4.18], .04, 1., 4.))
 
+    def test_repeat_recovery_keeps_prior_timing_when_no_audio_path_exists(self):
+        import json
+        from unittest.mock import patch
+        from align_repeated_lyrics import main
+
+        cues = [dict(text='甲乙丙丁戊己', aligned_start=start, aligned_end=end,
+                     units=[dict(text='甲乙丙丁戊己', first=0, stop=6, start=start, end=end,
+                                 timing_source=source)])
+                for start, end, source in [(1., 2., 'singing_phonemes'),
+                                           (10., 20., 'prior_word_fallback')]]
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder/'cues.json').write_text(json.dumps(cues))
+            (folder/'jobs.json').write_text(json.dumps([dict(song='test', language='Chinese',
+                audio='unused.wav', cues=str(folder/'cues.json'), output=str(folder/'output'))]))
+            # Even identical features cannot fit a 12-second target into a
+            # 3-second reference with the configured DTW step limits.
+            with patch('sys.argv', ['align_repeated_lyrics', '--jobs', str(folder/'jobs.json'), '--device', 'cpu']), \
+                 patch('align_repeated_lyrics.sf.read', return_value=(np.ones((400, 1)), 10)), \
+                 patch('align_repeated_lyrics.audio_features', return_value={'pitch': np.ones((2, 4000))}), \
+                 patch('align_repeated_lyrics.SingingAligner'), \
+                 patch('align_repeated_lyrics.reference_units', return_value={}):
+                main()
+            self.assertEqual(json.loads((folder/'output/cues.json').read_text()), cues)
+            attempt = json.loads((folder/'output/run.json').read_text())['attempts'][0]
+            self.assertEqual(attempt['accepted_units'], 0)
+            self.assertIn('No valid sub-sequence warping path', attempt['error'])
+
     def test_repeated_phonemes_keep_independent_time_windows(self):
         anchors = [{'first': 0, 'stop': 1, 'start': 0., 'end': .2},
                    {'first': 1, 'stop': 2, 'start': 1.2, 'end': 1.5}]

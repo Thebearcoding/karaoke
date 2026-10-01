@@ -233,28 +233,32 @@ def wait_job(client, base, job_id):
 
 def record_failure(attempt, job, folder):
     error = job.get('error') or dict(code='verification_failed', message='Output validation failed')
-    logs = []
-    for name in ('worker.log', 'download.log', 'transcribe.log'):
-        path = folder/name
-        if path.exists():
+    diagnostics = {}
+    for path in sorted(folder.glob('*.log')):
+        try:
             with path.open('rb') as stream:
-                stream.seek(max(0, path.stat().st_size-4000))
-                logs.append(stream.read().decode(errors='replace'))
+                stream.seek(0, 2)
+                stream.seek(max(0, stream.tell()-16384))
+                diagnostics[path.name] = stream.read().decode(errors='replace')
+        except FileNotFoundError:  # Cache eviction may race a completed job's inspection.
+            continue
+    names = ('worker.log', 'download.log', 'transcribe.log', error['code'].removesuffix('_failed')+'.log')
+    logs = [diagnostics[name][-4000:] for name in dict.fromkeys(names) if name in diagnostics]
     # Older workers reported these as generic stage failures. Classify their
     # retained logs too, so a code rollout does not cause inappropriate retries.
     error = provider_error('\n'.join(logs)) or error
     attempt.update(status='failed', error=error, finished_at=stamp(),
         error_fingerprint=hashlib.sha256(json.dumps(error, sort_keys=True).encode()).hexdigest())
     attempt['diagnostic_tail'] = '\n'.join(logs)
-    diagnostics = {}
     for pattern in ('asr/*.json', 'alignment/*.json', 'phonemes/*.json', 'context/**/*.json',
-                    'lyrics.json', 'anchors.json', 'word-cues.json', 'quality.json'):
+                    'repeated-lyrics/*.json', 'english-onsets/*.json',
+                    'lyrics.json', 'anchors.json', 'word-cues.json', 'ordered-cues.json', 'quality.json'):
         for path in folder.glob(pattern):
-            if path.stat().st_size <= 2*1024**2:
-                try:
+            try:
+                if path.stat().st_size <= 2*1024**2:
                     diagnostics[str(path.relative_to(folder))] = json.loads(path.read_text())
-                except (ValueError, OSError):
-                    continue
+            except (ValueError, OSError):
+                continue
     if diagnostics:
         target = folder.parent/'soak-100'/f'{job["id"]}-{attempt["error_fingerprint"][:12]}.json.gz'
         target.parent.mkdir(exist_ok=True)

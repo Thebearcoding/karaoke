@@ -13,6 +13,7 @@ from pathlib import Path
 import time
 
 import numpy as np
+from librosa.util.exceptions import ParameterError
 from scipy.signal import resample_poly
 import soundfile as sf
 
@@ -148,15 +149,15 @@ def main():
             reference_cache = {}
             for target_id, source_id in progress_items(pairs, 'blocks'):
                 source, target = cues[source_id], cues[target_id]
-                if source_id not in reference_cache:
-                    try:
+                try:
+                    if source_id not in reference_cache:
                         reference_cache[source_id] = reference_units(models[language], coarse, source_id, reference, reference_rate, language)
-                    except ValueError as error:
-                        reports.append({'target_line': target_id+1, 'reference_line': source_id+1,
-                                        'ordered': False, 'accepted_units': 0, 'error': str(error)})
-                        continue
+                    paths = {name: audio_path(data, source, target) for name, data in features.items()}
+                except (ValueError, ParameterError) as error:
+                    reports.append({'target_line': target_id+1, 'reference_line': source_id+1,
+                                    'ordered': False, 'accepted_units': 0, 'error': str(error)})
+                    continue
                 source_units = reference_cache[source_id]
-                paths = {name: audio_path(data, source, target) for name, data in features.items()}
                 report = {'target_line': target_id+1, 'reference_line': source_id+1,
                           'path_costs': {name: curve[2] for name, curve in paths.items()}, 'units': []}
                 candidate = deepcopy(target)
