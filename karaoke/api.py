@@ -67,6 +67,11 @@ class Store:
             if row is None:
                 raise KeyError(job_id)
             doc = json.loads(row[0])
+            if 'song_info' in fields:
+                # Stages learn metadata incrementally; missing values do not erase it.
+                fields['song_info'] = {**(doc.get('song_info') or {}), **{
+                    key: value for key, value in (fields['song_info'] or {}).items()
+                    if value is not None and value != ''}}
             doc.update(fields, updated_at=now())
             db.execute('UPDATE jobs SET status=?, doc=? WHERE id=?',
                        (doc['status'], json.dumps(doc, ensure_ascii=False), job_id))

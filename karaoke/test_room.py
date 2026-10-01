@@ -264,7 +264,7 @@ def test_progress_is_received_before_worker_exits(tmp_path):
                 'import sys,time;print("KARAOKE_PROGRESS "+sys.argv[1],flush=True);'
                 'print("KARAOKE_PROGRESS "+sys.argv[2],flush=True);time.sleep(30)',
                 json.dumps(dict(song_info=info)), json.dumps(dict(active_stages=['transcribe', 'separate_lead'],
-                    stage_progress=counters, timings={}))]
+                    stage_progress=counters, timings={}, song_info={'language': 'English'}))]
     with TestClient(create_app(tmp_path, worker_command=event_worker, version='test')) as client:
         entry = client.post('/v1/room/entries',json={'url':URL}).json()['entries'][0]
         end = time.monotonic()+3
@@ -274,8 +274,8 @@ def test_progress_is_received_before_worker_exits(tmp_path):
                 break
             time.sleep(.01)
         assert state['active_stages'] == ['transcribe', 'separate_lead'] and state['status'] == 'running'
-        # A later stage-only event must not erase the metadata or alter the input.
-        assert state['song_info'] == info and state['result'] is None
+        # Learning the language in a later stage must not erase earlier metadata.
+        assert state['song_info'] == {**info, 'language': 'English'} and state['result'] is None
         assert state['input']['title'] is None and state['input']['artist'] is None
         visible = client.get('/v1/room').json()['entries'][0]
         assert (visible['title'], visible['artist'], visible['duration']) == ('New video title', 'Singer', 123)
@@ -329,10 +329,16 @@ def test_search_title_is_immediate_but_does_not_override_metadata_or_cache(tmp_p
         job = app.state.store.read(entry['job_id'])
         assert job['input']['title'] is None
         assert finished(client, job['id'])['status'] == 'completed'
+        for partial in ({}, {'language': 'English'}, {'title': '', 'artist': None}, None):
+            app.state.store.update(job['id'], song_info=partial)
+            room = client.get('/v1/room').json()
+            assert room['entries'][0]['title'] == 'Video title (Official MV)'
+            assert room['library'][0]['title'] == 'Video title (Official MV)'
         app.state.store.update(job['id'], song_info={'title':'Clean song title', 'artist':'Singer'})
         room = client.get('/v1/room').json()
         assert room['entries'][0]['title'] == 'Clean song title'
         assert room['library'][0]['title'] == 'Clean song title'
+        assert room['library'][0]['language'] == 'English'
         again = client.post('/v1/room/entries', json={'url':URL, 'source_title':'A different search title'}).json()
         assert again['entries'][-1]['job_id'] == job['id']
         assert again['entries'][-1]['title'] == 'Clean song title'
