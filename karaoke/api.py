@@ -95,9 +95,15 @@ class Store:
             if not payload.force:
                 rows = db.execute("""SELECT doc FROM jobs WHERE
                     (cache_key=? AND status IN ('queued','running','completed'))
-                    OR status IN ('failed','audio_ready') OR json_extract(doc, '$.restore_video')=1 ORDER BY created_at DESC""", (key,)).fetchall()
+                    OR status IN ('queued','failed','audio_ready') OR json_extract(doc, '$.restore_video')=1 ORDER BY created_at DESC""", (key,)).fetchall()
                 for row in rows:
                     doc = json.loads(row[0])
+                    if doc['status'] == 'queued':
+                        if {k:v for k,v in doc['input'].items() if k != 'force'} != key_payload:
+                            continue
+                        # Pending work has not executed the old pipeline yet.
+                        doc.update(pipeline_version=version, updated_at=now())
+                        db.execute('UPDATE jobs SET cache_key=? WHERE id=?', (key, doc['id']))
                     if doc['status'] in ('failed', 'audio_ready') and not doc.get('restore_video'):
                         if {k: v for k, v in doc['input'].items() if k != 'force'} != key_payload:
                             continue

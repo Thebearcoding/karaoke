@@ -900,6 +900,17 @@ def test_queued_job_uses_executing_version_and_updates_cache_identity(tmp_path):
         assert cached['id'] == pending['id'] and cached['cache_hit']
 
 
+def test_pending_input_is_reused_after_version_change_without_merging_distinct_requests(tmp_path):
+    store=Store(tmp_path)
+    request=JobRequest(url=URL)
+    original,_=store.create(request,'before-update')
+    reused,cached=store.create(request,'after-update')
+    assert cached and reused['id']==original['id'] and reused['pipeline_version']=='after-update'
+    assert len(store.list(-1,'queued'))==1
+    different,cached=store.create(JobRequest(url=URL,language='Japanese'),'after-update')
+    assert not cached and different['id']!=original['id']
+
+
 def test_shutdown_stops_current_job_and_preserves_the_queue(tmp_path):
     def slow_worker(folder):
         return [sys.executable, '-c', "import time;time.sleep(30)"]
@@ -971,7 +982,11 @@ def test_different_lyrics_mix_or_pipeline_version_have_distinct_cache_keys(tmp_p
     cases = [(JobRequest(url=URL), 'a'), (JobRequest(url=URL, mv_audio='instrumental'), 'a'),
              (JobRequest(url=URL, lyrics='第一句\n第二句', language='zh'), 'a'),
              (JobRequest(url=URL), 'b')]
-    ids = [store.create(request, version)[0]['id'] for request, version in cases]
+    ids = []
+    for request, version in cases:
+        job, _ = store.create(request, version)
+        ids.append(job['id'])
+        store.update(job['id'], status='running')
     assert len(set(ids)) == 4
     assert cases[2][0].lyrics == ['第一句', '第二句']
     with pytest.raises(ValueError):
