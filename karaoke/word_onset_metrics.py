@@ -72,7 +72,8 @@ def score_risks(onset_score, risks, tolerance_ms=100):
         raise ValueError('Risk flags must retain every annotated unit')
     counts = dict(true_positive=0, false_positive=0, true_negative=0, false_negative=0)
     for error, risk in zip(errors, risks):
-        bad = error['error_ms'] is None or abs(error['error_ms']) > tolerance_ms+1e-7
+        bad = (error['error_ms'] is None or abs(error['error_ms']) > tolerance_ms+1e-7
+               or bool(error.get('merged') or error.get('incomplete_highlight')))
         counts[('true_' if bad == risk['review'] else 'false_') +
                ('positive' if risk['review'] else 'negative')] += 1
     tp, fp, tn, fn = (counts[k] for k in ('true_positive', 'false_positive', 'true_negative', 'false_negative'))
@@ -107,7 +108,9 @@ def score_onsets(reference, predictions, fps=None):
             value = math.ceil(value*fps-1e-9)/fps
         error = value-ref['start'] if value is not None else None
         rows.append(dict(id=ref['id'], text=ref['text'], reference=ref['start'],
-                         predicted=value, error_ms=1000*error if error is not None else None))
+                         predicted=value, error_ms=1000*error if error is not None else None,
+                         merged=bool(pred.get('merged')),
+                         incomplete_highlight=bool(pred.get('incomplete_highlight'))))
     errors = np.array([r['error_ms'] for r in rows if r['error_ms'] is not None])
     absolute = np.abs(errors)
     total = len(rows)

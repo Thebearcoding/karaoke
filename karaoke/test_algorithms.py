@@ -698,20 +698,31 @@ class WordOnsetScoring(unittest.TestCase):
             onset_risks(predictions, verifier[:-1])
 
     def test_chinese_merged_highlight_preserves_both_expected_characters(self):
-        from word_onset_metrics import onset_risks
+        from word_onset_metrics import onset_risks, score_risks
 
         events = word_events([dict(text='轻唱', units=[dict(first=0, stop=2, start=1.)])], 'Chinese')
         self.assertEqual([e['text'] for e in events], ['轻', '唱'])
         self.assertTrue(all(r['review'] for r in onset_risks(events, events)))
         # Even close onsets cannot make one shared highlight two independent ones.
         reference = [dict(id=0, text='轻', start=1.), dict(id=1, text='唱', start=1.04)]
-        score = score_onsets(reference, events)['summary']
+        accuracy = score_onsets(reference, events)
+        score = accuracy['summary']
         self.assertEqual(score['pco']['50'], 1.)
         self.assertFalse(score['passed'])
+        detected = score_risks(accuracy, onset_risks(events, events))
+        self.assertEqual(detected['true_positive'], 2)
+        self.assertEqual(detected['false_positive'], 0)
         independent = [dict(r) for r in reference]
         self.assertTrue(score_onsets(reference, independent)['summary']['passed'])
         independent[-1]['incomplete_highlight'] = True
         self.assertFalse(score_onsets(reference, independent)['summary']['passed'])
+        detected = score_risks(score_onsets(reference, independent), onset_risks(independent, reference))
+        self.assertEqual(detected['true_positive'], 1)
+        self.assertEqual(detected['true_negative'], 1)
+        # A verifier defect alone must not turn a correct prediction into an error.
+        detected = score_risks(score_onsets(reference, reference), onset_risks(reference, independent))
+        self.assertEqual(detected['true_positive'], 0)
+        self.assertEqual(detected['false_positive'], 1)
         with self.assertRaises(ValueError):
             word_events([dict(text='日本語', units=[])], 'Japanese')
 
