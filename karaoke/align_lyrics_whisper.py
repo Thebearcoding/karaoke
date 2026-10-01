@@ -34,6 +34,36 @@ def json_number(value):
     raise TypeError(f'Cannot serialize {type(value).__name__}')
 
 
+def recover_changed_text(result, lines, duration, realign):
+    """Retry a malformed alignment, never edit its words to fit the lyrics."""
+    expected = [normalized(line) for line in lines]
+
+    def matches(candidate):
+        return candidate is not None and [normalized(''.join(w['word'] for w in s['words']))
+                for s in candidate['segments']] == expected
+
+    if matches(result):
+        return result, None
+    candidate = realign()
+    report = dict(original_result=result, retry_result=candidate, accepted=False,
+                  method='dynamic attention heads without inter-line gap padding')
+    if matches(candidate):
+        units = [dict(text=w['word'], start=w['start'], end=w['end'])
+                 for s in candidate['segments'] for w in s['words'] if normalized(w['word'])]
+        valid = all(np.isfinite([u['start'], u['end']]).all() and
+                    0 <= u['start'] < u['end'] <= duration+.001 for u in units)
+        valid = valid and all(a['start'] < b['start'] for a, b in zip(units, units[1:]))
+        if valid:
+            try:
+                presentation_cues(lyric_cues(lines, units, duration), duration, lead=0, tail=0, bridge_gap=0)
+            except ValueError:
+                pass
+            else:
+                report['accepted'] = True
+                return candidate, report
+    return result, report
+
+
 def recover_skipped_repeats(result, duration, align):
     """Check a skipped repetition using both its gap and neighbouring phrases.
 
@@ -300,16 +330,19 @@ def main():
                               'window': [begin, end]}), flush=True)
             piece = audio[round(begin*16000):round(end*16000)]
 
-            def align_piece(start, stop, text):
+            def align_piece(start, stop, text, **options):
                 aligned = model.align(piece[round(start*16000):round(stop*16000)], text, language=language,
                     original_split=True, regroup=False, token_step=80, max_word_dur=4.,
                     word_dur_factor=3., nonspeech_skip=5., suppress_silence=True,
-                    dynamic_heads=args.dynamic_heads, verbose=None)
+                    dynamic_heads=options.pop('dynamic_heads', args.dynamic_heads), verbose=None, **options)
                 return aligned.to_dict() if aligned is not None else None
 
-            result = align_piece(0., len(piece)/16000, '\n'.join(lyrics['lines'][context_first:context_stop]))
+            lines = lyrics['lines'][context_first:context_stop]
+            result = align_piece(0., len(piece)/16000, '\n'.join(lines))
             if result is None:
                 raise ValueError(f'Alignment returned no result for {job["lyrics"]}')
+            result, text_recovery = recover_changed_text(result, lines, len(piece)/16000,
+                lambda: align_piece(0., len(piece)/16000, '\n'.join(lines), gap_padding=None, dynamic_heads=True))
             result, repeat_recoveries = recover_skipped_repeats(result, len(piece)/16000, align_piece)
             local_units = [{'text': word['word'], 'start': round(word['start']+begin, 3),
                             'end': round(word['end']+begin, 3), 'probability': word['probability']}
@@ -317,7 +350,11 @@ def main():
             units.extend(local_units)
             raw_blocks.append({'range': [first, stop], 'context': [context_first, context_stop],
                                'source_range': [begin, end], 'result': result,
-                               'repeat_recoveries': repeat_recoveries})
+                               'repeat_recoveries': repeat_recoveries, 'text_recovery': text_recovery})
+        # Keep the acoustic evidence even when stitching rejects text or times.
+        output.mkdir(parents=True)
+        (output/'raw.json').write_text(json.dumps(raw_blocks, ensure_ascii=False, indent=2, default=json_number)+'\n')
+        (output/'units.json').write_text(json.dumps(units, ensure_ascii=False, indent=2, default=json_number)+'\n')
         cues, raw_blocks, boundary_repairs = stitch_blocks(lyrics['lines'], raw_blocks, duration, lyrics['language'])
         if args.device == 'mps':
             torch.mps.synchronize()
@@ -329,7 +366,6 @@ def main():
         summary['zero_duration_units'] = sum(unit['end'] <= unit['start'] for unit in units)
         summary['unit_count'] = len(units)
         (output/'raw.json').write_text(json.dumps(raw_blocks, ensure_ascii=False, indent=2, default=json_number)+'\n')
-        (output/'units.json').write_text(json.dumps(units, ensure_ascii=False, indent=2, default=json_number)+'\n')
         report = {'model': args.model, 'device': args.device, 'dtype': 'float32',
             'model_loading_seconds': loading, 'alignment_seconds': elapsed,
             'audio': str(Path(job['audio']).resolve()), 'audio_sha256': sha(job['audio']),

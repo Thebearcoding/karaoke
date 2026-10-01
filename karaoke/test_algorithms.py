@@ -17,7 +17,7 @@ from lyric_progress import map_words, build as build_progress
 from align_lyric_phonemes import guided_scores, protect_line_order, protect_units
 from phoneme_progress import reading_parts, japanese_phone_groups, spoken_units
 from align_repeated_lyrics import agree_onset, audible, reference_pairs
-from align_lyrics_whisper import alignment_blocks, recover_skipped_repeats, stitch_blocks
+from align_lyrics_whisper import alignment_blocks, recover_changed_text, recover_skipped_repeats, stitch_blocks
 from transcribe_lyrics import filter_silent_transcription
 from word_onset_metrics import score_onsets, word_events
 
@@ -444,6 +444,72 @@ class WordOnsetScoring(unittest.TestCase):
 
 
 class AlignmentIntegrity(unittest.TestCase):
+    def test_changed_alignment_text_requires_a_complete_acoustic_retry(self):
+        from copy import deepcopy
+        from unittest.mock import Mock
+
+        words = [dict(word=word, start=float(i), end=i+.5)
+                 for i, word in enumerate(['keep', 'these', 'words'])]
+        candidate = dict(segments=[dict(words=words, text='keep these words')])
+        original = deepcopy(candidate)
+        original['segments'][0]['words'].insert(2, dict(word='these', start=4., end=4.))
+        original['segments'][0]['words'][-1].update(start=4., end=4.)
+        realign = Mock(return_value=candidate)
+        recovered, report = recover_changed_text(original, ['keep these words'], 4., realign)
+        self.assertEqual(recovered, candidate)
+        self.assertTrue(report['accepted'])
+        self.assertEqual(report['original_result'], original)
+        realign.assert_called_once_with()
+        realign.reset_mock()
+        self.assertEqual(recover_changed_text(candidate, ['keep these words'], 4., realign), (candidate, None))
+        realign.assert_not_called()
+
+        for problem in ('missing', 'collapsed', 'outside', 'unordered', 'nonfinite', 'wrong_line', 'empty'):
+            with self.subTest(problem=problem):
+                retry = deepcopy(candidate)
+                row = retry['segments'][0]['words']
+                if problem == 'missing':
+                    row.pop()
+                elif problem == 'collapsed':
+                    row[-1].update(start=4., end=4.)
+                elif problem == 'outside':
+                    row[-1]['end'] = 5.
+                elif problem == 'unordered':
+                    row[-1]['start'] = 0.
+                elif problem == 'nonfinite':
+                    row[-1]['end'] = float('nan')
+                elif problem == 'wrong_line':
+                    retry['segments'] = [dict(words=row[:1]), dict(words=row[1:])]
+                else:
+                    retry = None
+                recovered, report = recover_changed_text(original, ['keep these words'], 4., lambda: retry)
+                self.assertEqual(recovered, original)
+                self.assertFalse(report['accepted'])
+
+    def test_rejected_alignment_retains_raw_evidence_without_publishing_captions(self):
+        import json
+        from unittest.mock import Mock, patch
+        from align_lyrics_whisper import main
+
+        result = dict(segments=[dict(text='extra word', start=1., end=2., words=[
+            dict(word='extra word', start=1., end=2., probability=.8)])])
+        model = Mock()
+        model._buffers = {'alignment_heads': None}
+        model.align.return_value.to_dict.return_value = result
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sf.write(root/'audio.wav', np.zeros(3*16000), 16000)
+            (root/'lyrics.json').write_text(json.dumps(dict(language='English', lines=['word'])))
+            (root/'jobs.json').write_text(json.dumps([dict(audio=str(root/'audio.wav'),
+                lyrics=str(root/'lyrics.json'), output=str(root/'alignment'))]))
+            with patch('stable_whisper.load_model', return_value=model), patch('sys.argv',
+                    ['align', '--jobs', str(root/'jobs.json'), '--device', 'cpu']):
+                with self.assertRaisesRegex(ValueError, 'exactly cover'):
+                    main()
+            self.assertEqual(json.loads((root/'alignment/raw.json').read_text())[0]['result'], result)
+            self.assertEqual(json.loads((root/'alignment/units.json').read_text())[0]['text'], 'extra word')
+            self.assertFalse((root/'alignment/cues.json').exists())
+
     def test_skipped_refrain_requires_two_acoustic_windows_inside_the_gap(self):
         from copy import deepcopy
 
