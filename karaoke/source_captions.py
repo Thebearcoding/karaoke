@@ -81,7 +81,7 @@ def caption_candidate(packet, transcription, language, duration):
         return None, dict(status='unavailable', **packet['error'], retry_at=packet.get('retry_at'))
     if song_language(packet.get('language')) != language:
         return None, dict(status='wrong_caption_language')
-    lines = []
+    texts = []
     try:
         for event in packet['response']['events']:
             text = ''.join(s.get('utf8', '') for s in event.get('segs', []))
@@ -92,7 +92,10 @@ def caption_candidate(packet, transcription, language, duration):
             if (event.get('aAppend') or not all(math.isfinite(t) for t in (start, end)) or
                     not 0 <= start < end <= duration+1):
                 raise ValueError('Unsupported or out-of-range caption event')
-            lines.extend(transcript_lines(dict(text=text), language))
+            texts.append(dict(text=text))
+        # Caption display events can contain only musical notes or punctuation.
+        # Wrap the complete text so those symbols join an adjacent lyric line.
+        lines = transcript_lines(dict(segments=texts), language)
         if not lines or len(lines) > 1000 or any(len(line) > 200 for line in lines):
             raise ValueError('Invalid lyric length')
     except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
