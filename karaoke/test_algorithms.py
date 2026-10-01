@@ -249,6 +249,59 @@ class SubtitleIntegrity(unittest.TestCase):
         self.assertEqual(guarded[-1]['start'],1.8)
         self.assertEqual(guarded[-1]['timing_source'],'prior_word_fallback')
 
+    def test_context_retry_splits_merged_characters_only_with_usable_audio_boundaries(self):
+        import copy
+        import importlib.util
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location('cjk_context', Path(__file__).parent/'experiments/cjk-onsets-v003/run.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        protocol = dict(context_padding_seconds=[.35, .6, 1.], maximum_spread_seconds=.08,
+                        maximum_change_seconds=.4, minimum_relative_rms=.03)
+        before = [dict(text='前', aligned_start=.8, aligned_end=.98,
+                       units=[dict(text='前', first=0, stop=1, start=.8, end=.98)]),
+                  dict(text='甲乙丙', aligned_start=1., aligned_end=2.7,
+                       units=[dict(text='甲乙', first=0, stop=2, start=1., end=1.9),
+                              dict(text='丙', first=2, stop=3, start=2., end=2.6)]),
+                  dict(text='后', aligned_start=3., aligned_end=4.,
+                       units=[dict(text='后', first=0, stop=1, start=3., end=4.)])]
+        for mode in ('valid', 'silent', 'disagree', 'collapsed', 'outside', 'large_change', 'crossing'):
+            with self.subTest(mode=mode):
+                calls = []
+
+                class Model:
+                    def infer(self, audio, begin, units, context):
+                        calls.append(context['text'])
+                        times = dict(前=(.8, .98), 甲=(1.1, 1.4), 乙=(1.5, 1.9), 丙=(2., 2.6), 后=(3., 4.))
+                        if mode == 'disagree' and len(calls) == 1:
+                            times['乙'] = (1.7, 1.9)
+                        if mode == 'collapsed':
+                            times['乙'] = (1.5, 1.51)
+                        if mode == 'outside':
+                            times['乙'] = (2.8, 3.)
+                        if mode == 'large_change':
+                            times['甲'] = (1.45, 1.49)
+                        if mode == 'crossing':
+                            times['甲'] = (.7, 1.4)
+                        return dict(units=[dict(u, start=times[u['text']][0], end=times[u['text']][1]) for u in units])
+
+                wave = np.zeros(44100*5) if mode == 'silent' else np.ones(44100*5)*.1
+                parsed = lambda text, language: [dict(text=c, first=i, stop=i+1, phones=['a'])
+                                                 for i, c in enumerate(text) if not c.isspace()]
+                with patch.object(module, 'spoken_units', side_effect=parsed):
+                    result, report = module.repair_character_groups(copy.deepcopy(before), before, wave, Model(), protocol)
+                self.assertEqual(calls, ['前 甲乙丙 后']*3)
+                self.assertEqual(before[1]['units'][0]['text'], '甲乙')
+                self.assertEqual([c['text'] for c in result], [c['text'] for c in before])
+                if mode == 'valid':
+                    self.assertEqual([u['start'] for u in result[1]['units']], [1.1, 1.5, 2.])
+                    self.assertFalse(highlight_coverage_errors(result, 'Chinese'))
+                    self.assertTrue(report[0]['groups'][0]['accepted'])
+                else:
+                    self.assertEqual([u['start'] for u in result[1]['units']], [1., 2.])
+                    self.assertTrue(highlight_coverage_errors(result, 'Chinese'))
+                    self.assertFalse(report[0]['groups'][0]['accepted'])
+
     def test_first_phoneme_keeps_its_onset_on_either_side_of_coarse_start(self):
         cue = {'text': '甲乙', 'aligned_start': 1., 'aligned_end': 2.,
                'units': [dict(first=0, stop=1, text='甲', start=1., end=1.4),

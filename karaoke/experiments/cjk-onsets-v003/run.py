@@ -16,10 +16,10 @@ import torch
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT))
-from align_lyric_phonemes import SingingAligner, protect_units
+from align_lyric_phonemes import SingingAligner, protect_units, protect_line_order
 from lyric_progress import canonical_positions
 from phoneme_progress import spoken_units
-from subtitles import presentation_cues
+from subtitles import presentation_cues, highlight_spans
 from stage_progress import progress_items
 
 
@@ -43,6 +43,85 @@ def fixed_units(cue, language):
             unit['phones'] = [phone for part in parts for phone in part['phones']]
         result.append(unit)
     return result
+
+
+def repair_character_groups(cues, baseline, wave, model, protocol):
+    """Retry merged Chinese characters with their actual neighbouring lyrics."""
+    reports = []
+    floor = max(1e-5, protocol['minimum_relative_rms']*float(np.sqrt(np.mean(wave**2))))
+    for index, cue in enumerate(cues):
+        groups = [u for u in cue['units'] if len(list(highlight_spans(u['text'], 'Chinese'))) > 1
+                  and u.get('timing_source') != 'repeated_lyric_audio']
+        if not groups:
+            continue
+        report = dict(line=index+1, attempts=[], groups=[])
+        reports.append(report)
+        first, stop = max(0, index-1), min(len(baseline), index+2)
+        text, anchors, offset = '', [], 0
+        for line in range(first, stop):
+            if line == index:
+                offset = len(text)
+            anchors.extend(dict(u, first=u['first']+len(text), stop=u['stop']+len(text))
+                           for u in baseline[line]['units'])
+            text += baseline[line]['text']+' '
+        context = dict(text=text.strip(), units=anchors,
+                       aligned_start=baseline[first]['aligned_start'],
+                       aligned_end=baseline[stop-1]['aligned_end'])
+        try:
+            parsed = spoken_units(context['text'], 'Chinese')
+            if context['aligned_end']-context['aligned_start'] > 30:
+                raise ValueError('Neighbouring lyric context exceeds 30 seconds')
+            for pad in protocol['context_padding_seconds']:
+                begin = max(0., context['aligned_start']-pad)
+                end = min(len(wave)/44100, context['aligned_end']+pad)
+                prediction = model.infer(wave[round(begin*44100):round(end*44100)], begin, parsed, context)
+                units = [dict(u, first=u['first']-offset, stop=u['stop']-offset)
+                         for u in prediction['units'] if offset <= u['first'] < offset+len(cue['text'])]
+                guarded, reasons = protect_units(baseline[index], units, 'Chinese')
+                report['attempts'].append(dict(padding=pad, source_range=[begin, end],
+                                               guarded=guarded, reasons=reasons))
+        except (ValueError, RuntimeError) as error:
+            report['error'] = str(error)
+            continue
+        replacements = {}
+        for group in groups:
+            variants = [[u for u in a['guarded'] if group['first'] <= u['first'] and u['stop'] <= group['stop']]
+                        for a in report['attempts']]
+            decision = dict(first=group['first'], stop=group['stop'], accepted=False)
+            report['groups'].append(decision)
+            signatures = [[(u['first'], u['stop']) for u in variant] for variant in variants]
+            if (not variants or not variants[0] or any(s != signatures[0] for s in signatures)
+                    or any(canonical_positions(''.join(u['text'] for u in v), 'Chinese')[0]
+                           != canonical_positions(group['text'], 'Chinese')[0] for v in variants)
+                    or any(u['timing_source'] != 'singing_phonemes'
+                           or len(list(highlight_spans(u['text'], 'Chinese'))) != 1 for v in variants for u in v)):
+                decision['reason'] = 'not all contexts produced separate usable characters'
+                continue
+            candidate, reasons = [], []
+            for choices in zip(*variants):
+                starts = [u['start'] for u in choices]
+                start, end = float(np.median(starts)), float(np.median([u['end'] for u in choices]))
+                piece = wave[round(start*44100):round(end*44100)]
+                if max(starts)-min(starts) > protocol['maximum_spread_seconds']:
+                    reasons.append('context disagreement')
+                if choices[0]['first'] == group['first'] and abs(start-group['start']) > protocol['maximum_change_seconds']:
+                    reasons.append('large change needs independent verification')
+                if not len(piece) or float(np.sqrt(np.mean(piece**2))) <= floor:
+                    reasons.append('insufficient audible vocal support')
+                candidate.append(dict(choices[0], start=round(start, 3), end=round(end, 3),
+                                      timing_source='singing_context_characters'))
+            if reasons:
+                decision['reason'] = '; '.join(sorted(set(reasons)))
+                continue
+            replacements[(group['first'], group['stop'])] = candidate
+            decision.update(accepted=True, units=candidate)
+        cue['units'] = [part for u in cue['units'] for part in replacements.get((u['first'], u['stop']), [u])]
+    result, reverted = protect_line_order(cues, baseline)
+    for report in reports:
+        if report['line'] in reverted:
+            for group in report['groups']:
+                group.update(accepted=False, reason='reverted to preserve lyric order')
+    return result, reports
 
 
 def process(job, model, protocol):
@@ -117,6 +196,14 @@ def process(job, model, protocol):
         if unit['end'] <= unit['start']:
             raise ValueError('Non-positive voiced interval')
         decisions[i]['final'] = unit['start']
+    character_repairs = []
+    if job['language'] == 'Chinese':
+        cues, character_repairs = repair_character_groups(cues, baseline, wave, model, protocol)
+        all_units = [u for c in cues for u in c['units']]
+        for left, right in zip(all_units, all_units[1:]):
+            left['end'] = min(left['end'], right['start'])
+        if any(u['end'] <= u['start'] for u in all_units):
+            raise ValueError('Non-positive character interval')
     for cue in cues:
         cue.update(start=cue['units'][0]['start'], end=cue['units'][-1]['end'])
     cues, presentation = presentation_cues(cues, job['duration'], lead=0., tail=0., bridge_gap=0.)
@@ -127,12 +214,14 @@ def process(job, model, protocol):
         changed_at_least_50ms=sum(abs(d['final']-d['previous']) >= .05 for d in changes),
         preserved_repeat_units=sum(u.get('timing_source') == 'repeated_lyric_audio' for u in all_units),
         accepted_window_units=sum(u.get('timing_source') == 'singing_window_consensus' for u in all_units),
+        repaired_character_units=sum(u.get('timing_source') == 'singing_context_characters' for u in all_units),
         maximum_change_ms=max((abs(d['final']-d['previous'])*1000 for d in decisions), default=0),
         checkpoint=str(model.checkpoint), presentation=presentation,
         accuracy=None, accuracy_note='No independent manual onset reference for these four songs; consistency is not accuracy')
     write(output/'cues.json', cues)
     write(output/'raw.json', raw)
     write(output/'decisions.json', decisions)
+    write(output/'character-repairs.json', character_repairs)
     write(output/'report.json', report)
     print(json.dumps(report, ensure_ascii=False), flush=True)
     return report
