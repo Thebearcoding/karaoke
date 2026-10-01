@@ -839,9 +839,10 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
     selection=[dict(url=c['url'],language=c['language']) for c in cases]
     manifest=tmp_path/'manifest.json'
     manifest.write_text(json.dumps(dict(cases=cases,provider_backoff={},selection_sha256=hashlib.sha256(json.dumps(selection,sort_keys=True).encode()).hexdigest())))
+    version='test'
     def respond(request):
         path=request.url.path
-        if path=='/health':result={'pipeline_version':'test','preparation_paused':True,'running_job':None}
+        if path=='/health':result={'pipeline_version':version,'preparation_paused':True,'running_job':None}
         elif path=='/v1/room':result=room.snapshot()
         elif path=='/v1/room/entries':result=room.add(AddSong.model_validate_json(request.content))
         elif path=='/v1/room/commands':result=room.command(RoomCommand.model_validate_json(request.content))
@@ -852,7 +853,7 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
     calls=[]
     def execute(client,base,folder,command):
         calls.append(folder.name)
-        if len(calls)==2:
+        if len(calls) in (2,3):
             (folder/'error.json').write_text(json.dumps(dict(code='align_words_failed',message='real failed boundary')))
             return 1
         (folder/'audio-result.json').write_text(json.dumps(dict(title='Song',artist='',language='English',duration_seconds=100)))
@@ -869,6 +870,10 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
     assert room.read()['entries']==[]
     soak.run_audio(manifest,data,'http://test')
     assert len(calls)==2
+    version='after-fix'
+    soak.run_audio(manifest,data,'http://test')
+    assert len(calls)==3
+    assert store.read(calls[-1])['input']['url']==cases[1]['url']
 
 
 def test_partial_song_information_updates_preserve_language_and_title(tmp_path):

@@ -378,8 +378,9 @@ def run_audio(path, data_dir, base):
             if not candidates:
                 print('No eligible audio cases; inspect failures and retry deadlines', flush=True)
                 return
-            candidates.sort(key=lambda c: (bool(c.get('audio_attempts')) is False,
-                (c.get('attempts') or [{}])[-1].get('status') not in ('failed', 'blocked')))
+            candidates.sort(key=lambda c: (
+                (c.get('audio_attempts') or c.get('attempts') or [{}])[-1].get('status') not in ('failed', 'blocked'),
+                not bool(c.get('audio_attempts'))))
             case = candidates[0]
             room = client.get(base+'/v1/room').raise_for_status().json()
             existing = {e['id'] for e in room['entries']}
