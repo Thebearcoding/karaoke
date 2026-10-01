@@ -397,12 +397,13 @@ class Pipeline:
             with self.checkpoints.stage('prepare_lyrics',
                     inputs=[self.output/'asr/transcription.json', self.output/'vocals-16k.wav',
                             *sorted((self.output/'asr').glob('initial-transcription.json'))],
-                    outputs=[self.output/'lyrics.json', self.output/'anchors.json', self.output/'asr/filtered.json'],
+                    outputs=[self.output/'lyrics.json', self.output/'anchors.json', self.output/'asr/filtered.json',
+                             self.output/'asr/anchor-recovery.json'],
                     config=dict(request=self.request,
                                 metadata={k: metadata.get(k) for k in ('title', 'track', 'artist', 'artists', 'uploader', 'description')},
                                 duration=duration, model=self.text_model,
                                 implementation=inspect.getsource(type(self).prepare_lyrics)),
-                    code=[ROOT/p for p in ('song_sources.py', 'anchors_from_asr.py', 'transcribe_lyrics.py',
+                    code=[ROOT/p for p in ('song_sources.py', 'anchors_from_asr.py', 'transcribe_lyrics.py', 'anchor_recovery.py',
                                            'subtitles.py', 'job_schema.py')] + catalog) as reused:
                 if not reused:
                     self.prepare_lyrics(metadata, duration)
@@ -418,6 +419,7 @@ class Pipeline:
     def prepare_lyrics(self, metadata, duration):
         from anchors_from_asr import anchors_from_words
         from transcribe_lyrics import filter_silent_transcription
+        from anchor_recovery import recover_anchor_words
         import soundfile as sf
         transcription = json.loads((self.output/'asr/transcription.json').read_text())
         language = song_language(transcription.get('language'))
@@ -446,8 +448,15 @@ class Pipeline:
             matches[name] = (cues, coverage)
         selected = max(matches, key=lambda name: matches[name][1])
         anchors, covered = matches[selected]
+        recovery_path = self.output/'asr/anchor-recovery.json'
+        write_json(recovery_path, dict(attempts=[]))
+        if covered < .55 and lyrics['provenance']['kind'] != 'asr_draft':
+            _, anchors, covered = recover_anchor_words(None,
+                self.output/'vocals-16k.wav', lyrics['lines'], candidates[selected], lyrics['language'],
+                recovery_path, self.checkpoints, .55, duration)
         write_json(self.output/'asr/filtered.json', dict(transcription=transcription, rejected=rejected,
-            anchor_source=selected, anchor_coverage={name: match[1] for name, match in matches.items()}))
+            anchor_source=selected, anchor_coverage={name: match[1] for name, match in matches.items()},
+            final_anchor_coverage=covered))
         write_json(self.output/'lyrics.json', lyrics)
         write_json(self.output/'anchors.json', anchors)
         if covered < .55 or not any(c['status'] == 'candidate' for c in anchors):
