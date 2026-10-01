@@ -64,7 +64,7 @@ def independent_transcript_support(transcription, report, language):
     if not recovery.get('triggered') or not any(
             not c.get('word_times_discarded', True) for c in recovery.get('chunks', [])):
         return None
-    from anchors_from_asr import text_units
+    from .anchors_from_asr import text_units
     from rapidfuzz.distance import Levenshtein
     expected = text_units(' '.join(s['text'] for s in transcription.get('segments', [])) or
                           transcription.get('text', ''), language)
@@ -75,9 +75,9 @@ def independent_transcript_support(transcription, report, language):
 
 def missing_repetitions(reference, cues, words, language, duration):
     """Find supplied lyric passages recognized in gaps of the current timeline."""
-    from anchors_from_asr import anchors_from_words, text_units
+    from .anchors_from_asr import anchors_from_words, text_units
     from rapidfuzz.fuzz import ratio
-    from subtitles import normalized
+    from .subtitles import normalized
 
     keys = [text_units(line, language) for line in reference]
     timed = [w for w in words if math.isfinite(w['start']) and math.isfinite(w['end'])
@@ -133,7 +133,7 @@ def missing_repetitions(reference, cues, words, language, duration):
 
 def restore_repetitions(reference, anchors, words, language, duration, *, allow_expansion):
     """Copy supported repetitions, preserving the existing text and its placement."""
-    from anchors_from_asr import anchors_from_words
+    from .anchors_from_asr import anchors_from_words
 
     lines = list(reference)
     report = dict(reference_lines=reference, words=words, expansions=[], status='complete')

@@ -759,6 +759,18 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
     assert not (folder/'result.json').exists()
     evidence=verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
     assert evidence['validation_scope']=='audio_and_lyrics' and len(evidence['artifact_sha256'])==7
+    # The long-lived controller never imports Pipeline; its clean interpreter
+    # must verify results without the research scripts added to sys.path.
+    import os
+    from pathlib import Path
+    import subprocess
+    import sys
+    env = dict(os.environ)
+    env.pop('PYTHONPATH', None)
+    subprocess.run([sys.executable, '-c',
+        'from pathlib import Path; from karaoke.tools.soak import verify_outputs; '
+        f'verify_outputs(None, "", Path({str(tmp_path)!r}), {{"id":"job"}}, audio_only=True)'],
+        cwd=Path(__file__).resolve().parent.parent, env=env, check=True, capture_output=True)
     repeat_path.write_text(json.dumps(dict(status='failed')))
     with pytest.raises(ValueError, match='repetitions'):
         verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
@@ -1213,7 +1225,7 @@ def test_repetition_recovery_rejects_unsupported_evidence(invalid, monkeypatch):
                 index = 0 if invalid == 'moves_existing' else 4
                 result[index].update(start=14., end=15.)
             return result
-        monkeypatch.setattr('anchors_from_asr.anchors_from_words', moved)
+        monkeypatch.setattr('karaoke.anchors_from_asr.anchors_from_words', moved)
     else:
         for word in words[4:6]:
             if invalid == 'unrelated':

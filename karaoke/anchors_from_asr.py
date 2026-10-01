@@ -7,7 +7,10 @@ from pathlib import Path
 
 from Bio.Align import PairwiseAligner
 
-from subtitles import normalized, write_captions
+if __package__:
+    from .subtitles import normalized, write_captions
+else:
+    from subtitles import normalized, write_captions
 
 
 def text_units(text, language):

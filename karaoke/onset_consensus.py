@@ -1,7 +1,10 @@
 """Combine close estimates of the same English word onset without reordering lyrics."""
 import copy
 
-from word_onset_metrics import canonical, word_events
+if __package__:
+    from .word_onset_metrics import canonical, word_events
+else:
+    from word_onset_metrics import canonical, word_events
 
 
 def context_scope_violations(cues, blocks):
