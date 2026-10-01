@@ -1287,7 +1287,8 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
 @pytest.mark.parametrize('initial_kind', ['loop', 'punctuation', 'fragmented_loop',
                                         'backward_segments', 'backward_words', 'invalid_range',
                                         'collapsed_words', 'unsupported_language',
-                                        'short_window_recovery', 'short_tail_recovery', 'local_loop'])
+                                        'short_window_recovery', 'short_tail_recovery', 'local_loop',
+                                        'suspected_silence', 'compressed_silence'])
 def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, fallback_text, initial_kind):
     import soundfile as sf
     audio = tmp_path/'audio.wav'
@@ -1317,6 +1318,14 @@ def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, f
                 *[dict(start=i, end=i+.8, text='正常的一句') for i in range(30)],
                 *[dict(start=30+i*.02, end=30+(i+1)*.02, text='耶') for i in range(21)],
                 *[dict(start=31+i, end=31+i+.8, text='后面的歌词') for i in range(30)]], words=[])
+        elif initial_kind in ('suspected_silence', 'compressed_silence') and (name == str(audio) or bad_chunk):
+            end = 2 if initial_kind == 'suspected_silence' else 1.1
+            times = [(1,1.8),(1.8,1.8),(1.8,1.8),(1.8,2)] if end == 2 else [
+                (1,1.02),(1.02,1.04),(1.04,1.06),(1.06,1.1)]
+            data = dict(language='chinese', segments=[dict(start=1, end=end,
+                        text='A fluent invented phrase', no_speech_prob=.606)],
+                        words=[dict(start=a, end=b, word=w) for (a,b),w in zip(times,
+                               ['A','fluent','invented','phrase'])])
         elif initial_kind == 'collapsed_words' and (name == str(audio) or bad_chunk):
             data = dict(language='japanese', segments=[dict(start=1,end=5,text='一緒に歌うこの歌の続きを')],
                         words=[dict(start=1,end=1,word=c) for c in '一緒に歌うこの歌の続きを'])
@@ -1364,9 +1373,10 @@ def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, f
 
 @pytest.mark.parametrize('language', ['auto', 'zh'])
 def test_normal_choruses_do_not_trigger_asr_retry(tmp_path, language):
-    data = dict(language='chinese', segments=[dict(start=i*4, end=i*4+3, text='唱到这一句，接着唱下一句') for i in range(8)],
+    data = dict(language='chinese', segments=[dict(start=i*4, end=i*4+3, text='唱到这一句，接着唱下一句', no_speech_prob=.8) for i in range(8)],
                 words=[dict(start=1,end=1,word='一'), dict(start=1,end=1,word='起'),
-                       dict(start=1,end=2,word='唱'), dict(start=1.9,end=2.5,word='歌')])
+                       dict(start=1,end=2,word='唱'), dict(start=1.9,end=2.5,word='歌'),
+                       dict(start=2.5,end=2.8,word='吧')])
     assert not repetition_loop(data)
     assert not repetition_loop(dict(segments=[dict(start=i, end=i+.02, text='耶') for i in range(21)]))
     audio = tmp_path/'audio.mp3'

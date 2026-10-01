@@ -44,6 +44,17 @@ def repetition_loop(data):
 
 
 def needs_recovery(data):
+    # A fluent phrase can still be hallucinated over an intro or outro. Require
+    # collapsed timing to corroborate no-speech warnings (common in real singing).
+    # Re-recognize these words; do not silently delete them or score their onset.
+    for segment in data.get('segments') or []:
+        if segment.get('no_speech_prob', 0) < .6:
+            continue
+        start, end = segment.get('start', 0), segment.get('end', 0)
+        words = [w for w in data.get('words') or [] if start <= w['start'] < end]
+        collapsed = sum(w['end']-w['start'] <= .001 for w in words)
+        if len(words) >= 3 and (end-start <= .2 or collapsed >= len(words)/2):
+            return True
     # A wrong language/tokenization can collapse several lines into one "word"
     # and push the first segment past later segments. Such timing cannot guide
     # the alignment windows; retry it rather than sorting or clamping timestamps.
