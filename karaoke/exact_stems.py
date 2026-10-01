@@ -44,7 +44,7 @@ def reconstruction_report(source, vocals, backing):
             'recombined_pcm_sha256': pcm_sha(combined)}
 
 
-def exact_split(source, estimate, repair_limit=1e-8):
+def exact_split(source, estimate, repair_limit=1e-6):
     source = np.asarray(source, dtype='float64')
     vocals = np.array(estimate, dtype='float64', copy=True)
     if source.ndim != 2 or not source.size or source.shape != vocals.shape:
@@ -58,7 +58,8 @@ def exact_split(source, estimate, repair_limit=1e-8):
         raise ValueError(f'Exact addition would require changing a vocal sample by '
                          f'{peak_correction:g}, above the {repair_limit:g} repair limit')
     # Extremely quiet decoder/model tails can still exceed float64's dynamic
-    # precision. Reassign only failed values below -160 dBFS to the complement.
+    # precision. Reassign only failed values at or below -120 dBFS to the complement.
+    # Model/resampling tails can exceed 1e-8 even when the decoded source is near zero.
     # Also preserve a negative-zero source as (-0) + (-0), not (+0).
     vocals[unequal] = np.copysign(0., source[unequal])
     backing[unequal] = source[unequal]

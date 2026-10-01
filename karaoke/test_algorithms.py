@@ -56,9 +56,12 @@ class SignalIntegrity(unittest.TestCase):
         source[0] = [0., -0.]
         estimate[0] = [.1, 0.]
         source[1] = [np.nextafter(np.float32(0), np.float32(1)), -1e-30]
-        estimate[1] = [1e-10, -1e-10]
+        # Real model tails around -130 dBFS previously aborted the whole package.
+        estimate[1] = [3.28574e-7, -1e-10]
         vocals, backing, repair = exact_split(source, estimate)
         self.assertGreater(repair['reassigned_sample_values'], 0)
+        self.assertLessEqual(repair['maximum_vocal_change'], 1e-6)
+        np.testing.assert_array_equal(vocals[2:], estimate[2:].astype('float64'))
         with tempfile.TemporaryDirectory() as directory:
             restored = []
             for name, wave in [('vocals', vocals), ('backing', backing)]:
@@ -74,6 +77,14 @@ class SignalIntegrity(unittest.TestCase):
         source = np.array([[1e-30]], dtype='float32')
         with self.assertRaisesRegex(ValueError, 'above the .* repair limit'):
             exact_split(source, np.array([[.1]], dtype='float32'))
+
+    def test_exact_tail_repair_stays_bounded_and_respects_explicit_limit(self):
+        source = np.array([[1e-30, -1e-30]], dtype='float32')
+        estimate = np.array([[2e-6, -2e-6]], dtype='float32')
+        with self.assertRaisesRegex(ValueError, 'above the .* repair limit'):
+            exact_split(source, estimate)
+        with self.assertRaisesRegex(ValueError, 'above the .* repair limit'):
+            exact_split(source, estimate/10, repair_limit=1e-8)
 
     def test_reconstruction_check_detects_single_value_change(self):
         source = np.array([[.25, -.5], [0., .125]], dtype='float32')
