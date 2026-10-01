@@ -703,6 +703,15 @@ class WordOnsetScoring(unittest.TestCase):
         events = word_events([dict(text='轻唱', units=[dict(first=0, stop=2, start=1.)])], 'Chinese')
         self.assertEqual([e['text'] for e in events], ['轻', '唱'])
         self.assertTrue(all(r['review'] for r in onset_risks(events, events)))
+        # Even close onsets cannot make one shared highlight two independent ones.
+        reference = [dict(id=0, text='轻', start=1.), dict(id=1, text='唱', start=1.04)]
+        score = score_onsets(reference, events)['summary']
+        self.assertEqual(score['pco']['50'], 1.)
+        self.assertFalse(score['passed'])
+        independent = [dict(r) for r in reference]
+        self.assertTrue(score_onsets(reference, independent)['summary']['passed'])
+        independent[-1]['incomplete_highlight'] = True
+        self.assertFalse(score_onsets(reference, independent)['summary']['passed'])
         with self.assertRaises(ValueError):
             word_events([dict(text='日本語', units=[])], 'Japanese')
 

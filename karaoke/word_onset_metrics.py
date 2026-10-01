@@ -86,6 +86,7 @@ def score_risks(onset_score, risks, tolerance_ms=100):
 def score_onsets(reference, predictions, fps=None):
     """PCO denominator is all reference units; missing units are always failures.
 
+    Timing hits and independent highlight coverage are separate requirements.
     fps projects timestamps onto a render grid for diagnosis only. It does not
     measure the displayed video frames or correct an audio/video clock offset.
     """
@@ -122,7 +123,9 @@ def score_onsets(reference, predictions, fps=None):
                    absolute_error_ms={str(q):float(np.percentile(absolute, q)) if len(errors) else None
                                       for q in [50, 95, 99]},
                    projected_fps=fps,
-                   merged_units=sum(bool(p.get('merged')) for p in predictions))
+                   merged_units=sum(bool(p.get('merged')) for p in predictions),
+                   incomplete_highlights=sum(bool(p.get('incomplete_highlight')) for p in predictions))
     summary['passed'] = bool(summary['pco']['50'] >= .9 and summary['pco']['100'] >= .98
-                             and summary['catastrophic_or_missing'] <= .01 and not missing)
+                             and summary['catastrophic_or_missing'] <= .01 and not missing
+                             and not summary['merged_units'] and not summary['incomplete_highlights'])
     return dict(summary=summary, errors=rows)
