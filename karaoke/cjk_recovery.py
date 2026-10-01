@@ -71,6 +71,12 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol):
     for index in range(len(expected)):
         primary = [v[index] for v in predictions]
         secondary = [v[index] for v in witnesses]
+        events = [u.get('timing_evidence') == 'ctc_event' for u in primary]
+        if any(events) and not all(events):
+            return None, 'inconsistent onset evidence types'
+        if all(events) and any(not np.isfinite(u.get('emission_end', np.nan))
+                               or not u['start'] < u['emission_end'] <= u['end'] for u in primary):
+            return None, 'invalid CTC onset event'
         if any(not np.isfinite([u['start'], u['end']]).all() or u['end'] <= u['start']
                for u in [*primary, *secondary]):
             return None, 'invalid acoustic interval'
@@ -78,7 +84,7 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol):
                for u in [*primary, *secondary]):
             return None, 'acoustic evidence crosses adjacent words'
         if any(u['end']-u['start'] < .035 for u in primary):
-            return None, 'collapsed phonetic span'
+            return None, 'insufficient time between onset events' if all(events) else 'collapsed phonetic span'
         starts = [u['start'] for u in primary]
         start, end = float(np.median(starts)), min(bounds[1], float(np.median([u['end'] for u in primary])))
         if max(starts)-min(starts) > protocol['maximum_spread_seconds']:
@@ -88,7 +94,12 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol):
             return None, 'independent acoustic disagreement'
         if not bounds[0] <= start < end <= bounds[1] or (result and start-result[-1]['start'] < .015):
             return None, 'conflict with adjacent words'
-        piece = wave[round(start*44100):round(end*44100)]
+        if all(events) and (end-start < .035 or any(u['emission_end'] > bounds[1] for u in primary)):
+            return None, 'CTC event lacks room before the following word'
+        # CTC emissions can be one frame wide. Verify actual vocal support at
+        # the onset; a longer display hold alone cannot supply that evidence.
+        support_end = min(end, start+.035) if all(events) else end
+        piece = wave[round(start*44100):round(support_end*44100)]
         if not len(piece) or not np.isfinite(piece).all() or float(np.sqrt(np.mean(piece**2))) <= floor:
             return None, 'insufficient audible vocal support'
         result.append(dict(primary[0], start=round(start, 3), end=round(end, 3),
@@ -118,27 +129,42 @@ def recover_groups(cues, wave, model, witness, protocol):
                           for u in spoken_units(cue['text'][first:stop], 'Chinese')]
                 if cue['aligned_end']-cue['aligned_start'] > 30:
                     raise ValueError('Lyric recovery context exceeds 30 seconds')
-                predictions, windows = [], []
-                for padding in (1., 1.5, 2.):
-                    begin, end = max(0., cue['aligned_start']-padding), min(len(wave)/44100, cue['aligned_end']+padding)
-                    prediction = model.infer(wave[round(begin*44100):round(end*44100)], begin, parsed, cue)
-                    predictions.append([u for u in prediction['units'] if group['first'] <= u['first'] < group['stop']])
-                    windows.append([begin, end])
-                if len({tuple(w) for w in windows}) != 3:
-                    raise ValueError('Recovery contexts are not distinct')
-                if independent is None:
-                    independent = witness(cue, wave)
-                observed = [[u for u in view if group['first'] <= u['first'] < group['stop']] for view in independent]
                 previous = cue['units'][index-1] if index else (cues[line-1]['units'][-1] if line else None)
                 following = cue['units'][index+1] if index+1 < len(cue['units']) else (cues[line+1]['units'][0] if line+1 < len(cues) else None)
                 bounds = [previous['end'] if previous else 0., following['start'] if following else len(wave)/44100]
-                replacement, reason = corroborated_group(group, predictions, observed, wave, bounds, protocol)
-                report.update(reason=reason, predictions=predictions, witnesses=observed, source_windows=windows, bounds=bounds)
-                if replacement is not None:
-                    units = result[line]['units']
-                    where = next(i for i, u in enumerate(units) if (u['first'], u['stop']) == (group['first'], group['stop']))
-                    units[where:where+1] = replacement
-                    report['accepted'] = True
+                decoders = [('phonemes', (1., 1.5, 2.))]
+                # CTC gives sparse onset events. Only an internal group has a
+                # following measured onset to bound every display interval.
+                if any(u['first'] >= group['stop'] for u in parsed):
+                    decoders.append(('ctc', protocol['context_padding_seconds']))
+                report['attempts'] = []
+                for decoder, paddings in decoders:
+                    predictions, windows = [], []
+                    for padding in paddings:
+                        begin, end = max(0., cue['aligned_start']-padding), min(len(wave)/44100, cue['aligned_end']+padding)
+                        options = {'decoder': 'ctc'} if decoder == 'ctc' else {}
+                        prediction = model.infer(wave[round(begin*44100):round(end*44100)], begin, parsed, cue, **options)
+                        predictions.append([u for u in prediction['units'] if group['first'] <= u['first'] < group['stop']])
+                        windows.append([begin, end])
+                    if len({tuple(w) for w in windows}) != 3:
+                        raise ValueError('Recovery contexts are not distinct')
+                    if independent is None:
+                        independent = witness(cue, wave)
+                    observed = [[u for u in view if group['first'] <= u['first'] < group['stop']] for view in independent]
+                    replacement, reason = corroborated_group(group, predictions, observed, wave, bounds, protocol)
+                    attempt = dict(decoder=decoder, reason=reason, predictions=predictions,
+                                   witnesses=observed, source_windows=windows, bounds=bounds)
+                    report['attempts'].append(attempt)
+                    report.update(attempt)
+                    if replacement is not None:
+                        if decoder == 'ctc':
+                            for unit in replacement:
+                                unit['timing_source'] = 'cross_model_ctc'
+                        units = result[line]['units']
+                        where = next(i for i, u in enumerate(units) if (u['first'], u['stop']) == (group['first'], group['stop']))
+                        units[where:where+1] = replacement
+                        report['accepted'] = True
+                        break
             except (ValueError, RuntimeError, OSError) as error:
                 report['reason'] = str(error)
     result, reverted = protect_line_order(result, cues)

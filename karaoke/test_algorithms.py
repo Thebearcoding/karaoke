@@ -381,6 +381,76 @@ class SubtitleIntegrity(unittest.TestCase):
                     self.assertEqual(actual, before)
                     self.assertFalse(report[0]['accepted'])
 
+    def test_ctc_onsets_follow_phone_events_not_emission_width_or_equal_spacing(self):
+        import torch
+        from align_lyric_phonemes import ctc_word_units
+        units = [dict(text=c, first=i, stop=i+1, phones=phones)
+                 for i, (c, phones) in enumerate(zip('甲乙丙', [['a', 'b'], ['c'], ['d']]))]
+        vocab = dict(SP=0, a=1, b=2, c=3, d=4)
+        for middle in (40, 46):
+            logits = torch.full((1, 100, 5), -12.)
+            logits[:, :, 0] = 12.
+            for token, frame in enumerate((6, 12, middle, 80), 1):
+                logits[0, frame, 0] = -12.
+                logits[0, frame, token] = 12.
+            result = ctc_word_units(logits, units, vocab, 10., .01)
+            self.assertEqual([u['start'] for u in result], [10.06, 10.+middle*.01, 10.8])
+            self.assertEqual(result[0]['end'], result[1]['start'])
+            self.assertEqual(result[1]['end'], result[2]['start'])
+            self.assertAlmostEqual(result[1]['emission_end']-result[1]['start'], .01)
+            self.assertEqual([u['text'] for u in result], list('甲乙丙'))
+        logits[0, 0, 0] = float('nan')
+        with self.assertRaisesRegex(ValueError, 'Invalid CTC'):
+            ctc_word_units(logits, units, vocab, 10., .01)
+
+    def test_internal_ctc_recovery_still_requires_independent_audio_agreement(self):
+        from unittest.mock import patch
+        from cjk_recovery import recover_groups
+        original = [dict(text='甲乙丙', aligned_start=.5, aligned_end=2., units=[
+            dict(text='甲乙', first=0, stop=2, start=.5, end=1.5),
+            dict(text='丙', first=2, stop=3, start=1.5, end=2.)])]
+        parsed = [dict(text=c, first=i, stop=i+1, phones=['a']) for i, c in enumerate('甲乙丙')]
+        protocol = dict(maximum_spread_seconds=.08, minimum_relative_rms=.03,
+                        context_padding_seconds=[.35, .6, 1.])
+        for mode in ('agrees', 'disagrees', 'silent', 'missing_onset_audio',
+                     'short_before_next', 'pulse_crosses_next'):
+            with self.subTest(mode=mode):
+                calls = []
+                class Model:
+                    def infer(self, audio, begin, units, cue, *, decoder='phonemes'):
+                        calls.append(decoder)
+                        result = [dict(u, start=s, end=e, emission_end=s+.01)
+                                  for u, s, e in zip(units, [.5, 1., 1.5], [1., 1.5, 2.])]
+                        if decoder == 'phonemes':
+                            result[0]['end'] = .51
+                        else:
+                            for unit in result:
+                                unit['timing_evidence'] = 'ctc_event'
+                            if mode == 'short_before_next':
+                                result[0]['end'] = 1.48
+                                result[1].update(start=1.48, end=1.55, emission_end=1.49)
+                            if mode == 'pulse_crosses_next':
+                                result[1].update(end=1.55, emission_end=1.52)
+                        return dict(units=result)
+                def witness(cue, wave):
+                    middle = 1.49 if mode == 'short_before_next' else 1.01
+                    return [[dict(u, start=s, end=s+.1) for u, s in zip(parsed, [.51, middle, 1.51])],
+                            [dict(u, start=s, end=s+.1) for u, s in zip(parsed, [.51, 1.3 if mode == 'disagrees' else middle, 1.51])]]
+                wave = np.full(5*44100, 0. if mode == 'silent' else .1)
+                if mode == 'missing_onset_audio':
+                    wave[round(.5*44100):round(.535*44100)] = 0
+                with patch('cjk_recovery.spoken_units', return_value=parsed):
+                    result, report = recover_groups(original, wave, Model(), witness, protocol)
+                self.assertEqual(calls, ['phonemes']*3+['ctc']*3)
+                if mode == 'agrees':
+                    self.assertEqual([u['start'] for u in result[0]['units']], [.5, 1., 1.5])
+                    self.assertTrue(report[0]['accepted'])
+                    self.assertEqual(result[0]['units'][0]['timing_source'], 'cross_model_ctc')
+                    self.assertFalse(highlight_coverage_errors(result, 'Chinese'))
+                else:
+                    self.assertEqual(result, original)
+                    self.assertFalse(report[0]['accepted'])
+
     def test_pronunciation_mapping_preserves_written_glyphs(self):
         self.assertEqual(reading_parts('感じ', 'かんじ'), [(0,1,'かん'),(1,2,'じ')])
         self.assertEqual(japanese_phone_groups('ー', previous_vowel='o'), [['o']])

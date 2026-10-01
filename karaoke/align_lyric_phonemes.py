@@ -106,6 +106,37 @@ def protect_line_order(cues, prior):
     return result, [i+1 for i in sorted(reverted)]
 
 
+def ctc_word_units(logits, units, vocab, begin, frame_seconds):
+    """Keep CTC onset events separate from the duration of a displayed word."""
+    import torchaudio
+    phones, _, owners = phoneme_sequence(units)
+    content = [(phone, owner) for phone, owner in zip(phones, owners) if phone != 'SP']
+    if not content or any(phone not in vocab for phone, _ in content):
+        raise ValueError('CTC pronunciation is missing or unsupported')
+    if (logits.ndim != 3 or logits.shape[0] != 1 or not logits.shape[1]
+            or not torch.isfinite(logits).all() or not np.isfinite([begin, frame_seconds]).all()
+            or frame_seconds <= 0):
+        raise ValueError('Invalid CTC acoustic evidence')
+    targets = [vocab[phone] for phone, _ in content]
+    paths, scores = torchaudio.functional.forced_align(
+        logits.detach().float().cpu().log_softmax(-1), torch.tensor([targets]), blank=vocab['SP'])
+    spans = torchaudio.functional.merge_tokens(paths[0], scores[0].exp(), blank=vocab['SP'])
+    if [span.token for span in spans] != targets:
+        raise ValueError('CTC alignment omitted phonemes')
+    result = []
+    for index, unit in enumerate(units):
+        parts = [span for span, (_, owner) in zip(spans, content) if owner == index]
+        if not parts:
+            raise ValueError('CTC alignment omitted a displayed word')
+        start, end = begin+parts[0].start*frame_seconds, begin+parts[-1].end*frame_seconds
+        result.append(dict(unit, start=start, end=end, emission_end=end, timing_evidence='ctc_event'))
+    # A CTC pulse is evidence for an event, not an estimate of sung duration.
+    # Display holds use the next measured onset, never evenly split a group.
+    for left, right in zip(result, result[1:]):
+        left.update(end=right['start'], display_end_source='next_ctc_onset')
+    return result
+
+
 class SingingAligner:
     def __init__(self,language,device):
         sys.path.insert(0,str(ROOT/'research/subtitles-2026-09-18/sofa'))
@@ -125,7 +156,9 @@ class SingingAligner:
             win_length=c['win_length'],hop_length=c['hop_length'],n_fft=c['n_fft'],
             mel_fmin=c['fmin'],mel_fmax=c['fmax'],clamp=c['clamp'])
 
-    def infer(self,audio,begin,units,cue):
+    def infer(self,audio,begin,units,cue,*,decoder='phonemes'):
+        if decoder not in ('phonemes', 'ctc'):
+            raise ValueError('Unsupported singing alignment decoder')
         phones,words,owners=phoneme_sequence(units)
         missing=set(phones)-self.model.vocab.keys()
         if missing:
@@ -135,6 +168,13 @@ class SingingAligner:
         mel=self.extract(torch.from_numpy(audio).unsqueeze(0))
         mel=(mel-mel.mean())/mel.std().clamp_min(1e-6)
         mel=mel.repeat_interleave(self.config['scale_factor'],dim=-1).to(self.device)
+        if decoder == 'ctc':
+            with torch.inference_mode():
+                _, _, logits = self.model(mel.transpose(1, 2))
+            frame_seconds = self.config['hop_length']/(44100*self.config['scale_factor'])
+            frames = int((len(audio)*self.config['scale_factor']+.5)/self.config['hop_length'])
+            return dict(units=ctc_word_units(logits[:, :frames], units, self.model.vocab, begin, frame_seconds),
+                        decoder='ctc')
         def decode(ids,log_probs,edges):
             times=np.arange(len(log_probs))*self.config['hop_length']/(44100*self.config['scale_factor'])+begin
             state_ids,scores=guided_scores(ids,log_probs,owners,units,cue['units'],times)

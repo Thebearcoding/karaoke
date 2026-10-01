@@ -220,7 +220,7 @@ def process(job, model, protocol):
         preserved_repeat_units=sum(u.get('timing_source') == 'repeated_lyric_audio' for u in all_units),
         accepted_window_units=sum(u.get('timing_source') == 'singing_window_consensus' for u in all_units),
         repaired_character_units=sum(u.get('timing_source') == 'singing_context_characters' for u in all_units),
-        corroborated_character_units=sum(u.get('timing_source') == 'cross_model_phonemes' for u in all_units),
+        corroborated_character_units=sum(u.get('timing_source') in ('cross_model_phonemes', 'cross_model_ctc') for u in all_units),
         maximum_window_change_ms=max((abs(d['final']-d['previous'])*1000 for d in decisions), default=0),
         checkpoint=str(model.checkpoint), presentation=presentation,
         accuracy=None, accuracy_note='No independent manual onset reference supplied; consistency is not accuracy')
