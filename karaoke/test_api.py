@@ -371,6 +371,44 @@ def test_soak_collects_retries_in_submission_order(tmp_path, monkeypatch):
     assert all(c['attempts'][-1]['status'] == 'failed' for c in saved)
 
 
+@pytest.mark.parametrize('provider', ['youtube', 'openai'])
+@pytest.mark.parametrize('previous_delay', [3600, 14400])
+def test_soak_new_failure_never_shortens_provider_backoff(tmp_path, monkeypatch, provider, previous_delay):
+    import hashlib
+    import httpx
+    from karaoke.tools import soak
+    previous_retry = time.time()+previous_delay
+    case = dict(url=URL, title='Song', language='English', provider='youtube', attempts=[
+        dict(job_id='job', status='submitted', pipeline_version='v1', submitted_at='1',
+             entry_id='entry', external_attempt=1)])
+    selection = [dict(url=URL, language='English')]
+    manifest = tmp_path/'manifest.json'
+    manifest.write_text(json.dumps(dict(cases=[case], cache_limit_bytes=GIB,
+        provider_backoff={provider: previous_retry},
+        selection_sha256=hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest())))
+    folder = tmp_path/'job'
+    folder.mkdir()
+    (folder/'download.log').write_text('HTTP Error 403: Forbidden')
+    error = (dict(code='openai_rate_limit', provider='openai', retryable=True) if provider == 'openai'
+             else dict(code='download_failed'))
+    responses = {'/health': {'pipeline_version': 'v1'},
+        '/v1/room': {'entries': [], 'current_id': None},
+        '/v1/storage': {'limit_bytes': GIB, 'can_prepare': True},
+        '/v1/jobs/job': dict(id='job', status='failed', error=error)}
+    client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json=responses[request.url.path])))
+    monkeypatch.setattr(soak.httpx, 'Client', lambda **kwargs: client)
+    soak.run(manifest, tmp_path, 'http://test')
+    saved = json.loads(manifest.read_text())
+    attempt = saved['cases'][0]['attempts'][-1]
+    assert attempt['status'] == 'external'
+    assert saved['provider_backoff'][provider] >= attempt['next_retry_at']
+    if previous_delay > 7200:
+        assert saved['provider_backoff'][provider] == previous_retry
+    else:
+        assert saved['provider_backoff'][provider] > previous_retry
+
+
 def test_soak_checks_actual_stem_samples_not_only_pipeline_claim(tmp_path):
     import soundfile as sf
     from karaoke.exact_stems import pcm_sha

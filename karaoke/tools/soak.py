@@ -390,7 +390,9 @@ def run(path, data_dir, base):
                 else:
                     record_failure(attempt, job, data_dir/job['id'])
                 if attempt['status'] == 'external' and attempt['provider_blocked']:
-                    state['provider_backoff'][attempt.get('retry_provider', case['provider'])] = attempt['next_retry_at']
+                    provider = attempt.get('retry_provider', case['provider'])
+                    state['provider_backoff'][provider] = max(
+                        state['provider_backoff'].get(provider, 0), attempt['next_retry_at'])
                 save(path, state)
                 print(json.dumps({'title': case['title'], 'job_id': job['id'], 'status': attempt['status'],
                                   'error': attempt.get('error')}, ensure_ascii=False), flush=True)
