@@ -17,7 +17,7 @@ from lyric_progress import map_words, build as build_progress
 from align_lyric_phonemes import guided_scores, protect_line_order, protect_units
 from phoneme_progress import reading_parts, japanese_phone_groups, spoken_units
 from align_repeated_lyrics import agree_onset, audible, reference_pairs
-from align_lyrics_whisper import alignment_blocks, stitch_blocks
+from align_lyrics_whisper import alignment_blocks, recover_skipped_repeats, stitch_blocks
 from transcribe_lyrics import filter_silent_transcription
 from word_onset_metrics import score_onsets, word_events
 
@@ -444,6 +444,75 @@ class WordOnsetScoring(unittest.TestCase):
 
 
 class AlignmentIntegrity(unittest.TestCase):
+    def test_skipped_refrain_requires_two_acoustic_windows_inside_the_gap(self):
+        from copy import deepcopy
+
+        text = 'run into the light'
+
+        def segment(start):
+            return dict(text=text, start=start, end=start+1.4, words=[
+                dict(word=word, start=start+i*.4, end=start+i*.4+.2)
+                for i, word in enumerate(text.split())])
+
+        missing = segment(10.)
+        for word in missing['words']:
+            word.update(start=10., end=10.)
+        missing.update(start=10., end=10.)
+        original = dict(segments=[segment(1.), segment(6.), missing])
+        saved = deepcopy(original)
+        calls = []
+
+        def align(begin, end, requested):
+            calls.append((begin, end, requested))
+            absolute = [segment(1.), segment(3.5), segment(6.)] if '\n' in requested else [segment(3.5)]
+            for s in absolute:
+                s['start'] -= begin
+                s['end'] -= begin
+                for word in s['words']:
+                    word['start'] -= begin
+                    word['end'] -= begin
+            return dict(segments=absolute)
+
+        repaired, reports = recover_skipped_repeats(original, 10., align)
+        self.assertTrue(reports[0]['accepted'])
+        self.assertEqual(original, saved)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(repaired['segments'][1], segment(3.5))
+        self.assertEqual(repaired['segments'][2], original['segments'][1])
+        raw = [dict(range=[0, 3], context=[0, 3], source_range=[0., 10.], result=repaired)]
+        cues, stitched, _ = stitch_blocks([text]*3, raw, 10., 'English')
+        presentation_cues(cues, 10., lead=0, tail=0, bridge_gap=0)
+        _, mapping = build_progress(cues, stitched, 'English')
+        self.assertFalse(mapping['fallback_lines'])
+        calls.clear()
+        self.assertEqual(recover_skipped_repeats(repaired, 10., align)[1], [])
+        self.assertFalse(calls)
+
+        # Timing disagreement, matching only a clipped first word, an empty
+        # prediction, and a phrase outside the gap must all leave the failure.
+        for problem in ('disagreement', 'clipped', 'empty', 'outside'):
+            with self.subTest(problem=problem):
+                def unreliable(begin, end, requested):
+                    prediction = align(begin, end, requested)
+                    if '\n' not in requested:
+                        words = prediction['segments'][0]['words']
+                        if problem == 'empty':
+                            prediction['segments'][0]['words'] = []
+                        else:
+                            for i, word in enumerate(words):
+                                if problem == 'clipped' and i == 0:
+                                    word['start'] = 0.
+                                else:
+                                    word['start'] += .5
+                                    word['end'] += .5
+                    elif problem == 'outside':
+                        prediction['segments'][1]['words'][0]['start'] = 0.
+                    return prediction
+
+                unchanged, rejected = recover_skipped_repeats(original, 10., unreliable)
+                self.assertEqual(unchanged, original)
+                self.assertFalse(rejected[0]['accepted'])
+
     def test_crossing_can_use_context_from_the_third_neighboring_window(self):
         lines = ['first', 'middle', 'last']
 
