@@ -56,6 +56,10 @@ def needs_recovery(data):
 def transcribe(client, audio, language, hint, output):
     options = {} if language == 'auto' else {'language': language}
 
+    def unusable(prediction):
+        return needs_recovery(prediction) or (language == 'auto' and
+            song_language(prediction.get('language')) is None)
+
     def recognize(path, model='whisper-1', instruction=None):
         with path.open('rb') as stream:
             return client.audio.transcriptions.create(file=stream, model=model, **options,
@@ -65,7 +69,7 @@ def transcribe(client, audio, language, hint, output):
 
     data = recognize(audio)
     recovery = dict(triggered=False, chunks=[])
-    if not needs_recovery(data):
+    if not unusable(data):
         return data, recovery
     report_progress(detail='识别结果异常，分段重试')
     (output/'initial-transcription.json').write_text(json.dumps(data, ensure_ascii=False)+'\n')
@@ -97,7 +101,7 @@ def transcribe(client, audio, language, hint, output):
         try:
             part = recognize(path)
             diagnostic = dict(start=start, end=start+length, whisper=part)
-            fallback = needs_recovery(part)
+            fallback = unusable(part)
             if fallback:
                 path.with_suffix('.json').write_text(json.dumps(diagnostic, ensure_ascii=False)+'\n')
             # Do not give the text-only transcript invented word times. Unresolved
