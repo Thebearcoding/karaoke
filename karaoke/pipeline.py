@@ -145,7 +145,8 @@ class Pipeline:
             'package_two_stems': (['download/source.mkv', 'music-separation/song/vocals.wav'],
                                   ['two-stems'], [ROOT/'exact_stems.py']),
             'resample_vocals': (['music-separation/song/vocals.wav'], ['vocals-16k.wav', 'vocals-asr.mp3'], []),
-            'transcribe': (['vocals-asr.mp3'], ['asr'], [ROOT/'transcribe_lyrics.py']),
+            'transcribe': (['vocals-asr.mp3'], ['asr'], [ROOT/p for p in
+                ('transcribe_lyrics.py', 'anchors_from_asr.py', 'subtitles.py', 'job_schema.py')]),
             'separate_lead': (['music-separation/song/vocals.wav'], ['lead-separation'], [ROOT/'benchmark_neural.py']),
             'package_three_stems': (['two-stems', 'lead-separation/song/vocals.wav'],
                                     ['stems'], [ROOT/'exact_stems.py', ROOT/'three_stems.py']),

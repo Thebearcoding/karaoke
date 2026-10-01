@@ -49,7 +49,12 @@ def map_words(cue, words, offset, language):
         units[-1]['text'] = cue['text'][units[-1]['first']:]
     if not units or any(b['start'] < a['start'] for a, b in zip(units, units[1:])):
         raise ValueError('No usable monotonic word timing')
-    units[-1]['stop'] = len(cue['text'])
+    # Keep display punctuation between model tokens, including the apostrophe
+    # in split contractions. This changes only character spans, never onsets.
+    units[0]['first'] = 0
+    for index, unit in enumerate(units):
+        unit['stop'] = units[index+1]['first'] if index+1 < len(units) else len(cue['text'])
+        unit['text'] = cue['text'][unit['first']:unit['stop']]
     return units
 
 

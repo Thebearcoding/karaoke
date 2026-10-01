@@ -259,10 +259,26 @@ class SubtitleIntegrity(unittest.TestCase):
         words = [{'word': '刮', 'start': 1., 'end': 1.}, {'word': '风，', 'start': 1., 'end': 1.5},
                  {'word': '这天', 'start': 1.7, 'end': 3.}]
         units = map_words(cue, words, 3., 'Chinese')
-        self.assertEqual(units[0]['text'], '颳風')
+        self.assertEqual(units[0]['text'], '颳風，')
         self.assertEqual((units[0]['start'], units[0]['end']), (4., 4.5))
         self.assertEqual(cue['text'][units[1]['first']:units[1]['stop']], '這天')
         self.assertEqual(units[1]['start'], 4.7)
+
+    def test_progress_keeps_contractions_when_model_splits_around_apostrophe(self):
+        from subtitles import normalized
+        for language in ('Chinese', 'English'):
+            with self.subTest(language=language):
+                cue = dict(text="Hello, I'm here.", start=1., end=5.)
+                words = [dict(word=text, start=i+1., end=i+1.8)
+                         for i, text in enumerate(['Hello', 'I', 'm', 'here'])]
+                units = map_words(cue, words, 0., language)
+                self.assertEqual(''.join(u['text'] for u in units), cue['text'])
+                self.assertEqual(normalized(''.join(u['text'] for u in units)), normalized(cue['text']))
+                self.assertEqual([u['start'] for u in units], [1., 2., 3., 4.])
+                for unit in units:
+                    self.assertEqual(unit['text'], cue['text'][unit['first']:unit['stop']])
+                with self.assertRaisesRegex(ValueError, 'differs'):
+                    map_words(cue, words[:-1], 0., language)
 
     def test_progress_ignores_alignment_context_and_falls_back_on_mismatch(self):
         cues = [{'text': '甲', 'start': 0., 'end': 1.}, {'text': '乙', 'start': 1., 'end': 2.}]

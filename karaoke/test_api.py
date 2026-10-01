@@ -874,7 +874,7 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
 @pytest.mark.parametrize('initial_kind', ['loop', 'punctuation', 'fragmented_loop',
                                         'backward_segments', 'backward_words', 'invalid_range',
                                         'collapsed_words', 'unsupported_language',
-                                        'short_window_recovery', 'short_tail_recovery'])
+                                        'short_window_recovery', 'short_tail_recovery', 'local_loop'])
 def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, fallback_text, initial_kind):
     import soundfile as sf
     audio = tmp_path/'audio.wav'
@@ -897,6 +897,13 @@ def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, f
         elif name == str(audio) and initial_kind == 'fragmented_loop':
             data = dict(language='english', segments=[dict(start=i,end=i,text='same empty phrase')
                                                      for i in range(24)], words=[])
+        elif name == str(audio) and initial_kind == 'local_loop':
+            # A short loop inside an otherwise normal transcript must not be
+            # hidden by the proportion of correctly timed verses.
+            data = dict(language='chinese', segments=[
+                *[dict(start=i, end=i+.8, text='正常的一句') for i in range(30)],
+                *[dict(start=30+i*.02, end=30+(i+1)*.02, text='耶') for i in range(21)],
+                *[dict(start=31+i, end=31+i+.8, text='后面的歌词') for i in range(30)]], words=[])
         elif initial_kind == 'collapsed_words' and (name == str(audio) or bad_chunk):
             data = dict(language='japanese', segments=[dict(start=1,end=5,text='一緒に歌うこの歌の続きを')],
                         words=[dict(start=1,end=1,word=c) for c in '一緒に歌うこの歌の続きを'])
@@ -948,6 +955,7 @@ def test_normal_choruses_do_not_trigger_asr_retry(tmp_path, language):
                 words=[dict(start=1,end=1,word='一'), dict(start=1,end=1,word='起'),
                        dict(start=1,end=2,word='唱'), dict(start=1.9,end=2.5,word='歌')])
     assert not repetition_loop(data)
+    assert not repetition_loop(dict(segments=[dict(start=i, end=i+.02, text='耶') for i in range(21)]))
     audio = tmp_path/'audio.mp3'
     audio.write_bytes(b'input')
     with patch('karaoke.transcribe_lyrics.OpenAI') as client:
@@ -955,6 +963,47 @@ def test_normal_choruses_do_not_trigger_asr_retry(tmp_path, language):
         actual, recovery = transcribe(client, audio, language, '', tmp_path)
         assert actual == data and not recovery['triggered']
         client.audio.transcriptions.create.assert_called_once()
+
+
+@pytest.mark.parametrize('recoverable', [True, False])
+def test_truncated_recovery_text_cannot_drop_later_sung_words(tmp_path, recoverable):
+    import soundfile as sf
+    from karaoke.transcribe_lyrics import select_recovery_text
+    greeting = "Hello, I'm here."
+    lines = ['沿着山路走到远方', '听见晚风轻轻歌唱', '抬头又见漫天星光']
+    complete = greeting + ''.join(lines)
+    words = [dict(word=text, start=i*5+1, end=i*5+4)
+             for i, text in enumerate([greeting, *lines])]
+    initial = complete if recoverable else '呜'*100
+    audio = tmp_path/'audio.wav'
+    sf.write(audio, np.zeros(30000), 1000)
+    output = tmp_path/'asr'
+    output.mkdir()
+    def create(**kwargs):
+        if kwargs['model'] != 'whisper-1':
+            data = dict(text=greeting)
+        elif kwargs['file'].name == str(audio):
+            data = dict(language='chinese', text=initial,
+                        segments=[dict(start=2., end=1., text=initial)], words=[])
+        else:
+            data = dict(language='chinese', text=complete,
+                        segments=[dict(start=1., end=19., text=complete)], words=words)
+        return SimpleNamespace(model_dump=lambda: data)
+    client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create)))
+    if recoverable:
+        result, recovery = transcribe(client, audio, 'auto', '', output)
+        assert result['text'] == complete and result['segments'][0]['text'] == complete
+        assert recovery['text_selection']['selected'] == 'initial_transcription'
+        assert result['words'] == words
+    else:
+        with pytest.raises(ValueError, match='遗漏了分段识别'):
+            transcribe(client, audio, 'auto', '', output)
+        assert json.loads((output/'recovery-words.json').read_text()) == words
+        assert json.loads((output/'text-selection.json').read_text())['selected'] is None
+    # A complete fallback remains preferred; words are evidence, not a source
+    # of fabricated text or replacement timestamps.
+    assert select_recovery_text(complete, initial, words, 'Chinese')[0] == complete
+    assert [(w['start'], w['end']) for w in words] == [(1,4), (6,9), (11,14), (16,19)]
 
 
 @pytest.mark.parametrize('corrupt', [False, True])

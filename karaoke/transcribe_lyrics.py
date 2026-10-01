@@ -28,6 +28,18 @@ def repetition_loop(data):
     for text in candidates:
         if len(text) >= 40 and re.search(r'(.{1,32}?)\1{7,}', text):
             return True
+    # A local burst can be much shorter than the rest of the song. Eight
+    # repetitions in contiguous collapsed intervals are already unusable.
+    burst, previous_end = '', None
+    for segment, text in zip(segments, texts):
+        start, end = segment.get('start'), segment.get('end')
+        if start is None or end is None or end-start > .025:
+            burst, previous_end = '', None
+            continue
+        burst = (burst if previous_end is not None and 0 <= start-previous_end <= .025 else '') + text
+        previous_end = end
+        if re.search(r'(.{1,32}?)\1{7,}', burst):
+            return True
     return False
 
 
@@ -51,6 +63,29 @@ def needs_recovery(data):
                 return True
     text = ''.join(s.get('text', '') for s in data.get('segments') or []) or data.get('text', '')
     return not any(c.isalnum() for c in text) or repetition_loop(data)
+
+
+def select_recovery_text(text, initial_text, words, language):
+    """Keep full-recording text; detect a response containing only an intro."""
+    from anchors_from_asr import text_units
+    from rapidfuzz.distance import Levenshtein
+    observed = [unit for word in words for unit in text_units(word['word'], language)]
+    recovered = text_units(text, language)
+    report = dict(recovered_units=len(recovered), timed_units=len(observed), selected='recovered_text')
+    if len(recovered) >= len(observed)/2:
+        return text, report
+    initial = text_units(initial_text, language)
+    matched = sum(block.src_end-block.src_start for block in Levenshtein.opcodes(initial, observed)
+                  if block.tag == 'equal')
+    report.update(initial_units=len(initial), initial_support=matched/max(1, len(initial)),
+                  timed_word_coverage=matched/max(1, len(observed)), selected=None)
+    # Invalid initial timestamps do not invalidate its text. Reuse it only with
+    # independent word evidence in both directions, never its broken timestamps.
+    if (not needs_recovery(dict(segments=[dict(text=initial_text)])) and
+            min(report['initial_support'], report['timed_word_coverage']) >= .55):
+        report['selected'] = 'initial_transcription'
+        return initial_text, report
+    return None, report
 
 
 def transcribe(client, audio, language, hint, output):
@@ -137,9 +172,17 @@ def transcribe(client, audio, language, hint, output):
             languages[record['language']] += sum(c.isalnum() for w in words for c in w['word'])
     detected = languages.most_common(1)[0][0] if languages.total() else None
     data['language'] = song_language(language) if language != 'auto' else detected
-    data.update(duration=duration, text=text, segments=segments, words=[w for words, _ in parts for w in words])
+    words = [w for words, _ in parts for w in words]
+    initial_text = data.get('text') or ' '.join(s.get('text', '') for s in data.get('segments') or [])
+    text, selection = select_recovery_text(text, initial_text, words, data['language'])
+    (output/'text-selection.json').write_text(json.dumps(selection, ensure_ascii=False)+'\n')
+    if text is None:
+        (output/'recovery-words.json').write_text(json.dumps(words, ensure_ascii=False)+'\n')
+        raise ValueError('歌词文本遗漏了分段识别中的大量内容，无法生成完整歌词')
+    segments = [dict(start=0., end=duration, text=text, timing_source='recording_bounds')]
+    data.update(duration=duration, text=text, segments=segments, words=words)
     return data, dict(triggered=True, text_model=fallback_model, language_evidence=dict(languages),
-                      chunks=[record for _, record in parts])
+                      text_selection=selection, chunks=[record for _, record in parts])
 
 
 def filter_silent_transcription(data, audio, sample_rate):
