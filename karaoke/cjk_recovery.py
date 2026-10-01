@@ -7,7 +7,7 @@ import soundfile as sf
 from scipy.signal import resample_poly
 
 from align_lyric_phonemes import protect_line_order
-from phoneme_progress import ROOT, SPOKEN_CHINESE, spoken_units
+from phoneme_progress import ROOT, chinese_pronunciation_text, spoken_units
 from subtitles import highlight_spans
 
 
@@ -29,7 +29,7 @@ class AcousticWitness:
             self.model = self.bundle.get_model(dl_kwargs={'model_dir': str(weights.parent),
                                                           'progress': False}).to(self.device).eval()
         spans = list(highlight_spans(cue['text'], 'Chinese'))
-        syllables = lazy_pinyin(SPOKEN_CHINESE.convert(cue['text']), errors=lambda value: list(value))
+        syllables = lazy_pinyin(chinese_pronunciation_text(cue['text']), errors=lambda value: list(value))
         if len(syllables) != len(cue['text']):
             raise ValueError('Independent pronunciation changes character positions')
         tokens = [re.sub("[^a-z']", '', ''.join(syllables[a:b]).lower()) for a, b in spans]

@@ -446,13 +446,19 @@ class SubtitleIntegrity(unittest.TestCase):
     def test_traditional_chinese_pronunciation_uses_phrase_context(self):
         from unittest.mock import patch
         from phoneme_progress import chinese_units
-        dictionary = {word: [word] for word in ('tou', 'zhe', 'guang', 'yu', 'zhu', 'zuo')}
-        with patch('phoneme_progress.mandarin_dictionary', return_value=dictionary):
-            text = '透著光與著作'
-            units = chinese_units(text)
-        self.assertEqual([u['reading'] for u in units], ['tou', 'zhe', 'guang', 'yu', 'zhu', 'zuo'])
-        self.assertEqual(''.join(u['text'] for u in units), text)
-        self.assertEqual([text[u['first']:u['stop']] for u in units], list(text))
+        cases = {
+            '透著光與著作': ['tou', 'zhe', 'guang', 'yu', 'zhu', 'zuo'],
+            '怎么那么这么什么': ['zen', 'me', 'na', 'me', 'zhe', 'me', 'shen', 'me'],
+            '怎麼那么這麼什么': ['zen', 'me', 'na', 'me', 'zhe', 'me', 'shen', 'me'],
+            '幺妹看著幺雞': ['yao', 'mei', 'kan', 'zhe', 'yao', 'ji'],
+        }
+        dictionary = {word: [word] for words in cases.values() for word in words}
+        for text, readings in cases.items():
+            with self.subTest(text=text), patch('phoneme_progress.mandarin_dictionary', return_value=dictionary):
+                units = chinese_units(text)
+                self.assertEqual([u['reading'] for u in units], readings)
+                self.assertEqual(''.join(u['text'] for u in units), text)
+                self.assertEqual([text[u['first']:u['stop']] for u in units], list(text))
 
     def test_highlights_preserve_words_characters_and_japanese_reading_groups(self):
         for language, parts in [

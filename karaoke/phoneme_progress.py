@@ -13,6 +13,7 @@ from lyric_progress import canonical_positions
 ROOT = Path(__file__).resolve().parent
 KAKASI = pykakasi.kakasi()
 SPOKEN_CHINESE = OpenCC('tw2s')
+TRADITIONAL_CHINESE = OpenCC('s2t')
 KANJI = r'[\u3400-\u9fff々〆]+'
 SMALL = 'ゃゅょぁぃぅぇぉゎ'
 
@@ -123,7 +124,7 @@ def chinese_units(text):
     # Taiwan's particle 著 is 着 (zhe), while 著作 remains 著 (zhu).
     # Conversion needs the whole phrase; converting characters separately
     # discards the evidence used by OpenCC's regional phrase dictionary.
-    spoken, _ = canonical_positions(SPOKEN_CHINESE.convert(text), 'Chinese')
+    spoken, _ = canonical_positions(chinese_pronunciation_text(text), 'Chinese')
     if len(spoken) != len(normalized):
         raise ValueError('Chinese pronunciation conversion changes display alignment')
     normalized = spoken
@@ -137,6 +138,12 @@ def chinese_units(text):
             raise ValueError(f'Unsupported Chinese pronunciation: {text[position]} / {pinyin}')
         result.append(dict(first=position,stop=position+1,text=text[position],reading=pinyin,phones=dictionary[pinyin]))
     return result
+
+
+def chinese_pronunciation_text(text):
+    # Canonicalize mixed scripts first: tw2s treats a simplified 么 as the
+    # traditional form of 幺. Genuine 幺 remains unchanged through s2t.
+    return SPOKEN_CHINESE.convert(TRADITIONAL_CHINESE.convert(text))
 
 
 def spoken_units(text,language,isolated=False):
