@@ -1,10 +1,11 @@
 """Map verified lyric lines to rough ASR word times, preserving recording order."""
 
 import argparse
+from array import array
 import json
 from pathlib import Path
 
-from rapidfuzz.distance import Levenshtein
+from Bio.Align import PairwiseAligner
 
 from subtitles import normalized, write_captions
 
@@ -26,10 +27,21 @@ def anchors_from_words(lines, words, language, allow_missing=False):
         observed.extend(units)
         owners.extend([i]*len(units))
     correspondence = {}
-    for block in Levenshtein.opcodes(expected, observed):
-        if block.tag == 'equal':
-            for j in range(block.src_end-block.src_start):
-                correspondence[block.src_start+j] = owners[block.dest_start+j]
+    if expected and observed:
+        alphabet = {unit: i for i, unit in enumerate(dict.fromkeys(expected+observed))}
+        # Minimize ordinary edit distance first, then internal gap runs.
+        # Otherwise scattered letters in a spoken intro can tie a contiguous
+        # lyric match and falsely give a minute-long line 100% text coverage.
+        base = len(expected)+len(observed)+1
+        aligner = PairwiseAligner(mode='global', match_score=0, mismatch_score=-base,
+                                  open_gap_score=-base-1, extend_gap_score=-base)
+        aligner.open_end_gap_score = -base  # Intro/outro gaps do not fragment lyrics.
+        alignment = aligner.align(array('i', (alphabet[u] for u in expected)),
+                                  array('i', (alphabet[u] for u in observed)))[0]
+        for (first, stop), (begin, end) in zip(*alignment.aligned):
+            for i, j in zip(range(first, stop), range(begin, end)):
+                if expected[i] == observed[j]:
+                    correspondence[i] = owners[j]
     position = 0
     cues = []
     for line, key in zip(lines, keys):

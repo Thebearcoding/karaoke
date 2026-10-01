@@ -346,6 +346,27 @@ class SubtitleIntegrity(unittest.TestCase):
         self.assertEqual([(c['start'], c['end']) for c in cues],
                          [(0., 3.), (3., 5.), (6., 9.), (9., 12.)])
 
+    def test_lyric_anchors_do_not_collect_scattered_letters_from_dialogue(self):
+        for prefix, suffix in [('axbxcxdxexfx', ''), ('', 'xaxbxcxdxexf'),
+                               ('axbxcxdxexfx', 'xaxbxcxdxexf')]:
+            with self.subTest(prefix=prefix, suffix=suffix):
+                words = [dict(word=char, start=float(i), end=float(i+1))
+                         for i, char in enumerate(prefix+'abcdef'+suffix)]
+                cues = anchors_from_words(['abc', 'def'], words, 'English')
+                start = len(prefix)
+                self.assertEqual([(c['start'], c['end']) for c in cues],
+                                 [(start, start+3), (start+3, start+6)])
+                self.assertTrue(all(c['matched_fraction'] == 1. for c in cues))
+
+    def test_missing_asr_evidence_stays_unresolved(self):
+        for words in ([], [dict(word='xyz', start=1., end=2.)]):
+            with self.subTest(words=words):
+                cues = anchors_from_words(['abc'], words, 'English', allow_missing=True)
+                self.assertEqual(cues[0]['status'], 'unresolved_text')
+                self.assertIsNone(cues[0]['start'])
+                with self.assertRaisesRegex(ValueError, 'Insufficient ASR support'):
+                    anchors_from_words(['abc'], words, 'English')
+
     def test_split_video_cards_match_one_lyric_line(self):
         self.assertEqual(caption_similarity('星光落在心里面', '星光落在'), 1.)
         self.assertEqual(caption_similarity('星光落在心里面', '心里面'), 1.)

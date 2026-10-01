@@ -3,6 +3,7 @@ Pillow==12.3.0
 fonttools==4.63.0
 openai==1.109.1
 rapidfuzz==3.14.3
+biopython==1.87
 pypinyin==0.55.0
 stable-ts==2.19.1
 openai-whisper==20250625
