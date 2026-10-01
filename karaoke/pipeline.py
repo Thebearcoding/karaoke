@@ -160,7 +160,7 @@ class Pipeline:
                                     ['stems'], [ROOT/'exact_stems.py', ROOT/'three_stems.py']),
             'align_words': (['vocals-16k.wav', 'lyrics.json', 'anchors.json', 'alignment-jobs.json'],
                             ['alignment'], alignment_code),
-            'align_phonemes': ((['vocals-16k.wav', 'lyrics.json', 'anchors.json', 'english-jobs.json'] if english else
+            'align_phonemes': ((['vocals-16k.wav', 'lyrics.json', 'word-cues.json', 'english-jobs.json'] if english else
                                 ['music-separation/song/vocals.wav', 'word-cues.json', 'phoneme-jobs.json']),
                                ['english-onsets' if english else 'phonemes'], alignment_code),
             'align_repeats': (['music-separation/song/vocals.wav', 'phonemes/cues.json', 'word-cues.json', 'repeat-jobs.json'],
@@ -509,6 +509,7 @@ class Pipeline:
             raise StageFailure('align_words', '部分歌词无法生成时间轴；请检查本版本歌词')
         write_json(output/'word-cues.json', words)
         order_fallbacks = []
+        english_context_scope = None
         if language in ('Chinese', 'Japanese'):
             job = dict(song='song', language=language, audio=str(self.vocals),
                        cues=str(output/'word-cues.json'), output=str(output/'phonemes'))
@@ -531,14 +532,20 @@ class Pipeline:
                 '--jobs', output/'context-jobs.json', '--output', output/'context', '--device', self.device])
             cues = json.loads((output/'context/song/cues.json').read_text())
         else:
-            from onset_consensus import blend_cues
+            from onset_consensus import blend_cues, context_scope_violations
             job = dict(audio=str(output/'vocals-16k.wav'), lyrics=str(output/'lyrics.json'),
-                       anchors=str(output/'anchors.json'), output=str(output/'english-onsets'))
+                       anchors=str(output/'word-cues.json'), output=str(output/'english-onsets'))
             write_json(output/'english-jobs.json', [job])
             self.run('align_phonemes', [sys.executable, ROOT/'align_english_onsets.py', '--method', 'singing',
                 '--onset-ratio', '.02', '--full-song', '--jobs', output/'english-jobs.json', '--device', self.device])
+            report = json.loads((output/'english-onsets/run.json').read_text())
+            if report['failures']:
+                raise StageFailure('align_phonemes', '部分英文歌词无法可靠对齐；详情保存在音素对齐日志中')
+            english_context_scope = report['scope_blocks']
             primary = json.loads((output/'english-onsets/cues.json').read_text())
             cues = blend_cues(primary, words, max_disagreement=.2, primary_weight=.75)
+            if context_scope_violations(cues, english_context_scope):
+                raise StageFailure('align_words', '英文词起点落在已定位的唱句上下文之外，需重新对齐')
             cues = [dict(c, status='candidate') for c in cues]
             cues, _ = presentation_cues(cues, duration, lead=0, tail=0, bridge_gap=0)
         units = [u for c in cues for u in c['units']]
@@ -553,6 +560,7 @@ class Pipeline:
         write_json(output/'cues.json', cues)
         write_json(output/'quality.json', dict(lines=len(cues), units=len(units),
             lyrics_provenance=lyrics['provenance'], onset_accuracy=None, separation_purity=None,
+            english_context_scope=english_context_scope,
             fallback_units=sum(u.get('timing_source') == 'prior_word_fallback' for u in units),
             line_order_fallback_lines=order_fallbacks,
             countdown_events=countdown_events(cues)))

@@ -235,6 +235,10 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False):
         raise ValueError('Non-monotonic word onsets')
     if any(normalized(''.join(u['text'] for u in c['units'])) != normalized(c['text']) for c in cues):
         raise ValueError('Subtitle units omit lyric text')
+    if result.get('language') == 'English':
+        from karaoke.onset_consensus import context_scope_violations
+        if context_scope_violations(cues, result['quality'].get('english_context_scope')):
+            raise ValueError('Word timing falls outside acoustic phrase context')
     for name in ('mv', 'instrumental_preview', 'backing_vocals_preview', 'lead_vocals_preview'):
         if audio_only and name == 'mv':
             continue

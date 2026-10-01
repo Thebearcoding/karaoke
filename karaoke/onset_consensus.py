@@ -4,6 +4,15 @@ import copy
 from word_onset_metrics import canonical, word_events
 
 
+def context_scope_violations(cues, blocks):
+    """Reject placement outside acoustic phrase context; this is not onset accuracy."""
+    if not cues or not blocks or [i for b in blocks for i in range(b[0], b[1])] != list(range(len(cues))):
+        raise ValueError('Acoustic context must cover every lyric line exactly once')
+    return [b for b in blocks if any(not cues[i]['units'] or any(
+        not b[4]-.001 <= u['start'] < u['end'] <= b[5]+.001 for u in cues[i]['units'])
+        for i in range(b[0], b[1]))]
+
+
 def blend_cues(primary, auxiliary, *, max_disagreement, primary_weight):
     if not 0 <= primary_weight <= 1 or max_disagreement < 0:
         raise ValueError('Invalid consensus parameters')

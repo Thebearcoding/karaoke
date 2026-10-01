@@ -741,7 +741,7 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
     sf.write(pipeline.vocals, tone, sample_rate)
     (folder/'cues.json').write_text(json.dumps([dict(text='Hello',start=.1,end=.8,
         units=[dict(text='Hello',first=0,stop=5,start=.1,end=.8)])]))
-    (folder/'quality.json').write_text('{}')
+    (folder/'quality.json').write_text(json.dumps(dict(english_context_scope=[[0, 1, 0, 1, 0., 1.]])))
     monkeypatch.setenv('OPENAI_API_KEY','unit-test-placeholder')
     monkeypatch.setattr(pipeline, 'download', lambda: ({'format_id':'a1'},1))
     stages=[]
@@ -755,6 +755,13 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
     assert not (folder/'result.json').exists()
     evidence=verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
     assert evidence['validation_scope']=='audio_and_lyrics' and len(evidence['artifact_sha256'])==7
+    # Valid hashes, monotonic subtitles and playable audio must not conceal a
+    # lyric placed in unrelated speech outside its acoustic phrase context.
+    for scope in (None, [], [[0, 1, 0, 1, .9, 1.]], [[0, 0, 0, 1, 0., 1.]]):
+        result['quality']['english_context_scope'] = scope
+        (folder/'audio-result.json').write_text(json.dumps(result))
+        with pytest.raises(ValueError, match='context'):
+            verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
     with pytest.raises(FileNotFoundError):
         verify_outputs(None,'',tmp_path,{'id':'job'})
 

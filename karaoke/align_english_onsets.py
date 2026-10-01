@@ -15,6 +15,7 @@ import torchaudio
 from align_lyrics_whisper import alignment_blocks, sha
 from stage_progress import progress_items
 from word_onset_metrics import canonical
+from onset_consensus import context_scope_violations
 
 ROOT = Path(__file__).resolve().parent
 SINGING_ROOT = ROOT / 'research/word-onset-2026-09-18/lyrics-alignment-multilingual'
@@ -180,43 +181,63 @@ def align_job(aligner, job, full_song=False):
     cues = [dict(text=s, start=0., end=0., units=[]) for s in lines]
     failures = []
     started = time.perf_counter()
-    for block_id, (first, stop, left, right, begin, end) in enumerate(progress_items(blocks, 'blocks')):
-        matches = [[m for m in re.finditer(r'\S+', s) if canonical(m[0])] for s in lines[left:right]]
-        words = [m[0] for row in matches for m in row]
-        try:
-            if any(not row for row in matches):
-                raise ValueError('Lyric lines must contain alignable text')
-            aligned, emissions, step = aligner.align(audio[round(begin*rate):round(end*rate)], words)
-        except (ValueError, RuntimeError) as error:
-            failures.append(dict(lines=[first, stop], error=str(error)))
-            continue
-        if emissions is not None:
-            np.savez_compressed(output / f'emissions-{block_id:03d}.npz', values=emissions, step=step,
-                                begin=begin, core=[first, stop], context=[left, right])
-        cursor = 0
-        for line in range(left, right):
-            units = []
-            for match in matches[line-left]:
-                word = aligned[cursor]
-                units.append(dict(text=match[0], first=match.start(), stop=match.end(),
-                                  start=word['start']+begin, end=word['end']+begin,
-                                  confidence=word['confidence'], timing_source=aligner.method))
-                cursor += 1
-            # Punctuation has no separate phoneme or onset, but still belongs
-            # to the displayed line, including leading and trailing marks.
-            units[0]['first'] = 0
-            for index, unit in enumerate(units):
-                unit['stop'] = units[index+1]['first'] if index+1 < len(units) else len(lines[line])
-                unit['text'] = lines[line][unit['first']:unit['stop']]
-            if first <= line < stop:
-                cues[line] = dict(text=lines[line], start=units[0]['start'], end=units[-1]['end'],
-                                  aligned_start=units[0]['start'], aligned_end=units[-1]['end'], units=units)
-        print(json.dumps(dict(song=lyrics.get('id'), method=aligner.method, lines=[first+1, stop])), flush=True)
+
+    def run_blocks(blocks, start_id=0):
+        for block_id, (first, stop, left, right, begin, end) in enumerate(progress_items(blocks, 'context' if start_id else 'blocks'), start_id):
+            matches = [[m for m in re.finditer(r'\S+', s) if canonical(m[0])] for s in lines[left:right]]
+            words = [m[0] for row in matches for m in row]
+            try:
+                if any(not row for row in matches):
+                    raise ValueError('Lyric lines must contain alignable text')
+                aligned, emissions, step = aligner.align(audio[round(begin*rate):round(end*rate)], words)
+            except (ValueError, RuntimeError) as error:
+                failures.append(dict(lines=[first, stop], error=str(error)))
+                continue
+            if emissions is not None:
+                np.savez_compressed(output / f'emissions-{block_id:03d}.npz', values=emissions, step=step,
+                                    begin=begin, core=[first, stop], context=[left, right])
+            cursor = 0
+            for line in range(left, right):
+                units = []
+                for match in matches[line-left]:
+                    word = aligned[cursor]
+                    units.append(dict(text=match[0], first=match.start(), stop=match.end(),
+                                      start=word['start']+begin, end=word['end']+begin,
+                                      confidence=word['confidence'], timing_source=aligner.method))
+                    cursor += 1
+                # Punctuation has no separate phoneme or onset, but still belongs
+                # to the displayed line, including leading and trailing marks.
+                units[0]['first'] = 0
+                for index, unit in enumerate(units):
+                    unit['stop'] = units[index+1]['first'] if index+1 < len(units) else len(lines[line])
+                    unit['text'] = lines[line][unit['first']:unit['stop']]
+                if first <= line < stop:
+                    cues[line] = dict(text=lines[line], start=units[0]['start'], end=units[-1]['end'],
+                                      aligned_start=units[0]['start'], aligned_end=units[-1]['end'], units=units)
+            print(json.dumps(dict(song=lyrics.get('id'), method=aligner.method, lines=[first+1, stop])), flush=True)
+
+    run_blocks(blocks)
+    scope_blocks = context_blocks(anchors, audio) if full_song and anchors and aligner.method != 'sofa' else None
+    context_retries = []
+    if scope_blocks and not failures:
+        retries = context_scope_violations(cues, scope_blocks)
+        for first, stop, left, right, begin, end in retries:
+            context_retries.append(dict(core=[first, stop], context=[left, right], source_range=[begin, end],
+                                        original_cues=cues[first:stop]))
+            cues[first:stop] = [dict(text=lines[i], start=0., end=0., units=[]) for i in range(first, stop)]
+        run_blocks(retries, start_id=len(blocks))
+        remaining = context_scope_violations(cues, scope_blocks)
+        for block, report in zip(retries, context_retries):
+            report.update(accepted=block not in remaining, candidate_cues=cues[block[0]:block[1]])
+        if remaining:
+            failures.append(dict(lines=[b[:2] for b in remaining], error='Word timing falls outside acoustic phrase context'))
     if aligner.device == 'mps':
         torch.mps.synchronize()
     report = dict(method=aligner.method, device=aligner.device, seconds=time.perf_counter()-started,
-                  full_song=full_song, failures=failures, audio_sha256=sha(job['audio']),
+                  full_song=full_song, failures=failures, scope_blocks=scope_blocks,
+                  context_retries=context_retries, audio_sha256=sha(job['audio']),
                   onset_ratio=aligner.onset_ratio,
+                  anchors_sha256=sha(job['anchors']) if job.get('anchors') else None,
                   lyrics_sha256=sha(job['lyrics']), runner_sha256=sha(__file__),
                   model_identity=aligner.model_identity, torch_version=torch.__version__,
                   torchaudio_version=torchaudio.__version__,

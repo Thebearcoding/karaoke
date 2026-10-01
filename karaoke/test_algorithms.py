@@ -444,6 +444,59 @@ class WordOnsetScoring(unittest.TestCase):
 
 
 class AlignmentIntegrity(unittest.TestCase):
+    def test_global_english_alignment_retries_only_out_of_context_blocks(self):
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from align_english_onsets import align_job
+        from onset_consensus import context_scope_violations
+
+        lines = ['opening line', 'second line', 'later line']
+        anchors = [dict(text=text, status='candidate', start=start, end=start+1.4)
+                   for text, start in zip(lines, (10., 12., 25.))]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sf.write(root/'audio.wav', np.zeros(30*16000), 16000)
+            (root/'lyrics.json').write_text(json.dumps(dict(language='English', lines=lines)))
+            (root/'anchors.json').write_text(json.dumps(anchors))
+            for mode in ('repair', 'failed_retry', 'already_valid'):
+                with self.subTest(mode=mode):
+                    def align(audio, words):
+                        if len(audio) == 30*16000:
+                            first = 10.17 if mode == 'already_valid' else 1.
+                            starts = [first, first+.5, 12.17, 12.67, 25.17, 25.67]
+                        else:
+                            # These are measured offsets in the supplied crop,
+                            # deliberately different from the coarse anchors.
+                            starts = [.77, 1.27, 2.77, 3.27]
+                            if mode == 'failed_retry':
+                                starts[0] = -2.
+                        return [dict(text=w, start=t, end=t+.25, confidence=.9)
+                                for w, t in zip(words, starts)], None, .02
+
+                    model = SimpleNamespace(method='singing', device='cpu', onset_ratio=.02,
+                                            model_identity={}, align=Mock(side_effect=align))
+                    output = root/mode
+                    report = align_job(model, dict(audio=str(root/'audio.wav'), lyrics=str(root/'lyrics.json'),
+                        anchors=str(root/'anchors.json'), output=str(output)), full_song=True)
+                    cues = json.loads((output/'cues.json').read_text())
+                    self.assertEqual(model.align.call_count, 1 if mode == 'already_valid' else 2)
+                    self.assertAlmostEqual(cues[2]['start'], 25.17)
+                    if mode == 'already_valid':
+                        self.assertEqual(report['context_retries'], [])
+                    else:
+                        retry = report['context_retries'][0]
+                        self.assertEqual(retry['core'], [0, 2])
+                        self.assertEqual(retry['original_cues'][0]['start'], 1.)
+                        self.assertEqual(retry['accepted'], mode == 'repair')
+                    if mode == 'failed_retry':
+                        self.assertTrue(report['failures'])
+                        self.assertTrue(context_scope_violations(cues, report['scope_blocks']))
+                    else:
+                        self.assertFalse(report['failures'])
+                        self.assertFalse(context_scope_violations(cues, report['scope_blocks']))
+                        self.assertAlmostEqual(cues[0]['start'], 10.17)
+
     def test_english_phoneme_alignment_keeps_punctuation_out_of_spoken_words(self):
         import json
         from types import SimpleNamespace
