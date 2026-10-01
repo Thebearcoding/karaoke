@@ -10,6 +10,7 @@ from PIL import Image, ImageChops, ImageColor, ImageDraw
 
 from subtitle_style import TOKENS, STYLES, caption_image, song_intro_image
 from subtitles import countdown_events, countdown_state, read_ahead_state
+from stage_progress import progress_items, report_progress
 
 
 class Caption:
@@ -153,7 +154,7 @@ def main():
     with log.open('w') as errors:
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=errors)
         try:
-            for frame in range(round(args.duration*fps)):
+            for frame in progress_items(range(round(args.duration*fps)), 'frames'):
                 instant = args.start+frame/fps
                 preview = None
                 if args.next_line:
@@ -192,12 +193,14 @@ def main():
                     picture.alpha_composite(preview_image, (0, main_height))
                 process.stdin.write(picture.tobytes())
             process.stdin.close()
+            report_progress(detail='封装视频')
             if process.wait() != 0:
                 raise RuntimeError(log.read_text())
         except Exception:
             process.kill()
             process.wait()
             raise
+    report_progress(detail='校验视频')
     subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(args.output), '-f', 'null', '-'], check=True)
     probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',
         'format=duration:stream=codec_type,width,height', '-of', 'json', str(args.output)]))

@@ -1,0 +1,2 @@
+# Keep upstream runtime releases byte-for-byte, including their whitespace.
+karaoke/web/vendor/* linguist-vendored -whitespace

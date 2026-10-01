@@ -1,9 +1,11 @@
 import json
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import re
 import subprocess
 import sys
 import threading
 import time
+from urllib.parse import urljoin
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -14,10 +16,11 @@ import pytest
 from karaoke.api import Store, create_app
 from karaoke.exact_stems import validate_preview
 from karaoke.job_schema import JobRequest, video_url
-from karaoke.song_sources import SongText, find_verified_lyrics, prepare_song_text
+from karaoke.song_sources import SongText, find_verified_lyrics, prepare_song_text, video_song_info
 from karaoke.align_lyric_phonemes import protect_line_order
 from karaoke.cache import CacheFull, GIB
 from karaoke.pipeline import Pipeline, StageFailure, create_poster
+from karaoke.stage_progress import PREFIX, parse_progress, progress_items
 
 
 URL = 'https://www.youtube.com/watch?v=n5sjpCQhTDk'
@@ -129,6 +132,102 @@ def test_download_failure_has_actionable_reason_without_raw_diagnostics(tmp_path
     assert (tmp_path/'download.log').exists()
 
 
+def test_stage_counters_advance_after_work_and_do_not_finish_on_failure(monkeypatch, capsys):
+    monkeypatch.setenv('KARAOKE_EVENTS_STDOUT', '1')
+    monkeypatch.setattr('karaoke.stage_progress.time.monotonic', iter(range(100)).__next__)
+    items = progress_items(['first', 'second', 'third'])
+    assert next(items) == 'first'
+    assert parse_progress(capsys.readouterr().out.strip())['completed'] == 0
+    assert next(items) == 'second'
+    assert parse_progress(capsys.readouterr().out.strip())['completed'] == 1
+    items.close()  # The second item failed; it and the final item are not done.
+    assert not capsys.readouterr().out
+
+
+@pytest.mark.parametrize('payload', [
+    dict(completed=500, total=None, unit='bytes'),
+    dict(completed=500, total='NA', unit='bytes'),
+    dict(completed=500, total=100, unit='bytes'),
+    dict(completed=500, total=float('nan'), unit='bytes'),
+])
+def test_download_without_a_reliable_total_keeps_bytes_without_a_percentage(payload):
+    result = parse_progress(PREFIX+json.dumps(payload))
+    assert result['completed'] == 500 and result['total'] is None
+
+
+def test_subprocess_progress_arrives_before_exit_and_keeps_parallel_stages(tmp_path, monkeypatch):
+    monkeypatch.setenv('KARAOKE_EVENTS_STDOUT', '1')
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    pipeline.phase('prepare_lyrics', True, song_info=dict(title='A song'))
+    release = tmp_path/'release'
+    code = '''import pathlib,sys,time
+print('KARAOKE_STAGE_PROGRESS not-json', flush=True)
+print('KARAOKE_STAGE_PROGRESS []', flush=True)
+sys.stdout.write('KARAOKE_STAGE_PROGRESS {"completed":1,');sys.stdout.flush()
+time.sleep(.05)
+print('"total":4,"unit":"chunks"}', flush=True)
+while not pathlib.Path(sys.argv[1]).exists(): time.sleep(.01)
+'''
+    errors = []
+    def run():
+        try:
+            pipeline.run('separate_lead', [sys.executable, '-c', code, str(release)], timeout=5)
+        except Exception as error:
+            errors.append(error)
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        deadline = time.monotonic()+3
+        while time.monotonic() < deadline:
+            progress = json.loads((tmp_path/'progress.json').read_text())
+            if progress['stage_progress'].get('separate_lead', {}).get('completed') == 1:
+                break
+            time.sleep(.01)
+        assert thread.is_alive()
+        assert progress['stage_progress']['separate_lead']['total'] == 4
+        assert progress['active_stages'] == ['prepare_lyrics', 'separate_lead']
+        assert progress['song_info'] == {'title': 'A song'}
+    finally:
+        release.touch()
+        thread.join(6)
+    assert not errors and not thread.is_alive()
+    progress = json.loads((tmp_path/'progress.json').read_text())
+    assert progress['active_stages'] == ['prepare_lyrics'] and not progress['stage_progress']
+    assert 'not-json' in (tmp_path/'separate_lead.log').read_text()
+
+
+def test_silent_subprocess_still_obeys_timeout(tmp_path):
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    with pytest.raises(StageFailure, match='超过允许的处理时间'):
+        pipeline.run('render', [sys.executable, '-c', 'import time;time.sleep(30)'], timeout=.1)
+    assert not pipeline.active and pipeline.timings['render'] < 3
+
+
+def test_frontend_changes_invalidate_browser_cache_including_imports(tmp_path, monkeypatch):
+    web = tmp_path/'web'
+    web.mkdir()
+    (web/'index.html').write_text('<script type="module" src="/assets/app.js"></script>')
+    (web/'app.js').write_text('import "./player.js";')
+    (web/'player.js').write_text('export const version=1;')
+    (web/'style.css').write_text('body{color:white}')
+    monkeypatch.setattr('karaoke.api.ROOT', tmp_path)
+    with TestClient(create_app(tmp_path/'jobs', version='test')) as client:
+        def script_url():
+            home = client.get('/')
+            assert home.headers['cache-control'] == 'no-cache'
+            return re.search(r'src="([^"]+)"', home.text)[1]
+        first = script_url()
+        assert client.get(first).text == (web/'app.js').read_text()
+        (web/'player.js').write_text('export const version=2;')
+        second = script_url()
+        assert first != second
+        assert client.get(urljoin(second, './player.js')).text == 'export const version=2;'
+        (web/'style.css').write_text('body{color:gold}')
+        assert script_url() != second
+        assert client.get('/assets/player.js').status_code == 200
+        assert client.get(first.rsplit('/', 1)[0]+'/%2e%2e/test.py').status_code == 404
+
+
 def test_empty_alignment_error_identifies_the_failed_stage(tmp_path):
     pipeline = Pipeline(dict(url=URL), tmp_path)
     with pytest.raises(StageFailure, match='歌词对齐失败.*没有有效音频') as caught:
@@ -199,6 +298,22 @@ def test_download_publishes_metadata_before_separation(tmp_path, monkeypatch, ca
     assert events[0]['active_stages'] == [] and events[1]['active_stages'] == ['separate_music']
     assert json.loads((tmp_path/'progress.json').read_text())['song_info'] == info
     assert not (tmp_path/'result.json').exists()
+
+
+def test_language_classification_uses_audio_metadata_not_subtitle_language():
+    metadata = dict(title='English song (日本語字幕)', subtitles={'ja': []})
+    assert 'language' not in video_song_info(metadata)
+    metadata['requested_formats'] = [dict(acodec='none', language='ja'), dict(acodec='opus', language='en-US')]
+    assert video_song_info(metadata)['language'] == 'English'
+
+
+def test_partial_song_information_updates_preserve_language_and_title(tmp_path):
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    pipeline.phase(song_info=dict(title='Video', language='Japanese'))
+    pipeline.phase(song_info=dict(language='English'))
+    pipeline.phase(song_info=dict(title='Song', artist='Singer'))
+    info = json.loads((tmp_path/'progress.json').read_text())['song_info']
+    assert info == dict(title='Song', artist='Singer', language='English')
 
 
 def test_restart_recovers_pending_and_marks_interrupted_jobs(tmp_path):

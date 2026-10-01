@@ -19,6 +19,7 @@ import soundfile as sf
 from align_lyric_phonemes import SingingAligner
 from lyric_progress import canonical_positions
 from phoneme_progress import spoken_units
+from stage_progress import progress_items
 
 
 def fallback_fraction(cue):
@@ -145,7 +146,7 @@ def main():
             if language not in models:
                 models[language] = SingingAligner(language, args.device)
             reference_cache = {}
-            for target_id, source_id in pairs:
+            for target_id, source_id in progress_items(pairs, 'blocks'):
                 source, target = cues[source_id], cues[target_id]
                 if source_id not in reference_cache:
                     try:

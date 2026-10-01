@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import selectors
 import subprocess
 import shutil
 import sys
@@ -17,8 +18,9 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from .job_schema import JobRequest, video_url
+from .job_schema import JobRequest, song_language, video_url
 from .song_sources import prepare_song_text, video_song_info
+from .stage_progress import parse_progress
 
 
 def write_json(path, value):
@@ -107,6 +109,7 @@ class Pipeline:
         self.device, self.text_model = device, text_model
         self.max_duration, self.catalog_root, self.cookies_file = max_duration, catalog_root, cookies_file
         self.active, self.timings, self.lock = set(), {}, threading.Lock()
+        self.stage_progress = {}
         self.song_info = {}
         self.source = self.output/'download/source.mkv'
         self.vocals = self.output/'music-separation/song/vocals.wav'
@@ -115,22 +118,54 @@ class Pipeline:
         with self.lock:
             if name is not None:
                 self.active.add(name) if active else self.active.discard(name)
+                self.stage_progress.pop(name, None)
             if song_info is not None:
-                self.song_info = song_info
-            progress = dict(active_stages=sorted(self.active),
-                updated_at=datetime.now(timezone.utc).isoformat(), timings=self.timings,
-                song_info=self.song_info)
-            write_json(self.output/'progress.json', progress)
-            if os.getenv('KARAOKE_EVENTS_STDOUT') == '1':
-                print('KARAOKE_PROGRESS ' + json.dumps(progress), flush=True)
+                self.song_info.update(song_info)
+            self.publish_progress()
+
+    def publish_progress(self):
+        # Caller holds the lock: parallel stages publish one coherent snapshot.
+        progress = dict(active_stages=sorted(self.active), stage_progress=self.stage_progress,
+            updated_at=datetime.now(timezone.utc).isoformat(), timings=self.timings,
+            song_info=self.song_info)
+        write_json(self.output/'progress.json', progress)
+        if os.getenv('KARAOKE_EVENTS_STDOUT') == '1':
+            print('KARAOKE_PROGRESS ' + json.dumps(progress), flush=True)
 
     def run(self, name, command, timeout=3600):
         self.phase(name, True)
         started = time.perf_counter()
         try:
-            with (self.output/f'{name}.log').open('w') as log:
-                result = subprocess.run([str(a) for a in command], cwd=ROOT.parent,
-                    stdout=log, stderr=subprocess.STDOUT, timeout=timeout)
+            with (self.output/f'{name}.log').open('wb') as log, selectors.DefaultSelector() as selector:
+                with subprocess.Popen([str(a) for a in command], cwd=ROOT.parent,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        env={**os.environ, 'PYTHONUNBUFFERED': '1'}) as result:
+                    selector.register(result.stdout, selectors.EVENT_READ)
+                    pending = b''
+                    try:
+                        while True:
+                            remaining = timeout-(time.perf_counter()-started)
+                            if remaining <= 0:
+                                raise subprocess.TimeoutExpired(command, timeout)
+                            if not selector.select(remaining):
+                                raise subprocess.TimeoutExpired(command, timeout)
+                            block = result.stdout.read1(65536)
+                            log.write(block)
+                            log.flush()
+                            lines = (pending+block).split(b'\n')
+                            pending = lines.pop() if block else b''
+                            for line in lines:
+                                value = parse_progress(line.decode(errors='replace'))
+                                if value is not None:
+                                    with self.lock:
+                                        self.stage_progress[name] = value
+                                        self.publish_progress()
+                            if not block:
+                                break
+                        result.wait(timeout=max(.001, timeout-(time.perf_counter()-started)))
+                    except BaseException:
+                        result.kill()
+                        raise
             if result.returncode:
                 with (self.output/f'{name}.log').open('rb') as log:
                     log.seek(0, 2)
@@ -167,7 +202,11 @@ class Pipeline:
                 url = video_url(urljoin(url, response.headers['location']))
             if url.startswith('https://b23.tv/'):
                 raise StageFailure('download', '无法解析 b23.tv 短链，请使用完整 Bilibili 视频链接')
-        command = [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--no-playlist', '--no-progress',
+        command = [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--no-playlist',
+            '--newline', '--progress', '--progress-delta', '.5', '--progress-template',
+            'download:KARAOKE_STAGE_PROGRESS {"completed":%(progress.downloaded_bytes)j,'
+            '"total":%(progress.total_bytes)j,"unit":"bytes","vcodec":%(info.vcodec)j}',
+            '--progress-template', 'postprocess:KARAOKE_STAGE_PROGRESS {"detail":"合并视频"}',
             '--write-info-json', '--no-overwrites', '--retries', '2', '--fragment-retries', '2',
             '--socket-timeout', '25', '--max-filesize', '2G', '--match-filter',
             f'!is_live & duration <= {self.max_duration}', '-f', 'bv[height<=1080]+ba/b[height<=1080]',
@@ -211,13 +250,16 @@ class Pipeline:
         started = time.perf_counter()
         try:
             transcription = json.loads((self.output/'asr/transcription.json').read_text())
+            language = song_language(transcription.get('language'))
+            if language:
+                self.phase(song_info=dict(language=language))
             audio, rate = sf.read(self.output/'vocals-16k.wav', dtype='float32')
             transcription, rejected = filter_silent_transcription(transcription, audio, rate)
             write_json(self.output/'asr/filtered.json', dict(transcription=transcription, rejected=rejected))
             lyrics = prepare_song_text(self.request, metadata, transcription, duration,
                 catalog_root=self.catalog_root, model=self.text_model)
             self.phase(song_info=dict(title=lyrics['title'], artist=lyrics['artist'],
-                                      duration_seconds=duration))
+                                      duration_seconds=duration, language=lyrics['language']))
             anchors = anchors_from_words(lyrics['lines'], transcription.get('words') or [],
                                          lyrics['language'], allow_missing=True)
             covered = sum(c['matched_fraction']*len(c['text']) for c in anchors)/max(1, sum(len(c['text']) for c in anchors))

@@ -6,6 +6,12 @@ from urllib.parse import parse_qs, urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+def song_language(value):
+    key = str(value or '').lower().replace('_', '-').split('-')[0]
+    return {'zh': 'Chinese', 'chinese': 'Chinese', 'ja': 'Japanese', 'japanese': 'Japanese',
+            'en': 'English', 'english': 'English'}.get(key)
+
+
 def video_url(value: str) -> str:
     parsed = urlsplit(value.strip())
     if parsed.scheme not in ('http', 'https') or parsed.username or parsed.password:
@@ -66,4 +72,4 @@ class JobRequest(BaseModel):
     @field_validator('language', mode='before')
     @classmethod
     def language_alias(cls, value):
-        return {'zh': 'Chinese', 'ja': 'Japanese', 'en': 'English'}.get(value, value)
+        return song_language(value) or value

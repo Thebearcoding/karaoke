@@ -6,7 +6,7 @@ from typing import Literal
 from openai import OpenAI
 from pydantic import BaseModel
 
-from .job_schema import video_url
+from .job_schema import song_language, video_url
 
 
 class SongText(BaseModel):
@@ -18,9 +18,16 @@ class SongText(BaseModel):
 
 def video_song_info(metadata):
     """Use supplied music tags or the video title; an uploader is not a singer."""
-    return dict(title=metadata.get('track') or metadata.get('title') or '',
+    info = dict(title=metadata.get('track') or metadata.get('title') or '',
                 artist=metadata.get('artist') or ' · '.join(metadata.get('artists') or []),
                 duration_seconds=metadata.get('duration') or 0)
+    audio_languages = {song_language(f.get('language')) for f in (metadata.get('requested_formats') or [])
+                       if f.get('acodec') not in (None, 'none')}
+    audio_languages.discard(None)
+    language = next(iter(audio_languages)) if len(audio_languages) == 1 else song_language(metadata.get('language'))
+    if language:
+        info['language'] = language
+    return info
 
 
 def find_verified_lyrics(url, duration, root):
@@ -50,8 +57,7 @@ def find_verified_lyrics(url, duration, root):
 
 
 def prepare_song_text(request, metadata, transcription, duration, *, catalog_root, model):
-    detected = {'chinese': 'Chinese', 'japanese': 'Japanese', 'english': 'English',
-                'zh': 'Chinese', 'ja': 'Japanese', 'en': 'English'}.get(transcription.get('language', '').lower())
+    detected = song_language(transcription.get('language'))
     if request.get('lyrics'):
         language = request.get('language') or detected
         if language is None:

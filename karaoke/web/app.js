@@ -11,6 +11,7 @@ let library = [], filter = 'all', view = 'library', clockOffset = 0, readySent =
 let toastTimer, librarySignature = '', queueSignature = '';
 let pendingLevels = {}, sendingLevels = {}, levelTimer = null, levelsBusy = false;
 let levelRequest = Promise.resolve();
+let pitchRequest = Promise.resolve();
 const current = () => state.entries.find(e => e.id === state.current_id);
 const effectiveLevels = () => ({...state.levels, ...sendingLevels, ...pendingLevels});
 
@@ -92,22 +93,27 @@ function renderLibrary() {
   $('submit-song').innerHTML = `${isURL ? '加入歌单' : '点一首'} ${icon('arrow')}`;
   const search = isURL ? '' : query.toLocaleLowerCase();
   const songs = library.filter(song => (!search || `${song.title} ${song.artist}`.toLocaleLowerCase().includes(search)) &&
-    (filter === 'all' || (filter === 'ready' ? song.job_id : song.language === filter)));
+    (filter === 'all' || (filter === 'ready' ? song.status === 'completed' : song.language === filter)));
   $('library-count').textContent = `${songs.length} 首${filter === 'ready' ? '已准备' : '歌曲'}`;
   $('library-heading').textContent = search ? '搜索结果' : '曲库';
-  $('song-grid').innerHTML = songs.map(song => `<article class="song-card">
+  const signature = JSON.stringify([songs.map(({stage_progress, active_stages, ...song}) => song), filter, query]);
+  if (signature !== librarySignature) {
+    librarySignature = signature;
+    $('song-grid').innerHTML = songs.map(song => {
+      const ready = song.status === 'completed';
+      const label = ready ? '● 已准备' : song.status === 'queued' ? '等待准备' : song.status === 'failed' ? '准备失败' : song.status === 'running' ? '' : '需准备';
+      return `<article class="song-card" data-card="${escape(song.id)}">
     <div class="song-poster">${song.poster ? `<img src="${escape(song.poster)}" alt="" loading="lazy">` : `<span class="poster-initial">${escape(song.title.slice(0,1))}</span>`}
       <span class="poster-duration">${time(song.duration)}</span>
       <button class="add-song" data-song="${escape(song.id)}" aria-label="点歌：${escape(song.title)}" title="加入歌单">${icon('plus')}</button></div>
-    <div class="song-detail"><h3>${escape(song.title)}</h3><div class="song-info-row"><span class="song-artist">${escape(song.artist)}</span><span class="${song.job_id ? 'ready-label' : 'prepare-label'}">${song.job_id ? '● 已准备' : '需准备'}</span></div></div></article>`).join('');
+    <div class="song-detail"><h3>${escape(song.title)}</h3><div class="song-info-row"><span class="song-artist">${escape(song.artist)}</span>${label ? `<span class="${ready ? 'ready-label' : 'prepare-label'}">${label}</span>` : ''}</div>${song.status === 'running' ? `<div class="preparation-slot">${preparationHTML(song)}</div>` : ''}</div></article>`;
+    }).join('');
+  } else {
+    updatePreparationSlots($('song-grid'), songs);
+  }
   $('search-empty').hidden = songs.length > 0;
   $('youtube-search').href = `https://www.youtube.com/results?search_query=${encodeURIComponent(query + ' official music video')}`;
   $('bilibili-search').href = `https://search.bilibili.com/all?keyword=${encodeURIComponent(query + ' MV')}`;
-}
-
-async function refreshLibrary() {
-  try { library = (await request('/v1/library')).songs; renderLibrary(); }
-  catch { toast('曲库暂时无法加载，请检查服务连接'); }
 }
 
 function statusText(entry) {
@@ -117,22 +123,45 @@ function statusText(entry) {
   return (entry.active_stages || []).map(s => stages[s] || '正在准备').join(' · ') || '开始准备';
 }
 
+function preparationHTML(entry) {
+  if (entry?.status !== 'running') return '';
+  return `<div class="preparation">${(entry.active_stages?.length ? entry.active_stages : ['starting']).map(stage => {
+    const p = entry.stage_progress?.[stage] || {};
+    const measured = Number.isFinite(p.completed) && Number.isFinite(p.total) && p.total > 0;
+    const percent = measured ? Math.min(100, Math.floor(100*p.completed/p.total)) : null;
+    const label = `${stages[stage] || '开始准备'}${p.detail ? ` · ${p.detail}` : ''}`;
+    const amount = percent !== null ? `${percent}%` : p.unit === 'bytes' && Number.isFinite(p.completed) ? `${(p.completed/1024**2).toFixed(1)} MB` : '';
+    return `<div class="preparation-stage"><div class="preparation-label"><span>${escape(label)}</span><span>${amount}</span></div><progress max="100" ${percent === null ? '' : `value="${percent}"`} aria-label="${escape(label)}"></progress></div>`;
+  }).join('')}</div>`;
+}
+
+function updatePreparationSlots(container, songs) {
+  for (const element of container.children) {
+    const slot = element.querySelector('.preparation-slot');
+    if (slot) slot.innerHTML = preparationHTML(songs.find(s => s.id === (element.dataset.entry || element.dataset.card)));
+  }
+}
+
 function renderQueue() {
-  const signature = JSON.stringify([state.entries, state.current_id, state.playing]);
+  const signature = JSON.stringify([state.entries.map(({stage_progress, active_stages, ...entry}) => entry), state.current_id, state.playing]);
   $('queue-count').textContent = String(state.entries.length).padStart(2,'0');
   $('nav-count').textContent = state.entries.length;
   $('queue-empty').hidden = state.entries.length > 0;
   const preparing = state.entries.filter(e => ['running','queued'].includes(e.status)).length;
   $('queue-badge').textContent = `${preparing} 首准备中`;
   $('queue-badge').hidden = !preparing;
-  if (signature === queueSignature) return;
+  if (signature === queueSignature) {
+    // Progress pushes must not replace focused buttons or interrupt a click.
+    updatePreparationSlots($('queue-list'), state.entries);
+    return;
+  }
   queueSignature = signature;
   $('queue-list').innerHTML = state.entries.map((entry, i) => {
     const active = entry.id === state.current_id;
     const preparing = ['running','queued'].includes(entry.status);
     return `<article class="queue-entry ${active ? 'current' : ''}" data-entry="${escape(entry.id)}"><span class="entry-number">${active && state.playing ? '♫' : String(i+1).padStart(2,'0')}</span>
       ${entry.poster ? `<img class="entry-art" src="${escape(entry.poster)}" alt="">` : `<span class="entry-art">♪</span>`}
-      <div><h3 class="entry-title">${escape(entry.title)}</h3><p class="entry-artist">${escape(entry.artist || (entry.url.includes('bili') ? 'Bilibili 视频' : 'YouTube 视频'))}</p><p class="entry-status ${preparing ? 'preparing' : entry.status === 'failed' ? 'failed' : ''}">${preparing ? '<span class="spinner"></span>' : ''}${escape(statusText(entry))}</p></div>
+      <div class="entry-info"><h3 class="entry-title">${escape(entry.title)}</h3><p class="entry-artist">${escape(entry.artist || (entry.url.includes('bili') ? 'Bilibili 视频' : 'YouTube 视频'))}</p>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : `<p class="entry-status ${preparing ? 'preparing' : entry.status === 'failed' ? 'failed' : ''}">${escape(statusText(entry))}</p>`}</div>
       <div class="entry-tools">${entry.status === 'failed' ? `<button data-action="retry">重试</button>` : ''}${!active ? `<button data-action="select">${icon('play')}现在唱</button><button data-action="up" aria-label="上移：${escape(entry.title)}" ${i <= (state.current_id ? 1 : 0) ? 'disabled' : ''}>${icon('up')}</button><button data-action="down" aria-label="下移：${escape(entry.title)}" ${i === state.entries.length-1 ? 'disabled' : ''}>${icon('down')}</button>` : ''}<button data-action="remove" aria-label="移除：${escape(entry.title)}">${icon('trash')}</button></div></article>`;
   }).join('');
 }
@@ -156,6 +185,11 @@ function updateTransport() {
   $('duration').textContent = time(song?.duration);
   $('playing-dot').hidden = !state.playing;
   $('quality-note').hidden = !song?.lyrics_need_review;
+  const pitch = state.pitch_semitones || 0;
+  $('pitch-value').textContent = pitch ? `${pitch > 0 ? '+' : '−'}${Math.abs(pitch)}` : '原调';
+  $('pitch-value').setAttribute('aria-label', `当前${pitch ? `${pitch > 0 ? '升' : '降'} ${Math.abs(pitch)} 个半音` : '原调'}`);
+  $('pitch-down').disabled = pitch <= -6;
+  $('pitch-up').disabled = pitch >= 6;
   document.querySelectorAll('[data-mix]').forEach(button => {
     button.classList.toggle('selected', button.dataset.mix === state.mix);
     button.setAttribute('aria-pressed', String(button.dataset.mix === state.mix));
@@ -168,7 +202,7 @@ function updateCover() {
   const song = current();
   $('screen-cover').hidden = Boolean(song?.status === 'completed' && !loading && !loadError && !remote && player.unlocked && player.buffers);
   $('screen-status').textContent = remote ? '遥控模式' : loadError || (!song ? '请先点歌' : song.status !== 'completed' ? statusText(song) : loading ? '加载音轨…' : '');
-  $('screen-status').hidden = !$('screen-status').textContent;
+  $('screen-status').hidden = !$('screen-status').textContent || song?.status === 'running';
   $('screen-start').hidden = remote || !song || song.status !== 'completed' || loading;
   $('screen-start').firstChild.textContent = loadError ? '重试加载 ' : '开始唱 ';
 }
@@ -211,12 +245,13 @@ async function syncPlayback() {
 function acceptState(updated) {
   if (updated.revision < state.revision) return;
   state = updated;
+  library = updated.library || [];
+  renderLibrary();
+  $('screen-preparation').innerHTML = preparationHTML(current());
   clockOffset = state.server_time - Date.now()/1000;
   renderQueue(); updateTransport(); renderStorage();
   if (!player.anchor) updateTime(state.position);
   syncPlayback();
-  const signature = state.entries.map(e => `${e.job_id}:${e.status}`).join('|') + `:${state.storage?.revision}`;
-  if (signature !== librarySignature) { librarySignature = signature; refreshLibrary(); }
 }
 
 async function activate() {
@@ -249,7 +284,7 @@ $('add-form').onsubmit = async event => {
   try {
     acceptState(await request('/v1/room/entries', {url, title:$('title-input').value.trim() || null}));
     $('song-input').value = ''; $('title-input').value = ''; renderLibrary();
-    toast('已加入歌单，准备好就可以唱');
+    toast('已加入歌单');
   } catch (error) { toast(error.message); }
   finally { $('submit-song').disabled = false; }
 };
@@ -278,6 +313,16 @@ $('queue-list').onclick = async event => {
   }
 };
 $('play-toggle').onclick = togglePlay;
+for (const [id, step] of [['pitch-down', -1], ['pitch-up', 1], ['pitch-reset', null]]) {
+  $(id).onclick = () => {
+    pitchRequest = pitchRequest.then(async () => {
+      if (!(await activate())) return;
+      if (!remote && player.pitchError) { toast(player.pitchError.message); return; }
+      const pitch = step === null ? 0 : Math.max(-6, Math.min(6, (state.pitch_semitones || 0) + step));
+      await command('pitch', {pitch_semitones:pitch});
+    });
+  };
+}
 $('screen-start').onclick = async () => { if (await activate()) { if (!state.playing) await command('play'); else await syncPlayback(); } };
 $('next-song').onclick = async () => { await activate(); await command('next'); };
 $('now-song').onclick = () => switchView('player');
@@ -343,5 +388,4 @@ if (remote) {
   };
   requestAnimationFrame(remoteTick);
 }
-refreshLibrary();
 updateTransport();

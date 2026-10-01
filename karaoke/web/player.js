@@ -1,6 +1,8 @@
 // All three stems share one AudioContext clock. Video follows that clock.
+import {createPitchShift} from './pitch-shift.js';
+
 export class Player {
-  constructor(video, onTick, onEnd) {
+  constructor(video, onTick, onEnd, pitchFactory = createPitchShift) {
     this.video = video;
     this.onTick = onTick;
     this.onEnd = onEnd;
@@ -10,9 +12,19 @@ export class Player {
     this.unlocked = false;
     this.mode = 'karaoke';
     this.levels = {instrumental:1, backing_vocals:1, lead_vocals:0};
+    this.pitch = 0;
+    this.pitchFactory = pitchFactory;
     const tick = () => {
       if (this.anchor !== null && this.context.state === 'running') {
-        const position = Math.max(0, this.context.currentTime - this.anchor);
+        const position = Math.max(this.startPosition, this.context.currentTime - this.anchor);
+        if (this.videoPending && this.context.currentTime >= this.audibleWhen) {
+          this.videoPending = false;
+          const signature = this.signature;
+          this.video.play().catch(() => {
+            if (this.signature !== signature) return;
+            this.stop(); this.unlocked = false; this.onTick(position);
+          });
+        }
         if (this.video.readyState >= 2 && Math.abs(this.video.currentTime - position) > 0.08) {
           this.video.currentTime = Math.min(position, this.entry.duration);
         }
@@ -45,7 +57,28 @@ export class Player {
   async unlock() {
     this.ensureContext();
     await this.context.resume();
+    await this.preparePitch();
     this.unlocked = this.context.state === 'running';
+  }
+
+  preparePitch() {
+    if (!this.pitchLoading) {
+      this.pitchLoading = this.pitchFactory(this.context, this.master).then(chain => {
+        this.pitchChain = chain;
+        for (const gain of this.gains) { gain.disconnect(); gain.connect(chain.input); }
+        chain.setPitch(this.pitch);
+      }).catch(error => { this.pitchError = error; });
+    }
+    return this.pitchLoading;
+  }
+
+  setPitch(value) {
+    this.pitch = Math.max(-6, Math.min(6, Math.round(value || 0)));
+    if (this.pitch && this.pitchError) {
+      this.stop();
+      throw new Error(this.pitchError.message || '升降调初始化失败，请刷新播放页');
+    }
+    this.pitchChain?.setPitch(this.pitch);
   }
 
   setVolume(value) {
@@ -75,6 +108,8 @@ export class Player {
     this.sources = [];
     this.anchor = null;
     this.signature = null;
+    this.videoPending = false;
+    this.pitchChain?.stop();
     this.video.pause();
   }
 
@@ -106,7 +141,8 @@ export class Player {
       const response = await fetch(url, {signal});
       if (!response.ok) throw new Error('音轨加载失败，请重试');
       return this.context.decodeAudioData(await response.arrayBuffer());
-    })).then(buffers => {
+    })).then(async buffers => {
+      await this.preparePitch();
       if (signal.aborted) return;
       this.buffers = buffers;
     }).catch(error => {
@@ -118,6 +154,7 @@ export class Player {
   }
 
   apply(state, clockOffset) {
+    this.setPitch(state.pitch_semitones || 0);
     if (state.levels) this.setLevels(state.levels);
     else this.setMix(state.mix);
     if (!this.buffers || this.entry?.id !== state.current_id) return;
@@ -141,12 +178,11 @@ export class Player {
       source.start(when, Math.min(position, buffer.duration));
       return source;
     });
-    this.anchor = when - position;
+    this.audibleWhen = when + (this.pitchChain?.latency || 0);
+    this.startPosition = position;
+    this.anchor = this.audibleWhen - position;
+    this.pitchChain?.start(this.audibleWhen);
     this.video.currentTime = position;
-    this.video.play().catch(() => {
-      this.stop();
-      this.unlocked = false;
-      this.onTick(position);
-    });
+    this.videoPending = true;
   }
 }

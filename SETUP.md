@@ -16,7 +16,7 @@ python3.12 -m venv .venv
 
 ## 2. 完整处理环境
 
-需要 `ffmpeg`、`ffprobe` 在 PATH 中，例如 macOS 使用 `brew install ffmpeg`，Debian/Ubuntu 使用 `sudo apt-get install ffmpeg libsndfile1`。Node.js 仅用于运行播放器测试，前端本身不需要构建。
+需要 `ffmpeg`、`ffprobe` 在 PATH 中，例如 macOS 使用 `brew install ffmpeg`，Debian/Ubuntu 使用 `sudo apt-get install ffmpeg libsndfile1`。Node.js 仅用于运行播放器和音频变调测试，前端本身不需要构建。实时升降调的 Signalsmith Stretch / WASM 随源码提供，不需要额外安装、模型下载或运行时 CDN；版本和许可见 `karaoke/dependencies/pitch-shift.json`。
 
 主环境负责音频导出、ASR、歌词整理、对齐及字幕渲染。先按硬件安装匹配版本的 PyTorch 与 torchaudio，再装项目依赖。当前 Mac / MPS 开发环境使用 Python 3.12、`torch==2.11.0`、`torchaudio==2.11.0`：
 
@@ -91,6 +91,15 @@ export KARAOKE_DEVICE=auto
 
 保持一个 Uvicorn 进程、一个处理 worker；不要对同一数据目录使用多 worker。需要局域网遥控时再显式设置 `KARAOKE_HOST=0.0.0.0`，手机访问 `http://电脑IP:8746/?remote=1`。
 
+长期在本机运行时，将服务与临时终端分开，并保存日志（macOS / Linux）：
+
+```sh
+mkdir -p karaoke/service-data
+nohup .venv/bin/python -u -m karaoke.api </dev/null >>karaoke/service-data/server.log 2>&1 &
+```
+
+环境变量需在启动前设置。检查 `curl -fsS http://127.0.0.1:8746/health` 和 `tail -n 50 karaoke/service-data/server.log`；启动终端退出后应再次检查健康接口。`nohup` 不负责崩溃重启或开机启动；需要这两项时交给操作系统的服务管理器。重启前确认没有正在准备或播放的歌曲，再向监听进程发送 `TERM`，等它退出后启动，避免两个 worker 抢同一数据目录。
+
 网页能打开只说明本地服务正常，不代表下载网络可用。若日志出现 `Unable to connect to proxy` / `Tunnel connection failed: 403 Forbidden`，检查启动进程继承的代理环境。通过 Codex 启动长期服务时，应使用已获准访问视频站点的运行环境；不要把工具临时注入的受限代理当作应用代理，也不要在应用代码里擅自删除用户的代理设置。可在同一运行环境先执行 `python -m yt_dlp --ignore-config --skip-download --print title 视频URL` 验证。
 
 ## 6. 测试与范围
@@ -99,7 +108,7 @@ export KARAOKE_DEVICE=auto
 
 ```sh
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=karaoke .venv/bin/python -m pytest -q karaoke/test_api.py karaoke/test_room.py karaoke/test_algorithms.py
-node --test karaoke/test_player.mjs
+node --test karaoke/test_player.mjs karaoke/test_pitch.mjs
 ```
 
 这些行为测试不发起在线模型调用，不要求歌曲库或模型权重。真正验证下载、分离、对齐和渲染，仍需完成以上资源准备并提交一个真实视频链接。首次模型／字典下载耗时与后续单曲处理耗时应分别记录。

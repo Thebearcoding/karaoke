@@ -1,0 +1,11 @@
+{
+  "name": "Signalsmith Stretch Web",
+  "repository": "https://github.com/Signalsmith-Audio/signalsmith-stretch",
+  "commit": "a670068d9aeb64913331d5cc29337b19a457a7df",
+  "source": "web/release/SignalsmithStretch.mjs",
+  "vendored_file": "web/vendor/signalsmith-stretch.mjs",
+  "sha256": "97530b11d5bc01015af4cde40d6aa55ff10c40aa1294ca4c8c5762027d517a46",
+  "license": "MIT",
+  "license_file": "web/vendor/signalsmith-stretch.LICENSE.txt",
+  "purpose": "Local real-time pitch shifting in AudioWorklet; embedded WASM, no runtime CDN dependency"
+}

@@ -8,9 +8,9 @@ class Context {
   currentTime = 10;
   state = 'running';
   destination = {};
-  createGain() { return {gain:{value:0,setTargetAtTime(value){this.value=value;}},connect(){}}; }
+  createGain() { return {gain:{value:0,setTargetAtTime(value){this.value=value;}},connect(target){this.target=target;},disconnect(){this.target=null;}}; }
   createBufferSource() {
-    return {connect(target){this.target=target;},start(time,offset){this.started=[time,offset];},stop(){this.stopped=true;},disconnect(){}};
+    return {playbackRate:{value:1},connect(target){this.target=target;},start(time,offset){this.started=[time,offset];},stop(){this.stopped=true;},disconnect(){}};
   }
   resume() { return Promise.resolve(); }
   decodeAudioData(data) { return Promise.resolve({duration:20, tag:data}); }
@@ -67,4 +67,25 @@ test('a late download from the previous selection cannot replace current audio',
   pending.forEach(resolve=>resolve());await oldLoad;
   assert.equal(p.entry.id,'two');assert.equal(p.buffers[2].tag,'new-lead');
   p.clear();assert.equal(p.entry,null);assert.equal(p.buffers,null);
+});
+
+test('live key changes affect the common mix without restarting; video follows audible time', async () => {
+  const p=setup(), shifts=[], starts=[];
+  p.pitchFactory=async () => ({input:{},latency:.12,setPitch(value){shifts.push(value);},start(when){starts.push(when);},stop(){}});
+  await p.unlock();await p.load(song);p.apply(state,clockOffset());
+  const sources=[...p.sources], anchor=p.anchor, initial=p.video.currentTime;
+  assert.ok(p.gains.every(g=>g.target===p.pitchChain.input));
+  assert.equal(starts[0],sources[0].started[0]+.12);
+  p.apply({...state,pitch_semitones:3},clockOffset());
+  p.apply({...state,pitch_semitones:-2,levels:{instrumental:.7,backing_vocals:.5,lead_vocals:.3}},clockOffset());
+  assert.deepEqual(p.sources,sources);assert.equal(p.anchor,anchor);
+  assert.ok(sources.every(s=>s.playbackRate.value===1));
+  assert.deepEqual(shifts.slice(-2),[3,-2]);
+  frame();assert.equal(p.video.currentTime,initial); // Wait through processing latency.
+  p.context.currentTime=starts[0]+2;
+  frame();assert.ok(Math.abs(p.video.currentTime-initial-2)<1e-6);
+  p.apply({...state,position:8,pitch_semitones:-2},clockOffset());
+  assert.ok(sources.every(s=>s.stopped));assert.equal(p.pitch,-2);
+  p.apply({...state,position:8,pitch_semitones:0},clockOffset());
+  assert.equal(p.pitch,0);
 });

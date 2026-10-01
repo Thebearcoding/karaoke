@@ -20,6 +20,7 @@ from align_lyric_phonemes import SingingAligner, protect_units
 from lyric_progress import canonical_positions
 from phoneme_progress import spoken_units
 from subtitles import presentation_cues
+from stage_progress import progress_items
 
 
 def write(path, value):
@@ -55,7 +56,7 @@ def process(job, model, protocol):
     floor = max(1e-5, protocol['minimum_relative_rms']*float(np.sqrt(np.mean(wave**2))))
     raw, decisions = [], []
     started = time.perf_counter()
-    for line, (cue, old) in enumerate(zip(cues, baseline), 1):
+    for line, (cue, old) in enumerate(zip(progress_items(cues, 'lines'), baseline), 1):
         attempts = []
         try:
             units = fixed_units(cue, job['language'])

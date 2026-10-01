@@ -15,6 +15,7 @@ import torch
 
 from lyric_progress import canonical_positions
 from phoneme_progress import ROOT, phoneme_sequence, spoken_units
+from stage_progress import progress_items, report_progress
 
 def overlapping(unit, anchors):
     return [i for i,a in enumerate(anchors) if a['first']<unit['stop'] and a['stop']>unit['first']]
@@ -162,6 +163,7 @@ def main():
         output.mkdir(parents=True)
         language=job['language']
         if language not in models:
+            report_progress(detail='加载模型')
             models[language]=SingingAligner(language,args.device)
         aligner=models[language]
         cues=json.loads(Path(job['cues']).read_text())
@@ -170,7 +172,7 @@ def main():
         audio=resample_poly(audio.mean(axis=1),44100//divisor,rate//divisor).astype('float32')
         started=time.perf_counter()
         raw=[]
-        for index,cue in enumerate(cues):
+        for index,cue in enumerate(progress_items(cues, 'lines')):
             if job.get('lines') is not None and index+1 not in job['lines']:
                 continue
             begin=max(0,cue['aligned_start']-.35)

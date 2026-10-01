@@ -7,7 +7,7 @@
 - 粘贴视频链接点歌，搜索已有曲库；后台准备与播放顺序分别维护。
 - 自动下载视频，分离背景音乐、伴唱、主唱，生成带字幕的 MV。
 - 中文、日文和英文歌词对齐；当前句＋下一句，琥珀色逐字／词点亮，硬切换句，片头歌曲信息和四秒开唱提示。
-- 暂停、定位、重唱、下一首、全屏、音量；切换纯伴奏、保留伴唱和原唱。
+- 暂停、定位、重唱、下一首、全屏、音量；三轨实时升降调，切换纯伴奏、保留伴唱和原唱。
 - 伴奏、伴唱、主唱独立音量，支持全屏调整和遥控同步；默认 10 GiB 歌曲缓存上限与 LRU 自动回收。
 - SQLite 持久化，SSE 推送进度；同一局域网可以用手机遥控点歌。
 
@@ -52,7 +52,7 @@ karaoke/
   models/pretrained/*.yaml        分离模型配置（不含权重）
 ```
 
-本仓库上传当前代码、测试、配置和说明；不上传歌曲、歌词库、音轨、MV、封面、任务数据库、实验产物、模型权重、第三方源码副本或虚拟环境。历史报告中提到的试听页、实验数据和本机路径不随仓库发布；旧实验脚本需要自行准备相应数据。
+本仓库上传当前代码、测试、配置和说明；不上传歌曲、歌词库、音轨、MV、封面、任务数据库、实验产物、模型权重、大型第三方研究仓库或虚拟环境。浏览器升降调使用的 114 KB Signalsmith Stretch 运行库随源码提供，保留 MIT 许可和固定版本来源。历史报告中提到的试听页、实验数据和本机路径不随仓库发布；旧实验脚本需要自行准备相应数据。
 
 ## 验证
 
@@ -60,7 +60,7 @@ karaoke/
 
 ```sh
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=karaoke .venv/bin/python -m pytest -q karaoke/test_api.py karaoke/test_room.py karaoke/test_algorithms.py
-node --test karaoke/test_player.mjs
+node --test karaoke/test_player.mjs karaoke/test_pitch.mjs
 ```
 
 这些测试使用临时文件和合成音频，无需歌曲库、模型权重或 API key。中文发音测试会读取 SOFA 的音素字典，日文发音依赖 pyopenjtalk 字典。

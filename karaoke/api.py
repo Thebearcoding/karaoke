@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -213,7 +213,7 @@ class Worker:
                 if line.startswith(b'KARAOKE_PROGRESS '):
                     progress = json.loads(line[len(b'KARAOKE_PROGRESS '):])
                     self.store.update(job_id, **{key: progress[key]
-                        for key in ('active_stages', 'timings', 'song_info') if key in progress})
+                        for key in ('active_stages', 'stage_progress', 'timings', 'song_info') if key in progress})
             await self.process.wait()
 
         async def budget():
@@ -376,11 +376,21 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
                             media_type=mimetypes.guess_type(path.name)[0] or 'application/octet-stream',
                             filename=path.name, content_disposition_type='inline')
 
-    app.mount('/assets', StaticFiles(directory=ROOT/'web'), name='assets')
+    assets = StaticFiles(directory=ROOT/'web')
+    app.mount('/assets', assets, name='assets')
+
+    @app.get('/ui/{version}/{path:path}', include_in_schema=False)
+    async def frontend_asset(version: str, path: str, request: Request):
+        return await assets.get_response(path, request.scope)
 
     @app.get('/', include_in_schema=False)
     async def home():
-        return FileResponse(ROOT/'web/index.html', headers={'Cache-Control': 'no-cache'})
+        web = ROOT/'web'
+        digest = hashlib.sha256(b''.join(p.read_bytes() for p in sorted(web.rglob('*'))
+            if p.suffix in ('.js', '.mjs', '.css'))).hexdigest()[:16]
+        # Relative module imports share this versioned directory as well.
+        html = (web/'index.html').read_text().replace('/assets/', f'/ui/{digest}/')
+        return HTMLResponse(html, headers={'Cache-Control': 'no-cache'})
 
     return app
 

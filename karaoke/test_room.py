@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from karaoke.api import Store, Worker, create_app
 from karaoke.job_schema import JobRequest
-from karaoke.room import Updates
+from karaoke.room import AddSong, RoomCommand, Updates
 from karaoke.test_api import URL, fake_worker, finished
 
 
@@ -114,10 +114,18 @@ def test_independent_levels_preserve_playback_persist_and_presets_reset_them(tmp
         assert changed['mix'] == 'custom' and changed['levels']['backing_vocals'] == .35
         assert client.post('/v1/room/commands', json={'action':'levels','levels':{'lead_vocals':1.1}}).status_code == 422
         assert client.post('/v1/room/commands', json={'action':'levels','levels':{}}).status_code == 422
+        shifted = client.post('/v1/room/commands', json={'action':'pitch','pitch_semitones':3}).json()
+        assert shifted['pitch_semitones'] == 3
+        assert shifted['started_at'] == changed['started_at'] and shifted['position'] == changed['position']
+        assert shifted['levels'] == changed['levels']
+        for value in (-7, 7, .5, True, None):
+            assert client.post('/v1/room/commands', json={'action':'pitch','pitch_semitones':value}).status_code == 422
     with TestClient(create_app(tmp_path, version='test')) as client:
         assert client.get('/v1/room').json()['levels'] == changed['levels']
+        assert client.get('/v1/room').json()['pitch_semitones'] == 3
         original = client.post('/v1/room/commands', json={'action':'mix','mix':'original'}).json()
         assert original['levels'] == dict(instrumental=1,backing_vocals=1,lead_vocals=1)
+        assert original['pitch_semitones'] == 3
         muted = client.post('/v1/room/commands', json={'action':'levels', 'levels':dict(instrumental=0,backing_vocals=0,lead_vocals=0)}).json()
         assert all(value == 0 for value in muted['levels'].values())
 
@@ -159,6 +167,43 @@ def test_removed_pending_song_does_not_create_a_new_job(tmp_path):
         assert client.get('/assets/app.js').status_code == 200
 
 
+def test_library_lists_queued_and_running_songs_and_reuses_their_jobs(tmp_path):
+    app = create_app(tmp_path, version='test')
+    store, room, worker = app.state.store, app.state.room, app.state.worker
+    job, _ = store.create(JobRequest(url=URL, language='en'), 'test')
+    worker.queue.put_nowait(job['id'])
+    room.add(AddSong(job_id=job['id']))
+    snapshot = room.add(AddSong(job_id=job['id']))
+    song = next(s for s in snapshot['library'] if s['url'] == URL)
+    assert song['status'] == 'queued' and song['language'] == 'English'
+    assert song['job_id'] == job['id'] and worker.queue.qsize() == 1
+    assert len(store.list()) == 1 and len(snapshot['entries']) == 2
+    counters = {'download': dict(completed=50, total=100, unit='bytes')}
+    store.update(job['id'], status='running', active_stages=['download'], stage_progress=counters,
+                 song_info=dict(title='Video title', artist='Artist'))
+    song = next(s for s in room.library() if s['url'] == URL)
+    assert song['title'] == 'Video title' and song['stage_progress'] == counters
+    assert song['status'] == 'running'  # Reusable job ID does not mean ready to play.
+    room.add(AddSong(job_id=song['job_id']))
+    assert len(store.list()) == 1
+
+
+def test_library_keeps_one_card_across_failed_jobs_and_retries(tmp_path):
+    app = create_app(tmp_path, version='test')
+    store, room = app.state.store, app.state.room
+    job, _ = store.create(JobRequest(url=URL, title='Song'), 'test')
+    first = room.add(AddSong(job_id=job['id']))['entries'][0]
+    store.update(job['id'], status='failed', song_info=dict(language='Japanese'),
+                 error=dict(code='test', message='Failed'))
+    song = next(s for s in room.library() if s['url'] == URL)
+    assert song['status'] == 'failed' and song['language'] == 'Japanese'
+    assert song['job_id'] is None
+    snapshot = room.command(RoomCommand(action='retry', entry_id=first['id']))
+    songs = [s for s in snapshot['library'] if s['url'] == URL]
+    assert len(songs) == 1 and songs[0]['status'] == 'queued'
+    assert songs[0]['job_id'] != job['id']
+
+
 def test_sse_initial_snapshot_push_coalescing_and_disconnect():
     async def check():
         updates = Updates()
@@ -181,25 +226,28 @@ def test_sse_initial_snapshot_push_coalescing_and_disconnect():
 
 def test_progress_is_received_before_worker_exits(tmp_path):
     info = dict(title='New video title', artist='Singer', duration_seconds=123)
+    counters = {'separate_lead': dict(completed=3, total=10, unit='chunks')}
     def event_worker(folder):
         return [sys.executable,'-u','-c',
                 'import sys,time;print("KARAOKE_PROGRESS "+sys.argv[1],flush=True);'
-                'print(\'KARAOKE_PROGRESS {"active_stages":["transcribe"],"timings":{}}\',flush=True);time.sleep(30)',
-                json.dumps(dict(song_info=info))]
+                'print("KARAOKE_PROGRESS "+sys.argv[2],flush=True);time.sleep(30)',
+                json.dumps(dict(song_info=info)), json.dumps(dict(active_stages=['transcribe', 'separate_lead'],
+                    stage_progress=counters, timings={}))]
     with TestClient(create_app(tmp_path, worker_command=event_worker, version='test')) as client:
         entry = client.post('/v1/room/entries',json={'url':URL}).json()['entries'][0]
         end = time.monotonic()+3
         while time.monotonic() < end:
             state = client.get('/v1/jobs/'+entry['job_id']).json()
-            if state['active_stages'] == ['transcribe']:
+            if state.get('stage_progress') == counters:
                 break
             time.sleep(.01)
-        assert state['active_stages'] == ['transcribe'] and state['status'] == 'running'
+        assert state['active_stages'] == ['transcribe', 'separate_lead'] and state['status'] == 'running'
         # A later stage-only event must not erase the metadata or alter the input.
         assert state['song_info'] == info and state['result'] is None
         assert state['input']['title'] is None and state['input']['artist'] is None
         visible = client.get('/v1/room').json()['entries'][0]
         assert (visible['title'], visible['artist'], visible['duration']) == ('New video title', 'Singer', 123)
+        assert visible['stage_progress'] == counters
 
 
 def test_song_info_updates_push_to_room_and_preserve_user_overrides(tmp_path):
@@ -216,11 +264,19 @@ def test_song_info_updates_push_to_room_and_preserve_user_overrides(tmp_path):
             return json.loads(event.split('data: ', 1)[1])['entries'][0]
 
         assert entry(await anext(stream))['title'] == '新点的歌'
-        for title in ('Video title', 'Resolved song title'):
-            store.update(job['id'], status='running', song_info=dict(title=title, artist='Singer'))
-            assert entry(await asyncio.wait_for(anext(stream), 1))['title'] == title
+        for done, title in enumerate(('Video title', 'Resolved song title'), 1):
+            counters = {'separate_music': dict(completed=done, total=4, unit='chunks')}
+            store.update(job['id'], status='running', song_info=dict(title=title, artist='Singer', language='English'),
+                         active_stages=['separate_music'], stage_progress=counters)
+            event = await asyncio.wait_for(anext(stream), 1)
+            visible = entry(event)
+            assert visible['title'] == title and visible['stage_progress'] == counters
+            song = next(s for s in json.loads(event.split('data: ', 1)[1])['library'] if s['url'] == URL)
+            assert song['title'] == title and song['language'] == 'English'
+            assert song['stage_progress'] == counters
         store.update(job['id'], status='failed', error=dict(code='test', message='Test failure'))
-        assert entry(await anext(stream))['title'] == 'Resolved song title'
+        visible = entry(await anext(stream))
+        assert visible['title'] == 'Resolved song title' and visible['stage_progress'] == {}
         store.update(job['id'], status='completed', result=dict(title='Final title', artist='Final singer'))
         assert entry(await anext(stream))['title'] == 'Final title'
         await stream.aclose()

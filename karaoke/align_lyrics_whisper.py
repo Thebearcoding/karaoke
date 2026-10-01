@@ -16,6 +16,7 @@ import torch
 from whisper.timing import dtw_cpu
 
 from subtitles import lyric_cues, normalized, write_captions
+from stage_progress import progress_items, report_progress
 
 
 def sha(path):
@@ -124,6 +125,7 @@ def main():
     jobs = json.loads(args.jobs.read_text())
     model_root = Path(__file__).resolve().parent/'models/alignment/whisper'
     loading_start = time.perf_counter()
+    report_progress(detail='加载模型')
     model = stable_whisper.load_model(args.model, device='cpu', download_root=str(model_root))
     # The sparse head-selection buffer is indexed on the host; MPS cannot move it.
     heads = model._buffers.pop('alignment_heads')
@@ -148,7 +150,7 @@ def main():
             blocks = alignment_blocks(anchors, audio)
         started = time.perf_counter()
         cues, raw_blocks, units = [], [], []
-        for first, stop, context_first, context_stop, begin, end in blocks:
+        for first, stop, context_first, context_stop, begin, end in progress_items(blocks, 'blocks'):
             print(json.dumps({'song': Path(job['lyrics']).stem, 'lines': [first+1, stop],
                               'window': [begin, end]}), flush=True)
             result = model.align(audio[round(begin*16000):round(end*16000)],

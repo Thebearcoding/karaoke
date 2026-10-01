@@ -27,13 +27,14 @@ class StemLevels(BaseModel):
 
 class RoomCommand(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    action: Literal['play', 'pause', 'seek', 'next', 'select', 'remove', 'reorder', 'mix', 'levels', 'ready', 'retry']
+    action: Literal['play', 'pause', 'seek', 'next', 'select', 'remove', 'reorder', 'mix', 'levels', 'pitch', 'ready', 'retry']
     entry_id: str | None = None
     position: float = Field(default=0, ge=0, allow_inf_nan=False)
     order: list[str] | None = None
     revision: int | None = None
     mix: Literal['karaoke', 'instrumental', 'original'] | None = None
     levels: StemLevels | None = None
+    pitch_semitones: int | None = Field(default=None, ge=-6, le=6, strict=True)
 
 
 class AddSong(BaseModel):
@@ -82,6 +83,7 @@ class Room:
         with self.store.connect() as db:
             state = json.loads(db.execute('SELECT state FROM room WHERE id=1').fetchone()[0])
         state.setdefault('levels', PRESETS.get(state['mix'], PRESETS['karaoke']).copy())
+        state.setdefault('pitch_semitones', 0)
         return state
 
     def save(self, state):
@@ -113,6 +115,8 @@ class Room:
             title=inputs.get('title') or result.get('title') or song_info.get('title') or featured.get('title') or '新点的歌',
             artist=inputs.get('artist') or result.get('artist') or song_info.get('artist') or featured.get('artist', ''),
             url=inputs['url'], status=job['status'], active_stages=job.get('active_stages', []),
+            stage_progress=job.get('stage_progress', {}) if job['status'] == 'running' else {},
+            language=inputs.get('language') or result.get('language') or song_info.get('language') or featured.get('language', ''),
             error=job.get('error'), duration=result.get('duration_seconds') or song_info.get('duration_seconds', 0),
             poster=(f"/v1/jobs/{job['id']}/artifacts/poster"
                     if job['status'] == 'completed' and 'poster' in result.get('artifacts', {})
@@ -125,7 +129,7 @@ class Room:
         state = self.read()
         return {**state, 'entries': [self.describe(e) for e in state['entries']],
                 'server_time': time.time(), 'preparation_job': self.worker.current,
-                'storage': self.store.cache.snapshot()}
+                'storage': self.store.cache.snapshot(), 'library': self.library()}
 
     @staticmethod
     def featured():
@@ -133,30 +137,28 @@ class Room:
         return json.loads(path.read_text()) if path.exists() else []
 
     def library(self):
-        songs = self.featured()
+        songs = [dict(song, status='unprepared') for song in self.featured()]
         by_url = {s['url']: s for s in songs}
+        seen = set()
         for job in self.store.list(1000):
-            if job['status'] not in ('completed', 'evicted'):
+            url = job['input']['url']
+            if url in seen:
                 continue
+            seen.add(url)
             result = job.get('result') or {}
             artifacts = result.get('artifacts', {})
             ready = job['status'] == 'completed' and bool(artifacts) and all(
                 (self.store.root/job['id']/a['path']).is_file() for a in artifacts.values())
-            if job['status'] == 'completed' and not ready:
-                continue
-            song = by_url.get(job['input']['url'])
-            if song and song.get('job_id'):
-                continue
+            song = by_url.get(url)
             info = self.describe(dict(id=job['id'], job_id=job['id']))
-            if song:
-                if ready:
-                    song.update(job_id=job['id'], duration=info['duration'], poster=info['poster'])
-            else:
-                song = dict(id=job['id'], job_id=job['id'] if ready else None, title=info['title'], artist=info['artist'],
-                    url=info['url'], duration=info['duration'], language=result.get('language', ''),
-                    poster=info['poster'])
+            if song is None:
+                song = dict(id=job['id'])
                 songs.append(song)
-                by_url[song['url']] = song
+            song.update({key: info[key] for key in ('title', 'artist', 'url', 'language', 'duration',
+                'poster', 'status', 'active_stages', 'stage_progress', 'error')})
+            song['job_id'] = job['id'] if ready or job['status'] in ('queued', 'running') else None
+            if job['status'] == 'completed' and not ready:
+                song.update(status='evicted', poster=None)
         return songs
 
     def add(self, request):
@@ -171,8 +173,8 @@ class Room:
                 job, cached = self.store.create(JobRequest(**{**job['input'], 'force': False}), self.version)
                 if not cached:
                     self.worker.queue.put_nowait(job['id'])
-            elif not job or job['status'] != 'completed':
-                raise HTTPException(404, '这首歌尚未准备好')
+            elif not job or job['status'] not in ('completed', 'queued', 'running'):
+                raise HTTPException(404, '这首歌的任务已不可用，请重新提交链接')
             if job['status'] == 'completed' and not all((self.store.root/job['id']/a['path']).is_file()
                        for a in job['result']['artifacts'].values()):
                 raise HTTPException(409, '这首歌的文件已不可用，请重新提交链接')
@@ -253,6 +255,10 @@ class Room:
                 raise HTTPException(422, '请提供至少一个音轨音量')
             state['levels'].update(values)
             state['mix'] = next((name for name, levels in PRESETS.items() if levels == state['levels']), 'custom')
+        elif action == 'pitch':
+            if command.pitch_semitones is None:
+                raise HTTPException(422, '请提供升降调半音数')
+            state['pitch_semitones'] = command.pitch_semitones
         elif action == 'retry':
             old = self.store.read(entry['job_id'])
             if old['status'] != 'failed':

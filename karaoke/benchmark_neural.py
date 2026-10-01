@@ -16,6 +16,7 @@ from importlib.metadata import version
 
 import numpy as np
 import soundfile as sf
+from stage_progress import progress_items, report_progress
 
 
 ROOT = Path(__file__).resolve().parent
@@ -91,6 +92,10 @@ def main():
     from audio_separator.separator import Separator
     from audio_separator.separator.architectures import mdxc_separator
     assert version('audio-separator') == '0.44.5', 'Inspected local implementation version required'
+    if os.getenv('KARAOKE_EVENTS_STDOUT') == '1':
+        # This pinned implementation uses tqdm only around its inference loop.
+        mdxc_separator.tqdm = progress_items
+    report_progress(detail='加载模型')
     device = args.device
     if device == 'auto':
         device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -144,6 +149,7 @@ def main():
         padded = np.pad((x*gain).T, ((0, 0), (pad, pad)), mode='reflect')
         with torch.inference_mode():
             stems = instance.demix(np.ascontiguousarray(padded))
+        report_progress(detail='整理音轨')
         vocals = np.asarray(stems[args.target_stem], dtype='float32').T[pad:pad+len(x)]/gain
         if args.export_stem:
             extra = {name: np.asarray(stems[name], dtype='float32').T[pad:pad+len(x)]/gain

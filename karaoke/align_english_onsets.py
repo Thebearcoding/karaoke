@@ -13,6 +13,7 @@ import torch
 import torchaudio
 
 from align_lyrics_whisper import alignment_blocks, sha
+from stage_progress import progress_items
 
 ROOT = Path(__file__).resolve().parent
 SINGING_ROOT = ROOT / 'research/word-onset-2026-09-18/lyrics-alignment-multilingual'
@@ -178,7 +179,7 @@ def align_job(aligner, job, full_song=False):
     cues = [dict(text=s, start=0., end=0., units=[]) for s in lines]
     failures = []
     started = time.perf_counter()
-    for block_id, (first, stop, left, right, begin, end) in enumerate(blocks):
+    for block_id, (first, stop, left, right, begin, end) in enumerate(progress_items(blocks, 'blocks')):
         matches = [list(re.finditer(r'\S+', s)) for s in lines[left:right]]
         words = [m[0] for row in matches for m in row]
         try:
