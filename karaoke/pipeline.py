@@ -20,7 +20,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from .job_schema import JobRequest, provider_error, song_language, video_url
-from .song_sources import independent_transcript_support, prepare_song_text, transcript_lines, video_song_info
+from .song_sources import (independent_transcript_support, missing_repetitions, prepare_song_text,
+                           restore_repetitions, transcript_lines, video_song_info)
 from .stage_progress import parse_progress
 from .cache import can_restore_video
 from .stage_cache import StageCache
@@ -399,7 +400,7 @@ class Pipeline:
                             *sorted((self.output/'asr').glob('initial-transcription.json')),
                             *sorted((self.output/'asr').glob('run.json'))],
                     outputs=[self.output/'lyrics.json', self.output/'anchors.json', self.output/'asr/filtered.json',
-                             self.output/'asr/anchor-recovery.json'],
+                             self.output/'asr/anchor-recovery.json', self.output/'asr/lyric-repeats.json'],
                     config=dict(request=self.request,
                                 metadata={k: metadata.get(k) for k in ('title', 'track', 'artist', 'artists', 'uploader', 'description')},
                                 duration=duration, model=self.text_model,
@@ -463,7 +464,7 @@ class Pipeline:
         write_json(recovery_path, dict(attempts=[]))
         if covered < .55 and (lyrics['provenance']['kind'] != 'asr_draft' or report.get('recovery', {}).get('triggered')):
             raw_audio = self.output/'source-44100.wav'
-            _, anchors, covered = recover_anchor_words(None,
+            candidates[selected], anchors, covered = recover_anchor_words(None,
                 self.output/'vocals-16k.wav', lyrics['lines'], candidates[selected], lyrics['language'],
                 recovery_path, self.checkpoints, .55, duration,
                 fallback_audio=raw_audio if raw_audio.is_file() else None)
@@ -484,6 +485,17 @@ class Pipeline:
                 covered = sum(c['matched_fraction']*len(c['text']) for c in anchors)/max(1, sum(map(len, lyrics['lines'])))
                 selected = 'independently_corroborated_transcription'
                 matches[selected] = (anchors, covered)
+                candidates[selected] = candidates['transcription']
+        repeats = dict(reference_lines=lyrics['lines'], words=candidates[selected], expansions=[], status='unavailable')
+        if covered >= .55:
+            lines, anchors, repeats = restore_repetitions(lyrics['lines'], anchors, candidates[selected],
+                lyrics['language'], duration, allow_expansion=lyrics['provenance']['kind'] == 'video_description')
+            lyrics = dict(lyrics, lines=lines)
+            if repeats['expansions']:
+                lyrics['provenance'].update(text_transform='source_repetitions',
+                                            repetitions=repeats['expansions'])
+            covered = sum(c['matched_fraction']*len(c['text']) for c in anchors)/max(1, sum(map(len, lines)))
+        write_json(self.output/'asr/lyric-repeats.json', repeats)
         write_json(self.output/'asr/filtered.json', dict(transcription=transcription, rejected=rejected,
             anchor_source=selected, anchor_coverage={name: match[1] for name, match in matches.items()},
             final_anchor_coverage=covered))
@@ -491,6 +503,8 @@ class Pipeline:
         write_json(self.output/'anchors.json', anchors)
         if covered < .55 or not any(c['status'] == 'candidate' for c in anchors):
             raise StageFailure('prepare_lyrics', '歌词与这个视频的演唱匹配不足；请提交本版本的 lyrics 后重试')
+        if repeats['status'] != 'complete':
+            raise StageFailure('prepare_lyrics', '检测到歌词缺少重复唱段，但证据不足以自动恢复；详情已保留')
 
     def align(self, lyrics, duration):
         from lyric_progress import build
@@ -557,10 +571,16 @@ class Pipeline:
         for cue in cues:
             if normalized(''.join(u['text'] for u in cue['units'])) != normalized(cue['text']):
                 raise StageFailure('align_words', '逐字时间轴遗漏了歌词')
+        repeats = json.loads((output/'asr/lyric-repeats.json').read_text())
+        missing = missing_repetitions(repeats['reference_lines'], cues, repeats['words'], language, duration)
+        write_json(output/'lyric-repeat-validation.json', dict(missing=missing))
+        if missing:
+            raise StageFailure('align_words', '最终字幕仍遗漏已识别出的重复唱段；详情已保留')
         write_json(output/'cues.json', cues)
         write_json(output/'quality.json', dict(lines=len(cues), units=len(units),
             lyrics_provenance=lyrics['provenance'], onset_accuracy=None, separation_purity=None,
             english_context_scope=english_context_scope,
+            restored_repetitions=len(repeats['expansions']),
             fallback_units=sum(u.get('timing_source') == 'prior_word_fallback' for u in units),
             line_order_fallback_lines=order_fallbacks,
             countdown_events=countdown_events(cues)))

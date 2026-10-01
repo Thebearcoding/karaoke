@@ -1,6 +1,7 @@
 """Prepare song text from this recording, retaining its source and uncertainty."""
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 
@@ -70,6 +71,112 @@ def independent_transcript_support(transcription, report, language):
     observed = [u for w in transcription.get('words', []) for u in text_units(w['word'], language)]
     matched = sum(b.src_end-b.src_start for b in Levenshtein.opcodes(expected, observed) if b.tag == 'equal')
     return min(matched/max(1, len(expected)), matched/max(1, len(observed)))
+
+
+def missing_repetitions(reference, cues, words, language, duration):
+    """Find supplied lyric passages recognized in gaps of the current timeline."""
+    from anchors_from_asr import anchors_from_words, text_units
+    from rapidfuzz.fuzz import ratio
+    from subtitles import normalized
+
+    keys = [text_units(line, language) for line in reference]
+    timed = [w for w in words if math.isfinite(w['start']) and math.isfinite(w['end'])
+             and 0 <= w['start'] < w['end'] <= duration+.05]
+    if any(b['start'] < a['start'] for a, b in zip(timed, timed[1:])):
+        raise ValueError('Cannot recover repeated lyrics from unordered ASR words')
+    edges = [dict(start=0., end=0., status='candidate'), *cues,
+             dict(start=duration, end=duration, status='candidate')]
+    found = []
+    for after, (left, right) in enumerate(zip(edges, edges[1:])):
+        if left['status'] != 'candidate' or right['status'] != 'candidate':
+            continue
+        begin, end = left['end'], right['start']
+        if end <= begin:
+            continue
+        # Anchors are rounded to milliseconds; do not reuse a boundary word
+        # merely because its original floating-point end is a few us later.
+        gap = [w for w in timed if w['end'] > begin+.001 and w['start'] < end-.001]
+        observed = [u for w in gap for u in text_units(w['word'], language)]
+        if len(observed) < 24:
+            continue
+        scores = []
+        for first in range(len(keys)):
+            text = []
+            for stop in range(first+1, len(keys)+1):
+                text.extend(keys[stop-1])
+                if len(text) > len(observed)*1.5:
+                    break
+                if stop-first < 2 or len(text) < len(observed)*2/3:
+                    continue
+                score = ratio(text, observed)/100
+                if score >= .9:
+                    scores.append((score, first, stop))
+        best, identity = None, None
+        for score, first, stop in sorted(scores, key=lambda x: -x[0]):
+            if best and score < best['similarity']-1e-9:
+                break
+            anchors = anchors_from_words(reference[first:stop], gap, language, allow_missing=True)
+            if any(a['status'] != 'candidate' or a['matched_fraction'] < .8
+                   for a in (anchors[0], anchors[-1])):
+                continue
+            text = ''.join(normalized(s).lower() for s in reference[first:stop])
+            if best is None:
+                identity = text
+                best = dict(insertion_index=after, source_range=[first, stop], gap=[begin, end],
+                            similarity=score, boundary_anchors=[anchors[0], anchors[-1]], ambiguous=False)
+            elif text != identity:
+                best['ambiguous'] = True
+        if best:
+            found.append(best)
+    return found
+
+
+def restore_repetitions(reference, anchors, words, language, duration, *, allow_expansion):
+    """Copy supported repetitions, preserving the existing text and its placement."""
+    from anchors_from_asr import anchors_from_words
+
+    lines = list(reference)
+    report = dict(reference_lines=reference, words=words, expansions=[], status='complete')
+    for _ in range(4):
+        found = missing_repetitions(reference, anchors, words, language, duration)
+        if not found:
+            return lines, anchors, report
+        if not allow_expansion or any(f['ambiguous'] for f in found):
+            report.update(status='failed', unresolved=found,
+                          reason='Recognized lyric repetition needs an unambiguous automatic source')
+            return lines, anchors, report
+        additions = {f['insertion_index']: f for f in found}
+        expanded, kept, inserted = [], [], []
+        for i in range(len(lines)+1):
+            if i in additions:
+                f = additions[i]
+                first, stop = f['source_range']
+                start = len(expanded)
+                expanded.extend(reference[first:stop])
+                inserted.append(dict(f, output_range=[start, len(expanded)]))
+            if i < len(lines):
+                kept.append(len(expanded))
+                expanded.append(lines[i])
+        if len(expanded) > 1000:
+            report.update(status='failed', unresolved=found, reason='Repeated lyrics exceed the line budget')
+            return lines, anchors, report
+        candidate = anchors_from_words(expanded, words, language, allow_missing=True)
+        stable = all(old['status'] != 'candidate' or (candidate[i]['status'] == 'candidate' and
+                     max(old['start'], candidate[i]['start']) < min(old['end'], candidate[i]['end']))
+                     for old, i in zip(anchors, kept))
+        supported = all(a['status'] == 'candidate' and f['gap'][0]-.001 <= a['start'] < a['end'] <= f['gap'][1]+.001
+                        for f in inserted for a in candidate[slice(*f['output_range'])])
+        if not stable or not supported:
+            report.update(status='failed', unresolved=found,
+                          reason='Expanded lyric anchors move existing lines or lack bounded acoustic support')
+            return lines, anchors, report
+        report['expansions'].extend(inserted)
+        lines, anchors = expanded, candidate
+    remaining = missing_repetitions(reference, anchors, words, language, duration)
+    if remaining:
+        report.update(status='failed', unresolved=remaining,
+                      reason='Lyric repetition recovery did not converge within its bounded passes')
+    return lines, anchors, report
 
 
 def video_song_info(metadata):

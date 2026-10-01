@@ -239,6 +239,11 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False):
         from karaoke.onset_consensus import context_scope_violations
         if context_scope_violations(cues, result['quality'].get('english_context_scope')):
             raise ValueError('Word timing falls outside acoustic phrase context')
+    from karaoke.song_sources import missing_repetitions
+    repeats = json.loads((folder/'asr/lyric-repeats.json').read_text())
+    if repeats['status'] != 'complete' or missing_repetitions(
+            repeats['reference_lines'], cues, repeats['words'], result['language'], duration):
+        raise ValueError('Subtitles omit recognized lyric repetitions')
     for name in ('mv', 'instrumental_preview', 'backing_vocals_preview', 'lead_vocals_preview'):
         if audio_only and name == 'mv':
             continue
@@ -452,7 +457,8 @@ def record_failure(attempt, job, folder):
     attempt['diagnostic_tail'] = '\n'.join(logs)
     for pattern in ('asr/*.json', 'alignment/*.json', 'phonemes/*.json', 'context/**/*.json',
                     'repeated-lyrics/*.json', 'english-onsets/*.json',
-                    'lyrics.json', 'anchors.json', 'word-cues.json', 'ordered-cues.json', 'quality.json'):
+                    'lyrics.json', 'anchors.json', 'word-cues.json', 'ordered-cues.json', 'quality.json',
+                    'lyric-repeat-validation.json'):
         for path in folder.glob(pattern):
             try:
                 if path.stat().st_size <= 2*1024**2:

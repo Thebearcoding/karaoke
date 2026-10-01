@@ -739,8 +739,12 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
     sf.write(folder/'source-44100.wav', tone, sample_rate)
     pipeline.vocals.parent.mkdir(parents=True)
     sf.write(pipeline.vocals, tone, sample_rate)
-    (folder/'cues.json').write_text(json.dumps([dict(text='Hello',start=.1,end=.8,
+    (folder/'cues.json').write_text(json.dumps([dict(text='Hello',start=.1,end=.8,status='candidate',
         units=[dict(text='Hello',first=0,stop=5,start=.1,end=.8)])]))
+    (folder/'asr').mkdir()
+    repeat_path = folder/'asr/lyric-repeats.json'
+    repeat_path.write_text(json.dumps(dict(reference_lines=['Hello'],
+        words=[dict(word='Hello', start=.1, end=.8)], status='complete', expansions=[])))
     (folder/'quality.json').write_text(json.dumps(dict(english_context_scope=[[0, 1, 0, 1, 0., 1.]])))
     monkeypatch.setenv('OPENAI_API_KEY','unit-test-placeholder')
     monkeypatch.setattr(pipeline, 'download', lambda: ({'format_id':'a1'},1))
@@ -755,6 +759,9 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
     assert not (folder/'result.json').exists()
     evidence=verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
     assert evidence['validation_scope']=='audio_and_lyrics' and len(evidence['artifact_sha256'])==7
+    repeat_path.write_text(json.dumps(dict(status='failed')))
+    with pytest.raises(ValueError, match='repetitions'):
+        verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
     # Valid hashes, monotonic subtitles and playable audio must not conceal a
     # lyric placed in unrelated speech outside its acoustic phrase context.
     for scope in (None, [], [[0, 1, 0, 1, .9, 1.]], [[0, 0, 0, 1, 0., 1.]]):
@@ -1145,6 +1152,80 @@ def test_bad_description_uses_only_independently_corroborated_transcript(tmp_pat
     assert provenance['rejected_description']['anchor_coverage'] < .55
     anchors = json.loads((pipeline.output/'anchors.json').read_text())
     assert [(c['start'], c['end']) for c in anchors] == [(1., 4.)]
+
+
+@pytest.mark.parametrize('supplied', [False, True])
+def test_description_repeats_require_asr_support_and_preserve_supplied_lyrics(tmp_path, monkeypatch, supplied):
+    import soundfile as sf
+    from karaoke.song_sources import missing_repetitions, restore_repetitions
+    from anchors_from_asr import anchors_from_words
+    lines = ['An opening by the river', 'Golden lanterns in the window,',
+             'Every sparrow flies back home!', 'Winter carries distant thunder', 'The closing of the curtain']
+    performed = lines[:4]+lines[1:3]+lines[4:]
+    words = [dict(word=text, start=1.+2*i, end=2.+2*i) for i, text in enumerate(performed)]
+    pipeline = Pipeline(dict(url=URL), tmp_path/'job', catalog_root=None)
+    (pipeline.output/'asr').mkdir()
+    (pipeline.output/'asr/transcription.json').write_text(json.dumps(dict(language='English',
+        segments=[dict(text=' '.join(performed), start=1., end=14.)], words=words)))
+    sf.write(pipeline.output/'vocals-16k.wav', np.full(16000, .1), 1000)
+    monkeypatch.setattr('karaoke.pipeline.prepare_song_text', lambda *args, **kwargs:
+        dict(title='Example', artist='', language='English', lines=lines,
+             provenance=dict(kind='user_supplied' if supplied else 'video_description')))
+    if supplied:
+        with pytest.raises(StageFailure, match='重复唱段'):
+            pipeline.prepare_lyrics({}, 16.)
+    else:
+        pipeline.prepare_lyrics({}, 16.)
+    lyrics = json.loads((pipeline.output/'lyrics.json').read_text())
+    report = json.loads((pipeline.output/'asr/lyric-repeats.json').read_text())
+    assert lyrics['lines'] == (lines if supplied else performed)
+    assert report['reference_lines'] == lines and report['words'] == words
+    assert report['status'] == ('failed' if supplied else 'complete')
+    # The original ordered timeline looks valid while still missing a refrain.
+    original = anchors_from_words(lines, words, 'English')
+    assert missing_repetitions(lines, original, words, 'English', 16.)
+    if not supplied:
+        anchors = json.loads((pipeline.output/'anchors.json').read_text())
+        assert [(c['start'], c['end']) for c in anchors] == [(w['start'], w['end']) for w in words]
+        assert report['expansions'][0]['source_range'] == [1, 3]
+        assert not missing_repetitions(lines, anchors, words, 'English', 16.)
+        again, _, next_report = restore_repetitions(performed, anchors, words, 'English', 16., allow_expansion=True)
+        assert again == performed and not next_report['expansions']
+
+
+@pytest.mark.parametrize('invalid', ['unrelated', 'nonfinite', 'zero_duration', 'backward', 'moves_existing', 'outside_gap'])
+def test_repetition_recovery_rejects_unsupported_evidence(invalid, monkeypatch):
+    from karaoke.song_sources import restore_repetitions
+    from anchors_from_asr import anchors_from_words
+    lines = ['Opening by the river', 'Golden lanterns in the window',
+             'Every sparrow flies back home', 'Winter brings distant thunder', 'Closing of the curtain']
+    performed = lines[:4]+lines[1:3]+lines[4:]
+    words = [dict(word=text, start=1.+2*i, end=2.+2*i) for i, text in enumerate(performed)]
+    anchors = anchors_from_words(lines, words, 'English')
+    if invalid == 'backward':
+        with pytest.raises(ValueError, match='unordered'):
+            restore_repetitions(lines, anchors, words[::-1], 'English', 16., allow_expansion=True)
+        return
+    if invalid in ('moves_existing', 'outside_gap'):
+        def moved(texts, *args, **kwargs):
+            result = anchors_from_words(texts, *args, **kwargs)
+            if len(texts) == len(performed):
+                index = 0 if invalid == 'moves_existing' else 4
+                result[index].update(start=14., end=15.)
+            return result
+        monkeypatch.setattr('anchors_from_asr.anchors_from_words', moved)
+    else:
+        for word in words[4:6]:
+            if invalid == 'unrelated':
+                word['word'] = 'Speech about cooking an entirely different meal'
+            elif invalid == 'nonfinite':
+                word['end'] = float('nan')
+            else:
+                word['end'] = word['start']
+    result, _, report = restore_repetitions(lines, anchors, words, 'English', 16., allow_expansion=True)
+    assert result == lines and not report['expansions']
+    if invalid in ('moves_existing', 'outside_gap'):
+        assert report['status'] == 'failed'
 
 
 @pytest.mark.parametrize('same_text', [True, False])
