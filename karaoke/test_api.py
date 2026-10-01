@@ -1,3 +1,4 @@
+import hashlib
 import json
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import re
@@ -1032,6 +1033,42 @@ def test_lyric_text_survives_metadata_refusal_without_resubmitting_content():
     assert result['title'] == 'Source title'
     assert result['provenance']['metadata_error']['code'] == 'openai_content_rejected'
     assert parse.call_count == 1
+
+
+@pytest.mark.parametrize('selected,expected', [
+    ([3, 4, 5], ['踏过山河去寻你', '晚风吹过小树林', '踏过山河去寻你']),
+    ([], ['错字转录']),
+    ([3, 99], ['错字转录']),
+    ([4, 3], ['错字转录']),
+    ([3, 3], ['错字转录']),
+])
+def test_description_lyrics_select_existing_lines_without_rewriting(tmp_path, selected, expected):
+    description = '视频介绍\n作词：示例\n踏过山河去寻你\n晚风吹过小树林\n踏过山河去寻你\n订阅频道'
+    parsed = SongText(title='Song', artist='Singer', lyric_line_numbers=selected)
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))], model='test', usage=None)
+    with patch('karaoke.song_sources.OpenAI') as client:
+        client.return_value.beta.chat.completions.parse.return_value = response
+        result = prepare_song_text(dict(url=URL), dict(description=description),
+            dict(language='Chinese', segments=[dict(text='错字转录')]),
+            120, catalog_root=None, model='test')
+    assert result['lines'] == expected
+    assert result['provenance']['needs_review'] is True
+    assert result['provenance']['kind'] == ('video_description' if selected == [3, 4, 5] else 'asr_draft')
+    if selected == [3, 4, 5]:
+        assert result['provenance']['lyric_line_numbers'] == selected
+        assert result['provenance']['description_sha256'] == hashlib.sha256(description.encode()).hexdigest()
+        # Published words are not automatically valid for this performance.
+        # The real pipeline must still reject an unsupported description block.
+        import soundfile as sf
+        pipeline = Pipeline(dict(url=URL), tmp_path/'job', catalog_root=None)
+        (pipeline.output/'asr').mkdir()
+        (pipeline.output/'asr/transcription.json').write_text(json.dumps(dict(language='Chinese',
+            segments=[dict(text='完全不同', start=1, end=3)], words=[dict(word='完全不同', start=1, end=3)])))
+        sf.write(pipeline.output/'vocals-16k.wav', np.ones(5000)*.1, 1000)
+        with patch('karaoke.song_sources.OpenAI') as client:
+            client.return_value.beta.chat.completions.parse.return_value = response
+            with pytest.raises(StageFailure, match='匹配不足'):
+                pipeline.prepare_lyrics(dict(description=description), 5)
 
 
 @pytest.mark.parametrize('language,text', [

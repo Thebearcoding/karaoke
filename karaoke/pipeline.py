@@ -398,7 +398,7 @@ class Pipeline:
                     inputs=[self.output/'asr/transcription.json', self.output/'vocals-16k.wav'],
                     outputs=[self.output/'lyrics.json', self.output/'anchors.json', self.output/'asr/filtered.json'],
                     config=dict(request=self.request,
-                                metadata={k: metadata.get(k) for k in ('title', 'track', 'artist', 'artists', 'uploader')},
+                                metadata={k: metadata.get(k) for k in ('title', 'track', 'artist', 'artists', 'uploader', 'description')},
                                 duration=duration, model=self.text_model,
                                 implementation=inspect.getsource(type(self).prepare_lyrics)),
                     code=[ROOT/p for p in ('song_sources.py', 'anchors_from_asr.py', 'transcribe_lyrics.py',
