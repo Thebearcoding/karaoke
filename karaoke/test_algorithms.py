@@ -14,10 +14,10 @@ from match_video_lyrics import caption_similarity, strongest_cluster
 from anchors_from_asr import anchors_from_words
 from three_stems import check_three
 from lyric_progress import map_words, build as build_progress
-from align_lyric_phonemes import guided_scores, protect_units
+from align_lyric_phonemes import guided_scores, protect_line_order, protect_units
 from phoneme_progress import reading_parts, japanese_phone_groups, spoken_units
 from align_repeated_lyrics import agree_onset, audible, reference_pairs
-from align_lyrics_whisper import alignment_blocks
+from align_lyrics_whisper import alignment_blocks, stitch_blocks
 from transcribe_lyrics import filter_silent_transcription
 from word_onset_metrics import score_onsets, word_events
 
@@ -368,6 +368,37 @@ class WordOnsetScoring(unittest.TestCase):
 
 
 class AlignmentIntegrity(unittest.TestCase):
+    def test_crossing_block_boundary_uses_one_complete_joint_prediction(self):
+        lines = ['first tail', 'second line', 'last phrase']
+
+        def segment(text, start, middle, end):
+            first, last = text.split()
+            return dict(text=text, words=[dict(word=first, start=start, end=middle),
+                                         dict(word=last, start=middle, end=end)])
+
+        raw = [dict(range=[0, 1], context=[0, 2], source_range=[2., 7.], result=dict(segments=[
+                   segment(lines[0], 0., 1., 1.2), segment(lines[1], 1.2, 1.6, 2.)])),
+               dict(range=[1, 3], context=[1, 3], source_range=[3., 8.], result=dict(segments=[
+                   segment(lines[1], -.01, .4, .9), segment(lines[2], 2., 3., 4.)]))]
+        cues, stitched, repairs = stitch_blocks(lines, raw, 10., 'English')
+        words, report = build_progress(cues, stitched, 'English')
+        self.assertFalse(report['fallback_lines'])
+        self.assertEqual([[u['start'] for u in c['units']] for c in words],
+                         [[2., 3.], [3.2, 3.6], [5., 6.]])
+        self.assertEqual([b['range'] for b in stitched], [[0, 2], [2, 3]])
+        self.assertEqual([b['range'] for b in raw], [[0, 1], [1, 3]])
+        self.assertEqual(repairs[0]['lines'], [1, 2])
+        self.assertFalse(protect_line_order(words, words)[1])
+        self.assertEqual(stitch_blocks(lines, stitched, 10., 'English')[2], [])
+
+        # A replacement that only moves the crossing to the next line is unsafe.
+        raw[0]['result']['segments'][1] = segment(lines[1], 1.2, 3.5, 4.)
+        cues, unchanged, repairs = stitch_blocks(lines, raw, 10., 'English')
+        self.assertEqual(repairs, [])
+        words, _ = build_progress(cues, unchanged, 'English')
+        with self.assertRaisesRegex(ValueError, 'Coarse lyric onsets'):
+            protect_line_order(words, words)
+
     def test_asr_silence_filter_keeps_quiet_speech_and_nearby_collapsed_words(self):
         audio = np.zeros(5*16000, dtype='float32')
         audio[16000:2*16000] = 1e-7

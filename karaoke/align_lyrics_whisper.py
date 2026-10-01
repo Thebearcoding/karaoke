@@ -15,6 +15,7 @@ from stable_whisper import timing as whisper_timing
 import torch
 from whisper.timing import dtw_cpu
 
+from lyric_progress import map_words
 from subtitles import lyric_cues, normalized, write_captions
 from stage_progress import progress_items, report_progress
 
@@ -65,6 +66,72 @@ def alignment_blocks(anchors, audio):
         blocks.append((first, stop, context_first, context_stop, begin, end))
         first = stop
     return blocks
+
+
+def stitch_blocks(lines, raw_blocks, duration, language):
+    """Resolve crossing core boundaries with an existing joint-window prediction."""
+    predictions, owners = [], [None]*len(lines)
+    for block_index, block in enumerate(raw_blocks):
+        first, stop = block['context']
+        offset = block['source_range'][0]
+        segments = block['result']['segments']
+        units = [dict(text=w['word'], start=round(offset+w['start'], 3),
+                      end=round(offset+w['end'], 3)) for s in segments for w in s['words']]
+        cues = lyric_cues(lines[first:stop], units, duration)
+        prediction = {}
+        for index, (cue, segment) in enumerate(zip(cues, segments), first):
+            try:
+                words = map_words(cue, segment['words'], offset, language) if cue['status'] == 'candidate' else []
+            except ValueError:
+                words = []  # Retain the failure for the normal word-mapping gate.
+            prediction[index] = (cue, words)
+        predictions.append(prediction)
+        for index in range(*block['range']):
+            if owners[index] is not None:
+                raise ValueError(f'Duplicate core lyric line: {index}')
+            owners[index] = block_index
+    if None in owners:
+        raise ValueError('Raw alignment does not cover exactly the displayed lyrics')
+
+    def conflicts(selection):
+        words = [predictions[owner][i][1] for i, owner in enumerate(selection)]
+        return {i for i in range(1, len(words)) if words[i-1] and words[i]
+                and words[i][0]['start']-words[i-1][-1]['start'] < .015-1e-9}
+
+    repairs = []
+    while bad := conflicts(owners):
+        repaired = False
+        for index in sorted(bad):
+            for owner in dict.fromkeys(owners[index-1:index+1]):
+                prediction = predictions[owner]
+                if not all(i in prediction and prediction[i][1] for i in (index-1, index)):
+                    continue
+                words = prediction[index-1][1]+prediction[index][1]
+                if any(b['start']-a['start'] < .015-1e-9 for a, b in zip(words, words[1:])):
+                    continue
+                candidate = owners.copy()
+                candidate[index-1:index+1] = [owner, owner]
+                if not conflicts(candidate) < bad:
+                    continue
+                repairs.append(dict(lines=[index, index+1],
+                    previous_blocks=owners[index-1:index+1], selected_block=owner,
+                    context=raw_blocks[owner]['context'], source_range=raw_blocks[owner]['source_range']))
+                owners, repaired = candidate, True
+                break
+            if repaired:
+                break
+        if not repaired:
+            break  # Never invent times or relax the downstream quality gate.
+
+    # Preserve the selected raw prediction as well as the line timing: word and
+    # phoneme stages must not accidentally read the old window for this line.
+    stitched = []
+    for index, owner in enumerate(owners):
+        if index and owners[index-1] == owner:
+            stitched[-1]['range'][1] = index+1
+        else:
+            stitched.append({**raw_blocks[owner], 'range': [index, index+1]})
+    return [predictions[owner][i][0] for i, owner in enumerate(owners)], stitched, repairs
 
 
 def refine_chinese_onsets(cues, raw_blocks, audio, language):
@@ -149,7 +216,7 @@ def main():
             assert [cue['text'] for cue in anchors] == lyrics['lines']
             blocks = alignment_blocks(anchors, audio)
         started = time.perf_counter()
-        cues, raw_blocks, units = [], [], []
+        raw_blocks, units = [], []
         for first, stop, context_first, context_stop, begin, end in progress_items(blocks, 'blocks'):
             print(json.dumps({'song': Path(job['lyrics']).stem, 'lines': [first+1, stop],
                               'window': [begin, end]}), flush=True)
@@ -163,11 +230,10 @@ def main():
             local_units = [{'text': word.word, 'start': round(word.start+begin, 3),
                             'end': round(word.end+begin, 3), 'probability': word.probability}
                            for word in result.all_words()]
-            local_cues = lyric_cues(lyrics['lines'][context_first:context_stop], local_units, duration)
-            cues.extend(local_cues[first-context_first:stop-context_first])
             units.extend(local_units)
             raw_blocks.append({'range': [first, stop], 'context': [context_first, context_stop],
                                'source_range': [begin, end], 'result': result.to_dict()})
+        cues, raw_blocks, boundary_repairs = stitch_blocks(lyrics['lines'], raw_blocks, duration, lyrics['language'])
         if args.device == 'mps':
             torch.mps.synchronize()
         elapsed = time.perf_counter()-started
@@ -185,6 +251,7 @@ def main():
             'lyrics': str(Path(job['lyrics']).resolve()), 'lyrics_sha256': sha(job['lyrics']),
             'model_sha256': sha(model_root/f'{args.model}.pt'), 'runner_sha256': sha(__file__),
             'dynamic_heads': args.dynamic_heads,
+            'boundary_reconciliations': boundary_repairs,
             'onset_refinements': refinements,
             'anchors': job.get('anchors'), 'anchors_sha256': sha(job['anchors']) if job.get('anchors') else None,
             'packages': {name: version(name) for name in ['stable-ts', 'openai-whisper', 'torch']},
