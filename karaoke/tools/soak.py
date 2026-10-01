@@ -15,7 +15,7 @@ import time
 
 import httpx
 
-from karaoke.job_schema import video_url
+from karaoke.job_schema import provider_error, video_url
 
 
 REQUIRED = {'mv', 'instrumental', 'backing_vocals', 'lead_vocals', 'subtitles',
@@ -125,7 +125,7 @@ def eligible(case, version, now):
     if not attempts:
         return True
     last = attempts[-1]
-    if last['status'] in ('submitted', 'running'):
+    if last['status'] in ('submitted', 'running', 'blocked'):
         return False
     if last['status'] == 'external':
         return now >= last['next_retry_at'] and last.get('external_attempt', 1) < 3
@@ -233,15 +233,18 @@ def wait_job(client, base, job_id):
 
 def record_failure(attempt, job, folder):
     error = job.get('error') or dict(code='verification_failed', message='Output validation failed')
-    attempt.update(status='failed', error=error, finished_at=stamp(),
-        error_fingerprint=hashlib.sha256(json.dumps(error, sort_keys=True).encode()).hexdigest())
     logs = []
-    for name in ('worker.log', 'download.log'):
+    for name in ('worker.log', 'download.log', 'transcribe.log'):
         path = folder/name
         if path.exists():
             with path.open('rb') as stream:
                 stream.seek(max(0, path.stat().st_size-4000))
                 logs.append(stream.read().decode(errors='replace'))
+    # Older workers reported these as generic stage failures. Classify their
+    # retained logs too, so a code rollout does not cause inappropriate retries.
+    error = provider_error('\n'.join(logs)) or error
+    attempt.update(status='failed', error=error, finished_at=stamp(),
+        error_fingerprint=hashlib.sha256(json.dumps(error, sort_keys=True).encode()).hexdigest())
     attempt['diagnostic_tail'] = '\n'.join(logs)
     diagnostics = {}
     for pattern in ('asr/*.json', 'alignment/*.json', 'phonemes/*.json', 'context/**/*.json',
@@ -258,6 +261,12 @@ def record_failure(attempt, job, folder):
         with gzip.open(target, 'wt', encoding='utf-8') as output:
             json.dump(diagnostics, output, ensure_ascii=False)
         attempt['reproduction_file'] = str(target)
+    if error.get('provider') == 'openai':
+        attempt.update(status='external' if error['retryable'] else 'blocked',
+            retry_provider='openai', provider_blocked=error['code'] == 'openai_rate_limit',
+            next_retry_at=time.time()+min(86400, 7200*2**(attempt['external_attempt']-1))
+                if error['retryable'] else None)
+        return
     external_markers = ('sign in', 'login', 'http error 403', 'http error 429', 'video unavailable',
                         'private video', 'timed out', 'connection reset', 'proxy', '登录', '无法访问',
                         '代理', '超时', 'risk control', '-352')
@@ -284,7 +293,8 @@ def queue_cases(client, base, state, version, persist):
                 continue
             payload = dict(job_id=last['job_id'])
         else:
-            if not eligible(case, version, time.time()) or time.time() < state['provider_backoff'].get(case['provider'], 0):
+            if not eligible(case, version, time.time()) or time.time() < max(
+                    state['provider_backoff'].get(case['provider'], 0), state['provider_backoff'].get('openai', 0)):
                 continue
             payload = dict(url=case['url'], source_title=case['title'],
                 force=bool(last and last['status']=='passed' and last['pipeline_version']!=version))
@@ -365,7 +375,7 @@ def run(path, data_dir, base):
                 else:
                     record_failure(attempt, job, data_dir/job['id'])
                 if attempt['status'] == 'external' and attempt['provider_blocked']:
-                    state['provider_backoff'][case['provider']] = attempt['next_retry_at']
+                    state['provider_backoff'][attempt.get('retry_provider', case['provider'])] = attempt['next_retry_at']
                 save(path, state)
                 print(json.dumps({'title': case['title'], 'job_id': job['id'], 'status': attempt['status'],
                                   'error': attempt.get('error')}, ensure_ascii=False), flush=True)
@@ -383,7 +393,8 @@ def run(path, data_dir, base):
                 time.sleep(30)
                 continue
             candidates = [c for c in state['cases'] if eligible(c, version, time.time()) and
-                          time.time() >= state['provider_backoff'].get(c['provider'], 0)]
+                          time.time() >= max(state['provider_backoff'].get(c['provider'], 0),
+                                            state['provider_backoff'].get('openai', 0))]
             if not candidates:
                 print('No eligible cases; external failures are on backoff or need user action', flush=True)
                 return

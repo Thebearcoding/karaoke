@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from .job_schema import JobRequest, song_language, video_url
+from .job_schema import JobRequest, provider_error, song_language, video_url
 from .song_sources import prepare_song_text, video_song_info
 from .stage_progress import parse_progress
 from .cache import can_restore_video
@@ -63,6 +63,19 @@ class StageFailure(RuntimeError):
     def __init__(self, stage, message):
         super().__init__(message)
         self.stage = stage
+
+
+def processing_error(error, output):
+    details = provider_error(error)
+    if details is None and isinstance(error, StageFailure) and error.stage == 'transcribe':
+        path = Path(output)/'transcribe.log'
+        if path.is_file():
+            with path.open('rb') as log:
+                log.seek(max(0, path.stat().st_size-16384))
+                details = provider_error(log.read().decode(errors='replace'))
+    return details or dict(code=getattr(error, 'stage', 'processing')+'_failed',
+        message=str(error)[:600] if isinstance(error, (StageFailure, ValueError)) else
+        '处理失败；请查看任务目录中的日志，或提供本版本歌词后重试')
 
 
 def download_failure(log):
@@ -558,9 +571,7 @@ def main():
     try:
         pipeline.restore_video() if args.restore_video else pipeline.execute()
     except Exception as error:
-        write_json(args.output/'error.json', dict(code=getattr(error, 'stage', 'processing')+'_failed',
-            message=str(error)[:600] if isinstance(error, (StageFailure, ValueError)) else
-            '处理失败；请查看任务目录中的日志，或提供本版本歌词后重试'))
+        write_json(args.output/'error.json', processing_error(error, args.output))
         raise
 
 

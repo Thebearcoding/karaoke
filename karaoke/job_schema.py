@@ -1,9 +1,30 @@
-"""Public job inputs and canonical, single-video platform URLs."""
+"""Public job inputs, safe provider errors and single-video platform URLs."""
 import re
 from typing import Literal
 from urllib.parse import parse_qs, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def provider_error(value):
+    """Classify SDK exceptions (or their log lines) without exposing response data."""
+    if isinstance(value, BaseException):
+        names = [type(value).__name__] if type(value).__module__.startswith('openai') else []
+    else:
+        names = re.findall(r'^openai\.(\w+Error):', str(value), re.M)
+    known = {
+        'APITimeoutError': ('timeout', '语音或歌词服务响应超时，请稍后重试', True),
+        'APIConnectionError': ('connection', '无法连接语音或歌词服务，请稍后重试', True),
+        'RateLimitError': ('rate_limit', '语音或歌词服务额度或频率受限，请稍后重试', True),
+        'ContentFilterFinishReasonError': ('content_rejected', '歌词服务拒绝处理本次内容，需要人工检查', False),
+        'AuthenticationError': ('authentication', '语音或歌词服务认证失败，请检查服务配置', False),
+        'PermissionDeniedError': ('permission', '语音或歌词服务拒绝访问，请检查服务权限', False),
+    }
+    for name in reversed(names):
+        if name in known:
+            code, message, retryable = known[name]
+            return dict(code='openai_'+code, message=message, provider='openai', retryable=retryable)
+    return None
 
 
 def song_language(value):

@@ -82,6 +82,10 @@ def test_soak_adds_all_cases_to_room_and_only_removes_finished_owned_entries(tmp
         title=f'Test {i}', provider='youtube', attempts=[]) for i in range(3)]}
     with TestClient(app) as client:
         user = client.post('/v1/room/entries', json={'job_id': user_job['id']}).json()['entries'][0]
+        state['provider_backoff']['openai'] = time.time()+60
+        queue_cases(client, 'http://testserver', state, 'test', lambda: None)
+        assert len(client.get('/v1/room').json()['entries']) == 1
+        state['provider_backoff'].clear()
         queue_cases(client, 'http://testserver', state, 'test', lambda: None)
         entries = client.get('/v1/room').json()['entries']
         assert len(entries) == 4  # The abandoned queue=2 idea must not become an app limit.

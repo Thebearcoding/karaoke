@@ -19,7 +19,7 @@ from karaoke.job_schema import JobRequest, video_url
 from karaoke.song_sources import SongText, find_verified_lyrics, prepare_song_text, video_song_info
 from karaoke.align_lyric_phonemes import protect_line_order
 from karaoke.cache import CacheFull, GIB, can_restore_video
-from karaoke.pipeline import Pipeline, StageFailure, create_poster, file_hash
+from karaoke.pipeline import Pipeline, StageFailure, create_poster, file_hash, processing_error
 from karaoke.stage_progress import PREFIX, parse_progress, progress_items
 from karaoke.transcribe_lyrics import repetition_loop, transcribe
 
@@ -113,6 +113,39 @@ def test_failures_are_visible_and_retry_creates_new_job(tmp_path):
         second = client.post('/v1/jobs', json={'url': URL}).json()
         assert second['id'] != first['id']
         finished(client, second['id'])
+
+
+@pytest.mark.parametrize('rejected', [False, True])
+def test_external_failures_retain_safe_causes_and_do_not_retry_as_software_bugs(tmp_path, rejected):
+    import httpx
+    from openai import APITimeoutError, ContentFilterFinishReasonError
+    from karaoke.tools.soak import eligible, record_failure
+
+    error = (ContentFilterFinishReasonError() if rejected else
+             APITimeoutError(request=httpx.Request('POST', 'https://api.openai.com/')))
+    direct = processing_error(error, tmp_path)
+    assert direct['provider'] == 'openai' and direct['retryable'] is not rejected
+    log = f'openai.{type(error).__name__}: private response and credentials\n'
+    (tmp_path/'transcribe.log').write_text(log)
+    wrapped = processing_error(StageFailure('transcribe', 'stage failed'), tmp_path)
+    assert wrapped == direct and 'private' not in str(wrapped)
+    assert processing_error(RuntimeError('Request timed out'), tmp_path)['code'] == 'processing_failed'
+
+    attempt = dict(pipeline_version='v1', external_attempt=1)
+    legacy = dict(id=tmp_path.name, error=dict(code='transcribe_failed', message='Generic stage failure'))
+    record_failure(attempt, legacy, tmp_path)
+    assert attempt['error'] == direct and attempt['retry_provider'] == 'openai'
+    assert not attempt['provider_blocked']
+    case = {'attempts': [attempt]}
+    assert not eligible(case, 'v2', time.time())
+    if rejected:
+        assert attempt['status'] == 'blocked' and attempt['next_retry_at'] is None
+        assert not eligible(case, 'v3', time.time()+86400)
+    else:
+        assert attempt['status'] == 'external' and attempt['next_retry_at'] > time.time()+7100
+        assert eligible(case, 'v2', attempt['next_retry_at']+1)
+        attempt['external_attempt'] = 3
+        assert not eligible(case, 'v3', attempt['next_retry_at']+1)
 
 
 def test_retry_preserves_completed_stages_and_only_reruns_affected_work(tmp_path):

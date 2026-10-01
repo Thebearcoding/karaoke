@@ -88,6 +88,8 @@ curl -sS http://127.0.0.1:8746/v1/jobs/任务UUID
 
 状态依次为 `queued`、`running`、`completed`；失败为 `failed`，通过 `error.code` 与 `error.message` 获取原因。`active_stages` 会显示当前正在下载、分离、整理歌词、对齐还是渲染。同一首歌的独立步骤可并行，因此可能同时显示两个阶段。
 
+外部语音／歌词服务错误还包含 `error.provider` 和 `error.retryable`：超时、连接或限流可以退避后重试；内容拒绝、认证或权限失败需要人工处理。错误码分别为 `openai_timeout`、`openai_connection`、`openai_rate_limit`、`openai_content_rejected`、`openai_authentication` 和 `openai_permission`。对外只返回固定说明，不暴露原始响应、请求头或密钥；已完成阶段仍按检查点规则保留。
+
 `stage_progress` 按阶段提供实测计数，例如 `{"separate_music":{"completed":12,"total":40,"unit":"chunks","detail":null}}`。下载按视频／音频分别计字节，分离计已处理音频块，对齐计已处理段落／行，渲染计已送入编码器的帧。`total` 缺失时不计算百分比；加载模型、在线歌词请求、封装与校验仅提供阶段或 `detail`。这些是当前步骤的工作量，不能相加当作整首歌的时间百分比。只有成品通过校验后才会进入 `completed`。
 
 语音识别出现长串重复循环时，用 `gpt-4o-transcribe` 在整首上下文中恢复歌词文本（可用 `KARAOKE_ASR_FALLBACK_MODEL` 配置），同时把 Whisper 的粗定位改为 30 秒片段、最多 3 路并发；仍循环的片段不提供词时间。恢复文本不带词时间，`recording_bounds` 只是录音范围，后续仍由声学强制对齐生成起唱时间。恢复过程记录在 `asr/run.json`，持续异常会明确失败。失败任务保留转录、整理后的歌词、粗定位和日志供复现，计入缓存预算；不因排障永久保留大体积中间音频。
