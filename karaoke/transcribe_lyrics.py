@@ -1,6 +1,7 @@
 """Obtain an ASR draft and coarse word times from an existing vocal preview."""
 
 import argparse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
@@ -12,16 +13,27 @@ import subprocess
 import time
 
 from openai import OpenAI
+from job_schema import song_language
 from stage_progress import progress_items, report_progress
 
 
 def repetition_loop(data):
     """Detect decoder loops, not ordinary repeated lyric lines or short vocalizations."""
-    for segment in data.get('segments') or []:
-        text = ''.join(c for c in segment['text'].casefold() if c.isalnum())
+    segments = data.get('segments') or []
+    texts = [''.join(c for c in s['text'].casefold() if c.isalnum()) for s in segments]
+    # A decoder can emit the same phrase in many tiny segments. Require collapsed
+    # timing as corroboration so a normally timed repeated chorus stays valid.
+    collapsed = sum('start' in s and 'end' in s and s['end']-s['start'] <= .025 for s in segments)
+    candidates = texts + ([''.join(texts)] if collapsed > len(segments)/2 else [])
+    for text in candidates:
         if len(text) >= 40 and re.search(r'(.{1,32}?)\1{7,}', text):
             return True
     return False
+
+
+def needs_recovery(data):
+    text = ''.join(s.get('text', '') for s in data.get('segments') or []) or data.get('text', '')
+    return not any(c.isalnum() for c in text) or repetition_loop(data)
 
 
 def transcribe(client, audio, language, hint, output):
@@ -36,13 +48,12 @@ def transcribe(client, audio, language, hint, output):
 
     data = recognize(audio)
     recovery = dict(triggered=False, chunks=[])
-    if not repetition_loop(data):
+    if not needs_recovery(data):
         return data, recovery
-    report_progress(detail='识别重复异常，分段重试')
+    report_progress(detail='识别结果异常，分段重试')
     (output/'initial-transcription.json').write_text(json.dumps(data, ensure_ascii=False)+'\n')
-    detected = {'chinese':'zh', 'japanese':'ja', 'english':'en'}.get(data.get('language'))
-    if language == 'auto' and detected:
-        options['language'] = detected
+    # An unusable transcript's language detection is also untrusted. Preserve an
+    # explicit user language, but let recovery re-detect automatic requests.
     duration = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',
         'format=duration', '-of', 'default=nw=1:nk=1', str(audio)], text=True))
     fallback_model = os.getenv('KARAOKE_ASR_FALLBACK_MODEL', 'gpt-4o-transcribe')
@@ -54,9 +65,9 @@ def transcribe(client, audio, language, hint, output):
             'notes into repeated syllables. If there are no intelligible words, return an empty transcript.'):
         text = recognize(audio, fallback_model, instruction)['text'].strip()
         segments = [dict(start=0., end=duration, text=text, timing_source='recording_bounds')]
-        if not repetition_loop(dict(segments=segments)):
+        if not needs_recovery(dict(segments=segments)):
             break
-    if not text or repetition_loop(dict(segments=segments)):
+    if needs_recovery(dict(segments=segments)):
         raise ValueError('歌词文本重试仍有重复异常或为空，无法生成可靠歌词')
     (output/'recovered-text.json').write_text(json.dumps(segments, ensure_ascii=False)+'\n')
 
@@ -68,14 +79,15 @@ def transcribe(client, audio, language, hint, output):
         try:
             part = recognize(path)
             diagnostic = dict(start=start, end=start+length, whisper=part)
-            fallback = repetition_loop(part)
+            fallback = needs_recovery(part)
             if fallback:
                 (output/f'chunk-{start:05d}.json').write_text(json.dumps(diagnostic, ensure_ascii=False)+'\n')
             # Do not give the text-only transcript invented word times. Unresolved
             # lyrics use neighboring anchors in the later acoustic forced alignment.
             words = [] if fallback else [dict(w, start=w['start']+start, end=min(length, w['end'])+start)
                 for w in part.get('words', []) if 0 <= w['start'] < length and w['end'] > w['start']]
-            return words, dict(start=start, end=start+length, word_times_discarded=fallback)
+            return words, dict(start=start, end=start+length, word_times_discarded=fallback,
+                               language=song_language(part.get('language')))
         finally:
             path.unlink(missing_ok=True)
 
@@ -83,8 +95,15 @@ def transcribe(client, audio, language, hint, output):
     with ThreadPoolExecutor(max_workers=3) as pool:
         futures = [pool.submit(chunk, start) for start in starts]
         parts = [future.result() for future in progress_items(futures, 'chunks')]
+    languages = Counter()
+    for words, record in parts:
+        if record['language']:
+            languages[record['language']] += sum(c.isalnum() for w in words for c in w['word'])
+    detected = languages.most_common(1)[0][0] if languages.total() else None
+    data['language'] = song_language(language) if language != 'auto' else detected
     data.update(duration=duration, text=text, segments=segments, words=[w for words, _ in parts for w in words])
-    return data, dict(triggered=True, text_model=fallback_model, chunks=[record for _, record in parts])
+    return data, dict(triggered=True, text_model=fallback_model, language_evidence=dict(languages),
+                      chunks=[record for _, record in parts])
 
 
 def filter_silent_transcription(data, audio, sample_rate):
