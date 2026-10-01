@@ -313,6 +313,43 @@ def test_soak_observes_failed_job_when_library_no_longer_exposes_job_id():
     assert calls == ['/v1/jobs/job', '/v1/room/events', '/v1/jobs/job']
 
 
+def test_soak_collects_retries_in_submission_order(tmp_path, monkeypatch):
+    import hashlib
+    import httpx
+    from karaoke.tools import soak
+    cases = [dict(url=f'https://youtu.be/{i:011d}', title=str(i), language='English',
+        provider='youtube', attempts=[dict(job_id=str(i), status='submitted',
+            pipeline_version='v2', submitted_at=f'2026-10-01T00:00:0{1-i}Z', entry_id=str(i))])
+        for i in range(2)]
+    selection = [dict(url=c['url'], language=c['language']) for c in cases]
+    manifest = tmp_path/'manifest.json'
+    manifest.write_text(json.dumps(dict(cases=cases, provider_backoff={}, cache_limit_bytes=GIB,
+        selection_sha256=hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest())))
+    observed = []
+
+    def respond(request):
+        path = request.url.path
+        if path == '/health':
+            data = {'pipeline_version': 'v2'}
+        elif path == '/v1/room':
+            data = {'entries': [], 'current_id': None}
+        elif path == '/v1/storage':
+            data = {'limit_bytes': GIB, 'can_prepare': True}
+        else:
+            job_id = path.removeprefix('/v1/jobs/')
+            observed.append(job_id)
+            data = dict(id=job_id, status='failed', error={'code': 'processing_failed', 'message': 'test'})
+        return httpx.Response(200, json=data)
+
+    client = httpx.Client(transport=httpx.MockTransport(respond))
+    monkeypatch.setattr(soak.httpx, 'Client', lambda **kwargs: client)
+    soak.run(manifest, tmp_path, 'http://test')
+    assert observed == ['1', '0']
+    saved = json.loads(manifest.read_text())['cases']
+    assert [c['url'] for c in saved] == [c['url'] for c in cases]
+    assert all(c['attempts'][-1]['status'] == 'failed' for c in saved)
+
+
 def test_soak_checks_actual_stem_samples_not_only_pipeline_claim(tmp_path):
     import soundfile as sf
     from karaoke.exact_stems import pcm_sha

@@ -360,8 +360,9 @@ def run(path, data_dir, base):
                 raise RuntimeError('Cache limit changed; refusing to silently change it')
             if not failed and storage['can_prepare']:
                 queue_cases(client, base, state, version, lambda: save(path, state))
-            active = next(((c, c['attempts'][-1]) for c in state['cases'] if c['attempts'] and
-                           c['attempts'][-1]['status'] in ('submitted', 'running')), None)
+            active = min(((c, c['attempts'][-1]) for c in state['cases'] if c['attempts'] and
+                          c['attempts'][-1]['status'] in ('submitted', 'running')),
+                         key=lambda item: item[1]['submitted_at'], default=None)
             if active:
                 case, attempt = active
                 try:
