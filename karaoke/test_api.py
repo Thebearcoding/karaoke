@@ -361,9 +361,11 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
         'align_words': [sys.executable, code/'align_lyrics_whisper.py'],
         'align_phonemes': [sys.executable, code/'align_lyric_phonemes.py'],
         'transcribe': [sys.executable, code/'transcribe_lyrics.py'],
+        'align_context': [sys.executable, code/'experiments/cjk-onsets-v003/run.py'],
     }
     models = [code/'models/alignment'/name for name in (
-        'whisper/large-v3-turbo.pt', 'sofa/mandarin/model.ckpt', 'sofa/english/model.ckpt')]
+        'whisper/large-v3-turbo.pt', 'sofa/mandarin/model.ckpt', 'sofa/english/model.ckpt',
+        'mms/model.pt')]
     for model in models:
         model.parent.mkdir(parents=True, exist_ok=True)
         model.write_bytes(b'original model')
@@ -386,20 +388,32 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     prepare()
     (code/'subtitle-styles.json').write_text('{}')
     fingerprint = module.pipeline_fingerprint()
-    unrelated = code/'models/alignment/mms/model.pt'
+    unrelated = code/'models/alignment/experimental/model.pt'
     unrelated.parent.mkdir()
     unrelated.write_bytes(b'new experimental model')
     assert module.pipeline_fingerprint() == fingerprint
     models[2].write_bytes(b'updated English model')
     assert module.pipeline_fingerprint() != fingerprint
     prepare()
-    assert calls == ['align_words', 'align_phonemes', 'transcribe']
+    assert calls == list(stages)
+    calls.clear()
+    fingerprint = module.pipeline_fingerprint()
+    models[3].write_bytes(b'updated independent alignment model')
+    assert module.pipeline_fingerprint() != fingerprint
+    prepare()
+    assert calls == ['align_context']
+    calls.clear()
     models[1].write_bytes(b'updated Mandarin model')
     prepare()
-    assert calls == ['align_words', 'align_phonemes', 'transcribe', 'align_phonemes']
+    assert calls == ['align_phonemes', 'align_context']
+    calls.clear()
     models[0].write_bytes(b'updated Whisper model')
     prepare()
-    assert calls == ['align_words', 'align_phonemes', 'transcribe', 'align_phonemes', 'align_words', 'transcribe']
+    assert calls == ['align_words', 'transcribe']
+    calls.clear()
+    (folder/'source-44100.wav').write_bytes(b'updated original audio')
+    prepare()
+    assert calls == ['align_context']
 
 
 @pytest.mark.parametrize('formatting', ['lyrics', 'symbols', 'annotations'])

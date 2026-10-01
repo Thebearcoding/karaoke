@@ -51,7 +51,7 @@ def pipeline_fingerprint():
     for path in sorted((ROOT/'models/pretrained').glob('*roformer*')):
         stat = path.stat()
         digest.update(f'{path.name}:{stat.st_size}:{stat.st_mtime_ns}'.encode())
-    for path in sorted(p for directory in ('whisper', 'sofa')
+    for path in sorted(p for directory in ('whisper', 'sofa', 'mms')
                        for p in (ROOT/'models/alignment'/directory).rglob('*')):
         if path.is_file() and path.suffix in ('.ckpt', '.pt', '.yaml', '.json'):
             stat = path.stat()
