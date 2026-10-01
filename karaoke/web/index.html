@@ -38,13 +38,21 @@
     <section class="main-panel" id="library-view" aria-label="点歌台">
       <div class="intro"><h1>今晚，唱点什么<span>。</span></h1></div>
       <form id="add-form" class="search-form">
-        <div class="search-box"><svg class="icon"><use href="#i-search"/></svg><input id="song-input" type="text" autocomplete="off" aria-label="搜索歌曲或粘贴视频链接" placeholder="搜歌名、歌手，或粘贴视频链接"><button class="primary" id="submit-song" type="submit">点一首 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
+        <div class="search-box"><svg class="icon"><use href="#i-search"/></svg><input id="song-input" type="text" autocomplete="off" maxlength="2048" enterkeyhint="search" aria-label="搜索歌曲或粘贴视频链接" placeholder="歌名、歌手，或视频链接"><button class="primary" id="submit-song" type="submit">搜索 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
         <label class="optional-title" id="title-row" hidden>歌名 <input id="title-input" maxlength="200" placeholder="可选"></label>
       </form>
+      <section id="video-results" class="video-results" aria-label="视频搜索结果" hidden>
+        <div class="section-heading"><h2>搜索结果</h2><button class="text-button" id="clear-search">返回曲库</button></div>
+        <div class="filters video-sources" role="group" aria-label="视频来源"><button data-video-source="all" class="selected">全部</button><button data-video-source="youtube">YouTube</button><button data-video-source="bilibili">B站</button></div>
+        <div id="search-status" class="search-status" role="status"></div>
+        <div id="video-grid" class="video-grid"></div>
+      </section>
+      <section id="local-library">
       <div class="section-heading"><h2 id="library-heading">曲库</h2><span id="library-count"></span></div>
       <div class="filters" role="group" aria-label="筛选歌曲"><button data-filter="all" class="selected">全部</button><button data-filter="ready">已准备</button><button data-filter="Chinese">华语</button><button data-filter="Japanese">日语</button><button data-filter="English">英语</button></div>
       <div class="song-grid" id="song-grid" aria-live="polite"></div>
-      <div class="search-empty" id="search-empty" hidden><h3>没有找到歌曲</h3><div><a id="youtube-search" target="_blank" rel="noopener noreferrer">搜索 YouTube <span>↗</span></a><a id="bilibili-search" target="_blank" rel="noopener noreferrer">搜索 Bilibili <span>↗</span></a></div></div>
+      <div class="search-empty" id="search-empty" hidden><h3>还没有歌曲</h3></div>
+      </section>
     </section>
 
     <section class="main-panel player-panel" id="player-view" hidden aria-label="播放器">
@@ -54,6 +62,7 @@
         <video id="video" playsinline muted preload="metadata" aria-label="卡拉 OK 字幕 MV"></video>
         <div class="screen-cover" id="screen-cover"><div class="record-art"><div class="record-label"><span class="brand-mark"><i></i><i></i><i></i><i></i></span></div></div><p id="screen-status">请先点歌</p><div id="screen-preparation"></div><button class="primary" id="screen-start" hidden>开始唱 <svg class="icon"><use href="#i-play"/></svg></button></div>
         <div class="pitch-control" role="group" aria-label="升降调"><button id="pitch-down" aria-label="降半音" title="降半音">♭</button><button id="pitch-reset" aria-label="恢复原调" title="恢复原调"><span id="pitch-value">原调</span></button><button id="pitch-up" aria-label="升半音" title="升半音">♯</button></div>
+        <button class="screen-next next-button" data-next title="下一首 · N">下一首 <svg class="icon"><use href="#i-next"/></svg></button>
         <button class="screen-exit icon-button" id="exit-fullscreen" aria-label="退出全屏"><svg class="icon"><use href="#i-full"/></svg></button>
       </div>
       <div id="fullscreen-progress" class="fullscreen-progress"></div>
@@ -82,9 +91,15 @@
 
   <footer class="transport">
     <button class="now-song" id="now-song" aria-label="查看正在播放"><div class="now-art" id="now-art"><span>♪</span></div><div><strong id="now-title">未播放</strong><span id="now-artist"></span></div></button>
-    <div class="transport-center"><div class="transport-buttons"><button class="icon-button" id="transport-restart" aria-label="重唱" title="重唱"><svg class="icon"><use href="#i-restart"/></svg></button><button class="play-button" id="play-toggle" aria-label="播放"><svg class="icon"><use id="play-icon" href="#i-play"/></svg></button><button class="icon-button" id="next-song" aria-label="下一首" title="下一首 · N"><svg class="icon"><use href="#i-next"/></svg></button></div><div class="seek-row"><time id="current-time">0:00</time><input id="seek" type="range" min="0" max="1" step="0.1" value="0" aria-label="播放进度"><time id="duration">0:00</time></div></div>
+    <div class="transport-center"><div class="transport-buttons"><button class="icon-button" id="transport-restart" aria-label="重唱" title="重唱"><svg class="icon"><use href="#i-restart"/></svg></button><button class="play-button" id="play-toggle" aria-label="播放"><svg class="icon"><use id="play-icon" href="#i-play"/></svg></button><button class="next-button" id="next-song" data-next title="下一首 · N">下一首 <svg class="icon"><use href="#i-next"/></svg></button></div><div class="seek-row"><time id="current-time">0:00</time><input id="seek" type="range" min="0" max="1" step="0.1" value="0" aria-label="播放进度"><time id="duration">0:00</time></div></div>
     <div class="volume-control"><button id="mute" class="icon-button" aria-label="静音"><svg class="icon"><use href="#i-volume"/></svg></button><input id="volume" type="range" min="0" max="1" step="0.01" value="0.8" aria-label="音量"><span id="volume-value">80</span></div>
   </footer>
+  <dialog id="video-preview" class="video-preview" aria-labelledby="preview-title">
+    <div class="preview-heading"><h2 id="preview-title"></h2><button id="close-preview" aria-label="关闭预览">×</button></div>
+    <div id="preview-player" class="preview-player"></div>
+    <div class="preview-actions"><a id="preview-source" target="_blank" rel="noopener noreferrer"></a><button id="preview-add" class="primary">加入歌单</button></div>
+    <p id="preview-error" role="status" hidden></p>
+  </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
 </body>
 </html>

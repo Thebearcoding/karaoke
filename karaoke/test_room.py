@@ -287,3 +287,21 @@ def test_song_info_updates_push_to_room_and_preserve_user_overrides(tmp_path):
         visible = room.describe(dict(id='manual', job_id=manual['id']))
         assert (visible['title'], visible['artist']) == ('My title', 'My singer')
     asyncio.run(check())
+
+
+def test_search_title_is_immediate_but_does_not_override_metadata_or_cache(tmp_path):
+    app = create_app(tmp_path, worker_command=fake_worker, version='test')
+    with TestClient(app) as client:
+        entry = client.post('/v1/room/entries', json={'url':URL, 'source_title':'Video title (Official MV)'}).json()['entries'][0]
+        assert entry['title'] == 'Video title (Official MV)'
+        job = app.state.store.read(entry['job_id'])
+        assert job['input']['title'] is None
+        assert finished(client, job['id'])['status'] == 'completed'
+        app.state.store.update(job['id'], song_info={'title':'Clean song title', 'artist':'Singer'})
+        room = client.get('/v1/room').json()
+        assert room['entries'][0]['title'] == 'Clean song title'
+        assert room['library'][0]['title'] == 'Clean song title'
+        again = client.post('/v1/room/entries', json={'url':URL, 'source_title':'A different search title'}).json()
+        assert again['entries'][-1]['job_id'] == job['id']
+        assert again['entries'][-1]['title'] == 'Clean song title'
+        assert len(app.state.store.list()) == 1

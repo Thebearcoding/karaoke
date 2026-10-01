@@ -562,3 +562,100 @@ def test_low_free_disk_blocks_processing_without_evicting_the_playlist(tmp_path)
             assert job['status'] == 'failed' and job['error']['code'] == 'cache_full'
             assert client.get('/v1/storage').json()['can_prepare'] is False
         assert (tmp_path/pinned['id']/'mv.mp4').exists()
+
+
+def test_video_search_normalizes_results_and_rejects_unplayable_links():
+    from karaoke.video_search import search_results
+    bili = search_results('bilibili', [dict(bvid='BV1bK411W797', title='<em>歌曲</em> &amp; 现场',
+        duration='1:02:03', pic='//i0.hdslb.com/cover.jpg', author='Uploader')])
+    assert bili == [dict(url='https://www.bilibili.com/video/BV1bK411W797', title='歌曲 & 现场',
+        duration=3723, thumbnail='https://i0.hdslb.com/cover.jpg', uploader='Uploader', provider='bilibili')]
+    item = dict(url=URL, title='Video title', duration=180, thumbnails=[{'url':'https://i.ytimg.com/cover.jpg'}])
+    results = search_results('youtube', [item, item, dict(item, live_status='is_live'),
+        dict(item, url='http://127.0.0.1/private'), dict(item, url='https://youtube.com.attacker.test/'),
+        dict(item, url='https://www.bilibili.com/video/BV1bK411W797')])
+    assert len(results) == 1 and results[0]['url'] == URL
+    assert results[0]['thumbnail'] == 'https://i.ytimg.com/cover.jpg'
+    assert search_results('youtube', [dict(item, thumbnail='https://localhost/cover')])[0]['thumbnail'] is None
+
+
+def test_search_api_failure_is_distinct_from_empty_and_creates_no_jobs(tmp_path, monkeypatch):
+    from karaoke import video_search
+    async def fetch(provider, query):
+        if provider == 'bilibili':
+            raise RuntimeError('provider unavailable')
+        return []
+    monkeypatch.setattr(video_search, 'fetch_results', fetch)
+    app = create_app(tmp_path, version='test')
+    with TestClient(app) as client:
+        found = client.get('/v1/search', params=dict(provider='youtube', q='  some song  '))
+        assert found.status_code == 200 and found.json()['results'] == []
+        assert found.json()['query'] == 'some song'
+        assert client.get('/v1/search', params=dict(provider='bilibili', q='some song')).status_code == 502
+        for params in [dict(provider='other', q='song'), dict(provider='youtube', q=' '), dict(provider='youtube', q='a'*161)]:
+            assert client.get('/v1/search', params=params).status_code == 422
+        assert client.get('/v1/room').json()['entries'] == []
+        assert app.state.store.list() == []
+
+
+def test_video_search_deduplicates_inflight_queries_and_bounds_load(monkeypatch):
+    import asyncio
+    from karaoke import video_search
+    async def scenario():
+        service = video_search.VideoSearch()
+        release, started = asyncio.Event(), asyncio.Event()
+        calls, active, peak = [], 0, 0
+        async def fetch(provider, query):
+            nonlocal active, peak
+            calls.append((provider, query)); active += 1; peak = max(peak, active)
+            started.set()
+            try:
+                await release.wait()
+                return [query]
+            finally:
+                active -= 1
+        monkeypatch.setattr(video_search, 'fetch_results', fetch)
+        one = asyncio.create_task(service.search('youtube', 'same'))
+        await started.wait()
+        two = asyncio.create_task(service.search('youtube', 'same'))
+        await asyncio.sleep(0)
+        one.cancel()
+        await asyncio.gather(one, return_exceptions=True)
+        others = [asyncio.create_task(service.search('bilibili', str(i))) for i in range(7)]
+        await asyncio.sleep(0)
+        with pytest.raises(OverflowError):
+            await service.search('youtube', 'overflow')
+        release.set()
+        assert await two == ['same']
+        await asyncio.gather(*others)
+        assert peak <= 2 and calls.count(('youtube', 'same')) == 1
+        assert await service.search('youtube', 'same') == ['same']
+        assert len(calls) == 8 and not service.pending
+        # Expired entries refresh, and the metadata cache has a fixed size.
+        service.cache[('youtube', 'same')] = (0, ['stale'])
+        assert await service.search('youtube', 'same') == ['same']
+        for i in range(40):
+            await service.search('youtube', str(i))
+        assert len(service.cache) == 32
+        await service.close()
+    asyncio.run(scenario())
+
+
+def test_cancelling_video_search_terminates_its_subprocess(monkeypatch):
+    import asyncio
+    from karaoke import video_search
+    async def scenario():
+        original = asyncio.create_subprocess_exec
+        started, children = asyncio.Event(), []
+        async def spawn(*args, **kwargs):
+            process = await original(sys.executable, '-c', 'import time; time.sleep(60)', **kwargs)
+            children.append(process); started.set()
+            return process
+        monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
+        task = asyncio.create_task(video_search.fetch_results('youtube', 'anything'))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert children[0].returncode is not None
+    asyncio.run(scenario())

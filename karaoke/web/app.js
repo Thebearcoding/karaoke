@@ -1,4 +1,5 @@
 import { Player } from './player.js';
+import { createVideoSearch, previewURL } from './search.js';
 
 const $ = id => document.getElementById(id);
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -12,6 +13,11 @@ let toastTimer, librarySignature = '', queueSignature = '';
 let pendingLevels = {}, sendingLevels = {}, levelTimer = null, levelsBusy = false;
 let levelRequest = Promise.resolve();
 let pitchRequest = Promise.resolve();
+let searchTimer, searchQuery = '', searchSongs = [], previewSong = null, skipping = false, composing = false;
+let videoSource = 'all';
+const addingVideos = new Set();
+const providerName = provider => provider === 'youtube' ? 'YouTube' : 'B站';
+const videoSearch = createVideoSearch(renderVideoResults);
 const current = () => state.entries.find(e => e.id === state.current_id);
 const effectiveLevels = () => ({...state.levels, ...sendingLevels, ...pendingLevels});
 
@@ -90,12 +96,14 @@ function renderLibrary() {
   const query = $('song-input').value.trim();
   const isURL = /^https?:\/\//i.test(query);
   $('title-row').hidden = !isURL;
-  $('submit-song').innerHTML = `${isURL ? '加入歌单' : '点一首'} ${icon('arrow')}`;
+  $('submit-song').innerHTML = `${isURL ? '加入歌单' : '搜索'} ${icon('arrow')}`;
   const search = isURL ? '' : query.toLocaleLowerCase();
-  const songs = library.filter(song => (!search || `${song.title} ${song.artist}`.toLocaleLowerCase().includes(search)) &&
-    (filter === 'all' || (filter === 'ready' ? song.status === 'completed' : song.language === filter)));
+  const songs = library.filter(song => (!search || search.split(/\s+/).every(word => `${song.title} ${song.artist}`.toLocaleLowerCase().includes(word))) &&
+    (search || filter === 'all' || (filter === 'ready' ? song.status === 'completed' : song.language === filter)));
   $('library-count').textContent = `${songs.length} 首${filter === 'ready' ? '已准备' : '歌曲'}`;
-  $('library-heading').textContent = search ? '搜索结果' : '曲库';
+  $('library-heading').textContent = search ? '曲库里的歌' : '曲库';
+  $('local-library').hidden = Boolean(search && !songs.length);
+  document.querySelector('#local-library .filters').hidden = Boolean(search);
   const signature = JSON.stringify([songs.map(({stage_progress, active_stages, ...song}) => song), filter, query]);
   if (signature !== librarySignature) {
     librarySignature = signature;
@@ -112,8 +120,103 @@ function renderLibrary() {
     updatePreparationSlots($('song-grid'), songs);
   }
   $('search-empty').hidden = songs.length > 0;
-  $('youtube-search').href = `https://www.youtube.com/results?search_query=${encodeURIComponent(query + ' official music video')}`;
-  $('bilibili-search').href = `https://search.bilibili.com/all?keyword=${encodeURIComponent(query + ' MV')}`;
+}
+
+function renderVideoResults(providers) {
+  $('video-results').hidden = false;
+  $('search-status').innerHTML = Object.entries(providers).map(([name, info]) => `<span class="${info.error ? 'search-error' : ''}">${providerName(name)} · ${info.loading ? '搜索中…' : info.error ? escape(info.error) : info.results.length ? `${info.results.length} 个视频` : '没有相关视频'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`).join('');
+  const songs = Object.values(providers).flatMap(info => info.results);
+  // Keep existing cards in place when the other platform finishes loading.
+  for (const song of songs) {
+    if (searchSongs.some(old => old.url === song.url)) continue;
+    const index = searchSongs.push(song)-1;
+    $('video-grid').insertAdjacentHTML('beforeend', `<article class="video-card" data-provider="${song.provider}">
+      <button class="video-thumbnail" data-preview="${index}" aria-label="预览：${escape(song.title)}">${song.thumbnail ? `<img src="${escape(song.thumbnail)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ''}<span class="preview-label">${icon('play')}预览</span>${song.duration ? `<span class="poster-duration">${time(song.duration)}</span>` : ''}</button>
+      <h3 title="${escape(song.title)}">${escape(song.title)}</h3><p class="video-uploader">${escape(song.uploader)}</p>
+      <div class="video-actions"><button data-add-video="${index}">${icon('plus')}<span>加入歌单</span></button><a href="${escape(song.url)}" target="_blank" rel="noopener noreferrer">${providerName(song.provider)} ↗</a></div>
+    </article>`);
+  }
+  filterVideos();
+  updateVideoButtons();
+}
+
+function filterVideos() {
+  document.querySelectorAll('[data-provider]').forEach(card => card.hidden = videoSource !== 'all' && card.dataset.provider !== videoSource);
+  document.querySelectorAll('[data-video-source]').forEach(button => {
+    button.classList.toggle('selected', button.dataset.videoSource === videoSource);
+    button.setAttribute('aria-pressed', String(button.dataset.videoSource === videoSource));
+  });
+}
+
+function updateVideoButtons() {
+  document.querySelectorAll('[data-add-video], #preview-add').forEach(button => {
+    const song = button.id === 'preview-add' ? previewSong : searchSongs[button.dataset.addVideo];
+    if (!song) return;
+    const queued = state.entries.some(entry => entry.url === song.url);
+    const adding = addingVideos.has(song.url);
+    button.disabled = queued || adding;
+    const label = button.querySelector('span') || button;
+    label.textContent = queued ? '已在歌单 ✓' : adding ? '加入中…' : '加入歌单';
+  });
+}
+
+function clearVideoSearch() {
+  clearTimeout(searchTimer);
+  videoSearch.cancel();
+  searchQuery = '';
+  searchSongs = [];
+  $('video-results').hidden = true;
+  $('video-grid').replaceChildren();
+  $('search-status').replaceChildren();
+}
+
+function searchVideos(force = false) {
+  clearTimeout(searchTimer);
+  const query = $('song-input').value.trim();
+  if (!query || /^https?:\/\//i.test(query) || (!force && query === searchQuery)) return;
+  clearVideoSearch();
+  searchQuery = query;
+  if (query.length > 160) { toast('搜索关键词请控制在 160 字以内'); return; }
+  videoSearch.search(query);
+}
+
+function editSearch() {
+  clearVideoSearch();
+  renderLibrary();
+  if (!composing) searchTimer = setTimeout(searchVideos, 700);
+}
+
+async function addVideo(song) {
+  if (!song || addingVideos.has(song.url)) return;
+  addingVideos.add(song.url); updateVideoButtons();
+  $('preview-error').hidden = true;
+  try {
+    const cached = library.find(item => item.url === song.url && item.job_id);
+    acceptState(await request('/v1/room/entries', cached ? {job_id:cached.job_id} : {url:song.url, source_title:song.title}));
+    if ($('video-preview').open) $('video-preview').close();
+    toast('已加入歌单');
+  } catch (error) {
+    toast(error.message);
+    $('preview-error').textContent = error.message;
+    $('preview-error').hidden = false;
+  } finally { addingVideos.delete(song.url); updateVideoButtons(); }
+}
+
+function previewVideo(song) {
+  previewSong = song;
+  $('preview-title').textContent = song.title;
+  $('preview-source').href = song.url;
+  $('preview-source').textContent = `在 ${providerName(song.provider)} 观看 ↗`;
+  $('preview-error').hidden = true;
+  const iframe = document.createElement('iframe');
+  iframe.src = previewURL(song, location.origin);
+  iframe.title = song.title;
+  iframe.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen';
+  iframe.allowFullscreen = true;
+  iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+  $('preview-player').replaceChildren(iframe);
+  updateVideoButtons();
+  $('video-preview').showModal();
 }
 
 function statusText(entry) {
@@ -177,7 +280,7 @@ function updateTransport() {
   $('play-icon').setAttribute('href', state.playing && (remote || player.unlocked) ? '#i-pause' : '#i-play');
   $('play-toggle').setAttribute('aria-label', state.playing && (remote || player.unlocked) ? '暂停' : '播放');
   $('play-toggle').disabled = state.entries.length === 0;
-  $('next-song').disabled = !state.current_id;
+  document.querySelectorAll('[data-next]').forEach(button => button.disabled = skipping || !state.current_id);
   $('restart').disabled = !song;
   $('transport-restart').disabled = !song;
   $('seek').disabled = !song || song.status !== 'completed';
@@ -250,6 +353,7 @@ function acceptState(updated) {
   $('screen-preparation').innerHTML = preparationHTML(current());
   clockOffset = state.server_time - Date.now()/1000;
   renderQueue(); updateTransport(); renderStorage();
+  updateVideoButtons();
   if (!player.anchor) updateTime(state.position);
   syncPlayback();
 }
@@ -275,15 +379,31 @@ document.querySelectorAll('[data-filter]').forEach(button => button.onclick = ()
   document.querySelectorAll('[data-filter]').forEach(b => b.classList.toggle('selected', b === button));
   renderLibrary();
 });
-$('song-input').oninput = renderLibrary;
+$('song-input').oninput = editSearch;
+document.querySelectorAll('[data-video-source]').forEach(button => button.onclick = () => { videoSource = button.dataset.videoSource; filterVideos(); });
+$('song-input').oncompositionstart = () => { composing = true; clearVideoSearch(); };
+$('song-input').oncompositionend = () => { composing = false; editSearch(); };
+$('clear-search').onclick = () => { $('song-input').value = ''; editSearch(); $('song-input').focus(); };
+$('search-status').onclick = event => { if (event.target.closest('[data-search-retry]')) searchVideos(true); };
+$('video-grid').onclick = event => {
+  const preview = event.target.closest('[data-preview]');
+  const add = event.target.closest('[data-add-video]');
+  if (preview) previewVideo(searchSongs[preview.dataset.preview]);
+  if (add) addVideo(searchSongs[add.dataset.addVideo]);
+};
+$('preview-add').onclick = () => addVideo(previewSong);
+$('close-preview').onclick = () => $('video-preview').close();
+$('video-preview').onclose = () => { $('preview-player').replaceChildren(); previewSong = null; };
+$('video-preview').onclick = event => { if (event.target === $('video-preview')) $('video-preview').close(); };
 $('add-form').onsubmit = async event => {
   event.preventDefault();
+  if (composing) return;
   const url = $('song-input').value.trim();
-  if (!/^https?:\/\//i.test(url)) { renderLibrary(); if (!url) $('song-input').focus(); return; }
+  if (!/^https?:\/\//i.test(url)) { searchVideos(); if (!url) $('song-input').focus(); return; }
   $('submit-song').disabled = true;
   try {
     acceptState(await request('/v1/room/entries', {url, title:$('title-input').value.trim() || null}));
-    $('song-input').value = ''; $('title-input').value = ''; renderLibrary();
+    $('song-input').value = ''; $('title-input').value = ''; editSearch();
     toast('已加入歌单');
   } catch (error) { toast(error.message); }
   finally { $('submit-song').disabled = false; }
@@ -324,7 +444,14 @@ for (const [id, step] of [['pitch-down', -1], ['pitch-up', 1], ['pitch-reset', n
   };
 }
 $('screen-start').onclick = async () => { if (await activate()) { if (!state.playing) await command('play'); else await syncPlayback(); } };
-$('next-song').onclick = async () => { await activate(); await command('next'); };
+async function nextSong() {
+  if (skipping || !state.current_id) return;
+  const entry_id = state.current_id;
+  skipping = true; updateTransport();
+  try { await activate(); await command('next', {entry_id}); }
+  finally { skipping = false; updateTransport(); }
+}
+document.querySelectorAll('[data-next]').forEach(button => button.onclick = nextSong);
 $('now-song').onclick = () => switchView('player');
 for (const id of ['restart','transport-restart']) $(id).onclick = () => command('seek', {position:0});
 document.querySelectorAll('[data-mix]').forEach(button => button.onclick = async () => {
@@ -365,9 +492,10 @@ document.addEventListener('fullscreenchange', () => {
   target.append(seekRow);
 });
 document.addEventListener('keydown', event => {
+  if ($('video-preview').open) return;
   if (['INPUT','TEXTAREA','BUTTON'].includes(event.target.tagName) || event.ctrlKey || event.metaKey || event.altKey) return;
   if (event.code === 'Space') { event.preventDefault(); togglePlay(); }
-  if (event.key.toLowerCase() === 'n' && state.current_id) command('next');
+  if (event.key.toLowerCase() === 'n') nextSong();
   if (event.key.toLowerCase() === 'f') fullscreen();
 });
 window.addEventListener('resize', () => switchView(view));

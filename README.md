@@ -4,7 +4,7 @@
 
 ## 当前功能
 
-- 粘贴视频链接点歌，搜索已有曲库；后台准备与播放顺序分别维护。
+- 输入歌名／歌手搜索 YouTube、B站，预览后直接加入歌单；也支持视频链接。后台准备与播放顺序分别维护。
 - 自动下载视频，分离背景音乐、伴唱、主唱，生成带字幕的 MV。
 - 中文、日文和英文歌词对齐；当前句＋下一句，琥珀色逐字／词点亮，硬切换句，片头歌曲信息和四秒开唱提示。
 - 暂停、定位、重唱、下一首、全屏、音量；三轨实时升降调，切换纯伴奏、保留伴唱和原唱。
@@ -60,7 +60,7 @@ karaoke/
 
 ```sh
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=karaoke .venv/bin/python -m pytest -q karaoke/test_api.py karaoke/test_room.py karaoke/test_algorithms.py
-node --test karaoke/test_player.mjs karaoke/test_pitch.mjs
+node --test karaoke/test_player.mjs karaoke/test_pitch.mjs karaoke/test_search.mjs
 ```
 
 这些测试使用临时文件和合成音频，无需歌曲库、模型权重或 API key。中文发音测试会读取 SOFA 的音素字典，日文发音依赖 pyopenjtalk 字典。

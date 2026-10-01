@@ -108,7 +108,7 @@ nohup .venv/bin/python -u -m karaoke.api </dev/null >>karaoke/service-data/serve
 
 ```sh
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=karaoke .venv/bin/python -m pytest -q karaoke/test_api.py karaoke/test_room.py karaoke/test_algorithms.py
-node --test karaoke/test_player.mjs karaoke/test_pitch.mjs
+node --test karaoke/test_player.mjs karaoke/test_pitch.mjs karaoke/test_search.mjs
 ```
 
 这些行为测试不发起在线模型调用，不要求歌曲库或模型权重。真正验证下载、分离、对齐和渲染，仍需完成以上资源准备并提交一个真实视频链接。首次模型／字典下载耗时与后续单曲处理耗时应分别记录。

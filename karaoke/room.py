@@ -42,6 +42,7 @@ class AddSong(BaseModel):
     url: str | None = Field(default=None, max_length=2048)
     job_id: str | None = None
     title: str | None = Field(default=None, max_length=200)
+    source_title: str | None = Field(default=None, max_length=500)
 
 
 class Updates:
@@ -185,6 +186,8 @@ class Room:
                 raise HTTPException(422, '请输入有效的 YouTube 或 Bilibili 单个视频链接') from error
             job, cached = self.store.create(payload, self.version)
             if not cached:
+                if request.source_title:
+                    job = self.store.update(job['id'], song_info={'title': request.source_title})
                 self.worker.queue.put_nowait(job['id'])
         state['entries'].append(dict(id=str(uuid4()), job_id=job['id']))
         self.store.touch(job['id'])

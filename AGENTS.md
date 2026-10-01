@@ -46,7 +46,7 @@
 
 ```sh
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=karaoke .venv/bin/python -m pytest -q karaoke/test_api.py karaoke/test_room.py karaoke/test_algorithms.py
-node --test karaoke/test_player.mjs karaoke/test_pitch.mjs
+node --test karaoke/test_player.mjs karaoke/test_pitch.mjs karaoke/test_search.mjs
 ```
 
 - 优先扩展已有行为测试，覆盖实际 bug 和关键边界；不要写只复述实现或检查静态文本的测试。
