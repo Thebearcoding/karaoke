@@ -282,6 +282,7 @@ def run_probe(client, base, folder, command):
         raise ValueError('Pause preparation and register a queued job before a focused probe')
     with (folder.parent/'focused-probe.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        (folder/'error.json').unlink(missing_ok=True)
         with (folder/'probe.log').open('ab') as log:
             process = subprocess.Popen(command, cwd=folder.parent.parent.parent,
                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -331,6 +332,99 @@ def probe(path, data_dir, base, job_id):
         print(json.dumps(evidence, ensure_ascii=False), flush=True)
 
 
+def run_audio(path, data_dir, base):
+    """Stop at the first software failure; retain an independent audio ledger."""
+    from karaoke.api import Store
+    store = Store(data_dir)
+    with path.with_suffix('.lock').open('a') as lock, httpx.Client(timeout=30) as client:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        while True:
+            state = json.loads(path.read_text())
+            selection = [dict(url=c['url'], language=c['language']) for c in state['cases']]
+            if hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest() != state['selection_sha256']:
+                raise ValueError('Fixed case selection changed')
+            health = client.get(base+'/health').raise_for_status().json()
+            version = health['pipeline_version']
+            state['audio_pipeline_version'] = version
+            state['audio_passed_current_version'] = sum(bool(c.get('audio_attempts')) and
+                c['audio_attempts'][-1]['status'] == 'passed_audio' and
+                c['audio_attempts'][-1]['pipeline_version'] == version for c in state['cases'])
+            save(path, state)
+            if state['audio_passed_current_version'] == len(state['cases']):
+                print(f'All {len(state["cases"])} audio cases passed on {version}', flush=True)
+                return
+            if path.with_name('audio.pause').exists():
+                print('Audio regression paused', flush=True)
+                return
+            if any(c.get('audio_attempts') and c['audio_attempts'][-1]['status'] in ('running', 'submitted')
+                   for c in state['cases']):
+                print('Reconcile the unfinished audio attempt before starting another', flush=True)
+                return
+            if any(c.get('audio_attempts') and c['audio_attempts'][-1]['status'] == 'failed' and
+                   c['audio_attempts'][-1]['pipeline_version'] == version for c in state['cases']):
+                print('Repair the audio failure before resuming this pipeline version', flush=True)
+                return
+            candidates = []
+            for case in state['cases']:
+                attempts = case.get('audio_attempts', [])
+                if attempts and attempts[-1]['status'] == 'passed_audio' and attempts[-1]['pipeline_version'] == version:
+                    continue
+                if attempts and not eligible({'attempts': attempts}, version, time.time()):
+                    continue
+                previous = (case.get('attempts') or [{}])[-1]
+                if time.time() < max(retry_deadline(state, case), previous.get('next_retry_at') or 0):
+                    continue
+                candidates.append(case)
+            if not candidates:
+                print('No eligible audio cases; inspect failures and retry deadlines', flush=True)
+                return
+            candidates.sort(key=lambda c: (bool(c.get('audio_attempts')) is False,
+                (c.get('attempts') or [{}])[-1].get('status') not in ('failed', 'blocked')))
+            case = candidates[0]
+            room = client.get(base+'/v1/room').raise_for_status().json()
+            existing = {e['id'] for e in room['entries']}
+            room = client.post(base+'/v1/room/entries', json=dict(url=case['url'], source_title=case['title'])).raise_for_status().json()
+            entry = next(e for e in room['entries'] if e['id'] not in existing)
+            job = client.get(f'{base}/v1/jobs/{entry["job_id"]}').raise_for_status().json()
+            attempts = case.setdefault('audio_attempts', [])
+            attempt = dict(job_id=job['id'], entry_id=entry['id'], pipeline_version=version,
+                status='running', submitted_at=stamp(), external_attempt=1+sum(a['status']=='external' for a in attempts))
+            attempts.append(attempt)
+            save(path, state)
+            folder = data_dir/job['id']
+            command = [sys.executable, '-u', '-m', 'karaoke.pipeline', '--request', str(folder/'request.json'),
+                       '--output', str(folder), '--audio-only']
+            try:
+                cached_full = job['status'] == 'completed'
+                if not cached_full and run_probe(client, base, folder, command):
+                    raise RuntimeError('Audio pipeline failed; retained diagnostics')
+                if client.get(base+'/health').raise_for_status().json()['pipeline_version'] != version:
+                    raise RuntimeError('Pipeline changed during audio regression')
+                evidence = verify_outputs(client, base, data_dir, job, audio_only=not cached_full)
+                evidence['pipeline_version'] = version
+                save(folder/'audio-verification.json', evidence)
+                attempt.update(status='passed_audio', finished_at=stamp(), evidence=evidence)
+                if not cached_full:
+                    result = json.loads((folder/'audio-result.json').read_text())
+                    store.update(job['id'], status='audio_ready', pipeline_version=version, audio_result=result,
+                        song_info={k:result[k] for k in ('title','artist','language','duration_seconds')}, active_stages=[], error=None)
+            except Exception as error:
+                error_path = folder/'error.json'
+                job['error'] = json.loads(error_path.read_text()) if error_path.is_file() else dict(code='verification_failed', message=str(error))
+                record_failure(attempt, job, folder)
+                store.update(job['id'], status='failed', error=job['error'], active_stages=[])
+                if attempt['status'] == 'external' and attempt['provider_blocked']:
+                    provider = attempt.get('retry_provider', case['provider'])
+                    state['provider_backoff'][provider] = max(state['provider_backoff'].get(provider, 0), attempt['next_retry_at'])
+            save(path, state)
+            room = client.get(base+'/v1/room').raise_for_status().json()
+            if room['current_id'] != entry['id'] and any(e['id']==entry['id'] for e in room['entries']):
+                client.post(base+'/v1/room/commands',json=dict(action='remove',entry_id=entry['id'],revision=room['revision'])).raise_for_status()
+            print(json.dumps({k:attempt.get(k) for k in ('job_id','status','error')},ensure_ascii=False),flush=True)
+            if attempt['status'] in ('failed','blocked'):
+                return
+
+
 def record_failure(attempt, job, folder):
     error = job.get('error') or dict(code='verification_failed', message='Output validation failed')
     diagnostics = {}
@@ -342,7 +436,7 @@ def record_failure(attempt, job, folder):
                 diagnostics[path.name] = stream.read().decode(errors='replace')
         except FileNotFoundError:  # Cache eviction may race a completed job's inspection.
             continue
-    names = ('worker.log', 'download.log', 'transcribe.log', error['code'].removesuffix('_failed')+'.log')
+    names = ('worker.log', 'probe.log', 'download.log', 'transcribe.log', error['code'].removesuffix('_failed')+'.log')
     logs = [diagnostics[name][-4000:] for name in dict.fromkeys(names) if name in diagnostics]
     # Older workers reported these as generic stage failures. Classify their
     # retained logs too, so a code rollout does not cause inappropriate retries.
@@ -499,7 +593,7 @@ def run(path, data_dir, base):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('sample', 'run', 'probe'))
+    parser.add_argument('action', choices=('sample', 'run', 'probe', 'audio-run'))
     parser.add_argument('--manifest', type=Path, required=True)
     parser.add_argument('--data-dir', type=Path, required=True)
     parser.add_argument('--base-url', default='http://127.0.0.1:8746')
@@ -513,6 +607,8 @@ def main():
         if not args.job_id:
             parser.error('probe requires --job-id')
         probe(args.manifest, args.data_dir, args.base_url.rstrip('/'), args.job_id)
+    elif args.action == 'audio-run':
+        run_audio(args.manifest, args.data_dir, args.base_url.rstrip('/'))
     else:
         run(args.manifest, args.data_dir, args.base_url.rstrip('/'))
 

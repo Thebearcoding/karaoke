@@ -790,6 +790,85 @@ def test_focused_probe_obeys_shared_budget_and_preserves_checkpoints(tmp_path, o
     assert (folder/'checkpoint.wav').read_bytes() == b'reusable'
 
 
+@pytest.mark.parametrize('evict', [False, True])
+def test_audio_ready_job_releases_queue_protection_and_resumes_its_checkpoints(tmp_path,evict):
+    from karaoke.stage_cache import StageCache
+    hold=tmp_path/'preparation.pause'
+    hold.write_text('test')
+    calls=[]
+    def command(folder):
+        calls.append(folder.name)
+        return fake_worker(folder)
+    app=create_app(tmp_path,worker_command=command,version='test')
+    with TestClient(app) as client:
+        room=client.post('/v1/room/entries',json={'url':URL}).json()
+        entry=room['entries'][0];folder=tmp_path/entry['job_id']; output=folder/'audio.wav'
+        with StageCache(folder).stage('separate',inputs=[folder/'request.json'],outputs=[output]):
+            output.write_bytes(b'computed audio')
+        app.state.store.update(entry['job_id'],status='audio_ready')
+        room=client.post('/v1/room/commands',json={'action':'remove','entry_id':entry['id']}).json()
+        assert client.get('/v1/library').json()['songs'][0]['status']=='unprepared'
+        assert entry['job_id'] not in app.state.store.cache.protected(app.state.store.list(-1))
+        app.state.store.cache.compact(app.state.store.read(entry['job_id']))
+        assert output.read_bytes()==b'computed audio'
+        if evict:
+            app.state.store.cache.set_limit(1)
+            assert not folder.exists()
+            app.state.store.cache.set_limit(GIB)
+        hold.unlink()
+        deadline=time.monotonic()+2
+        while client.get('/health').json()['queued'] and time.monotonic()<deadline:
+            time.sleep(.02)
+        assert calls==[]
+        resumed=client.post('/v1/jobs',json={'url':URL}).json()
+        assert (resumed['id']==entry['job_id']) is not evict
+        assert finished(client,resumed['id'])['status']=='completed'
+        assert calls==[resumed['id']]
+
+
+def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separate(tmp_path,monkeypatch):
+    import hashlib
+    import httpx
+    from karaoke.room import AddSong,RoomCommand
+    from karaoke.tools import soak
+    data=tmp_path/'jobs';data.mkdir();(data/'preparation.pause').write_text('test')
+    app=create_app(data,version='test');store=app.state.store;room=app.state.room
+    cases=[dict(url=f'https://www.youtube.com/watch?v={i:011d}',title=str(i),language='English',provider='youtube',attempts=[]) for i in range(3)]
+    selection=[dict(url=c['url'],language=c['language']) for c in cases]
+    manifest=tmp_path/'manifest.json'
+    manifest.write_text(json.dumps(dict(cases=cases,provider_backoff={},selection_sha256=hashlib.sha256(json.dumps(selection,sort_keys=True).encode()).hexdigest())))
+    def respond(request):
+        path=request.url.path
+        if path=='/health':result={'pipeline_version':'test','preparation_paused':True,'running_job':None}
+        elif path=='/v1/room':result=room.snapshot()
+        elif path=='/v1/room/entries':result=room.add(AddSong.model_validate_json(request.content))
+        elif path=='/v1/room/commands':result=room.command(RoomCommand.model_validate_json(request.content))
+        else:result=store.read(path.split('/')[-1])
+        return httpx.Response(200,json=result)
+    client_type=httpx.Client
+    monkeypatch.setattr(soak.httpx,'Client',lambda **kwargs:client_type(transport=httpx.MockTransport(respond)))
+    calls=[]
+    def execute(client,base,folder,command):
+        calls.append(folder.name)
+        if len(calls)==2:
+            (folder/'error.json').write_text(json.dumps(dict(code='align_words_failed',message='real failed boundary')))
+            return 1
+        (folder/'audio-result.json').write_text(json.dumps(dict(title='Song',artist='',language='English',duration_seconds=100)))
+        return 0
+    monkeypatch.setattr(soak,'run_probe',execute)
+    monkeypatch.setattr(soak,'verify_outputs',lambda *args,**kwargs:dict(validation_scope='audio_and_lyrics'))
+    soak.run_audio(manifest,data,'http://test')
+    saved=json.loads(manifest.read_text())['cases']
+    assert saved[0]['audio_attempts'][-1]['status']=='passed_audio'
+    assert saved[1]['audio_attempts'][-1]['status']=='failed'
+    assert not saved[2].get('audio_attempts') and len(calls)==2
+    assert all(c['attempts']==[] for c in saved)
+    assert store.read(calls[0])['status']=='audio_ready'
+    assert room.read()['entries']==[]
+    soak.run_audio(manifest,data,'http://test')
+    assert len(calls)==2
+
+
 def test_partial_song_information_updates_preserve_language_and_title(tmp_path):
     pipeline = Pipeline(dict(url=URL), tmp_path)
     pipeline.phase(song_info=dict(title='Video', language='Japanese'))

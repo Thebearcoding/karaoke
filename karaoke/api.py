@@ -95,10 +95,10 @@ class Store:
             if not payload.force:
                 rows = db.execute("""SELECT doc FROM jobs WHERE
                     (cache_key=? AND status IN ('queued','running','completed'))
-                    OR status='failed' OR json_extract(doc, '$.restore_video')=1 ORDER BY created_at DESC""", (key,)).fetchall()
+                    OR status IN ('failed','audio_ready') OR json_extract(doc, '$.restore_video')=1 ORDER BY created_at DESC""", (key,)).fetchall()
                 for row in rows:
                     doc = json.loads(row[0])
-                    if doc['status'] == 'failed' and not doc.get('restore_video'):
+                    if doc['status'] in ('failed', 'audio_ready') and not doc.get('restore_video'):
                         if {k: v for k, v in doc['input'].items() if k != 'force'} != key_payload:
                             continue
                         folder = self.root/doc['id']
@@ -202,9 +202,12 @@ class Worker:
             while (self.store.root/'preparation.pause').exists() or self.queue.empty():
                 await asyncio.sleep(.2)
             job_id = self.queue.get_nowait()
+            job = self.store.read(job_id)
+            if job['status'] != 'queued':
+                self.queue.task_done()
+                continue
             self.current = job_id
             folder = self.store.root/job_id
-            job = self.store.read(job_id)
             version = {'pipeline_version': self.version} if self.version and not job.get('restore_video') else {}
             job = self.store.update(job_id, status='running', started_at=now(), **version)
             try:
