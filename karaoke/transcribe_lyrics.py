@@ -42,6 +42,13 @@ def needs_recovery(data):
             return True
         if any(right['start'] < left['start'] for left, right in zip(timed, timed[1:])):
             return True
+        if kind == 'words':
+            # A few zero-length subwords are normal; a whole phrase at one
+            # instant is not usable timing evidence. Re-recognize, never delete it.
+            collapsed = Counter(item['start'] for item in timed
+                if item['start'] == item['end'] and any(c.isalnum() for c in item.get('word', '')))
+            if max(collapsed.values(), default=0) >= 8:
+                return True
     text = ''.join(s.get('text', '') for s in data.get('segments') or []) or data.get('text', '')
     return not any(c.isalnum() for c in text) or repetition_loop(data)
 

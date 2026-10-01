@@ -788,7 +788,8 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
 
 @pytest.mark.parametrize('fallback_text', ['恢复的歌词', '哒'*100])
 @pytest.mark.parametrize('initial_kind', ['loop', 'punctuation', 'fragmented_loop',
-                                        'backward_segments', 'backward_words', 'invalid_range'])
+                                        'backward_segments', 'backward_words', 'invalid_range',
+                                        'collapsed_words'])
 def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, fallback_text, initial_kind):
     import soundfile as sf
     audio = tmp_path/'audio.wav'
@@ -807,6 +808,9 @@ def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, f
         elif name == str(audio) and initial_kind == 'fragmented_loop':
             data = dict(language='english', segments=[dict(start=i,end=i,text='same empty phrase')
                                                      for i in range(24)], words=[])
+        elif initial_kind == 'collapsed_words' and (name == str(audio) or name.endswith('chunk-00030.mp3')):
+            data = dict(language='japanese', segments=[dict(start=1,end=5,text='一緒に歌うこの歌の続きを')],
+                        words=[dict(start=1,end=1,word=c) for c in '一緒に歌うこの歌の続きを'])
         elif initial_kind in ('backward_segments', 'backward_words', 'invalid_range') and (
                 name == str(audio) or name.endswith('chunk-00030.mp3')):
             data = dict(language='english', segments=[dict(start=1,end=2,text='第一句'),
@@ -842,7 +846,8 @@ def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, f
 
 def test_normal_choruses_do_not_trigger_asr_retry(tmp_path):
     data = dict(segments=[dict(start=i*4, end=i*4+3, text='唱到这一句，接着唱下一句') for i in range(8)],
-                words=[dict(start=1,end=2,word='唱'), dict(start=1.9,end=2.5,word='歌')])
+                words=[dict(start=1,end=1,word='一'), dict(start=1,end=1,word='起'),
+                       dict(start=1,end=2,word='唱'), dict(start=1.9,end=2.5,word='歌')])
     assert not repetition_loop(data)
     audio = tmp_path/'audio.mp3'
     audio.write_bytes(b'input')
