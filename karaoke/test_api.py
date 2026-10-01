@@ -668,6 +668,32 @@ def test_shutdown_stops_current_job_and_preserves_the_queue(tmp_path):
         assert finished(client, queued)['status'] == 'completed'
 
 
+def test_preparation_hold_survives_restart_and_finishes_current_job(tmp_path):
+    hold = tmp_path/'preparation.pause'
+    hold.touch()
+    ids = []
+    with TestClient(create_app(tmp_path, worker_command=fake_worker, version='test')) as client:
+        for _ in range(2):
+            ids.append(client.post('/v1/jobs', json={'url': URL, 'force': True}).json()['id'])
+        time.sleep(.3)
+        assert client.get('/health').json()['queued'] == 2
+        assert client.get('/health').json()['running_job'] is None
+    app = create_app(tmp_path, worker_command=fake_worker, version='test')
+    with TestClient(app) as client:
+        assert client.get('/health').json()['preparation_paused']
+        hold.unlink()
+        deadline = time.monotonic()+5
+        while app.state.worker.current is None and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert app.state.worker.current == ids[0]
+        hold.touch()
+        assert finished(client, ids[0])['status'] == 'completed'
+        time.sleep(.3)
+        assert client.get(f'/v1/jobs/{ids[1]}').json()['status'] == 'queued'
+        hold.unlink()
+        assert finished(client, ids[1])['status'] == 'completed'
+
+
 def test_successful_process_without_required_outputs_is_not_completed(tmp_path):
     def incomplete_worker(folder):
         return [sys.executable, '-c',

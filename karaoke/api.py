@@ -192,7 +192,11 @@ class Worker:
 
     async def consume(self):
         while True:
-            job_id = await self.queue.get()
+            # A persistent maintenance hold stops only new jobs. Keep every
+            # queued entry in order and let the current subprocess finish.
+            while (self.store.root/'preparation.pause').exists() or self.queue.empty():
+                await asyncio.sleep(.2)
+            job_id = self.queue.get_nowait()
             self.current = job_id
             folder = self.store.root/job_id
             job = self.store.update(job_id, status='running', started_at=now())
@@ -342,6 +346,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
     @app.get('/health')
     async def health():
         return dict(status='ok', queued=worker.queue.qsize(), running_job=worker.current,
+                    preparation_paused=(store.root/'preparation.pause').exists(),
                     pipeline_version=version, device=os.getenv('KARAOKE_DEVICE', 'auto'))
 
     @app.get('/v1/library')
