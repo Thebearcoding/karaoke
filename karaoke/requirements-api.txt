@@ -4,3 +4,4 @@ httpx==0.28.1
 pydantic==2.12.5
 openai==1.109.1
 yt-dlp==2026.7.4
+opencc-python-reimplemented==0.1.7

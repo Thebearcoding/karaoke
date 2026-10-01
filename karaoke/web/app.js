@@ -126,7 +126,7 @@ function renderLibrary() {
 function renderVideoResults(providers) {
   youtubePending = providers.youtube.loading;
   $('video-results').hidden = false;
-  $('search-status').innerHTML = Object.entries(providers).map(([name, info]) => `<span class="${info.error ? 'search-error' : ''}">${providerName(name)} · ${info.loading ? '搜索中…' : info.error ? escape(info.error) : info.results.length ? `${info.results.length} 个视频` : '没有相关视频'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`).join('');
+  $('search-status').innerHTML = Object.entries(providers).map(([name, info]) => `<span class="${info.error ? 'search-error' : ''}">${providerName(name)} · ${info.loading ? '搜索中…' : info.error ? escape(info.error) : info.results.length ? `${info.results.length} 个视频` : '未找到官方版本'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`).join('');
   const songs = Object.values(providers).flatMap(info => info.results);
   // Keep provider ranking independent of response order, without replacing cards.
   for (const song of songs) {
@@ -144,10 +144,13 @@ function renderVideoResults(providers) {
 }
 
 function filterVideos() {
+  let shown = 0;
   document.querySelectorAll('[data-provider]').forEach(card => {
-    card.hidden = videoSource === 'all'
+    const excluded = videoSource === 'all'
       ? youtubePending && card.dataset.provider === 'bilibili'
       : card.dataset.provider !== videoSource;
+    card.hidden = excluded || shown >= 3;
+    if (!card.hidden) shown++;
   });
   document.querySelectorAll('[data-video-source]').forEach(button => {
     button.classList.toggle('selected', button.dataset.videoSource === videoSource);

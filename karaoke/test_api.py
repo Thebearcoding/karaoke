@@ -567,10 +567,13 @@ def test_low_free_disk_blocks_processing_without_evicting_the_playlist(tmp_path)
 def test_video_search_normalizes_results_and_rejects_unplayable_links():
     from karaoke.video_search import search_results
     bili = search_results('bilibili', [dict(bvid='BV1bK411W797', title='<em>歌曲</em> &amp; 现场',
-        duration='1:02:03', pic='//i0.hdslb.com/cover.jpg', author='Uploader')])
+        duration='1:02:03', pic='//i0.hdslb.com/cover.jpg', author='Uploader',
+        official_identity={'type':0, 'desc':'歌手'})])
     assert bili == [dict(url='https://www.bilibili.com/video/BV1bK411W797', title='歌曲 & 现场',
-        duration=3723, thumbnail='https://i0.hdslb.com/cover.jpg', uploader='Uploader', provider='bilibili')]
-    item = dict(url=URL, title='Video title', duration=180, thumbnails=[{'url':'https://i.ytimg.com/cover.jpg'}])
+        duration=3723, thumbnail='https://i0.hdslb.com/cover.jpg', uploader='Uploader', provider='bilibili',
+        official_evidence='bilibili_certified_artist')]
+    item = dict(url=URL, title='Video title', duration=180, channel_is_official_artist=True,
+                thumbnails=[{'url':'https://i.ytimg.com/cover.jpg'}])
     results = search_results('youtube', [item, item, dict(item, live_status='is_live'),
         dict(item, url='http://127.0.0.1/private'), dict(item, url='https://youtube.com.attacker.test/'),
         dict(item, url='https://www.bilibili.com/video/BV1bK411W797')])
@@ -658,4 +661,98 @@ def test_cancelling_video_search_terminates_its_subprocess(monkeypatch):
         with pytest.raises(asyncio.CancelledError):
             await task
         assert children[0].returncode is not None
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('provider,item,allowed', [
+    ('youtube', {'title':'A song', 'channel_is_official_artist':True}, True),
+    ('youtube', {'title':'A song (Official Music Video)', 'channel':'Example Records', 'channel_is_verified':True}, True),
+    ('youtube', {'title':'A song (Official Music Video)', 'channel':'Example Records'}, False),
+    ('youtube', {'title':'A song (Lyrics)', 'channel':'A verified creator', 'channel_is_verified':True}, False),
+    ('youtube', {'title':'A song (Official Music Video)', 'channel':'Fan Music', 'channel_is_verified':True}, False),
+    ('youtube', {'title':'A song Cover', 'channel_is_official_artist':True}, True),
+    ('youtube', {'title':'《某首歌》某组合翻唱 / 某卫视官方HD', 'channel':'某卫视 Music Channel', 'channel_is_verified':True}, True),
+    ('youtube', {'title':'A song (Unofficial)', 'channel':'Example Music', 'channel_is_verified':True}, False),
+    ('bilibili', {'title':'官方 MV', 'author':'官方音乐'}, False),
+    ('bilibili', {'title':'官方 MV', 'official_identity':{'type':0, 'desc':'bilibili 知名音乐UP主'}}, False),
+    ('bilibili', {'title':'A song', 'official_identity':{'type':0, 'desc':'歌手、音乐制作人'}}, True),
+    ('bilibili', {'title':'A song 翻唱', 'official_identity':{'type':0, 'desc':'歌手'}}, True),
+    ('bilibili', {'title':'A song', 'official_identity':{'type':1, 'desc':'某唱片公司官方账号'}}, True),
+    ('bilibili', {'title':'A song', 'official_identity':{'type':1, 'desc':'某科技公司官方账号'}}, False),
+    ('bilibili', {'title':'官方 MV', 'official_identity':None}, False),
+])
+def test_official_video_filter_requires_source_evidence(provider, item, allowed):
+    from karaoke.video_search import official_source
+    assert bool(official_source(provider, item)) == allowed
+
+
+def test_bilibili_verification_uses_certification_not_self_description(monkeypatch):
+    import asyncio
+    import httpx
+    from karaoke import video_search
+    calls = []
+    def respond(request):
+        calls.append(request)
+        mid = request.url.params['mid']
+        if mid == '3':
+            return httpx.Response(503)
+        return httpx.Response(200, json={'code':0, 'data':{'card':{
+            'name':'Official Music', 'sign':'I am the official artist',
+            'official_verify':{'type':1, 'desc':'Example 唱片公司官方账号'} if mid == '1' else {'type':-1, 'desc':''}
+        }}})
+    async def scenario():
+        video_search._bilibili_identities.clear()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            slots = asyncio.Semaphore(4)
+            verified = await video_search.bilibili_identity(client, '1', slots)
+            assert await video_search.bilibili_identity(client, '1', slots) == verified
+            unknown = await video_search.bilibili_identity(client, '2', slots)
+            assert video_search.official_source('bilibili', {'official_identity':verified})
+            assert not video_search.official_source('bilibili', {'official_identity':unknown})
+            assert await video_search.bilibili_identity(client, '3', slots) is None
+            assert len(calls) == 3
+        video_search._bilibili_identities.clear()
+    asyncio.run(scenario())
+
+
+def test_official_search_keeps_only_a_few_releases_without_padding():
+    from karaoke.video_search import search_results
+    def item(index, **extra):
+        return dict(url=f'https://www.youtube.com/watch?v={index:011d}', title=f'Cover {index}',
+                    channel_is_official_artist=True, **extra)
+    found = search_results('youtube', [item(i) for i in range(12)])
+    assert [x['title'] for x in found] == ['Cover 0', 'Cover 1', 'Cover 2']
+    assert len(search_results('youtube', [item(0), {'url':URL,'title':'A fan upload'}])) == 1
+
+
+@pytest.mark.parametrize('query,title,channel,expected', [
+    ('周杰伦 晴天','周杰倫【晴天 Sunny Day】','周杰倫 Jay Chou', True),
+    ('周杰伦 晴天','周杰倫【星晴 Starry Mood】','周杰倫 Jay Chou', False),
+    ('凤凰传奇海底','《海底》凤凰传奇 官方舞台','Music TV', True),
+    ('海底凤凰传奇','凤凰传奇《海底》','Music TV', True),
+    ('米津玄師Lemon','Kenshi Yonezu - Lemon','米津玄師', True),
+    ('Ed Sheeran Perfect','Ed Sheeran - Thinking Out Loud','Ed Sheeran', False),
+    ('Ed Sheeran Perfect','Ed Sheeran - Perfect Symphony','Ed Sheeran', True),
+])
+def test_search_matches_song_and_performer_without_related_song_padding(query, title, channel, expected):
+    from karaoke.video_search import matches_query
+    assert matches_query(query, dict(title=title,channel=channel)) == expected
+
+
+def test_bilibili_identity_cools_down_after_rate_limit(monkeypatch):
+    import asyncio
+    import httpx
+    from karaoke import video_search
+    calls = []
+    def limited(request):
+        calls.append(request)
+        return httpx.Response(200, json={'code':-352})
+    async def scenario():
+        monkeypatch.setattr(video_search, '_bilibili_retry_at', 0)
+        monkeypatch.setattr(video_search, '_bilibili_identities', {})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(limited)) as client:
+            slots = asyncio.Semaphore(2)
+            results = await asyncio.gather(*(video_search.bilibili_identity(client, str(i), slots) for i in range(4)))
+            assert results == [None]*4
+            assert len(calls) == 1
     asyncio.run(scenario())

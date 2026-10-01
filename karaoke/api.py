@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from .cache import CacheFull, GIB, SongCache
 from .job_schema import JobRequest
 from .room import AddSong, Room, RoomCommand, Updates
-from .video_search import VideoSearch
+from .video_search import SourceVerificationUnavailable, VideoSearch
 
 
 ROOT = Path(__file__).resolve().parent
@@ -317,6 +317,8 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
             return dict(query=query, provider=provider, results=await video_search.search(provider, query))
         except OverflowError as error:
             raise HTTPException(429, '搜索较多，请稍后重试') from error
+        except SourceVerificationUnavailable as error:
+            raise HTTPException(503, 'B站官方来源暂时无法核验，请稍后重试') from error
         except Exception as error:
             logging.getLogger(__name__).warning('%s search failed: %s', provider, type(error).__name__)
             name = 'YouTube' if provider == 'youtube' else 'B站'
