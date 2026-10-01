@@ -161,8 +161,9 @@ class Worker:
             pending.append(self.queue.get_nowait())
             self.queue.task_done()
         rank = {job_id: index for index, job_id in reversed(list(enumerate(job_ids)))}
-        for job_id in sorted(pending, key=lambda key: rank.get(key, len(rank))):
-            self.queue.put_nowait(job_id)
+        for job_id in sorted(dict.fromkeys(pending), key=lambda key: rank.get(key, len(rank))):
+            if (self.store.read(job_id) or {}).get('status') == 'queued':
+                self.queue.put_nowait(job_id)
 
     async def start(self):
         for job in self.store.list(100000, 'running'):
@@ -203,7 +204,7 @@ class Worker:
                 await asyncio.sleep(.2)
             job_id = self.queue.get_nowait()
             job = self.store.read(job_id)
-            if job['status'] != 'queued':
+            if (job or {}).get('status') != 'queued':
                 self.queue.task_done()
                 continue
             self.current = job_id

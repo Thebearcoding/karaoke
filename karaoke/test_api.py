@@ -808,6 +808,7 @@ def test_audio_ready_job_releases_queue_protection_and_resumes_its_checkpoints(t
         app.state.store.update(entry['job_id'],status='audio_ready')
         room=client.post('/v1/room/commands',json={'action':'remove','entry_id':entry['id']}).json()
         assert client.get('/v1/library').json()['songs'][0]['status']=='unprepared'
+        assert client.get('/health').json()['queued']==0
         assert entry['job_id'] not in app.state.store.cache.protected(app.state.store.list(-1))
         app.state.store.cache.compact(app.state.store.read(entry['job_id']))
         assert output.read_bytes()==b'computed audio'

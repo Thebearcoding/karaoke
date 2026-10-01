@@ -175,10 +175,13 @@ def test_pending_preparation_follows_playlist_without_interrupting_current(tmp_p
     store = Store(tmp_path)
     worker = Worker(store)
     worker.current = 'already-running'
-    for job in ['a','b','c','standalone']:
+    jobs = {name:store.create(JobRequest(url=f'https://youtu.be/{i:011d}'),'test')[0]['id']
+            for i,name in enumerate(['a','b','c','standalone'])}
+    for job in [*jobs.values(), jobs['a'], 'missing-job']:
         worker.queue.put_nowait(job)
-    worker.prioritize(['c','a','c','b'])
-    assert [worker.queue.get_nowait() for _ in range(4)] == ['c','a','b','standalone']
+    worker.prioritize([jobs[name] for name in ['c','a','c','b']])
+    assert [worker.queue.get_nowait() for _ in range(4)] == [jobs[name] for name in ['c','a','b','standalone']]
+    assert worker.queue.empty()
     assert worker.current == 'already-running'
 
 
