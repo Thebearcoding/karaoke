@@ -35,6 +35,40 @@ def cached_recognition(client, audio, request, output):
     return json.loads(path.read_text())
 
 
+def cached_local_recognition(audio, language, output, *, weights=None):
+    """Use the existing alignment model to check a short disputed ending."""
+    from importlib.metadata import version
+    weights = Path(weights) if weights is not None else Path(__file__).resolve().parent/'models/alignment/whisper/large-v3-turbo.pt'
+    if not weights.is_file():
+        raise ValueError('Local ASR repair requires the installed large-v3-turbo alignment model')
+    config = dict(language=language, implementation=inspect.getsource(cached_local_recognition),
+                  packages={name: version(name) for name in ('openai-whisper', 'torch')})
+    key = hashlib.sha256((digest(audio)+json.dumps(config, sort_keys=True)).encode()).hexdigest()[:16]
+    path = output.parent/'asr-requests'/('local-'+key+'.json')
+    path.parent.mkdir(exist_ok=True)
+    with StageCache(output.parent).stage('local_asr_'+key, inputs=[audio, weights],
+                                        outputs=[path], config=config) as reused:
+        if not reused:
+            import torch
+            import whisper
+            from whisper import timing
+            torch.set_num_threads(4)
+            torch.set_grad_enabled(False)
+            device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+            model = whisper.load_model(str(weights), device='cpu')
+            heads = model._buffers.pop('alignment_heads')
+            model.to(device)
+            model.register_buffer('alignment_heads', heads, persistent=False)
+            if device == 'mps':
+                timing.dtw = lambda matrix: timing.dtw_cpu(matrix.detach().cpu().double().numpy())
+            code = {'Chinese': 'zh', 'Japanese': 'ja', 'English': 'en'}[song_language(language)]
+            data = whisper.transcribe(model, str(audio), language=code, fp16=False,
+                temperature=0, condition_on_previous_text=False, word_timestamps=True, verbose=False)
+            data['words'] = [word for segment in data['segments'] for word in segment['words']]
+            path.write_text(json.dumps(data, ensure_ascii=False)+'\n')
+    return json.loads(path.read_text())
+
+
 def repetition_loop(data):
     """Detect decoder loops, not ordinary repeated lyric lines or short vocalizations."""
     segments = data.get('segments') or []
@@ -59,6 +93,25 @@ def repetition_loop(data):
         if re.search(r'(.{1,32}?)\1{7,}', burst):
             return True
     return False
+
+
+def repeated_tail(data):
+    """Locate a repeated ending with both silence warnings and collapsed words."""
+    segments = data.get('segments') or []
+    texts = [''.join(c for c in s.get('text', '').casefold() if c.isalnum()) for s in segments]
+    if not texts or not texts[-1]:
+        return None
+    first = len(texts)-1
+    while first and texts[first-1] == texts[-1]:
+        first -= 1
+    tail = segments[first:]
+    if len(tail) < 8 or len(texts[-1])*len(tail) < 40:
+        return None
+    words = [w for w in data.get('words') or [] if w['start'] >= tail[0]['start']]
+    if (any(s.get('no_speech_prob', 0) >= .6 for s in tail) and
+            sum(w['end']-w['start'] <= .001 for w in words) >= 3):
+        return first
+    return None
 
 
 def needs_recovery(data):
@@ -91,7 +144,7 @@ def needs_recovery(data):
             if max(collapsed.values(), default=0) >= 8:
                 return True
     text = ''.join(s.get('text', '') for s in data.get('segments') or []) or data.get('text', '')
-    return not any(c.isalnum() for c in text) or repetition_loop(data)
+    return not any(c.isalnum() for c in text) or repetition_loop(data) or repeated_tail(data) is not None
 
 
 def select_recovery_text(text, initial_text, words, language):
@@ -117,7 +170,7 @@ def select_recovery_text(text, initial_text, words, language):
     return None, report
 
 
-def splice_loop_window(original, replacement, left, right, begin):
+def splice_loop_window(original, replacement, left, right, begin, end=None):
     """Replace a broken passage only between independently matched sung anchors."""
     from rapidfuzz.distance import Levenshtein
     from subtitles import normalized
@@ -153,33 +206,41 @@ def splice_loop_window(original, replacement, left, right, begin):
             return None
         return best[1:]
 
-    before, after = boundary(segments[left], 'left'), boundary(segments[right], 'right')
-    if before is None or after is None or before[1] >= after[0]:
+    before = boundary(segments[left], 'left')
+    after = boundary(segments[right], 'right') if right is not None else (len(parts), len(parts))
+    if before is None or after is None or before[1] >= after[0] or (right is None and end is None):
         return None
     first, stop = before[1], after[0]
     # Word times are taken directly from this decode, never interpolated at cuts.
-    lo, hi = parts[first]['start'], parts[stop]['start']
+    lo = parts[first]['start']
+    hi = parts[stop]['start'] if right is not None else end-begin
+    limit = segments[right]['start'] if right is not None else end
     body = [dict(s, start=s['start']+begin, end=s['end']+begin) for s in parts[first:stop]]
     words = [dict(w, start=w['start']+begin, end=w['end']+begin)
              for w in replacement.get('words') or [] if lo <= w['start'] < hi]
     if (not words or body[0]['start'] < segments[left]['end'] or
-            body[-1]['end'] > segments[right]['start'] or
-            any(w['start'] < segments[left]['end'] or w['end'] > segments[right]['start'] for w in words)):
+            body[-1]['end'] > limit or
+            any(w['start'] < segments[left]['end'] or w['end'] > limit for w in words)):
         return None
-    joined = segments[:left+1] + body + segments[right:]
+    joined = segments[:left+1] + body + (segments[right:] if right is not None else [])
     result = dict(original, segments=joined, text=' '.join(s['text'] for s in joined),
         words=[w for w in original.get('words') or [] if w['start'] < segments[left]['end']] + words +
-              [w for w in original.get('words') or [] if w['start'] >= segments[right]['start']])
-    # Cropped audio can itself loop at its final cut. Only the verified interior
-    # is used; apply the unchanged quality gate to the actual joined transcript.
+              ([w for w in original.get('words') or [] if w['start'] >= segments[right]['start']]
+               if right is not None else []))
+    # Cropped audio can itself loop at its final cut. Apply the quality gate to
+    # the actual joined transcript, including a recovered end-of-file passage.
     return None if needs_recovery(result) else result
 
 
-def repair_loop_window(data, audio, duration, recognize, output):
+def repair_loop_window(data, audio, duration, recognize, output, local_recognize=None):
     """Try one bounded decode around a localized loop before retrying the song."""
     from subtitles import normalized
     segments = data.get('segments') or []
     bad = [i for i, s in enumerate(segments) if repetition_loop(dict(segments=[s]))]
+    tail = repeated_tail(data)
+    if tail is not None:
+        bad.extend(range(tail, len(segments)))
+        bad = sorted(set(bad))
     if not bad or not data.get('words') or song_language(data.get('language')) is None:
         return None
 
@@ -188,11 +249,15 @@ def repair_loop_window(data, audio, duration, recognize, output):
         # Short repeated syllables cannot identify where one decode joins another.
         return len(text) >= 6 and len(set(text)) >= 4
 
-    left = next((i for i in range(bad[0]-1, max(-1, bad[0]-4), -1) if usable_anchor(i)), None)
+    lefts = [i for i in range(bad[0]-1, max(-1, bad[0]-4), -1) if usable_anchor(i)]
+    left = lefts[0] if lefts else None
     right = next((i for i in range(bad[-1]+1, min(len(segments), bad[-1]+4)) if usable_anchor(i)), None)
-    if left is None or right is None:
+    if left is None or (right is None and (tail is None or bad[-1] != len(segments)-1)):
         return None
-    begin, end = max(0., segments[left]['start']-.5), min(duration, segments[right]['end']+.5)
+    # The nearest phrase can itself contain an ASR error. Include up to three
+    # preceding anchors in one tail decode, then require one to match.
+    begin = max(0., segments[lefts[-1] if right is None else left]['start']-.5)
+    end = min(duration, segments[right]['end']+.5) if right is not None else duration
     if not 0 < end-begin <= 90:
         return None
     clip = output/'loop-repair.mp3'
@@ -200,8 +265,13 @@ def repair_loop_window(data, audio, duration, recognize, output):
     try:
         subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-y', '-ss', str(begin), '-i', str(audio),
             '-t', str(end-begin), '-ar', '16000', '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '64k', str(clip)], check=True)
-        part = recognize(clip)
-        result = splice_loop_window(data, part, left, right, begin)
+        part = local_recognize(clip) if right is None and local_recognize else recognize(clip)
+        result = None
+        for candidate in lefts if right is None else [left]:
+            result = splice_loop_window(data, part, candidate, right, begin, end)
+            if result is not None:
+                report['left'] = candidate
+                break
         report['accepted'] = result is not None
         (output/'loop-repair.json').write_text(json.dumps(dict(report, response=part), ensure_ascii=False)+'\n')
         return (result, report) if result is not None else None
@@ -247,12 +317,15 @@ def transcribe(client, audio, language, hint, output):
     report_progress(detail='识别结果异常，分段重试')
     # An unusable transcript's language detection is also untrusted. Preserve an
     # explicit user language, but let recovery re-detect automatic requests.
-    duration = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',
-        'format=duration', '-of', 'default=nw=1:nk=1', str(audio)], text=True))
-    repaired = repair_loop_window(data, audio, duration, recognize, output)
+    duration = len(pcm)/rate
+    repaired = repair_loop_window(data, audio, duration, recognize, output,
+        local_recognize=lambda path: cached_local_recognition(path, data['language'], output))
     if repaired is not None:
         data, report = repaired
-        return data, dict(recovery, triggered=True, text_model='whisper-1', loop_repair=report)
+        return data, dict(recovery, triggered=True,
+            text_model='local-large-v3-turbo' if report['right'] is None else 'whisper-1', loop_repair=report)
+    if repeated_tail(data) is not None and song_language(data.get('language')) is not None:
+        raise ValueError('重复的结尾转录未通过局部核验，已保留诊断')
     fallback_model = os.getenv('KARAOKE_ASR_FALLBACK_MODEL', 'gpt-4o-transcribe')
     # Keep full recording context for text: independent chunks can omit a split
     # syllable or duplicate the opening of the next lyric. Chunks only locate words.

@@ -193,6 +193,8 @@ class Pipeline:
                 for p in weights if p.is_file()]
         if name == 'transcribe':
             config['fallback_model'] = os.getenv('KARAOKE_ASR_FALLBACK_MODEL', 'gpt-4o-transcribe')
+            weights = ROOT/'models/alignment/whisper/large-v3-turbo.pt'
+            config['local_repair_weights'] = (weights.stat().st_size, weights.stat().st_mtime_ns) if weights.is_file() else None
         return dict(inputs=[self.output/p for p in inputs], outputs=[self.output/p for p in outputs],
                     config=config, code=code)
 

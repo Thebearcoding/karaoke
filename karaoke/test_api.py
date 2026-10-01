@@ -360,6 +360,7 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     stages = {
         'align_words': [sys.executable, code/'align_lyrics_whisper.py'],
         'align_phonemes': [sys.executable, code/'align_lyric_phonemes.py'],
+        'transcribe': [sys.executable, code/'transcribe_lyrics.py'],
     }
     models = [code/'models/alignment'/name for name in (
         'whisper/large-v3-turbo.pt', 'sofa/mandarin/model.ckpt', 'sofa/english/model.ckpt')]
@@ -392,13 +393,13 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     models[2].write_bytes(b'updated English model')
     assert module.pipeline_fingerprint() != fingerprint
     prepare()
-    assert calls == ['align_words', 'align_phonemes']
+    assert calls == ['align_words', 'align_phonemes', 'transcribe']
     models[1].write_bytes(b'updated Mandarin model')
     prepare()
-    assert calls == ['align_words', 'align_phonemes', 'align_phonemes']
+    assert calls == ['align_words', 'align_phonemes', 'transcribe', 'align_phonemes']
     models[0].write_bytes(b'updated Whisper model')
     prepare()
-    assert calls == ['align_words', 'align_phonemes', 'align_phonemes', 'align_words']
+    assert calls == ['align_words', 'align_phonemes', 'transcribe', 'align_phonemes', 'align_words', 'transcribe']
 
 
 @pytest.mark.parametrize('formatting', ['lyrics', 'symbols', 'annotations'])
@@ -2112,6 +2113,71 @@ def test_truncated_recovery_text_cannot_drop_later_sung_words(tmp_path, recovera
     # of fabricated text or replacement timestamps.
     assert select_recovery_text(complete, initial, words, 'Chinese')[0] == complete
     assert [(w['start'], w['end']) for w in words] == [(1,4), (6,9), (11,14), (16,19)]
+
+
+@pytest.mark.parametrize('ending', ['hallucinated', 'genuine', 'clean', 'earlier_anchor', 'wrong_anchor', 'outside_audio'])
+def test_repeated_asr_ending_is_redecoded_locally_without_dropping_genuine_repeats(tmp_path, monkeypatch, ending):
+    import soundfile as sf
+    from copy import deepcopy
+    from pathlib import Path
+    audio, output = tmp_path/'audio.wav', tmp_path/'asr'
+    sf.write(audio, np.full(18000, .01), 1000)
+    output.mkdir()
+    prefix = [dict(start=0., end=1., text='Before the ending'),
+              dict(start=3., end=5., text='A familiar opening phrase')]
+    initial = dict(language='english', segments=prefix+[
+        dict(start=8.+i, end=8.8+i, text='Sing this phrase', no_speech_prob=.9 if i >= 6 else .1)
+        for i in range(8)], words=[dict(start=s['start'], end=s['end'], word=s['text']) for s in prefix]+[
+        dict(start=8.+i, end=8.+i+(.5 if ending == 'clean' else 0), word='Sing this phrase') for i in range(8)])
+    untouched, calls = deepcopy(initial), []
+    repeated = ending == 'genuine'
+    parts = deepcopy(prefix)+[
+        dict(start=8.+i, end=8.7+i, text='Sing this phrase') for i in range(8 if repeated else 1)]
+    replacement = dict(language='english', segments=parts,
+        words=[dict(start=s['start'], end=s['end'], word=s['text']) for s in parts])
+    if ending == 'earlier_anchor':
+        replacement['segments'][1]['text'] = 'A corrected nearby phrase'
+        replacement['words'][1]['word'] = 'A corrected nearby phrase'
+    if ending == 'wrong_anchor':
+        for segment in replacement['segments'][:2]:
+            segment['text'] = 'A different recording entirely'
+    if ending == 'outside_audio':
+        replacement['segments'][-1]['end'] = 20.
+        replacement['words'][-1]['end'] = 20.
+
+    def create(**request):
+        calls.append((Path(request['file'].name).name, request['model']))
+        if request['model'] != 'whisper-1':
+            raise RuntimeError('unverified ending requires recovery')
+        return SimpleNamespace(model_dump=lambda: initial if len(calls) == 1 else replacement)
+
+    def local(path, language, target):
+        calls.append((path.name, 'local-large-v3-turbo'))
+        assert path.is_file() and target == output and language == 'english'
+        return replacement
+
+    monkeypatch.setattr('karaoke.transcribe_lyrics.cached_local_recognition', local)
+    client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create)))
+    if ending in ('wrong_anchor', 'outside_audio'):
+        with pytest.raises(ValueError, match='局部核验'):
+            transcribe(client, audio, 'auto', '', output)
+        assert not json.loads((output/'loop-repair.json').read_text())['accepted']
+    else:
+        result, recovery = transcribe(client, audio, 'auto', '', output)
+        if ending == 'clean':
+            assert not recovery['triggered'] and result == initial and len(calls) == 1
+        else:
+            assert recovery['triggered'] and recovery['loop_repair']['accepted']
+            assert recovery['loop_repair']['right'] is None
+            assert calls == [('audio.wav', 'whisper-1'), ('loop-repair.mp3', 'local-large-v3-turbo')]
+            assert result['segments'][:1] == prefix[:1]
+            assert result['segments'][1]['text'] == replacement['segments'][1]['text']
+            assert len(result['segments']) == 2+(8 if repeated else 1)
+            assert result['words'][:1] == initial['words'][:1]
+            assert [(w['start'], w['end']) for w in result['words'][2:]] == [
+                (w['start'], w['end']) for w in replacement['words'][2:]]
+    assert initial == untouched
+    assert not (output/'loop-repair.mp3').exists()
 
 
 @pytest.mark.parametrize('corrupt', [False, True])
