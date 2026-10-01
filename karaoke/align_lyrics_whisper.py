@@ -16,7 +16,7 @@ import torch
 from whisper.timing import dtw_cpu
 
 from lyric_progress import map_words
-from subtitles import lyric_cues, normalized, write_captions
+from subtitles import lyric_cues, normalized, presentation_cues, write_captions
 from stage_progress import progress_items, report_progress
 
 
@@ -94,9 +94,18 @@ def stitch_blocks(lines, raw_blocks, duration, language):
         raise ValueError('Raw alignment does not cover exactly the displayed lyrics')
 
     def conflicts(selection):
-        words = [predictions[owner][i][1] for i, owner in enumerate(selection)]
-        return {i for i in range(1, len(words)) if words[i-1] and words[i]
-                and words[i][0]['start']-words[i-1][-1]['start'] < .015-1e-9}
+        selected = [predictions[owner][i] for i, owner in enumerate(selection)]
+        bad = set()
+        for i, ((left, left_words), (right, right_words)) in enumerate(zip(selected, selected[1:]), 1):
+            if left_words and right_words and right_words[0]['start']-left_words[-1]['start'] < .015-1e-9:
+                bad.add(i)
+            try:
+                # Share the downstream gate: repairing word starts must not
+                # introduce invalid line ends or excessive overlap elsewhere.
+                presentation_cues([left, right], duration, lead=0, tail=0, bridge_gap=0)
+            except ValueError:
+                bad.add(i)
+        return bad
 
     repairs = []
     while bad := conflicts(owners):

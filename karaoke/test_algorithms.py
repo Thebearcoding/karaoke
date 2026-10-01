@@ -391,13 +391,16 @@ class AlignmentIntegrity(unittest.TestCase):
         self.assertFalse(protect_line_order(words, words)[1])
         self.assertEqual(stitch_blocks(lines, stitched, 10., 'English')[2], [])
 
-        # A replacement that only moves the crossing to the next line is unsafe.
-        raw[0]['result']['segments'][1] = segment(lines[1], 1.2, 3.5, 4.)
-        cues, unchanged, repairs = stitch_blocks(lines, raw, 10., 'English')
-        self.assertEqual(repairs, [])
-        words, _ = build_progress(cues, unchanged, 'English')
-        with self.assertRaisesRegex(ValueError, 'Coarse lyric onsets'):
-            protect_line_order(words, words)
+        # Reject new conflicts in either word onsets or line ends, even when
+        # the replacement resolves the original crossing.
+        for middle, end in [(3.5, 4.), (1.6, 5.)]:
+            with self.subTest(middle=middle, end=end):
+                raw[0]['result']['segments'][1] = segment(lines[1], 1.2, middle, end)
+                cues, unchanged, repairs = stitch_blocks(lines, raw, 10., 'English')
+                self.assertEqual(repairs, [])
+                words, _ = build_progress(cues, unchanged, 'English')
+                with self.assertRaisesRegex(ValueError, 'Coarse lyric onsets'):
+                    protect_line_order(words, words)
 
     def test_asr_silence_filter_keeps_quiet_speech_and_nearby_collapsed_words(self):
         audio = np.zeros(5*16000, dtype='float32')
