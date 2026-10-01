@@ -95,8 +95,10 @@ class EnglishOnsetAligner:
                     raise ValueError(f'Unsupported word for English CTC model: {word}')
                 sequences.append([self.vocab[c] for c in text])
         else:
-            texts = [re.sub(r'[^\w\s\'’]', '', word).lower() for word in words]
+            texts = [re.sub(r'[^\w\s\'’-]', '', word).lower() for word in words]
             phonemes = self.phonemizer.phonemize(texts, separator=self.separator, strip=True)
+            # A sustained hum is not a sequence of spoken letter names.
+            phonemes = ['m' if re.fullmatch(r'm{2,}', text) else value for text, value in zip(texts, phonemes)]
             sequences = [[self.vocab.get(p, 70) for p in value.split(';') if p] for value in phonemes]
         targets, spans = [], []
         for word, seq in zip(words, sequences):
@@ -220,9 +222,22 @@ def align_job(aligner, job, full_song=False):
     scope_blocks = context_blocks(anchors, audio) if full_song and anchors and aligner.method != 'sofa' else None
     context_retries = []
     if scope_blocks and not failures:
-        retries = context_scope_violations(cues, scope_blocks)
-        for first, stop, left, right, begin, end in retries:
+        retries = []
+        for original in context_scope_violations(cues, scope_blocks):
+            first, stop, left, right, begin, end = original
+            # A coarse boundary can cut off a sustained syllable. Include one
+            # more phrase at either edge before retrying, so similar vowels
+            # retain their context instead of being forced into a short crop.
+            left, right = max(0, left-1), min(len(lines), right+1)
+            if anchors[left]['status'] == 'candidate':
+                begin = min(begin, max(0., anchors[left]['start']-.6))
+            if anchors[right-1]['status'] == 'candidate':
+                end = max(end, min(len(audio)/rate, anchors[right-1]['end']+(3. if right == len(lines) else .6)))
+            expanded = (first, stop, left, right, begin, end)
+            retries.append(expanded)
+            scope_blocks[scope_blocks.index(original)] = expanded
             context_retries.append(dict(core=[first, stop], context=[left, right], source_range=[begin, end],
+                                        original_scope=original,
                                         original_cues=cues[first:stop]))
             cues[first:stop] = [dict(text=lines[i], start=0., end=0., units=[]) for i in range(first, stop)]
         run_blocks(retries, start_id=len(blocks))

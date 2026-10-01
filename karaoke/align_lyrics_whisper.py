@@ -34,6 +34,24 @@ def json_number(value):
     raise TypeError(f'Cannot serialize {type(value).__name__}')
 
 
+def valid_recovery(candidate, lines, duration):
+    if candidate is None or [normalized(''.join(w['word'] for w in s['words']))
+            for s in candidate['segments']] != [normalized(line) for line in lines]:
+        return False
+    units = [dict(text=w['word'], start=w['start'], end=w['end'])
+             for s in candidate['segments'] for w in s['words'] if normalized(w['word'])]
+    if not units or any(not np.isfinite([u['start'], u['end']]).all() or
+                       not 0 <= u['start'] < u['end'] <= duration+.001 for u in units):
+        return False
+    if any(a['start'] >= b['start'] for a, b in zip(units, units[1:])):
+        return False
+    try:
+        presentation_cues(lyric_cues(lines, units, duration), duration, lead=0, tail=0, bridge_gap=0)
+    except ValueError:
+        return False
+    return True
+
+
 def recover_changed_text(result, lines, duration, realign):
     """Retry a malformed alignment, never edit its words to fit the lyrics."""
     expected = [normalized(line) for line in lines]
@@ -47,21 +65,36 @@ def recover_changed_text(result, lines, duration, realign):
     candidate = realign()
     report = dict(original_result=result, retry_result=candidate, accepted=False,
                   method='dynamic attention heads without inter-line gap padding')
-    if matches(candidate):
-        units = [dict(text=w['word'], start=w['start'], end=w['end'])
-                 for s in candidate['segments'] for w in s['words'] if normalized(w['word'])]
-        valid = all(np.isfinite([u['start'], u['end']]).all() and
-                    0 <= u['start'] < u['end'] <= duration+.001 for u in units)
-        valid = valid and all(a['start'] < b['start'] for a, b in zip(units, units[1:]))
-        if valid:
-            try:
-                presentation_cues(lyric_cues(lines, units, duration), duration, lead=0, tail=0, bridge_gap=0)
-            except ValueError:
-                pass
-            else:
-                report['accepted'] = True
-                return candidate, report
+    if valid_recovery(candidate, lines, duration):
+        report['accepted'] = True
+        return candidate, report
     return result, report
+
+
+def recover_unresolved_block(block, lines, anchors, duration, align):
+    """Retry wholly untimed lines with another neighbour and no speech-duration cap."""
+    if block['result']['segments'] and all(any(w['end'] > w['start'] for w in s['words'] if normalized(w['word']))
+           for s in block['result']['segments']):
+        return block
+    left, right = block['context']
+    begin, end = block['source_range']
+    if anchors:
+        if left and anchors[left-1]['status'] == 'candidate':
+            left -= 1
+            begin = min(begin, max(0., anchors[left]['start']-.6))
+        if right < len(lines) and anchors[right]['status'] == 'candidate':
+            end = max(end, min(duration, anchors[right]['end']+.6))
+            right += 1
+    candidate = align(begin, end, '\n'.join(lines[left:right]),
+                      max_word_dur=None, word_dur_factor=None, gap_padding=None)
+    accepted = valid_recovery(candidate, lines[left:right], end-begin)
+    report = dict(original_context=block['context'], original_source_range=block['source_range'],
+                  original_result=block['result'], context=[left, right], source_range=[begin, end],
+                  retry_result=candidate, accepted=accepted)
+    block = dict(block, unresolved_recovery=report)
+    if accepted:
+        block.update(context=[left, right], source_range=[begin, end], result=candidate)
+    return block
 
 
 def recover_skipped_repeats(result, duration, align):
@@ -321,6 +354,7 @@ def main():
         audio, _ = sf.read(job['audio'], dtype='float32')
         language = {'Japanese': 'ja', 'Chinese': 'zh', 'English': 'en'}[lyrics['language']]
         blocks = [(0, len(lyrics['lines']), 0, len(lyrics['lines']), 0., duration)]
+        anchors = None
         if job.get('anchors'):
             anchors = json.loads(Path(job['anchors']).read_text())
             assert [cue['text'] for cue in anchors] == lyrics['lines']
@@ -332,12 +366,15 @@ def main():
                               'window': [begin, end]}), flush=True)
             piece = audio[round(begin*16000):round(end*16000)]
 
-            def align_piece(start, stop, text, **options):
-                aligned = model.align(piece[round(start*16000):round(stop*16000)], text, language=language,
-                    original_split=True, regroup=False, token_step=80, max_word_dur=4.,
-                    word_dur_factor=3., nonspeech_skip=5., suppress_silence=True,
+            def align_audio(start, stop, text, **options):
+                aligned = model.align(audio[round(start*16000):round(stop*16000)], text, language=language,
+                    original_split=True, regroup=False, token_step=80, max_word_dur=options.pop('max_word_dur', 4.),
+                    word_dur_factor=options.pop('word_dur_factor', 3.), nonspeech_skip=5., suppress_silence=True,
                     dynamic_heads=options.pop('dynamic_heads', args.dynamic_heads), verbose=None, **options)
                 return aligned.to_dict() if aligned is not None else None
+
+            def align_piece(start, stop, text, **options):
+                return align_audio(begin+start, begin+stop, text, **options)
 
             lines = lyrics['lines'][context_first:context_stop]
             result = align_piece(0., len(piece)/16000, '\n'.join(lines))
@@ -346,13 +383,15 @@ def main():
             result, text_recovery = recover_changed_text(result, lines, len(piece)/16000,
                 lambda: align_piece(0., len(piece)/16000, '\n'.join(lines), gap_padding=None, dynamic_heads=True))
             result, repeat_recoveries = recover_skipped_repeats(result, len(piece)/16000, align_piece)
+            block = recover_unresolved_block(dict(range=[first, stop], context=[context_first, context_stop],
+                source_range=[begin, end], result=result, repeat_recoveries=repeat_recoveries,
+                text_recovery=text_recovery), lyrics['lines'], anchors, duration, align_audio)
+            result, begin = block['result'], block['source_range'][0]
             local_units = [{'text': word['word'], 'start': round(word['start']+begin, 3),
                             'end': round(word['end']+begin, 3), 'probability': word['probability']}
                            for segment in result['segments'] for word in segment['words']]
             units.extend(local_units)
-            raw_blocks.append({'range': [first, stop], 'context': [context_first, context_stop],
-                               'source_range': [begin, end], 'result': result,
-                               'repeat_recoveries': repeat_recoveries, 'text_recovery': text_recovery})
+            raw_blocks.append(block)
         # Keep the acoustic evidence even when stitching rejects text or times.
         output.mkdir(parents=True)
         (output/'raw.json').write_text(json.dumps(raw_blocks, ensure_ascii=False, indent=2, default=json_number)+'\n')

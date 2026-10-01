@@ -444,6 +444,74 @@ class WordOnsetScoring(unittest.TestCase):
 
 
 class AlignmentIntegrity(unittest.TestCase):
+    def test_untimed_line_recovery_retains_measured_times_and_rejects_bad_candidates(self):
+        from copy import deepcopy
+        from unittest.mock import Mock
+        from align_lyrics_whisper import recover_unresolved_block
+
+        lines = ['opening', 'context', 'long-vocalization']
+        anchors = [dict(status='candidate', start=1., end=2.),
+                   dict(status='candidate', start=8., end=9.), dict(status='unresolved_text')]
+        def segment(text, start, end):
+            return dict(text=text, start=start, end=end, words=[dict(word=text, start=start, end=end)])
+        original = dict(range=[2, 3], context=[1, 3], source_range=[7.4, 20.], result=dict(segments=[
+            segment(lines[1], .7, 1.5), segment(lines[2], 12.6, 12.6)]))
+        candidate = dict(segments=[segment(lines[0], .7, 1.7), segment(lines[1], 7.7, 8.5),
+                                  segment(lines[2], 10.9, 18.7)])
+        for failure in (None, 'text', 'collapsed', 'nan', 'outside', 'order'):
+            with self.subTest(failure=failure):
+                prediction = deepcopy(candidate)
+                word = prediction['segments'][-1]['words'][0]
+                if failure == 'text': word['word'] = 'rewritten'
+                if failure == 'collapsed': word['end'] = word['start']
+                if failure == 'nan': word['start'] = float('nan')
+                if failure == 'outside': word['end'] = 30.
+                if failure == 'order': word['start'] = .1
+                align = Mock(return_value=prediction)
+                result = recover_unresolved_block(original, lines, anchors, 20., align)
+                self.assertEqual(align.call_count, 1)
+                self.assertEqual(align.call_args.args, (.4, 20., '\n'.join(lines)))
+                report = result['unresolved_recovery']
+                self.assertEqual(report['original_result'], original['result'])
+                self.assertEqual(report['accepted'], failure is None)
+                if failure is None:
+                    self.assertEqual(result['context'], [0, 3])
+                    self.assertEqual(result['source_range'], [.4, 20.])
+                    self.assertEqual(result['result'], prediction)  # No clamping of the long word.
+                else:
+                    self.assertEqual(result['result'], original['result'])
+                    self.assertEqual(result['source_range'], original['source_range'])
+        # A short zero-length consonant in an otherwise timed line is handled
+        # by the later phoneme stage; do not rerun every valid phrase.
+        valid = deepcopy(original)
+        valid['result']['segments'][-1]['words'] = [dict(word='long', start=8., end=8.),
+                                                   dict(word='vocalization', start=8., end=9.)]
+        align = Mock()
+        self.assertEqual(recover_unresolved_block(valid, lines, anchors, 20., align), valid)
+        align.assert_not_called()
+
+    def test_singing_phonemes_keep_hyphenated_syllables_separate(self):
+        import os
+        from unittest.mock import patch
+        import espeakng_loader
+        from phonemizer.backend import EspeakBackend
+        from phonemizer.backend.espeak.wrapper import EspeakWrapper
+        from phonemizer.separator import Separator
+        from align_english_onsets import EnglishOnsetAligner
+
+        with patch.dict(os.environ, ESPEAK_DATA_PATH=espeakng_loader.get_data_path()):
+            EspeakWrapper.set_library(espeakng_loader.get_library_path())
+            aligner = object.__new__(EnglishOnsetAligner)
+            aligner.method = 'singing'
+            aligner.phonemizer = EspeakBackend('en-us')
+            aligner.separator = Separator(phone=';', word=None)
+            aligner.vocab, aligner.space = {'uː': 1, 'h': 2, 'm': 4}, 3
+            targets, spans = aligner.tokenize(['Ooh-ooh-ooh-ooh', 'Ooh', 'Mmm'])
+        # The written h is silent: deleting the hyphens invents consonants
+        # between the four vowels and changes the forced-alignment target.
+        self.assertEqual(targets, [1, 1, 1, 1, 3, 1, 3, 4])
+        self.assertEqual(spans, [(0, 4), (5, 6), (7, 8)])
+
     def test_global_english_alignment_retries_only_out_of_context_blocks(self):
         import json
         from types import SimpleNamespace
@@ -468,7 +536,7 @@ class AlignmentIntegrity(unittest.TestCase):
                         else:
                             # These are measured offsets in the supplied crop,
                             # deliberately different from the coarse anchors.
-                            starts = [.77, 1.27, 2.77, 3.27]
+                            starts = [.77, 1.27, 2.77, 3.27, 15.77, 16.27]
                             if mode == 'failed_retry':
                                 starts[0] = -2.
                         return [dict(text=w, start=t, end=t+.25, confidence=.9)
@@ -496,6 +564,35 @@ class AlignmentIntegrity(unittest.TestCase):
                         self.assertFalse(report['failures'])
                         self.assertFalse(context_scope_violations(cues, report['scope_blocks']))
                         self.assertAlmostEqual(cues[0]['start'], 10.17)
+
+    def test_late_coarse_boundary_does_not_cut_off_a_sustained_syllable(self):
+        import json
+        from types import SimpleNamespace
+        from align_english_onsets import align_job
+
+        def align(audio, words):
+            if len(audio) == 20*16000:
+                starts = [1.1, 6.8, 12.1]
+            elif words[0] == 'first':
+                starts = [.7, 6.4, 11.7]
+            else:  # The short crop has already lost the held syllable's onset.
+                starts = [.1, 4.7]
+            return [dict(text=w, start=t, end=t+.7, confidence=.9)
+                    for w, t in zip(words, starts)], None, .02
+
+        model = SimpleNamespace(method='singing', device='cpu', onset_ratio=.02, model_identity={}, align=align)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lines = ['first', 'held-vowel', 'last']
+            sf.write(root/'audio.wav', np.zeros(20*16000), 16000)
+            (root/'lyrics.json').write_text(json.dumps(dict(language='English', lines=lines)))
+            (root/'anchors.json').write_text(json.dumps([dict(text=text, status='candidate', start=t, end=t+1.)
+                                                       for text, t in zip(lines, [1., 8., 12.])]))
+            report = align_job(model, dict(audio=str(root/'audio.wav'), lyrics=str(root/'lyrics.json'),
+                anchors=str(root/'anchors.json'), output=str(root/'output')), full_song=True)
+            self.assertFalse(report['failures'])
+            cues = json.loads((root/'output/cues.json').read_text())
+            np.testing.assert_allclose([c['start'] for c in cues], [1.1, 6.8, 12.1])
 
     def test_english_phoneme_alignment_keeps_punctuation_out_of_spoken_words(self):
         import json
