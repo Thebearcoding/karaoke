@@ -1040,6 +1040,30 @@ def test_lyric_text_survives_metadata_refusal_without_resubmitting_content():
     assert parse.call_count == 1
 
 
+@pytest.mark.parametrize('source', ['asr', 'description', 'user'])
+@pytest.mark.parametrize('language,lines,expected', [
+    ('English', ['“', 'Will you stay?”', 'I’ll wait here!'], ['“Will you stay?”', 'I’ll wait here!']),
+    ('Japanese', ['「', 'また会おう！', '」', '待っている。'], ['「また会おう！」', '待っている。']),
+])
+def test_lyric_wrapping_keeps_standalone_punctuation_without_empty_alignment_rows(source, language, lines, expected):
+    request = dict(url=URL, language=language)
+    if source == 'user':
+        request['lyrics'] = lines
+    parsed = SongText(title='Song', artist='Singer',
+                      lyric_line_numbers=list(range(1, len(lines)+1)) if source == 'description' else [])
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))], model='test', usage=None)
+    with patch('karaoke.song_sources.OpenAI') as client:
+        client.return_value.beta.chat.completions.parse.return_value = response
+        result = prepare_song_text(request, dict(description='\n'.join(lines)),
+            dict(language=language, segments=[dict(text=line) for line in lines]),
+            120, catalog_root=None, model='test')
+    assert result['lines'] == expected
+    assert ''.join(''.join(result['lines']).split()) == ''.join(''.join(lines).split())
+    if source == 'user':
+        with pytest.raises(ValueError, match='歌词为空或过长'):
+            prepare_song_text(dict(request, lyrics=['…', '“”']), {}, {}, 120, catalog_root=None, model='test')
+
+
 @pytest.mark.parametrize('selected,expected', [
     ([3, 4, 5], ['踏过山河去寻你', '晚风吹过小树林', '踏过山河去寻你']),
     ([], ['错字转录']),

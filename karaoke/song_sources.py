@@ -16,6 +16,21 @@ class SongText(BaseModel):
     lyric_line_numbers: list[int] = Field(default_factory=list)
 
 
+def join_punctuation_lines(lines):
+    """Keep unspoken punctuation with a lyric line without dropping characters."""
+    joined, prefix = [], ''
+    for line in lines:
+        line = line.strip()
+        if any(c.isalnum() for c in line):
+            joined.append(prefix+line)
+            prefix = ''
+        elif joined:
+            joined[-1] += line
+        else:
+            prefix += line
+    return joined or ([prefix] if prefix else [])
+
+
 def transcript_lines(transcription, language):
     """Wrap the observed text without rewriting words, repetitions or punctuation."""
     texts = [s['text'] for s in transcription.get('segments', [])]
@@ -35,6 +50,7 @@ def transcript_lines(transcription, language):
                 size += weight
             if line.strip():
                 lines.append(line.strip())
+    lines = join_punctuation_lines(lines)
     # Whitespace is layout; every other observed character must survive exactly.
     if ''.join(''.join(lines).split()) != ''.join(''.join(texts).split()):
         raise ValueError('歌词分行改变了转录内容')
@@ -159,8 +175,9 @@ def prepare_song_text(request, metadata, transcription, duration, *, catalog_roo
     for field in ('title', 'artist', 'language'):
         if request.get(field):
             result[field] = request[field]
-    result['lines'] = [line.strip() for line in result['lines'] if line.strip()]
-    if not result['lines'] or len(result['lines']) > 1000 or any(len(line) > 200 for line in result['lines']):
+    result['lines'] = join_punctuation_lines(result['lines'])
+    if not result['lines'] or len(result['lines']) > 1000 or any(
+            len(line) > 200 or not any(c.isalnum() for c in line) for line in result['lines']):
         raise ValueError('歌词为空或过长；请提供适合按句显示的 lyrics')
     result['id'] = 'song'
     result['source_url'] = request['url']

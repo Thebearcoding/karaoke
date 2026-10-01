@@ -164,6 +164,8 @@ def alignment_blocks(anchors, audio):
 
 def stitch_blocks(lines, raw_blocks, duration, language):
     """Resolve crossings using existing predictions, without moving word times."""
+    if any(not any(c.isalnum() for c in line) for line in lines):
+        raise ValueError('Lyric lines must contain alignable text')
     predictions, owners = [], [None]*len(lines)
     for block_index, block in enumerate(raw_blocks):
         first, stop = block['context']

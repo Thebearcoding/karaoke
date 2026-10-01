@@ -444,6 +444,14 @@ class WordOnsetScoring(unittest.TestCase):
 
 
 class AlignmentIntegrity(unittest.TestCase):
+    def test_punctuation_only_row_cannot_shift_following_line_ownership(self):
+        lines = ['first', '”', 'last']
+        raw = [dict(range=[0, 3], context=[0, 3], source_range=[0., 5.], result=dict(segments=[
+            dict(text=text, words=[dict(word=text, start=float(i), end=i+.5)])
+            for i, text in enumerate(lines)]))]
+        with self.assertRaisesRegex(ValueError, 'alignable text'):
+            stitch_blocks(lines, raw, 5., 'English')
+
     def test_changed_alignment_text_requires_a_complete_acoustic_retry(self):
         from copy import deepcopy
         from unittest.mock import Mock
