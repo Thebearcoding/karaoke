@@ -88,9 +88,10 @@ def transcribe(client, audio, language, hint, output):
         raise ValueError('歌词文本重试仍有重复异常或为空，无法生成可靠歌词')
     (output/'recovered-text.json').write_text(json.dumps(segments, ensure_ascii=False)+'\n')
 
-    def chunk(start):
-        length = min(30., duration-start)
-        path = output/f'chunk-{start:05d}.mp3'
+    def chunk(start, window=30):
+        length = min(window, duration-start)
+        suffix = '' if window == 30 else f'-{window}s'
+        path = output/f'chunk-{start:05d}{suffix}.mp3'
         subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-ss', str(start), '-i', str(audio),
             '-t', str(length), '-ar', '16000', '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '64k', str(path)], check=True)
         try:
@@ -98,13 +99,13 @@ def transcribe(client, audio, language, hint, output):
             diagnostic = dict(start=start, end=start+length, whisper=part)
             fallback = needs_recovery(part)
             if fallback:
-                (output/f'chunk-{start:05d}.json').write_text(json.dumps(diagnostic, ensure_ascii=False)+'\n')
+                path.with_suffix('.json').write_text(json.dumps(diagnostic, ensure_ascii=False)+'\n')
             # Do not give the text-only transcript invented word times. Unresolved
             # lyrics use neighboring anchors in the later acoustic forced alignment.
             words = [] if fallback else [dict(w, start=w['start']+start, end=min(length, w['end'])+start)
                 for w in part.get('words', []) if 0 <= w['start'] < length and w['end'] > w['start']]
             return words, dict(start=start, end=start+length, word_times_discarded=fallback,
-                               language=song_language(part.get('language')))
+                               language=song_language(part.get('language')), window_seconds=window)
         finally:
             path.unlink(missing_ok=True)
 
@@ -112,6 +113,20 @@ def transcribe(client, audio, language, hint, output):
     with ThreadPoolExecutor(max_workers=3) as pool:
         futures = [pool.submit(chunk, start) for start in starts]
         parts = [future.result() for future in progress_items(futures, 'chunks')]
+        # Retry only failed windows, once, at half length. Keep good word times
+        # and the full-recording text; never splice independently decoded text.
+        retry_windows = []
+        for _, record in parts:
+            if record['word_times_discarded'] and record['end']-record['start'] > 15:
+                # Balance the final partial window too, avoiding a tiny tail request.
+                window = math.ceil((record['end']-record['start'])/2)
+                retry_windows.extend((start, window)
+                    for start in range(record['start'], math.ceil(record['end']), window))
+        if retry_windows:
+            report_progress(detail='缩短异常片段，重试词时间')
+            futures = [pool.submit(chunk, start, window) for start, window in retry_windows]
+            parts.extend(future.result() for future in progress_items(futures, 'chunks'))
+    parts.sort(key=lambda part: part[1]['start'])
     languages = Counter()
     for words, record in parts:
         if record['language']:

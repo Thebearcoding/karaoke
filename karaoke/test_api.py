@@ -789,17 +789,21 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
 @pytest.mark.parametrize('fallback_text', ['恢复的歌词', '哒'*100])
 @pytest.mark.parametrize('initial_kind', ['loop', 'punctuation', 'fragmented_loop',
                                         'backward_segments', 'backward_words', 'invalid_range',
-                                        'collapsed_words'])
+                                        'collapsed_words', 'short_window_recovery', 'short_tail_recovery'])
 def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, fallback_text, initial_kind):
     import soundfile as sf
     audio = tmp_path/'audio.wav'
-    sf.write(audio, np.zeros(65000), 1000)
+    short_tail = initial_kind == 'short_tail_recovery'
+    duration = 45.05 if short_tail else 65.
+    sf.write(audio, np.zeros(round(duration*1000)), 1000)
     output = tmp_path/'asr'
     output.mkdir()
     calls = []
     def create(**kwargs):
         name = kwargs['file'].name
         calls.append((name, kwargs['model']))
+        bad_chunk = name.endswith('chunk-00030.mp3') or (
+            initial_kind not in ('short_window_recovery', 'short_tail_recovery') and name.endswith('-15s.mp3'))
         if kwargs['model'] != 'whisper-1':
             assert 'timestamp_granularities' not in kwargs
             data = dict(text=fallback_text)
@@ -808,11 +812,11 @@ def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, f
         elif name == str(audio) and initial_kind == 'fragmented_loop':
             data = dict(language='english', segments=[dict(start=i,end=i,text='same empty phrase')
                                                      for i in range(24)], words=[])
-        elif initial_kind == 'collapsed_words' and (name == str(audio) or name.endswith('chunk-00030.mp3')):
+        elif initial_kind == 'collapsed_words' and (name == str(audio) or bad_chunk):
             data = dict(language='japanese', segments=[dict(start=1,end=5,text='一緒に歌うこの歌の続きを')],
                         words=[dict(start=1,end=1,word=c) for c in '一緒に歌うこの歌の続きを'])
         elif initial_kind in ('backward_segments', 'backward_words', 'invalid_range') and (
-                name == str(audio) or name.endswith('chunk-00030.mp3')):
+                name == str(audio) or bad_chunk):
             data = dict(language='english', segments=[dict(start=1,end=2,text='第一句'),
                                                       dict(start=3,end=4,text='第二句')],
                         words=[dict(start=1,end=2,word='第一句'), dict(start=3,end=4,word='第二句')])
@@ -820,7 +824,7 @@ def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, f
                 data['words'][0]['end'] = .5
             else:
                 data[initial_kind.removeprefix('backward_')][0].update(start=10, end=11)
-        elif name == str(audio) or name.endswith('chunk-00030.mp3'):
+        elif name == str(audio) or bad_chunk:
             data = dict(language='chinese', segments=[dict(start=0,end=1,text='呜'*100)], words=[])
         else:
             assert 'language' not in kwargs
@@ -833,13 +837,19 @@ def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, f
             transcribe(client, audio, 'auto', '', output)
         return
     data, recovery = transcribe(client, audio, 'auto', '', output)
-    assert recovery['triggered'] and len(calls) == 5
-    assert [(w['start'],w['end']) for w in data['words']] == [(1,2),(61,62)]
-    assert data['segments'] == [dict(text='恢复的歌词', start=0., end=65., timing_source='recording_bounds')]
-    assert len(recovery['chunks']) == 3 and recovery['chunks'][1]['word_times_discarded']
+    assert recovery['triggered'] and len(calls) == (6 if short_tail else 7)
+    if short_tail:
+        expected = [(1,2),(31,32),(39,40)]
+    elif initial_kind == 'short_window_recovery':
+        expected = [(1,2),(31,32),(46,47),(61,62)]
+    else:
+        expected = [(1,2),(61,62)]
+    assert [(w['start'],w['end']) for w in data['words']] == expected
+    assert data['segments'] == [dict(text='恢复的歌词', start=0., end=duration, timing_source='recording_bounds')]
+    assert len(recovery['chunks']) == (4 if short_tail else 5) and recovery['chunks'][1]['word_times_discarded']
     assert recovery['text_model'] == 'gpt-4o-transcribe'
     assert data['language'] == 'Chinese'
-    assert {key: count for key, count in recovery['language_evidence'].items() if count} == {'Chinese': 4}
+    assert {key: count for key, count in recovery['language_evidence'].items() if count} == {'Chinese': 2*len(expected)}
     assert not list(output.glob('chunk-*.mp3'))
     assert (output/'initial-transcription.json').exists()
 
