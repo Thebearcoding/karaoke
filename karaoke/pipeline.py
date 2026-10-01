@@ -395,7 +395,7 @@ class Pipeline:
         try:
             catalog = list((self.catalog_root/'lyrics').glob('*.json')) if self.catalog_root else []
             with self.checkpoints.stage('prepare_lyrics',
-                    inputs=[self.output/'asr/transcription.json', self.output/'vocals-16k.wav',
+                    inputs=[self.output/'asr/transcription.json', self.output/'vocals-16k.wav', self.output/'source-44100.wav',
                             *sorted((self.output/'asr').glob('initial-transcription.json')),
                             *sorted((self.output/'asr').glob('run.json'))],
                     outputs=[self.output/'lyrics.json', self.output/'anchors.json', self.output/'asr/filtered.json',
@@ -461,10 +461,12 @@ class Pipeline:
         anchors, covered = matches[selected]
         recovery_path = self.output/'asr/anchor-recovery.json'
         write_json(recovery_path, dict(attempts=[]))
-        if covered < .55 and lyrics['provenance']['kind'] != 'asr_draft':
+        if covered < .55 and (lyrics['provenance']['kind'] != 'asr_draft' or report.get('recovery', {}).get('triggered')):
+            raw_audio = self.output/'source-44100.wav'
             _, anchors, covered = recover_anchor_words(None,
                 self.output/'vocals-16k.wav', lyrics['lines'], candidates[selected], lyrics['language'],
-                recovery_path, self.checkpoints, .55, duration)
+                recovery_path, self.checkpoints, .55, duration,
+                fallback_audio=raw_audio if raw_audio.is_file() else None)
         if covered < .55 and lyrics['provenance']['kind'] == 'video_description':
             # Optional metadata can contain a diary or synopsis. Only replace
             # it when separately recognized words corroborate the ASR text;

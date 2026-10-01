@@ -1221,6 +1221,49 @@ def test_missing_anchors_use_cached_context_without_lyric_prompt(tmp_path, bad_t
     assert json.loads(output.read_text())['attempts'][0]['reused'] is True
 
 
+def test_long_anchor_gap_can_use_cached_mix_and_keep_usable_asr_segments(tmp_path):
+    import soundfile as sf
+    from karaoke.anchor_recovery import recover_anchor_words
+    from karaoke.stage_cache import StageCache
+    lines = ['opening words', 'missing middle phrase', 'another missing sequence', 'closing words']
+    vocals, mixture = tmp_path/'vocals.wav', tmp_path/'mix.wav'
+    for audio in (vocals, mixture):
+        sf.write(audio, np.ones(82000)*.1, 1000)
+    words = [dict(word=lines[0], start=1., end=2.), dict(word=lines[-1], start=78., end=79.)]
+    begin = 79.6-45
+    good = [dict(word=text, start=a-begin, end=b-begin) for text,a,b in
+            [(lines[1],40.,45.), (lines[2],60.,65.), (lines[3],78.,79.)]]
+    calls = []
+
+    def create(**kwargs):
+        assert 'prompt' not in kwargs
+        calls.append(kwargs['file'].name)
+        if len(calls) == 1:
+            return SimpleNamespace(model_dump=lambda:dict(language='english', text='', segments=[], words=[]))
+        collapsed = [dict(word='noise', start=.5, end=.5) for _ in range(8)]
+        bad_segment = dict(text='noise '*8, start=0., end=1., no_speech_prob=.99)
+        return SimpleNamespace(model_dump=lambda:dict(language='english',
+            words=collapsed+good, segments=[bad_segment]+[
+                dict(text=w['word'], start=w['start'], end=w['end']) for w in good]))
+
+    client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create)))
+    output = tmp_path/'recovery.json'
+    args = (client, vocals, lines, words, 'English', output, StageCache(tmp_path), .55, 82.)
+    result, cues, score = recover_anchor_words(*args, fallback_audio=mixture)
+    assert score == 1. and [c['text'] for c in cues] == lines
+    assert result[0] == words[0]
+    np.testing.assert_allclose([(w['start'],w['end']) for w in result[1:]],
+                               [(40.,45.), (60.,65.), (78.,79.)], rtol=0, atol=1e-12)
+    report = json.loads(output.read_text())
+    assert len(calls) == 2 and all(a['end']-a['begin'] <= 45 for a in report['attempts'])
+    assert [a['audio'] for a in report['attempts']] == [str(vocals), str(mixture)]
+    assert len(report['attempts'][-1]['rejected_segments']) == 1
+    assert recover_anchor_words(*args, fallback_audio=mixture)[0] == result and len(calls) == 2
+    # Changing only the fallback PCM invalidates its response, not the vocal response.
+    sf.write(mixture, np.ones(82000)*.2, 1000)
+    assert recover_anchor_words(*args, fallback_audio=mixture)[0] == result and len(calls) == 3
+
+
 @pytest.mark.parametrize('language,text', [
     ('English', "One two three four five six seven eight nine ten eleven twelve. Don't lose déjà vu!"),
     ('Chinese', '甲乙丙丁戊己庚辛壬癸甲乙丙丁戊己庚辛壬癸，今天hello world不要漏字。'),
