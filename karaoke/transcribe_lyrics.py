@@ -4,6 +4,7 @@ import argparse
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -15,6 +16,23 @@ import time
 from openai import OpenAI
 from job_schema import song_language
 from stage_progress import progress_items, report_progress
+from stage_cache import StageCache, digest
+
+
+def cached_recognition(client, audio, request, output):
+    """Keep every API response, including rejected drafts, across stage retries."""
+    config = dict(request=request, implementation=inspect.getsource(cached_recognition))
+    key = hashlib.sha256((audio.name+digest(audio)+json.dumps(config, sort_keys=True)).encode()).hexdigest()[:16]
+    folder = output.parent/'asr-requests'
+    folder.mkdir(exist_ok=True)
+    path = folder/(key+'.json')
+    with StageCache(output.parent).stage('asr_request_'+key, inputs=[audio], outputs=[path],
+                                        config=config) as reused:
+        if not reused:
+            with audio.open('rb') as stream:
+                data = client.audio.transcriptions.create(file=stream, **request).model_dump()
+            path.write_text(json.dumps(data, ensure_ascii=False)+'\n')
+    return json.loads(path.read_text())
 
 
 def repetition_loop(data):
@@ -99,6 +117,98 @@ def select_recovery_text(text, initial_text, words, language):
     return None, report
 
 
+def splice_loop_window(original, replacement, left, right, begin):
+    """Replace a broken passage only between independently matched sung anchors."""
+    from rapidfuzz.distance import Levenshtein
+    from subtitles import normalized
+    segments = original['segments']
+    parts = replacement.get('segments') or []
+    if song_language(replacement.get('language')) != song_language(original.get('language')):
+        return None
+
+    def boundary(anchor, side):
+        expected = normalized(anchor['text']).casefold()
+        candidates = []
+        # An independent decode may split the same lyric into several segments.
+        for first, part in enumerate(parts):
+            if abs(part['start']+begin-anchor['start']) > 2:
+                continue
+            for stop in range(first+1, min(len(parts), first+3)+1):
+                if abs(parts[stop-1]['end']+begin-anchor['end']) > 2:
+                    continue
+                observed = normalized(''.join(p['text'] for p in parts[first:stop])).casefold()
+                # Padding can contain the tail/head of a neighboring lyric.
+                # Only ignore text on the outside of the eventual splice.
+                observed = observed[-len(expected):] if side == 'left' else observed[:len(expected)]
+                score = Levenshtein.normalized_similarity(expected, observed)
+                if score >= .8:
+                    candidates.append((score, first, stop))
+        if not candidates:
+            return None
+        candidates.sort(reverse=True)
+        best = candidates[0]
+        # Two disjoint, nearly identical matches do not identify a safe cut.
+        if any(score >= best[0]-.05 and (stop <= best[1] or first >= best[2])
+               for score, first, stop in candidates[1:]):
+            return None
+        return best[1:]
+
+    before, after = boundary(segments[left], 'left'), boundary(segments[right], 'right')
+    if before is None or after is None or before[1] >= after[0]:
+        return None
+    first, stop = before[1], after[0]
+    # Word times are taken directly from this decode, never interpolated at cuts.
+    lo, hi = parts[first]['start'], parts[stop]['start']
+    body = [dict(s, start=s['start']+begin, end=s['end']+begin) for s in parts[first:stop]]
+    words = [dict(w, start=w['start']+begin, end=w['end']+begin)
+             for w in replacement.get('words') or [] if lo <= w['start'] < hi]
+    if (not words or body[0]['start'] < segments[left]['end'] or
+            body[-1]['end'] > segments[right]['start'] or
+            any(w['start'] < segments[left]['end'] or w['end'] > segments[right]['start'] for w in words)):
+        return None
+    joined = segments[:left+1] + body + segments[right:]
+    result = dict(original, segments=joined, text=' '.join(s['text'] for s in joined),
+        words=[w for w in original.get('words') or [] if w['start'] < segments[left]['end']] + words +
+              [w for w in original.get('words') or [] if w['start'] >= segments[right]['start']])
+    # Cropped audio can itself loop at its final cut. Only the verified interior
+    # is used; apply the unchanged quality gate to the actual joined transcript.
+    return None if needs_recovery(result) else result
+
+
+def repair_loop_window(data, audio, duration, recognize, output):
+    """Try one bounded decode around a localized loop before retrying the song."""
+    from subtitles import normalized
+    segments = data.get('segments') or []
+    bad = [i for i, s in enumerate(segments) if repetition_loop(dict(segments=[s]))]
+    if not bad or not data.get('words') or song_language(data.get('language')) is None:
+        return None
+
+    def usable_anchor(index):
+        text = normalized(segments[index]['text']).casefold()
+        # Short repeated syllables cannot identify where one decode joins another.
+        return len(text) >= 6 and len(set(text)) >= 4
+
+    left = next((i for i in range(bad[0]-1, max(-1, bad[0]-4), -1) if usable_anchor(i)), None)
+    right = next((i for i in range(bad[-1]+1, min(len(segments), bad[-1]+4)) if usable_anchor(i)), None)
+    if left is None or right is None:
+        return None
+    begin, end = max(0., segments[left]['start']-.5), min(duration, segments[right]['end']+.5)
+    if not 0 < end-begin <= 90:
+        return None
+    clip = output/'loop-repair.mp3'
+    report = dict(begin=begin, end=end, left=left, right=right, accepted=False)
+    try:
+        subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-y', '-ss', str(begin), '-i', str(audio),
+            '-t', str(end-begin), '-ar', '16000', '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '64k', str(clip)], check=True)
+        part = recognize(clip)
+        result = splice_loop_window(data, part, left, right, begin)
+        report['accepted'] = result is not None
+        (output/'loop-repair.json').write_text(json.dumps(dict(report, response=part), ensure_ascii=False)+'\n')
+        return (result, report) if result is not None else None
+    finally:
+        clip.unlink(missing_ok=True)
+
+
 def transcribe(client, audio, language, hint, output):
     options = {} if language == 'auto' else {'language': language}
 
@@ -107,11 +217,10 @@ def transcribe(client, audio, language, hint, output):
             song_language(prediction.get('language')) is None)
 
     def recognize(path, model='whisper-1', instruction=None):
-        with path.open('rb') as stream:
-            return client.audio.transcriptions.create(file=stream, model=model, **options,
-                prompt=instruction if instruction is not None else hint,
-                temperature=0, response_format='verbose_json' if model == 'whisper-1' else 'json',
-                **({'timestamp_granularities': ['word', 'segment']} if model == 'whisper-1' else {})).model_dump()
+        request = dict(model=model, **options, prompt=instruction if instruction is not None else hint,
+            temperature=0, response_format='verbose_json' if model == 'whisper-1' else 'json',
+            **({'timestamp_granularities': ['word', 'segment']} if model == 'whisper-1' else {}))
+        return cached_recognition(client, path, request, output)
 
     data = recognize(audio)
     recovery = dict(triggered=False, chunks=[])
@@ -123,6 +232,10 @@ def transcribe(client, audio, language, hint, output):
     # explicit user language, but let recovery re-detect automatic requests.
     duration = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',
         'format=duration', '-of', 'default=nw=1:nk=1', str(audio)], text=True))
+    repaired = repair_loop_window(data, audio, duration, recognize, output)
+    if repaired is not None:
+        data, report = repaired
+        return data, dict(triggered=True, text_model='whisper-1', loop_repair=report, chunks=[])
     fallback_model = os.getenv('KARAOKE_ASR_FALLBACK_MODEL', 'gpt-4o-transcribe')
     # Keep full recording context for text: independent chunks can omit a split
     # syllable or duplicate the opening of the next lyric. Chunks only locate words.

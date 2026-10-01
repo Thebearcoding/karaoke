@@ -1746,6 +1746,16 @@ def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, f
     if repetition_loop(dict(segments=[dict(text=fallback_text)])):
         with pytest.raises(ValueError, match='文本重试仍有重复异常'):
             transcribe(client, audio, 'auto', '', output)
+        # Retrying the failed stage retains both rejected fallback responses.
+        from karaoke.stage_cache import StageCache
+        previous_calls = list(calls)
+        with pytest.raises(ValueError, match='文本重试仍有重复异常'):
+            with StageCache(tmp_path).stage('transcribe', inputs=[audio], outputs=[output]):
+                output.mkdir()
+                transcribe(client, audio, 'auto', '', output)
+        assert calls == previous_calls
+        assert len(list((tmp_path/'asr-requests').glob('*.json'))) == 3
+        assert not (tmp_path/'checkpoints/transcribe.json').exists()
         return
     data, recovery = transcribe(client, audio, 'auto', '', output)
     assert recovery['triggered'] and len(calls) == (6 if short_tail else 7)
@@ -1775,11 +1785,95 @@ def test_normal_choruses_do_not_trigger_asr_retry(tmp_path, language):
     assert not repetition_loop(dict(segments=[dict(start=i, end=i+.02, text='耶') for i in range(21)]))
     audio = tmp_path/'audio.mp3'
     audio.write_bytes(b'input')
+    output = tmp_path/'asr'
+    output.mkdir()
     with patch('karaoke.transcribe_lyrics.OpenAI') as client:
         client.audio.transcriptions.create.return_value.model_dump.return_value = data
-        actual, recovery = transcribe(client, audio, language, '', tmp_path)
+        actual, recovery = transcribe(client, audio, language, '', output)
         assert actual == data and not recovery['triggered']
         client.audio.transcriptions.create.assert_called_once()
+
+
+def test_asr_request_cache_checks_input_parameters_and_response(tmp_path):
+    from karaoke.transcribe_lyrics import cached_recognition
+    from karaoke.stage_cache import retained_files
+    audio = tmp_path/'audio.mp3'
+    audio.write_bytes(b'first audio')
+    output = tmp_path/'asr'
+    output.mkdir()
+    calls = []
+    def create(**kwargs):
+        calls.append(kwargs['prompt'])
+        data = dict(text='known response', call=len(calls))
+        return SimpleNamespace(model_dump=lambda: data)
+    client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create)))
+    request = dict(model='whisper-1', prompt='')
+    first = cached_recognition(client, audio, request, output)
+    assert cached_recognition(client, audio, request, output) == first
+    path = next((tmp_path/'asr-requests').glob('*.json'))
+    assert path.relative_to(tmp_path).as_posix() in retained_files(tmp_path)
+    path.write_text('{"text":"corrupted response"}')
+    assert cached_recognition(client, audio, request, output)['call'] == 2
+    audio.write_bytes(b'different audio')
+    assert cached_recognition(client, audio, request, output)['call'] == 3
+    assert cached_recognition(client, audio, dict(request, prompt='new context'), output)['call'] == 4
+
+
+@pytest.mark.parametrize('problem', [None, 'padding', 'missing_boundary', 'wrong_language', 'overlap', 'loop'])
+def test_local_asr_repair_keeps_surrounding_words_and_requires_matching_boundaries(tmp_path, problem):
+    from copy import deepcopy
+    from karaoke.transcribe_lyrics import repair_loop_window, splice_loop_window
+    import soundfile as sf
+    original = dict(language='chinese', duration=60, segments=[
+        dict(start=3., end=5., text='此刻一起唱着歌'),
+        # The decoder starts at 6s but only emits loop words much later. A
+        # repair must include the lost audio before those words, not just 30s+.
+        dict(start=30., end=32., seek=600, text='哒'*100),
+        dict(start=45., end=48., text='走向明天的远方')],
+        words=[dict(start=3.,end=5.,word='此刻一起唱着歌'),
+               dict(start=30.,end=32.,word='哒'*100),
+               dict(start=45.,end=48.,word='走向明天的远方')])
+    replacement = dict(language='chinese', segments=[
+        dict(start=.5,end=2.5,text='此刻一起唱着歌'),
+        dict(start=8.,end=10.,text='轻轻唱出这一句'),
+        dict(start=20.,end=22.,text='然后听见你的回答'),
+        dict(start=42.5,end=45.5,text='走向明天的远方')],
+        words=[dict(start=.5,end=2.5,word='此刻一起唱着歌'),
+               dict(start=8.,end=10.,word='轻轻唱出这一句'),
+               dict(start=20.,end=22.,word='然后听见你的回答'),
+               dict(start=42.5,end=45.5,word='走向明天的远方')])
+    damaged = deepcopy(replacement)
+    if problem == 'missing_boundary':
+        damaged['segments'][-1]['text'] = '完全无关的一句话'
+    elif problem == 'wrong_language':
+        damaged['language'] = 'english'
+    elif problem == 'overlap':
+        damaged['words'][1]['end'] = 46.
+    elif problem == 'loop':
+        damaged['segments'][1]['text'] = '啦'*100
+    elif problem == 'padding':
+        damaged['segments'][0]['text'] = '我说' + damaged['segments'][0]['text']
+        damaged['segments'].append(dict(start=45.5,end=45.5,text='啦'*100))
+        damaged['words'].append(dict(start=45.5,end=45.5,word='啦'*100))
+    result = splice_loop_window(original, damaged, 0, 2, 2.5)
+    if problem not in (None, 'padding'):
+        assert result is None
+        return
+    assert result['segments'][0] == original['segments'][0]
+    assert result['segments'][-1] == original['segments'][-1]
+    assert result['words'] == [original['words'][0],
+        dict(start=10.5,end=12.5,word='轻轻唱出这一句'),
+        dict(start=22.5,end=24.5,word='然后听见你的回答'), original['words'][-1]]
+    audio, output = tmp_path/'audio.wav', tmp_path/'asr'
+    sf.write(audio, np.zeros(60000), 1000)
+    output.mkdir()
+    def recognize(path):
+        assert path.is_file()
+        return replacement
+    repaired, report = repair_loop_window(original, audio, 60, recognize, output)
+    assert repaired == result and report['accepted']
+    assert (report['begin'],report['end']) == (2.5,48.5)
+    assert not (output/'loop-repair.mp3').exists()
 
 
 @pytest.mark.parametrize('recoverable', [True, False])
