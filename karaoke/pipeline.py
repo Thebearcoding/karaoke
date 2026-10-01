@@ -146,7 +146,7 @@ class Pipeline:
         alignment_code = [ROOT/p for p in ('align_lyrics_whisper.py', 'align_lyric_phonemes.py',
             'align_english_onsets.py', 'align_repeated_lyrics.py', 'phoneme_progress.py',
             'phonetic_align.py', 'anchors_from_asr.py', 'subtitles.py', 'lyric_progress.py',
-            'onset_consensus.py', 'word_onset_metrics.py', 'experiments/cjk-onsets-v003/run.py',
+            'onset_consensus.py', 'word_onset_metrics.py', 'cjk_recovery.py', 'experiments/cjk-onsets-v003/run.py',
             'experiments/cjk-onsets-v003/protocol.json')]
         english = str(ROOT/'align_english_onsets.py') in [str(a) for a in command]
         specs = {
@@ -167,7 +167,7 @@ class Pipeline:
                                ['english-onsets' if english else 'phonemes'], alignment_code),
             'align_repeats': (['music-separation/song/vocals.wav', 'phonemes/cues.json', 'word-cues.json', 'repeat-jobs.json'],
                               ['repeated-lyrics'], alignment_code),
-            'align_context': (['music-separation/song/vocals.wav', 'ordered-cues.json', 'context-jobs.json'],
+            'align_context': (['music-separation/song/vocals.wav', 'source-44100.wav', 'ordered-cues.json', 'context-jobs.json'],
                               ['context'], alignment_code),
         }
         if name not in specs:
@@ -188,6 +188,8 @@ class Pipeline:
                 language = 'English' if english else json.loads((self.output/'lyrics.json').read_text())['language']
                 directory = {'Chinese': 'mandarin', 'Japanese': 'japanese', 'English': 'english'}[language]
                 weights = sorted((ROOT/'models/alignment/sofa'/directory).rglob('*.ckpt'))
+                if name == 'align_context' and language == 'Chinese':
+                    weights.append(ROOT/'models/alignment/mms/model.pt')
             # An unrelated model download must not invalidate completed stages.
             config['weights'] = [(str(p), p.stat().st_size, p.stat().st_mtime_ns)
                 for p in weights if p.is_file()]
@@ -566,6 +568,7 @@ class Pipeline:
                 json.loads((output/'repeated-lyrics/cues.json').read_text()), words)
             write_json(output/'ordered-cues.json', ordered)
             job.update(cues=str(output/'ordered-cues.json'), duration=duration,
+                       original_audio=str(output/'source-44100.wav'),
                        output=str(output/'context/song'))
             write_json(output/'context-jobs.json', [job])
             self.run('align_context', [sys.executable, ROOT/'experiments/cjk-onsets-v003/run.py',

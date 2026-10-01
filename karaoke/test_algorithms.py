@@ -317,6 +317,70 @@ class SubtitleIntegrity(unittest.TestCase):
             units, _ = protect_units(cue, candidate, 'Chinese')
             self.assertEqual(units[0]['start'], onset)
 
+    def test_cross_model_recovery_preserves_foreign_words_and_rejects_unverified_changes(self):
+        import copy
+        from unittest.mock import patch
+        from cjk_recovery import recover_groups
+        protocol = dict(maximum_spread_seconds=.08, minimum_relative_rms=.03)
+        original = [dict(text='go', aligned_start=.1, aligned_end=.4,
+                         units=[dict(text='go', first=0, stop=2, start=.1, end=.4)]),
+                    dict(text='甲乙 no', aligned_start=1.2, aligned_end=2.2,
+                         units=[dict(text='甲乙 ', first=0, stop=3, start=1.2, end=1.8),
+                                dict(text='no', first=3, stop=5, start=1.8, end=2.2)])]
+        # The old group is 600 ms late, but the foreign word already has a
+        # usable boundary and must neither be romanized as Chinese nor moved.
+        for mode in ('valid', 'one_witness', 'different_text', 'disagree', 'collapsed',
+                     'context_disagree', 'silent', 'crossing', 'invalid'):
+            with self.subTest(mode=mode):
+                calls = []
+
+                class Model:
+                    def infer(self, audio, begin, units, cue):
+                        calls.append((begin, len(audio)))
+                        self_units = [dict(u, start=start, end=end) for u, start, end in
+                                      zip(units, [.6, .9], [.9, 1.3])]
+                        if mode == 'collapsed':
+                            self_units[0]['end'] = .61
+                        if mode == 'context_disagree' and len(calls) == 1:
+                            self_units[0]['start'] = .75
+                        return dict(units=self_units)
+
+                def witness(cue, wave):
+                    values = [[dict(first=i, stop=i+1, text=text, start=start, end=end)
+                               for i, text, start, end in [(0, '甲', .61, .88), (1, '乙', .91, 1.3)]]
+                              for _ in range(2)]
+                    if mode == 'one_witness':
+                        values.pop()
+                    elif mode == 'different_text':
+                        values[1][1]['text'] = '丙'
+                    elif mode == 'disagree':
+                        values[1][1]['start'] = 1.2
+                    elif mode == 'invalid':
+                        values[0][0]['end'] = float('nan')
+                    return values
+
+                before = copy.deepcopy(original)
+                if mode == 'crossing':
+                    before[0]['units'][0]['end'] = .7
+                wave = np.full(44100*5, 0. if mode == 'silent' else .1)
+
+                def parsed(text, language):
+                    self.assertEqual(text, '甲乙 ')
+                    return [dict(first=i, stop=i+1, text=c, phones=['a']) for i, c in enumerate('甲乙')]
+
+                with patch('cjk_recovery.spoken_units', side_effect=parsed):
+                    actual, report = recover_groups(before, wave, Model(), witness, protocol)
+                self.assertEqual(len(set(calls)), 3)
+                self.assertEqual(actual[0], before[0])
+                self.assertEqual(actual[1]['units'][-1], before[1]['units'][-1])
+                if mode == 'valid':
+                    self.assertEqual([u['start'] for u in actual[1]['units']], [.6, .9, 1.8])
+                    self.assertFalse(highlight_coverage_errors(actual, 'Chinese'))
+                    self.assertTrue(report[0]['accepted'])
+                else:
+                    self.assertEqual(actual, before)
+                    self.assertFalse(report[0]['accepted'])
+
     def test_pronunciation_mapping_preserves_written_glyphs(self):
         self.assertEqual(reading_parts('感じ', 'かんじ'), [(0,1,'かん'),(1,2,'じ')])
         self.assertEqual(japanese_phone_groups('ー', previous_vowel='o'), [['o']])

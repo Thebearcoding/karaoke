@@ -1,0 +1,8 @@
+{
+  "url": "https://dl.fbaipublicfiles.com/mms/torchaudio/ctc_alignment_mling_uroman/model.pt",
+  "path": "karaoke/models/alignment/mms/model.pt",
+  "sha256": "20ef12963ab4924bef49ac4fc7f58ad5da2ee43b2c11bc8c853c9b90ecdbc680",
+  "bytes": 1262047414,
+  "bundle": "torchaudio.pipelines.MMS_FA",
+  "tested_torchaudio": "2.11.0"
+}
