@@ -265,9 +265,15 @@ class SubtitleIntegrity(unittest.TestCase):
                               dict(text='丙', first=2, stop=3, start=2., end=2.6)]),
                   dict(text='后', aligned_start=3., aligned_end=4.,
                        units=[dict(text='后', first=0, stop=1, start=3., end=4.)])]
-        for mode in ('valid', 'silent', 'disagree', 'collapsed', 'outside', 'large_change', 'crossing'):
+        for mode in ('valid', 'silent', 'disagree', 'collapsed', 'outside', 'large_change',
+                     'leading_punctuation_large_change', 'crossing'):
             with self.subTest(mode=mode):
                 calls = []
+                baseline = copy.deepcopy(before)
+                if mode == 'leading_punctuation_large_change':
+                    baseline[1]['text'] = '，甲乙丙'
+                    baseline[1]['units'][0].update(text='，甲乙', stop=3)
+                    baseline[1]['units'][1].update(first=3, stop=4)
 
                 class Model:
                     def infer(self, audio, begin, units, context):
@@ -279,7 +285,7 @@ class SubtitleIntegrity(unittest.TestCase):
                             times['乙'] = (1.5, 1.51)
                         if mode == 'outside':
                             times['乙'] = (2.8, 3.)
-                        if mode == 'large_change':
+                        if mode in ('large_change', 'leading_punctuation_large_change'):
                             times['甲'] = (1.45, 1.49)
                         if mode == 'crossing':
                             times['甲'] = (.7, 1.4)
@@ -287,12 +293,12 @@ class SubtitleIntegrity(unittest.TestCase):
 
                 wave = np.zeros(44100*5) if mode == 'silent' else np.ones(44100*5)*.1
                 parsed = lambda text, language: [dict(text=c, first=i, stop=i+1, phones=['a'])
-                                                 for i, c in enumerate(text) if not c.isspace()]
+                                                 for i, c in enumerate(text) if c.isalnum()]
                 with patch.object(module, 'spoken_units', side_effect=parsed):
-                    result, report = module.repair_character_groups(copy.deepcopy(before), before, wave, Model(), protocol)
-                self.assertEqual(calls, ['前 甲乙丙 后']*3)
+                    result, report = module.repair_character_groups(copy.deepcopy(baseline), baseline, wave, Model(), protocol)
+                self.assertEqual(calls, ['前 '+baseline[1]['text']+' 后']*3)
                 self.assertEqual(before[1]['units'][0]['text'], '甲乙')
-                self.assertEqual([c['text'] for c in result], [c['text'] for c in before])
+                self.assertEqual([c['text'] for c in result], [c['text'] for c in baseline])
                 if mode == 'valid':
                     self.assertEqual([u['start'] for u in result[1]['units']], [1.1, 1.5, 2.])
                     self.assertFalse(highlight_coverage_errors(result, 'Chinese'))

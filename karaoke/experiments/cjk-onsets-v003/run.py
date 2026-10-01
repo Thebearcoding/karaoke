@@ -98,13 +98,13 @@ def repair_character_groups(cues, baseline, wave, model, protocol):
                 decision['reason'] = 'not all contexts produced separate usable characters'
                 continue
             candidate, reasons = [], []
-            for choices in zip(*variants):
+            for unit_index, choices in enumerate(zip(*variants)):
                 starts = [u['start'] for u in choices]
                 start, end = float(np.median(starts)), float(np.median([u['end'] for u in choices]))
                 piece = wave[round(start*44100):round(end*44100)]
                 if max(starts)-min(starts) > protocol['maximum_spread_seconds']:
                     reasons.append('context disagreement')
-                if choices[0]['first'] == group['first'] and abs(start-group['start']) > protocol['maximum_change_seconds']:
+                if unit_index == 0 and abs(start-group['start']) > protocol['maximum_change_seconds']:
                     reasons.append('large change needs independent verification')
                 if not len(piece) or float(np.sqrt(np.mean(piece**2))) <= floor:
                     reasons.append('insufficient audible vocal support')
