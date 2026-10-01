@@ -32,6 +32,16 @@ def repetition_loop(data):
 
 
 def needs_recovery(data):
+    # A wrong language/tokenization can collapse several lines into one "word"
+    # and push the first segment past later segments. Such timing cannot guide
+    # the alignment windows; retry it rather than sorting or clamping timestamps.
+    for kind in ('segments', 'words'):
+        timed = [item for item in data.get(kind) or [] if 'start' in item and 'end' in item]
+        if any(not math.isfinite(item['start']) or not math.isfinite(item['end']) or
+               not 0 <= item['start'] <= item['end'] for item in timed):
+            return True
+        if any(right['start'] < left['start'] for left, right in zip(timed, timed[1:])):
+            return True
     text = ''.join(s.get('text', '') for s in data.get('segments') or []) or data.get('text', '')
     return not any(c.isalnum() for c in text) or repetition_loop(data)
 

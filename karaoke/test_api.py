@@ -787,8 +787,9 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
 
 
 @pytest.mark.parametrize('fallback_text', ['恢复的歌词', '哒'*100])
-@pytest.mark.parametrize('initial_kind', ['loop', 'punctuation', 'fragmented_loop'])
-def test_repetitive_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, fallback_text, initial_kind):
+@pytest.mark.parametrize('initial_kind', ['loop', 'punctuation', 'fragmented_loop',
+                                        'backward_segments', 'backward_words', 'invalid_range'])
+def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, fallback_text, initial_kind):
     import soundfile as sf
     audio = tmp_path/'audio.wav'
     sf.write(audio, np.zeros(65000), 1000)
@@ -806,6 +807,15 @@ def test_repetitive_asr_recovers_in_chunks_without_inventing_word_times(tmp_path
         elif name == str(audio) and initial_kind == 'fragmented_loop':
             data = dict(language='english', segments=[dict(start=i,end=i,text='same empty phrase')
                                                      for i in range(24)], words=[])
+        elif initial_kind in ('backward_segments', 'backward_words', 'invalid_range') and (
+                name == str(audio) or name.endswith('chunk-00030.mp3')):
+            data = dict(language='english', segments=[dict(start=1,end=2,text='第一句'),
+                                                      dict(start=3,end=4,text='第二句')],
+                        words=[dict(start=1,end=2,word='第一句'), dict(start=3,end=4,word='第二句')])
+            if initial_kind == 'invalid_range':
+                data['words'][0]['end'] = .5
+            else:
+                data[initial_kind.removeprefix('backward_')][0].update(start=10, end=11)
         elif name == str(audio) or name.endswith('chunk-00030.mp3'):
             data = dict(language='chinese', segments=[dict(start=0,end=1,text='呜'*100)], words=[])
         else:
@@ -824,14 +834,15 @@ def test_repetitive_asr_recovers_in_chunks_without_inventing_word_times(tmp_path
     assert data['segments'] == [dict(text='恢复的歌词', start=0., end=65., timing_source='recording_bounds')]
     assert len(recovery['chunks']) == 3 and recovery['chunks'][1]['word_times_discarded']
     assert recovery['text_model'] == 'gpt-4o-transcribe'
-    assert data['language'] == 'Chinese' and recovery['language_evidence'] == {'Chinese': 4}
+    assert data['language'] == 'Chinese'
+    assert {key: count for key, count in recovery['language_evidence'].items() if count} == {'Chinese': 4}
     assert not list(output.glob('chunk-*.mp3'))
     assert (output/'initial-transcription.json').exists()
 
 
 def test_normal_choruses_do_not_trigger_asr_retry(tmp_path):
     data = dict(segments=[dict(start=i*4, end=i*4+3, text='唱到这一句，接着唱下一句') for i in range(8)],
-                words=[dict(start=1,end=2,word='唱')])
+                words=[dict(start=1,end=2,word='唱'), dict(start=1.9,end=2.5,word='歌')])
     assert not repetition_loop(data)
     audio = tmp_path/'audio.mp3'
     audio.write_bytes(b'input')
