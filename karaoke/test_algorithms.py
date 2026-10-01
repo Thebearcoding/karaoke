@@ -473,6 +473,40 @@ class SubtitleIntegrity(unittest.TestCase):
 
 
 class WordOnsetScoring(unittest.TestCase):
+    def test_risk_checker_keeps_weak_missing_words_and_measures_its_own_errors(self):
+        from copy import deepcopy
+        from word_onset_metrics import onset_risks, score_risks
+
+        reference = [dict(id=i, text=t, start=float(i+1)) for i, t in enumerate(['a', 'b', 'c', 'd'])]
+        predictions, verifier = deepcopy(reference), deepcopy(reference)
+        predictions[0]['start'] += .4  # An independently detected real error.
+        verifier[1]['start'] += .4     # The verifier itself is wrong: false alert.
+        predictions[2]['start'] = verifier[2]['start'] = 8.  # Shared error is missed.
+        verifier[3]['start'] = float('nan')   # Quiet word not recognized: retain and review it.
+        before = deepcopy(predictions)
+        risks = onset_risks(predictions, verifier)
+        measured = score_risks(score_onsets(reference, predictions), risks)
+        self.assertEqual(predictions, before)
+        self.assertEqual([r['text'] for r in risks], ['a', 'b', 'c', 'd'])
+        self.assertEqual(risks[-1]['reason'], 'missing_acoustic_evidence')
+        self.assertIsNone(risks[-1]['verifier'])
+        self.assertEqual(measured['true_positive'], 1)
+        self.assertEqual(measured['false_negative'], 1)
+        self.assertEqual(measured['false_positive'], 2)
+        self.assertEqual(measured['recall'], .5)
+        self.assertAlmostEqual(measured['precision'], 1/3)
+        with self.assertRaises(ValueError):
+            onset_risks(predictions, verifier[:-1])
+
+    def test_chinese_merged_highlight_preserves_both_expected_characters(self):
+        from word_onset_metrics import onset_risks
+
+        events = word_events([dict(text='轻唱', units=[dict(first=0, stop=2, start=1.)])], 'Chinese')
+        self.assertEqual([e['text'] for e in events], ['轻', '唱'])
+        self.assertTrue(all(r['review'] for r in onset_risks(events, events)))
+        with self.assertRaises(ValueError):
+            word_events([dict(text='日本語', units=[])], 'Japanese')
+
     def test_missing_and_late_words_stay_in_accuracy_denominator(self):
         reference = [dict(id=i, text=str(i), start=float(i+1)) for i in range(4)]
         predictions = [dict(r) for r in reference]
@@ -503,6 +537,80 @@ class WordOnsetScoring(unittest.TestCase):
         self.assertEqual(score_onsets(reference, predictions, fps=30)['summary']['pco']['50'], 0.)
         with self.assertRaises(ValueError):
             score_onsets(reference, [])
+
+
+class StemQualityScoring(unittest.TestCase):
+    def test_reconstruction_cannot_hide_a_lost_quiet_word_or_swapped_roles(self):
+        from stem_metrics import score_stems
+
+        rng = np.random.default_rng(51)
+        refs = {name: rng.normal(0, .05, (3000, 2)) for name in ('lead', 'backing', 'music')}
+        refs['lead'][1000:2000] *= .01  # A genuinely quiet reference is still scored.
+        refs['lead'][2000:] = 0
+        damaged = {name: wave.copy() for name, wave in refs.items()}
+        damaged['music'][1000:2000] += damaged['lead'][1000:2000]
+        damaged['lead'][1000:2000] = 0
+        np.testing.assert_allclose(sum(damaged.values()), sum(refs.values()), atol=1e-15)
+        scores = score_stems(refs, damaged, 1000)
+        self.assertEqual(scores['summary']['roles']['lead']['active_windows'], 2)
+        self.assertEqual(scores['windows'][1]['roles']['lead']['fixed_gain_db'], 0.)
+        self.assertEqual(scores['windows'][1]['roles']['lead']['si_sdr_db'], -300.)
+        self.assertLess(scores['summary']['roles']['lead']['active_window_p10']['fixed_gain_db'], 31.)
+        swapped = dict(refs, lead=refs['backing'], backing=refs['lead'])
+        scores = score_stems(refs, swapped, 1000)
+        self.assertLess(scores['summary']['roles']['lead']['fixed_gain_db'], 0.)
+        self.assertLess(scores['summary']['roles']['lead']['si_sir_db'], 0.)
+        self.assertGreater(scores['summary']['roles']['lead']['silent_window_peak_output_dbfs'], -30.)
+
+    def test_gain_loss_and_correlated_stems_are_not_hidden_by_scale_invariance(self):
+        from stem_metrics import score_stems
+
+        rng = np.random.default_rng(72)
+        lead = rng.normal(0, .05, (1000, 2))
+        refs = dict(lead=lead, backing=lead.copy())
+        scores = score_stems(refs, dict(lead=lead*.5, backing=lead*1.5), 1000)
+        row = scores['summary']['roles']['lead']
+        self.assertAlmostEqual(row['fixed_gain_db'], 6.020599913)
+        self.assertAlmostEqual(row['target_gain'], .5)
+        self.assertGreater(row['si_sdr_db'], 120.)
+        self.assertIsNone(row['si_sir_db'])
+        self.assertFalse(scores['summary']['interference_identifiable'])
+        with self.assertRaises(ValueError):
+            score_stems(refs, dict(lead=lead[:-1], backing=lead), 1000)
+
+    def test_quality_report_requires_references_for_accuracy_and_hashes_inputs(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from karaoke.tools.quality import evaluate
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events = [dict(id=0, text='quiet', start=1.)]
+            for name in ('candidate', 'verifier', 'reference'):
+                (root/f'{name}.json').write_text(json.dumps(events))
+            case = dict(id='fixture', prediction='candidate.json', verifier='verifier.json')
+            manifest = root/'manifest.json'
+            manifest.write_text(json.dumps(dict(onsets=[case])))
+            report = evaluate(manifest)
+            self.assertIsNone(report['cases'][0]['accuracy'])
+            self.assertFalse(report['cases'][0]['risks'][0]['review'])
+            case.update(reference='reference.json', reference_provenance='independent fixture')
+            manifest.write_text(json.dumps(dict(onsets=[case])))
+            report = evaluate(manifest)
+            self.assertEqual(report['cases'][0]['accuracy']['summary']['pco']['50'], 1.)
+            self.assertEqual(len(report['input_sha256']), 4)
+            wave = np.linspace(-.1, .1, 320).reshape(-1, 1)
+            sf.write(root/'truth.wav', wave, 16000, subtype='DOUBLE')
+            sf.write(root/'half.wav', wave*.5, 16000, subtype='DOUBLE')
+            stem = dict(id='stem', reference_provenance='independent fixture',
+                        references=dict(vocals='truth.wav'), predictions=dict(vocals='half.wav'))
+            manifest.write_text(json.dumps(dict(stems=[stem])))
+            report = evaluate(manifest)
+            self.assertAlmostEqual(report['cases'][0]['scores']['summary']['roles']['vocals']['target_gain'], .5)
+            sf.write(root/'half.wav', wave*.5, 8000, subtype='DOUBLE')
+            with self.assertRaises(ValueError):
+                evaluate(manifest)
 
 
 class AlignmentIntegrity(unittest.TestCase):

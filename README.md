@@ -35,6 +35,7 @@ python3.12 -m venv .venv
 - [API](karaoke/API.md)：请求、任务状态、成品下载和环境变量。
 - [界面设计](karaoke/docs/design/app.md) · [字幕设计](karaoke/docs/design/subtitles.md)。
 - [切字验收](karaoke/docs/word-onset-metrics.md) · [主唱／伴唱验收](karaoke/docs/lead-backing-metrics.md) · [整体验收](karaoke/ACCEPTANCE.md)。
+- [自动质量检查](karaoke/docs/automatic-quality.md)：独立参考评分、疑点检查器的漏报／误报和故障注入验证。
 
 ## 代码结构
 
