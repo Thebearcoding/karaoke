@@ -74,6 +74,38 @@ def test_playlist_duplicate_song_order_and_stale_end_event(tmp_path):
         assert client.post('/v1/room/commands', json={'action':'reorder','order':[ids[2],ids[2]]}).status_code == 422
 
 
+def test_soak_adds_all_cases_to_room_and_only_removes_finished_owned_entries(tmp_path):
+    from karaoke.tools.soak import queue_cases, release_finished_entries
+    app = create_app(tmp_path, worker_command=fake_worker, version='test')
+    user_job = ready_job(app.state.store)
+    state = {'provider_backoff': {}, 'cases': [dict(url=f'https://www.youtube.com/watch?v={i:011d}',
+        title=f'Test {i}', provider='youtube', attempts=[]) for i in range(3)]}
+    with TestClient(app) as client:
+        user = client.post('/v1/room/entries', json={'job_id': user_job['id']}).json()['entries'][0]
+        queue_cases(client, 'http://testserver', state, 'test', lambda: None)
+        entries = client.get('/v1/room').json()['entries']
+        assert len(entries) == 4  # The abandoned queue=2 idea must not become an app limit.
+        attempts = [c['attempts'][0] for c in state['cases']]
+        assert {a['entry_id'] for a in attempts} == {e['id'] for e in entries[1:]}
+        queue_cases(client, 'http://testserver', state, 'test', lambda: None)
+        assert len(client.get('/v1/room').json()['entries']) == 4
+        attempts[0]['status'] = 'passed'
+        attempts[1]['status'] = 'failed'
+        client.post('/v1/room/commands', json={'action':'select','entry_id':attempts[0]['entry_id']})
+        release_finished_entries(client, 'http://testserver', state)
+        remaining = {e['id'] for e in client.get('/v1/room').json()['entries']}
+        assert remaining == {user['id'], attempts[0]['entry_id'], attempts[2]['entry_id']}
+
+
+def test_room_can_force_full_revalidation_without_reusing_a_completed_job(tmp_path):
+    app = create_app(tmp_path, worker_command=fake_worker, version='test')
+    old = ready_job(app.state.store)
+    with TestClient(app) as client:
+        entry = client.post('/v1/room/entries', json={'url':URL,'force':True}).json()['entries'][0]
+        assert entry['job_id'] != old['id']
+        assert finished(client, entry['job_id'])['status'] == 'completed'
+
+
 def test_wait_for_preparation_then_play_pause_seek_mix_and_persist(tmp_path):
     app = create_app(tmp_path, worker_command=fake_worker, version='test')
     with TestClient(app) as client:

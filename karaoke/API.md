@@ -30,6 +30,8 @@ API 的依赖文件只安装服务依赖。新检出请按[安装说明](../SETU
 
 `pause`、`seek`、`next`、`ready` 必须带 `entry_id`，防止旧播放器事件影响新歌曲。`reorder` 传入完整的 `order` ID 数组，可带 `revision` 拒绝过期操作；当前歌曲保持首位。`mix` 接受 `instrumental`（纯伴奏）、`karaoke`（伴奏＋伴唱）、`original`（三轨一起播放）。
 
+`POST /v1/room/entries` 也接受 `force: true`，与 URL 一起使用时完整重做该视频，用于最终版本的整曲回归；普通点歌和失败重试默认复用缓存。此参数不改变房间队列容量。
+
 `levels` 独立调整三个声部，支持部分更新，例如 `{ "action": "levels", "levels": { "backing_vocals": 0.35, "lead_vocals": 0.2 } }`。键为 `instrumental`、`backing_vocals`、`lead_vocals`，值为 0–1 的有限数。房间快照中的 `levels` 包含全部三个值，手动设置不对应预设时 `mix` 为 `custom`。切歌、暂停、定位不改变音量；选择 `mix` 预设则重置三个值。`storage` 随房间 SSE 快照推送，前端不轮询。
 
 `pitch` 实时设置三轨共同的升降调，例如 `{ "action": "pitch", "pitch_semitones": -2 }`。接受 -6 至 +6 的整数半音数，0 为原调；快照中的 `pitch_semitones` 持久保存，遥控页同步。此命令不改变播放位置、播放速度、音量、预处理结果或缓存音轨。

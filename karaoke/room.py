@@ -43,6 +43,7 @@ class AddSong(BaseModel):
     job_id: str | None = None
     title: str | None = Field(default=None, max_length=200)
     source_title: str | None = Field(default=None, max_length=500)
+    force: bool = False
 
 
 class Updates:
@@ -181,7 +182,7 @@ class Room:
                 raise HTTPException(409, '这首歌的文件已不可用，请重新提交链接')
         else:
             try:
-                payload = JobRequest(url=request.url, title=request.title)
+                payload = JobRequest(url=request.url, title=request.title, force=request.force)
             except ValueError as error:
                 raise HTTPException(422, '请输入有效的 YouTube 或 Bilibili 单个视频链接') from error
             job, cached = self.store.create(payload, self.version)

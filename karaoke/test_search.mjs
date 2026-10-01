@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createVideoSearch, previewURL} from './web/search.js';
+import {createVideoSearch, previewURL, searchLibrary, visibleResults} from './web/search.js';
 
 function setup() {
   const requests = [], snapshots = [];
@@ -53,4 +53,34 @@ test('preview uses provider embeds, never arbitrary pages or autoplay', () => {
   assert.equal(new URL(bili).searchParams.get('bvid'), 'BV1bK411W797');
   assert.equal(new URL(bili).searchParams.get('autoplay'), '0');
   assert.equal(previewURL({provider:'youtube', url:'https://www.youtube.com.attacker.test/watch?v=n5sjpCQhTDk'}, ''), '');
+});
+
+test('local matches appear immediately and update while online providers are pending', async () => {
+  let library = [{url:'local', title:'弯弯的月亮', artist:'刘欢', status:'running'}];
+  const snapshots = [], requests = [];
+  const search = createVideoSearch(value => snapshots.push(structuredClone(value)), () => new Promise(resolve => requests.push(resolve)), query => searchLibrary(library, query));
+  const pending = search.search('刘欢 月亮');
+  assert.equal(snapshots[0].local.results[0].title, '弯弯的月亮');
+  assert.equal(snapshots[0].youtube.loading, true);
+  library[0].status = 'completed';
+  search.refreshLocal();
+  assert.equal(snapshots.at(-1).local.results[0].status, 'completed');
+  requests.forEach(resolve => resolve({ok:true,json:async () => ({results:[]})}));
+  await pending;
+  assert.equal(snapshots.at(-1).local.results.length, 1);
+  search.cancel();
+  const count = snapshots.length;
+  search.refreshLocal();
+  assert.equal(snapshots.length, count);
+});
+
+test('combined results prefer local, deduplicate sources, and keep source tabs usable', () => {
+  const songs = [{url:'b',provider:'bilibili'}, {url:'a',provider:'youtube'},
+    {url:'a',provider:'local'}, {url:'c',provider:'youtube'}, {url:'d',provider:'youtube'}];
+  assert.deepEqual(visibleResults(songs,'all',false).map(s => [s.url,s.provider]),
+    [['a','local'],['c','youtube'],['d','youtube']]);
+  assert.deepEqual(visibleResults(songs,'local',true), [songs[2]]);
+  assert.equal(visibleResults(songs,'youtube',false)[0],songs[1]);
+  assert.deepEqual(visibleResults([songs[0]],'all',true),[]);
+  assert.deepEqual(visibleResults([songs[0]],'bilibili',true),[songs[0]]);
 });

@@ -1,5 +1,5 @@
 import { Player } from './player.js';
-import { createVideoSearch, previewURL } from './search.js';
+import { createVideoSearch, previewURL, searchLibrary, visibleResults } from './search.js';
 
 const $ = id => document.getElementById(id);
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -17,8 +17,8 @@ let searchTimer, searchQuery = '', searchSongs = [], previewSong = null, skippin
 let videoSource = 'all';
 let youtubePending = false;
 const addingVideos = new Set();
-const providerName = provider => provider === 'youtube' ? 'YouTube' : 'B站';
-const videoSearch = createVideoSearch(renderVideoResults);
+const providerName = provider => ({local:'本地', youtube:'YouTube', bilibili:'B站'})[provider];
+const videoSearch = createVideoSearch(renderVideoResults, fetch, query => searchLibrary(library, query));
 const current = () => state.entries.find(e => e.id === state.current_id);
 const effectiveLevels = () => ({...state.levels, ...sendingLevels, ...pendingLevels});
 
@@ -103,7 +103,7 @@ function renderLibrary() {
     (search || filter === 'all' || (filter === 'ready' ? song.status === 'completed' : song.language === filter)));
   $('library-count').textContent = `${songs.length} 首${filter === 'ready' ? '已准备' : '歌曲'}`;
   $('library-heading').textContent = search ? '曲库里的歌' : '曲库';
-  $('local-library').hidden = Boolean(search && !songs.length);
+  $('local-library').hidden = Boolean(searchQuery || (search && !songs.length));
   document.querySelector('#local-library .filters').hidden = Boolean(search);
   const signature = JSON.stringify([songs.map(({stage_progress, active_stages, ...song}) => song), filter, query]);
   if (signature !== librarySignature) {
@@ -126,31 +126,36 @@ function renderLibrary() {
 function renderVideoResults(providers) {
   youtubePending = providers.youtube.loading;
   $('video-results').hidden = false;
-  $('search-status').innerHTML = Object.entries(providers).map(([name, info]) => `<span class="${info.error ? 'search-error' : ''}">${providerName(name)} · ${info.loading ? '搜索中…' : info.error ? escape(info.error) : info.results.length ? `${info.results.length} 个视频` : '未找到官方版本'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`).join('');
+  $('local-library').hidden = true;
+  $('search-status').innerHTML = Object.entries(providers).map(([name, info]) => `<span class="${info.error ? 'search-error' : ''}">${providerName(name)} · ${info.loading ? '搜索中…' : info.error ? escape(info.error) : info.results.length ? `${info.results.length} ${name === 'local' ? '首' : '个视频'}` : name === 'local' ? '未找到' : '未找到官方版本'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`).join('');
   const songs = Object.values(providers).flatMap(info => info.results);
+  const order = {local:0, youtube:1, bilibili:2};
   // Keep provider ranking independent of response order, without replacing cards.
   for (const song of songs) {
-    if (searchSongs.some(old => old.url === song.url)) continue;
+    const existing = searchSongs.findIndex(old => old.url === song.url && old.provider === song.provider);
+    if (existing >= 0) { searchSongs[existing] = song; continue; }
     const index = searchSongs.push(song)-1;
-    const before = song.provider === 'youtube' && $('video-grid').querySelector('[data-provider="bilibili"]');
-    (before || $('video-grid')).insertAdjacentHTML(before ? 'beforebegin' : 'beforeend', `<article class="video-card" data-provider="${song.provider}">
+    const before = [...$('video-grid').children].find(card => order[card.dataset.provider] > order[song.provider]);
+    (before || $('video-grid')).insertAdjacentHTML(before ? 'beforebegin' : 'beforeend', `<article class="video-card" data-provider="${song.provider}" data-result="${index}">
       <button class="video-thumbnail" data-preview="${index}" aria-label="预览：${escape(song.title)}">${song.thumbnail ? `<img src="${escape(song.thumbnail)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ''}<span class="preview-label">${icon('play')}预览</span>${song.duration ? `<span class="poster-duration">${time(song.duration)}</span>` : ''}</button>
-      <h3 title="${escape(song.title)}">${escape(song.title)}</h3><p class="video-uploader">${escape(song.uploader)}</p>
-      <div class="video-actions"><button data-add-video="${index}">${icon('plus')}<span>加入歌单</span></button><a href="${escape(song.url)}" target="_blank" rel="noopener noreferrer">${providerName(song.provider)} ↗</a></div>
+      <h3 title="${escape(song.title)}">${escape(song.title)}</h3><p class="video-uploader">${escape(song.uploader)}${song.provider === 'local' ? ' · <span class="local-status"></span>' : ''}</p>
+      <div class="video-actions"><button data-add-video="${index}">${icon('plus')}<span>加入歌单</span></button><a href="${escape(song.url)}" target="_blank" rel="noopener noreferrer">${song.provider === 'local' ? '原站' : providerName(song.provider)} ↗</a></div>
     </article>`);
   }
+  document.querySelectorAll('[data-result]').forEach(card => {
+    const song = searchSongs[card.dataset.result];
+    card.dataset.active = String(songs.some(item => item.url === song.url && item.provider === song.provider));
+    if (song.provider === 'local') card.querySelector('.local-status').textContent = song.status === 'completed' ? '已准备' : song.status === 'running' ? '准备中' : song.status === 'queued' ? '等待准备' : '需准备';
+  });
   filterVideos();
   updateVideoButtons();
 }
 
 function filterVideos() {
-  let shown = 0;
-  document.querySelectorAll('[data-provider]').forEach(card => {
-    const excluded = videoSource === 'all'
-      ? youtubePending && card.dataset.provider === 'bilibili'
-      : card.dataset.provider !== videoSource;
-    card.hidden = excluded || shown >= 3;
-    if (!card.hidden) shown++;
+  const cards = [...document.querySelectorAll('[data-result]')];
+  const visible = visibleResults(cards.filter(card => card.dataset.active === 'true').map(card => searchSongs[card.dataset.result]), videoSource, youtubePending);
+  cards.forEach(card => {
+    card.hidden = card.dataset.active !== 'true' || !visible.includes(searchSongs[card.dataset.result]);
   });
   document.querySelectorAll('[data-video-source]').forEach(button => {
     button.classList.toggle('selected', button.dataset.videoSource === videoSource);
@@ -216,8 +221,18 @@ function previewVideo(song) {
   previewSong = song;
   $('preview-title').textContent = song.title;
   $('preview-source').href = song.url;
-  $('preview-source').textContent = `在 ${providerName(song.provider)} 观看 ↗`;
+  $('preview-source').textContent = `在 ${song.url.includes('youtube.com') ? 'YouTube' : 'B站'} 观看 ↗`;
   $('preview-error').hidden = true;
+  if (song.provider === 'local' && song.status === 'completed' && song.job_id) {
+    const video = document.createElement('video');
+    video.src = `/v1/jobs/${song.job_id}/artifacts/mv`;
+    video.controls = true;
+    video.preload = 'metadata';
+    $('preview-player').replaceChildren(video);
+    $('video-preview').showModal();
+    updateVideoButtons();
+    return;
+  }
   const iframe = document.createElement('iframe');
   iframe.src = previewURL(song, location.origin);
   iframe.title = song.title;
@@ -360,6 +375,7 @@ function acceptState(updated) {
   state = updated;
   library = updated.library || [];
   renderLibrary();
+  videoSearch.refreshLocal();
   $('screen-preparation').innerHTML = preparationHTML(current());
   clockOffset = state.server_time - Date.now()/1000;
   renderQueue(); updateTransport(); renderStorage();

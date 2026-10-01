@@ -1,11 +1,9 @@
-"""Reproducible whole-song acceptance runs against an existing local API.
-
-No player commands, second worker, or private media cache. Run with --help.
-"""
+"""Reproducible whole-song acceptance runs through the room's song queue."""
 import argparse
 from contextlib import ExitStack
 from datetime import datetime, timezone
 import fcntl
+import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -245,6 +243,21 @@ def record_failure(attempt, job, folder):
                 stream.seek(max(0, path.stat().st_size-4000))
                 logs.append(stream.read().decode(errors='replace'))
     attempt['diagnostic_tail'] = '\n'.join(logs)
+    diagnostics = {}
+    for pattern in ('asr/*.json', 'alignment/*.json', 'phonemes/*.json', 'context/**/*.json',
+                    'lyrics.json', 'anchors.json', 'word-cues.json', 'quality.json'):
+        for path in folder.glob(pattern):
+            if path.stat().st_size <= 2*1024**2:
+                try:
+                    diagnostics[str(path.relative_to(folder))] = json.loads(path.read_text())
+                except (ValueError, OSError):
+                    continue
+    if diagnostics:
+        target = folder.parent/'soak-100'/f'{job["id"]}-{attempt["error_fingerprint"][:12]}.json.gz'
+        target.parent.mkdir(exist_ok=True)
+        with gzip.open(target, 'wt', encoding='utf-8') as output:
+            json.dump(diagnostics, output, ensure_ascii=False)
+        attempt['reproduction_file'] = str(target)
     external_markers = ('sign in', 'login', 'http error 403', 'http error 429', 'video unavailable',
                         'private video', 'timed out', 'connection reset', 'proxy', '登录', '无法访问',
                         '代理', '超时', 'risk control', '-352')
@@ -254,6 +267,54 @@ def record_failure(attempt, job, folder):
         attempt['next_retry_at'] = time.time()+min(86400, 7200*2**(attempt['external_attempt']-1))
         attempt['provider_blocked'] = not any(marker in (str(error)+' '.join(logs)).lower()
             for marker in ('video unavailable', 'private video', '无法访问'))
+
+
+def queue_cases(client, base, state, version, persist):
+    """Use the same room API as a person's add button; no test-only queue limit."""
+    room = client.get(base+'/v1/room').raise_for_status().json()
+    for case in state['cases']:
+        if len(room['entries']) >= 100:
+            break
+        last = case['attempts'][-1] if case['attempts'] else None
+        if last and last['status'] in ('submitted', 'running'):
+            if last.get('entry_id'):
+                continue
+            job = client.get(f'{base}/v1/jobs/{last["job_id"]}').raise_for_status().json()
+            if job['status'] not in ('queued', 'running', 'completed'):
+                continue
+            payload = dict(job_id=last['job_id'])
+        else:
+            if not eligible(case, version, time.time()) or time.time() < state['provider_backoff'].get(case['provider'], 0):
+                continue
+            payload = dict(url=case['url'], source_title=case['title'],
+                force=bool(last and last['status']=='passed' and last['pipeline_version']!=version))
+        before = {e['id'] for e in room['entries']}
+        response = client.post(base+'/v1/room/entries', json=payload)
+        if response.status_code == 409:
+            break  # The user may have filled the last available queue slot.
+        room = response.raise_for_status().json()
+        entry = next(e for e in room['entries'] if e['id'] not in before)
+        if not last or last['status'] not in ('submitted', 'running'):
+            job = client.get(f'{base}/v1/jobs/{entry["job_id"]}').raise_for_status().json()
+            last = dict(job_id=job['id'], pipeline_version=job['pipeline_version'], status='submitted',
+                        submitted_at=stamp(), external_attempt=1+sum(a['status']=='external' for a in case['attempts']))
+            case['attempts'].append(last)
+        last['entry_id'] = entry['id']
+        persist()
+
+
+def release_finished_entries(client, base, state):
+    room = client.get(base+'/v1/room').raise_for_status().json()
+    owned = {a.get('entry_id') for c in state['cases'] for a in c['attempts']
+             if a['status'] not in ('submitted', 'running')}
+    for entry in list(room['entries']):
+        if entry['id'] not in owned or entry['id'] == room['current_id']:
+            continue
+        response = client.post(base+'/v1/room/commands', json=dict(action='remove',
+            entry_id=entry['id'], revision=room['revision']))
+        if response.status_code == 409:
+            return
+        room = response.raise_for_status().json()
 
 
 def run(path, data_dir, base):
@@ -272,6 +333,16 @@ def run(path, data_dir, base):
             version = health['pipeline_version']
             state['current_pipeline_version'] = version
             state['updated_at'] = stamp()
+            state['passed_current_version'] = sum(bool(c['attempts'] and c['attempts'][-1]['status'] == 'passed'
+                and c['attempts'][-1]['pipeline_version'] == version) for c in state['cases'])
+            release_finished_entries(client, base, state)
+            failed = any(c['attempts'] and c['attempts'][-1]['status']=='failed' and
+                         c['attempts'][-1]['pipeline_version']==version for c in state['cases'])
+            storage = client.get(base+'/v1/storage').raise_for_status().json()
+            if storage['limit_bytes'] != state['cache_limit_bytes']:
+                raise RuntimeError('Cache limit changed; refusing to silently change it')
+            if not failed and storage['can_prepare']:
+                queue_cases(client, base, state, version, lambda: save(path, state))
             active = next(((c, c['attempts'][-1]) for c in state['cases'] if c['attempts'] and
                            c['attempts'][-1]['status'] in ('submitted', 'running')), None)
             if active:
@@ -299,24 +370,14 @@ def run(path, data_dir, base):
                 print(json.dumps({'title': case['title'], 'job_id': job['id'], 'status': attempt['status'],
                                   'error': attempt.get('error')}, ensure_ascii=False), flush=True)
                 continue
-            state['passed_current_version'] = sum(bool(c['attempts'] and c['attempts'][-1]['status'] == 'passed'
-                and c['attempts'][-1]['pipeline_version'] == version) for c in state['cases'])
             save(path, state)
             if state['passed_current_version'] == len(state['cases']):
                 print(f'All {len(state["cases"])} cases passed on {version}', flush=True)
                 return
             # Stop on reproducible software failures until the maintainer deploys a fix.
-            if any(c['attempts'] and c['attempts'][-1]['status'] == 'failed' and
-                   c['attempts'][-1]['pipeline_version'] == version for c in state['cases']):
+            if failed:
                 print('Needs repair; retained failed job diagnostics', flush=True)
                 return
-            room = client.get(base+'/v1/room').raise_for_status().json()
-            if room['playing'] or health['queued'] or health['running_job']:
-                time.sleep(15)
-                continue
-            storage = client.get(base+'/v1/storage').raise_for_status().json()
-            if storage['limit_bytes'] != state['cache_limit_bytes']:
-                raise RuntimeError('Cache limit changed; refusing to silently change it')
             if not storage['can_prepare']:
                 print('Waiting for cache space; user queue remains protected', flush=True)
                 time.sleep(30)
@@ -326,20 +387,7 @@ def run(path, data_dir, base):
             if not candidates:
                 print('No eligible cases; external failures are on backoff or need user action', flush=True)
                 return
-            # Retry failures first following a deployed fix, then revalidate prior passes.
-            candidates.sort(key=lambda c: 0 if c['attempts'] and c['attempts'][-1]['status']=='failed' else 1)
-            case = candidates[0]
-            request = dict(url=case['url'])
-            if (case['attempts'] and case['attempts'][-1]['pipeline_version'] != version
-                    and case['attempts'][-1]['status'] == 'passed'):
-                request['force'] = True  # Revalidate all stages, not a video-only restore.
-            job = client.post(base+'/v1/jobs', json=request).raise_for_status().json()
-            case['attempts'].append(dict(job_id=job['id'], pipeline_version=job['pipeline_version'],
-                status='submitted', submitted_at=stamp(), external_attempt=1+sum(
-                    a['status']=='external' for a in case['attempts'])))
-            save(path, state)
-            print(json.dumps({'title': case['title'], 'job_id': job['id'], 'status': 'submitted'},
-                             ensure_ascii=False), flush=True)
+            time.sleep(15)  # User-owned entries may currently fill the room.
 
 
 def main():
