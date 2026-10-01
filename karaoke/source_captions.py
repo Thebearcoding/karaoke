@@ -3,6 +3,7 @@ import hashlib
 import inspect
 import json
 import math
+import re
 import time
 from urllib.parse import parse_qs, urlsplit
 
@@ -92,6 +93,11 @@ def caption_candidate(packet, transcription, language, duration):
             if (event.get('aAppend') or not all(math.isfinite(t) for t in (start, end)) or
                     not 0 <= start < end <= duration+1):
                 raise ValueError('Unsupported or out-of-range caption event')
+            if re.search(r'\[[^\]\n]+\]', text):
+                # Closed captions may label speakers or describe sounds. Do not
+                # sing those labels or guess which bracketed words to delete;
+                # retain the audio transcript instead of this optional source.
+                return None, dict(status='unsupported_caption_annotations')
             texts.append(dict(text=text))
         # Caption display events can contain only musical notes or punctuation.
         # Wrap the complete text so those symbols join an adjacent lyric line.

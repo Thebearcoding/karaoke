@@ -401,8 +401,8 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     assert calls == ['align_words', 'align_phonemes', 'align_phonemes', 'align_words']
 
 
-@pytest.mark.parametrize('symbols', [False, True])
-def test_manual_source_captions_are_cached_and_replace_an_asr_draft(tmp_path, monkeypatch, symbols):
+@pytest.mark.parametrize('formatting', ['lyrics', 'symbols', 'annotations'])
+def test_manual_source_captions_are_cached_and_replace_an_asr_draft(tmp_path, monkeypatch, formatting):
     import soundfile as sf
     from karaoke import source_captions, pipeline as module
     pipeline = Pipeline(dict(url=URL), tmp_path)
@@ -411,8 +411,10 @@ def test_manual_source_captions_are_cached_and_replace_an_asr_draft(tmp_path, mo
     info = tmp_path/'info.json'
     info.write_text(json.dumps(metadata))
     lines = ['微風裡慢慢歌唱', '星光下靜靜傾聽', '微風裡慢慢歌唱']
-    displayed = ['♪', lines[0], '♪♪♪', lines[1], lines[2], '…'] if symbols else lines
-    expected = ['♪'+lines[0]+'♪♪♪', lines[1], lines[2]+'…'] if symbols else lines
+    displayed = ['♪', lines[0], '♪♪♪', lines[1], lines[2], '…'] if formatting == 'symbols' else list(lines)
+    expected = ['♪'+lines[0]+'♪♪♪', lines[1], lines[2]+'…'] if formatting == 'symbols' else lines
+    if formatting == 'annotations':
+        displayed[1] = '[Singer] '+displayed[1]
     document = dict(events=[dict(tStartMs=1000*i, dDurationMs=900, segs=[dict(utf8=t)])
                             for i,t in enumerate(displayed)])
     calls = []
@@ -437,14 +439,18 @@ def test_manual_source_captions_are_cached_and_replace_an_asr_draft(tmp_path, mo
     pipeline.prepare_lyrics(metadata, 14)
     result = json.loads((tmp_path/'lyrics.json').read_text())
     anchors = json.loads((tmp_path/'anchors.json').read_text())
-    assert result['provenance']['kind'] == 'source_manual_subtitles'
+    assert result['provenance']['kind'] == ('asr_draft' if formatting == 'annotations' else 'source_manual_subtitles')
     assert result['lines'] == expected
-    assert ''.join(expected) == ''.join(displayed)
+    if formatting == 'annotations':
+        assert result['provenance']['source_captions']['status'] == 'unsupported_caption_annotations'
+    else:
+        assert ''.join(expected) == ''.join(displayed)
     assert all(any(c.isalnum() for c in line) for line in result['lines'])
     assert [a['start'] for a in anchors] == [10,11,12]
     unrelated = dict(transcription, words=[dict(word='完全無關的內容',start=1,end=2)])
     candidate, report = source_captions.caption_candidate(json.loads(path.read_text()), unrelated, 'Chinese', 14)
-    assert candidate is None and report['status'] == 'insufficient_audio_support'
+    assert candidate is None and report['status'] == ('unsupported_caption_annotations'
+        if formatting == 'annotations' else 'insufficient_audio_support')
     # Never override explicit lyrics, even with a matching publisher track.
     draft['provenance']['kind'] = 'user_supplied'
     pipeline.prepare_lyrics(metadata, 14)
