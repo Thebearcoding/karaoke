@@ -1,9 +1,31 @@
 """Public job inputs, safe provider errors and single-video platform URLs."""
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+import math
 import re
 from typing import Literal
 from urllib.parse import parse_qs, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def retry_after_seconds(value):
+    """Retain a server's retry hint without exposing response headers or body."""
+    hints = []
+    headers = getattr(getattr(value, 'response', None), 'headers', {})
+    for name, scale in (('retry-after-ms', .001), ('retry-after', 1.)):
+        if name not in headers:
+            continue
+        try:
+            hints.append(float(headers[name])*scale)
+        except ValueError:
+            try:
+                hints.append((parsedate_to_datetime(headers[name])-datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError):
+                pass
+    for amount, unit in re.findall(r'try again in\s+(\d+(?:\.\d+)?)\s*(ms|seconds?|s|minutes?|m)\b', str(value), re.I):
+        hints.append(float(amount)*(.001 if unit.lower() == 'ms' else 60 if unit.lower().startswith('m') else 1))
+    return max((v for v in hints if math.isfinite(v) and v >= 0), default=None)
 
 
 def provider_error(value):
@@ -23,7 +45,19 @@ def provider_error(value):
     for name in reversed(names):
         if name in known:
             code, message, retryable = known[name]
-            return dict(code='openai_'+code, message=message, provider='openai', retryable=retryable)
+            text = str(value)
+            if name == 'RateLimitError' and 'request too large' in text.lower():
+                code, message, retryable = 'request_too_large', '请求超过模型或项目限制，需要调整请求或配置', False
+            elif name == 'RateLimitError' and 'insufficient_quota' in text.lower():
+                code, message, retryable = 'quota', '语音或歌词服务额度不足，需要检查项目额度', False
+            result = dict(code='openai_'+code, message=message, provider='openai', retryable=retryable)
+            delay = retry_after_seconds(value)
+            if delay is not None:
+                result['retry_after_seconds'] = delay
+            model = re.search(r'for ([\w.-]+) in (?:project|organization)', text)
+            if model:
+                result['model'] = model.group(1)
+            return result
     return None
 
 

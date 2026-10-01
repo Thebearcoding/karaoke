@@ -222,7 +222,14 @@ def main():
     client = OpenAI(timeout=240., max_retries=1)
     language = {'Chinese': 'zh', 'Japanese': 'ja', 'English': 'en'}.get(args.language, args.language)
     args.output.mkdir(parents=True)
-    data, recovery = transcribe(client, args.audio, language, args.hint, args.output)
+    try:
+        data, recovery = transcribe(client, args.audio, language, args.hint, args.output)
+    except Exception as error:
+        from job_schema import provider_error
+        details = provider_error(error)
+        if details:
+            (args.output/'error.json').write_text(json.dumps(details)+'\n')
+        raise
     for key in ['words', 'segments']:
         for item in data.get(key, []):
             item['start'] += args.source_offset

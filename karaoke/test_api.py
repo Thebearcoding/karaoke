@@ -142,10 +142,63 @@ def test_external_failures_retain_safe_causes_and_do_not_retry_as_software_bugs(
         assert attempt['status'] == 'blocked' and attempt['next_retry_at'] is None
         assert not eligible(case, 'v3', time.time()+86400)
     else:
-        assert attempt['status'] == 'external' and attempt['next_retry_at'] > time.time()+7100
+        assert attempt['status'] == 'external' and time.time()+20 < attempt['next_retry_at'] <= time.time()+30
         assert eligible(case, 'v2', attempt['next_retry_at']+1)
         attempt['external_attempt'] = 3
         assert not eligible(case, 'v3', attempt['next_retry_at']+1)
+
+
+@pytest.mark.parametrize('message,headers,code,delay', [
+    ('Rate limit reached for gpt-5-mini in project private. Please try again in 6ms.', {}, 'rate_limit', .006),
+    ('Rate limit reached for whisper-1 in project private.', {'retry-after':'120'}, 'rate_limit', 120),
+    ('Rate limit reached for whisper-1 in project private.', {'retry-after-ms':'7500'}, 'rate_limit', 7.5),
+    ('Request too large for gpt-5-mini in project private.', {}, 'request_too_large', None),
+    ('insufficient_quota for gpt-5-mini in project private.', {}, 'quota', None),
+])
+def test_rate_limit_uses_server_hint_and_distinguishes_request_errors(message, headers, code, delay):
+    import httpx
+    from openai import RateLimitError
+    from karaoke.job_schema import provider_error
+    from karaoke.tools.soak import retry_fields, retry_deadline
+    response=httpx.Response(429, headers=headers, request=httpx.Request('POST','https://api.openai.com/'))
+    error=provider_error(RateLimitError(message,response=response,body={'message':message}))
+    assert error['code']=='openai_'+code and error.get('retry_after_seconds')==delay
+    assert 'private' not in str(error)
+    policy=retry_fields(error,'',1,failed_at=1000)
+    if code=='rate_limit':
+        assert policy['next_retry_at']==1000+max(30,delay)
+        state={'provider_backoff':{policy['retry_provider']:policy['next_retry_at']}}
+        assert retry_deadline(state,{'provider':'youtube'})==(policy['next_retry_at'] if error['model']=='whisper-1' else 0)
+    else:
+        assert policy['status']=='blocked' and policy['next_retry_at'] is None
+
+
+@pytest.mark.parametrize('diagnostic,status,global_limit', [
+    ('HTTP Error 403: Forbidden','external',False),
+    ('File "worker.py", line 429\nHTTP Error 403: Forbidden','external',False),
+    ('HTTP Error 429: Too Many Requests','external',True),
+    ('Failed to resolve www.youtube.com','external',False),
+    ('Sign in to confirm you are not a bot','blocked',False),
+])
+def test_video_retry_does_not_apply_one_resource_error_to_every_song(diagnostic,status,global_limit):
+    from karaoke.tools.soak import retry_fields
+    policy=retry_fields({'code':'download_failed'},diagnostic,1,failed_at=1000)
+    assert policy['status']==status and policy['provider_blocked']==global_limit
+    assert policy['next_retry_at'] is None if status=='blocked' else 1000<policy['next_retry_at']<=1300
+
+
+def test_asr_child_preserves_server_retry_header_for_parent(tmp_path, monkeypatch):
+    import httpx
+    from openai import RateLimitError
+    from karaoke import transcribe_lyrics
+    response=httpx.Response(429,headers={'Retry-After':'95'},request=httpx.Request('POST','https://api.openai.com/'))
+    error=RateLimitError('Rate limit reached',response=response,body=None)
+    monkeypatch.setattr(sys,'argv',['transcribe_lyrics','--audio',str(tmp_path/'audio.mp3'),'--output',str(tmp_path/'asr')])
+    with patch.object(transcribe_lyrics,'OpenAI'), patch.object(transcribe_lyrics,'transcribe',side_effect=error):
+        with pytest.raises(RateLimitError):
+            transcribe_lyrics.main()
+    result=processing_error(StageFailure('transcribe','stage failed'),tmp_path)
+    assert result['retry_after_seconds']==95 and result['code']=='openai_rate_limit'
 
 
 def test_soak_preserves_failed_stage_diagnostics_after_cache_eviction(tmp_path):
@@ -390,7 +443,7 @@ def test_soak_new_failure_never_shortens_provider_backoff(tmp_path, monkeypatch,
         selection_sha256=hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest())))
     folder = tmp_path/'job'
     folder.mkdir()
-    (folder/'download.log').write_text('HTTP Error 403: Forbidden')
+    (folder/'download.log').write_text('HTTP Error 429: Too Many Requests')
     error = (dict(code='openai_rate_limit', provider='openai', retryable=True) if provider == 'openai'
              else dict(code='download_failed'))
     responses = {'/health': {'pipeline_version': 'v1'},
@@ -405,10 +458,7 @@ def test_soak_new_failure_never_shortens_provider_backoff(tmp_path, monkeypatch,
     attempt = saved['cases'][0]['attempts'][-1]
     assert attempt['status'] == 'external'
     assert saved['provider_backoff'][provider] >= attempt['next_retry_at']
-    if previous_delay > 7200:
-        assert saved['provider_backoff'][provider] == previous_retry
-    else:
-        assert saved['provider_backoff'][provider] > previous_retry
+    assert saved['provider_backoff'][provider] == max(previous_retry, attempt['next_retry_at'])
 
 
 def test_soak_checks_actual_stem_samples_not_only_pipeline_claim(tmp_path):
@@ -450,7 +500,7 @@ def test_download_failure_has_actionable_reason_without_raw_diagnostics(tmp_path
         attempt = dict(pipeline_version='v1', external_attempt=1)
         record_failure(attempt, dict(id=tmp_path.name,
             error=dict(code='download_failed', message='Generic download failure')), tmp_path)
-        assert attempt['status'] == 'external' and attempt['provider_blocked']
+        assert attempt['status'] == 'external' and not attempt['provider_blocked']
         assert not eligible({'attempts': [attempt]}, 'v2', time.time())
         assert eligible({'attempts': [attempt]}, 'v1', attempt['next_retry_at']+1)
 

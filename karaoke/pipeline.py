@@ -68,8 +68,11 @@ class StageFailure(RuntimeError):
 def processing_error(error, output):
     details = provider_error(error)
     if details is None and isinstance(error, StageFailure) and error.stage == 'transcribe':
+        saved = Path(output)/'asr/error.json'
+        if saved.is_file():
+            details = json.loads(saved.read_text())
         path = Path(output)/'transcribe.log'
-        if path.is_file():
+        if details is None and path.is_file():
             with path.open('rb') as log:
                 log.seek(max(0, path.stat().st_size-16384))
                 details = provider_error(log.read().decode(errors='replace'))

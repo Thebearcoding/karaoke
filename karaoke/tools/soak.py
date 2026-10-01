@@ -18,7 +18,7 @@ import time
 
 import httpx
 
-from karaoke.job_schema import provider_error, video_url
+from karaoke.job_schema import provider_error, retry_after_seconds, video_url
 
 
 REQUIRED = {'mv', 'instrumental', 'backing_vocals', 'lead_vocals', 'subtitles',
@@ -137,6 +137,42 @@ def eligible(case, version, now):
     # A software failure is retried only after a fix. Prior passes must also
     # pass on the final deployed version, so fixes are exercised together.
     return last['pipeline_version'] != version
+
+
+def retry_deadline(state, case):
+    # Song metadata is optional; its text-model quota must not block ASR.
+    required = (case['provider'], 'openai', 'openai:whisper-1',
+                'openai:'+os.getenv('KARAOKE_ASR_FALLBACK_MODEL', 'gpt-4o-transcribe'))
+    return max((state['provider_backoff'].get(key, 0) for key in required), default=0)
+
+
+def retry_fields(error, diagnostic, number, *, failed_at):
+    """Scope retries to the failure and respect explicit server delays."""
+    exponent = 2**min(10, max(0, number-1))
+    fields = dict(status='failed', provider_blocked=False, next_retry_at=None)
+    if error.get('provider') == 'openai':
+        scope = 'openai'+(':'+error['model'] if error.get('model') else '')
+        fields.update(status='external' if error['retryable'] else 'blocked', retry_provider=scope,
+                      provider_blocked=error['code'] == 'openai_rate_limit')
+        if error['retryable']:
+            fields['next_retry_at'] = failed_at+max(error.get('retry_after_seconds', 0), min(900, 30*exponent))
+        return fields
+    if error['code'] == 'interrupted' or re.search(r'^ImportError: dlopen\(.*system is shutting down', diagnostic, re.M):
+        return dict(fields, status='external', retry_provider='local', next_retry_at=failed_at+min(900, 60*exponent))
+    if error['code'] != 'download_failed':
+        return fields
+    text = (str(error)+' '+diagnostic).lower()
+    if any(s in text for s in ('sign in', 'login', '登录', 'risk control', '-352', 'captcha',
+                                'video unavailable', 'private video', '无法访问')):
+        return dict(fields, status='blocked')
+    rate_limited = bool(re.search(r'(?:http error|error code:|http/\d(?:\.\d)?)\s*429\b', text))
+    forbidden = bool(re.search(r'(?:http error|error code:|http/\d(?:\.\d)?)\s*403\b', text))
+    if rate_limited or forbidden or any(s in text for s in ('timed out', 'connection reset',
+            'proxy', '代理', '超时', 'failed to resolve', 'temporary failure in name resolution',
+            'nodename nor servname', 'name or service not known', 'dns')):
+        delay = max(retry_after_seconds(diagnostic) or 0, min(1800, (300 if forbidden else 60)*exponent))
+        return dict(fields, status='external', provider_blocked=rate_limited, next_retry_at=failed_at+delay)
+    return fields
 
 
 def verify_stems(paths, expected_hash):
@@ -276,8 +312,7 @@ def probe(path, data_dir, base, job_id):
         job = client.get(f'{base}/v1/jobs/{job_id}').raise_for_status().json()
         state = json.loads(path.read_text())
         case = next(c for c in state['cases'] if video_url(c['url']) == job['input']['url'])
-        retry_at = max(state['provider_backoff'].get(case['provider'], 0),
-                       state['provider_backoff'].get('openai', 0),
+        retry_at = max(retry_deadline(state, case),
                        (case.get('attempts') or [{}])[-1].get('next_retry_at') or 0)
         if time.time() < retry_at:
             raise ValueError(f'Provider backoff lasts until {datetime.fromtimestamp(retry_at, timezone.utc).isoformat()}')
@@ -311,7 +346,8 @@ def record_failure(attempt, job, folder):
     logs = [diagnostics[name][-4000:] for name in dict.fromkeys(names) if name in diagnostics]
     # Older workers reported these as generic stage failures. Classify their
     # retained logs too, so a code rollout does not cause inappropriate retries.
-    error = provider_error('\n'.join(logs)) or error
+    parsed = provider_error('\n'.join(logs))
+    error = {**error, **parsed} if parsed else error
     attempt.update(status='failed', error=error, finished_at=stamp(),
         error_fingerprint=hashlib.sha256(json.dumps(error, sort_keys=True).encode()).hexdigest())
     attempt['diagnostic_tail'] = '\n'.join(logs)
@@ -330,28 +366,7 @@ def record_failure(attempt, job, folder):
         with gzip.open(target, 'wt', encoding='utf-8') as output:
             json.dump(diagnostics, output, ensure_ascii=False)
         attempt['reproduction_file'] = str(target)
-    if error.get('provider') == 'openai':
-        attempt.update(status='external' if error['retryable'] else 'blocked',
-            retry_provider='openai', provider_blocked=error['code'] == 'openai_rate_limit',
-            next_retry_at=time.time()+min(86400, 7200*2**(attempt['external_attempt']-1))
-                if error['retryable'] else None)
-        return
-    if error['code'] == 'interrupted' or re.search(
-            r'^ImportError: dlopen\(.*system is shutting down', '\n'.join(logs), re.M):
-        attempt.update(status='external', retry_provider='local', provider_blocked=False,
-            next_retry_at=time.time()+min(3600, 60*2**(attempt['external_attempt']-1)))
-        return
-    external_markers = ('sign in', 'login', 'http error 403', 'http error 429', 'video unavailable',
-                        'private video', 'timed out', 'connection reset', 'proxy', '登录', '无法访问',
-                        '代理', '超时', 'risk control', '-352', 'failed to resolve',
-                        'temporary failure in name resolution', 'nodename nor servname',
-                        'name or service not known')
-    if error['code'] == 'download_failed' and any(
-            marker in (str(error)+' '.join(logs)).lower() for marker in external_markers):
-        attempt['status'] = 'external'
-        attempt['next_retry_at'] = time.time()+min(86400, 7200*2**(attempt['external_attempt']-1))
-        attempt['provider_blocked'] = not any(marker in (str(error)+' '.join(logs)).lower()
-            for marker in ('video unavailable', 'private video', '无法访问'))
+    attempt.update(retry_fields(error, '\n'.join(logs), attempt.get('external_attempt', 1), failed_at=time.time()))
 
 
 def queue_cases(client, base, state, version, persist):
@@ -372,8 +387,7 @@ def queue_cases(client, base, state, version, persist):
                 continue
             payload = dict(job_id=last['job_id'])
         else:
-            if not eligible(case, version, time.time()) or time.time() < max(
-                    state['provider_backoff'].get(case['provider'], 0), state['provider_backoff'].get('openai', 0)):
+            if not eligible(case, version, time.time()) or time.time() < retry_deadline(state, case):
                 continue
             payload = dict(url=case['url'], source_title=case['title'],
                 force=bool(last and last['status']=='passed' and last['pipeline_version']!=version))
@@ -476,8 +490,7 @@ def run(path, data_dir, base):
                 time.sleep(30)
                 continue
             candidates = [c for c in state['cases'] if eligible(c, version, time.time()) and
-                          time.time() >= max(state['provider_backoff'].get(c['provider'], 0),
-                                            state['provider_backoff'].get('openai', 0))]
+                          time.time() >= retry_deadline(state, c)]
             if not candidates:
                 print('No eligible cases; external failures are on backoff or need user action', flush=True)
                 return
