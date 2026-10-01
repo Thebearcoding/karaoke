@@ -15,6 +15,7 @@ let levelRequest = Promise.resolve();
 let pitchRequest = Promise.resolve();
 let searchTimer, searchQuery = '', searchSongs = [], previewSong = null, skipping = false, composing = false;
 let videoSource = 'all';
+let youtubePending = false;
 const addingVideos = new Set();
 const providerName = provider => provider === 'youtube' ? 'YouTube' : 'B站';
 const videoSearch = createVideoSearch(renderVideoResults);
@@ -123,14 +124,16 @@ function renderLibrary() {
 }
 
 function renderVideoResults(providers) {
+  youtubePending = providers.youtube.loading;
   $('video-results').hidden = false;
   $('search-status').innerHTML = Object.entries(providers).map(([name, info]) => `<span class="${info.error ? 'search-error' : ''}">${providerName(name)} · ${info.loading ? '搜索中…' : info.error ? escape(info.error) : info.results.length ? `${info.results.length} 个视频` : '没有相关视频'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`).join('');
   const songs = Object.values(providers).flatMap(info => info.results);
-  // Keep existing cards in place when the other platform finishes loading.
+  // Keep provider ranking independent of response order, without replacing cards.
   for (const song of songs) {
     if (searchSongs.some(old => old.url === song.url)) continue;
     const index = searchSongs.push(song)-1;
-    $('video-grid').insertAdjacentHTML('beforeend', `<article class="video-card" data-provider="${song.provider}">
+    const before = song.provider === 'youtube' && $('video-grid').querySelector('[data-provider="bilibili"]');
+    (before || $('video-grid')).insertAdjacentHTML(before ? 'beforebegin' : 'beforeend', `<article class="video-card" data-provider="${song.provider}">
       <button class="video-thumbnail" data-preview="${index}" aria-label="预览：${escape(song.title)}">${song.thumbnail ? `<img src="${escape(song.thumbnail)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ''}<span class="preview-label">${icon('play')}预览</span>${song.duration ? `<span class="poster-duration">${time(song.duration)}</span>` : ''}</button>
       <h3 title="${escape(song.title)}">${escape(song.title)}</h3><p class="video-uploader">${escape(song.uploader)}</p>
       <div class="video-actions"><button data-add-video="${index}">${icon('plus')}<span>加入歌单</span></button><a href="${escape(song.url)}" target="_blank" rel="noopener noreferrer">${providerName(song.provider)} ↗</a></div>
@@ -141,7 +144,11 @@ function renderVideoResults(providers) {
 }
 
 function filterVideos() {
-  document.querySelectorAll('[data-provider]').forEach(card => card.hidden = videoSource !== 'all' && card.dataset.provider !== videoSource);
+  document.querySelectorAll('[data-provider]').forEach(card => {
+    card.hidden = videoSource === 'all'
+      ? youtubePending && card.dataset.provider === 'bilibili'
+      : card.dataset.provider !== videoSource;
+  });
   document.querySelectorAll('[data-video-source]').forEach(button => {
     button.classList.toggle('selected', button.dataset.videoSource === videoSource);
     button.setAttribute('aria-pressed', String(button.dataset.videoSource === videoSource));
