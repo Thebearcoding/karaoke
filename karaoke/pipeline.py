@@ -51,7 +51,8 @@ def pipeline_fingerprint():
     for path in sorted((ROOT/'models/pretrained').glob('*roformer*')):
         stat = path.stat()
         digest.update(f'{path.name}:{stat.st_size}:{stat.st_mtime_ns}'.encode())
-    for path in sorted((ROOT/'models/alignment').rglob('*')):
+    for path in sorted(p for directory in ('whisper', 'sofa')
+                       for p in (ROOT/'models/alignment'/directory).rglob('*')):
         if path.is_file() and path.suffix in ('.ckpt', '.pt', '.yaml', '.json'):
             stat = path.stat()
             digest.update(f'{path.relative_to(ROOT)}:{stat.st_size}:{stat.st_mtime_ns}'.encode())
@@ -179,8 +180,17 @@ class Pipeline:
             weights = ROOT/f'models/pretrained/{model}.ckpt'
             config['weights'] = (weights.stat().st_size, weights.stat().st_mtime_ns)
         if name.startswith('align_'):
+            if name == 'align_words':
+                arguments = [str(a) for a in command]
+                model = arguments[arguments.index('--model')+1] if '--model' in arguments else 'large-v3-turbo'
+                weights = [ROOT/f'models/alignment/whisper/{model}.pt']
+            else:
+                language = 'English' if english else json.loads((self.output/'lyrics.json').read_text())['language']
+                directory = {'Chinese': 'mandarin', 'Japanese': 'japanese', 'English': 'english'}[language]
+                weights = sorted((ROOT/'models/alignment/sofa'/directory).rglob('*.ckpt'))
+            # An unrelated model download must not invalidate completed stages.
             config['weights'] = [(str(p), p.stat().st_size, p.stat().st_mtime_ns)
-                for p in sorted((ROOT/'models/alignment').rglob('*')) if p.is_file() and p.suffix in ('.ckpt', '.pt')]
+                for p in weights if p.is_file()]
         if name == 'transcribe':
             config['fallback_model'] = os.getenv('KARAOKE_ASR_FALLBACK_MODEL', 'gpt-4o-transcribe')
         return dict(inputs=[self.output/p for p in inputs], outputs=[self.output/p for p in outputs],
@@ -394,18 +404,22 @@ class Pipeline:
         self.phase('prepare_lyrics', True)
         started = time.perf_counter()
         try:
+            from .source_captions import fetch_manual_captions
+            transcription = json.loads((self.output/'asr/transcription.json').read_text())
+            captions = None if self.request.get('lyrics') else fetch_manual_captions(
+                self.output/'download/source.info.json', song_language(transcription.get('language')), self.checkpoints)
             catalog = list((self.catalog_root/'lyrics').glob('*.json')) if self.catalog_root else []
             with self.checkpoints.stage('prepare_lyrics',
                     inputs=[self.output/'asr/transcription.json', self.output/'vocals-16k.wav', self.output/'source-44100.wav',
                             *sorted((self.output/'asr').glob('initial-transcription.json')),
-                            *sorted((self.output/'asr').glob('run.json'))],
+                            *sorted((self.output/'asr').glob('run.json')), *([captions] if captions else [])],
                     outputs=[self.output/'lyrics.json', self.output/'anchors.json', self.output/'asr/filtered.json',
                              self.output/'asr/anchor-recovery.json', self.output/'asr/lyric-repeats.json'],
                     config=dict(request=self.request,
                                 metadata={k: metadata.get(k) for k in ('title', 'track', 'artist', 'artists', 'uploader', 'description')},
                                 duration=duration, model=self.text_model,
                                 implementation=inspect.getsource(type(self).prepare_lyrics)),
-                    code=[ROOT/p for p in ('song_sources.py', 'anchors_from_asr.py', 'transcribe_lyrics.py', 'anchor_recovery.py',
+                    code=[ROOT/p for p in ('song_sources.py', 'source_captions.py', 'anchors_from_asr.py', 'transcribe_lyrics.py', 'anchor_recovery.py',
                                            'subtitles.py', 'job_schema.py')] + catalog) as reused:
                 if not reused:
                     self.prepare_lyrics(metadata, duration)
@@ -444,6 +458,16 @@ class Pipeline:
         write_json(self.output/'asr/filtered.json', dict(transcription=transcription, rejected=rejected))
         lyrics = prepare_song_text(self.request, metadata, transcription, duration,
             catalog_root=self.catalog_root, model=self.text_model)
+        caption_path = self.output/'source-captions.json'
+        if lyrics['provenance']['kind'] == 'asr_draft' and caption_path.is_file():
+            from .source_captions import caption_candidate, manual_track
+            packet = json.loads(caption_path.read_text())
+            # A changed input must not reuse a formerly matching subtitle track.
+            if packet.get('video_id') == metadata.get('id') and manual_track(metadata, lyrics['language']):
+                lines, caption_report = caption_candidate(packet, transcription, lyrics['language'], duration)
+                lyrics['provenance']['source_captions'] = caption_report
+                if lines is not None:
+                    lyrics.update(lines=lines, provenance=dict(lyrics['provenance'], kind='source_manual_subtitles'))
         candidates = {'transcription': transcription.get('words') or []}
         if lyrics['provenance']['kind'] != 'asr_draft' and initial:
             # Recovery of one bad passage need not discard usable whole-song

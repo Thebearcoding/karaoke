@@ -350,6 +350,141 @@ def test_pipeline_reuses_decoded_audio_and_rebuilds_corrupted_stage(tmp_path):
     assert output.read_bytes() == expected
 
 
+def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
+    from karaoke import pipeline as module
+    code, folder = tmp_path/'code', tmp_path/'job'
+    code.mkdir()
+    monkeypatch.setattr(module, 'ROOT', code)
+    pipeline = Pipeline(dict(url=URL), folder)
+    (folder/'lyrics.json').write_text(json.dumps(dict(language='Chinese')))
+    stages = {
+        'align_words': [sys.executable, code/'align_lyrics_whisper.py'],
+        'align_phonemes': [sys.executable, code/'align_lyric_phonemes.py'],
+    }
+    models = [code/'models/alignment'/name for name in (
+        'whisper/large-v3-turbo.pt', 'sofa/mandarin/model.ckpt', 'sofa/english/model.ckpt')]
+    for model in models:
+        model.parent.mkdir(parents=True, exist_ok=True)
+        model.write_bytes(b'original model')
+    for stage, command in stages.items():
+        spec = pipeline.stage_spec(stage, command)
+        for path in spec['inputs'] + spec['code']:
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b'input')
+    calls = []
+    def run(stage, command, timeout):
+        calls.append(stage)
+        output = pipeline.stage_spec(stage, command)['outputs'][0]
+        output.mkdir()
+        (output/'result.json').write_text('{}')
+    monkeypatch.setattr(pipeline, 'run_process', run)
+    def prepare():
+        for stage, command in stages.items():
+            pipeline.run(stage, command)
+    prepare()
+    (code/'subtitle-styles.json').write_text('{}')
+    fingerprint = module.pipeline_fingerprint()
+    unrelated = code/'models/alignment/mms/model.pt'
+    unrelated.parent.mkdir()
+    unrelated.write_bytes(b'new experimental model')
+    assert module.pipeline_fingerprint() == fingerprint
+    models[2].write_bytes(b'updated English model')
+    assert module.pipeline_fingerprint() != fingerprint
+    prepare()
+    assert calls == ['align_words', 'align_phonemes']
+    models[1].write_bytes(b'updated Mandarin model')
+    prepare()
+    assert calls == ['align_words', 'align_phonemes', 'align_phonemes']
+    models[0].write_bytes(b'updated Whisper model')
+    prepare()
+    assert calls == ['align_words', 'align_phonemes', 'align_phonemes', 'align_words']
+
+
+def test_manual_source_captions_are_cached_and_replace_an_asr_draft(tmp_path, monkeypatch):
+    import soundfile as sf
+    from karaoke import source_captions, pipeline as module
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    metadata = dict(id='n5sjpCQhTDk', subtitles={'zh-Hant': [dict(ext='json3', url=
+        'https://www.youtube.com/api/timedtext?v=n5sjpCQhTDk&lang=zh-Hant&fmt=json3')]})
+    info = tmp_path/'info.json'
+    info.write_text(json.dumps(metadata))
+    lines = ['微風裡慢慢歌唱', '星光下靜靜傾聽', '微風裡慢慢歌唱']
+    document = dict(events=[dict(tStartMs=1000*i, dDurationMs=900, segs=[dict(utf8=t)])
+                            for i,t in enumerate(lines)])
+    calls = []
+    def fetch(url):
+        calls.append(url)
+        return document
+    monkeypatch.setattr(source_captions, 'read_document', fetch)
+    path = source_captions.fetch_manual_captions(info, 'Chinese', pipeline.checkpoints)
+    assert source_captions.fetch_manual_captions(info, 'Chinese', pipeline.checkpoints) == path
+    assert len(calls) == 1
+    # Captions are displayed much earlier than these measured word times.
+    # Their display timestamps must not become the alignment evidence.
+    words = [dict(word=t, start=10+i, end=10+i+.9) for i,t in enumerate(lines)]
+    transcription = dict(language='chinese', segments=[dict(text=w['word'], start=w['start'], end=w['end'])
+                         for w in words], words=words)
+    (tmp_path/'asr').mkdir()
+    (tmp_path/'asr/transcription.json').write_text(json.dumps(transcription))
+    sf.write(tmp_path/'vocals-16k.wav', np.ones(16000*14)*.1, 16000)
+    draft = dict(title='Song',artist='Singer',language='Chinese',lines=lines,
+                 provenance=dict(kind='asr_draft'),source_url=URL)
+    monkeypatch.setattr(module, 'prepare_song_text', lambda *a,**k: json.loads(json.dumps(draft)))
+    pipeline.prepare_lyrics(metadata, 14)
+    result = json.loads((tmp_path/'lyrics.json').read_text())
+    anchors = json.loads((tmp_path/'anchors.json').read_text())
+    assert result['provenance']['kind'] == 'source_manual_subtitles'
+    assert result['lines'] == lines
+    assert [a['start'] for a in anchors] == [10,11,12]
+    unrelated = dict(transcription, words=[dict(word='完全無關的內容',start=1,end=2)])
+    candidate, report = source_captions.caption_candidate(json.loads(path.read_text()), unrelated, 'Chinese', 14)
+    assert candidate is None and report['status'] == 'insufficient_audio_support'
+    # Never override explicit lyrics, even with a matching publisher track.
+    draft['provenance']['kind'] = 'user_supplied'
+    pipeline.prepare_lyrics(metadata, 14)
+    assert json.loads((tmp_path/'lyrics.json').read_text())['provenance']['kind'] == 'user_supplied'
+
+
+@pytest.mark.parametrize('url', [
+    'https://www.youtube.com/api/timedtext?v=other&lang=zh&fmt=json3',
+    'https://www.youtube.com/api/timedtext?v=n5sjpCQhTDk&lang=zh&fmt=json3&kind=asr',
+    'https://www.youtube.com/api/timedtext?v=n5sjpCQhTDk&lang=en&fmt=json3&tlang=zh',
+    'https://youtube.com.attacker.test/api/timedtext?v=n5sjpCQhTDk&lang=zh&fmt=json3',
+    'http://127.0.0.1/api/timedtext?v=n5sjpCQhTDk&lang=zh&fmt=json3',
+])
+def test_only_same_source_manual_language_captions_are_eligible(url):
+    from karaoke.source_captions import manual_track
+    track = {'zh': [dict(ext='json3',url=url)]}
+    assert manual_track(dict(id='n5sjpCQhTDk',subtitles=track), 'Chinese') is None
+    assert manual_track(dict(id='n5sjpCQhTDk',automatic_captions=track), 'Chinese') is None
+
+
+def test_manual_caption_failure_obeys_backoff_and_keeps_cached_diagnostics(tmp_path, monkeypatch):
+    import httpx
+    from karaoke import source_captions
+    from karaoke.stage_cache import StageCache, retained_files
+    url = 'https://www.youtube.com/api/timedtext?v=example&lang=en&fmt=json3'
+    info = tmp_path/'info.json'
+    info.write_text(json.dumps(dict(id='example',subtitles={'en':[dict(ext='json3',url=url)]})))
+    clock, calls = [1000.], []
+    monkeypatch.setattr(source_captions.time, 'time', lambda:clock[0])
+    def fetch(url):
+        calls.append(url)
+        response=httpx.Response(429,headers={'Retry-After':'900'},request=httpx.Request('GET',url))
+        raise httpx.HTTPStatusError('rate limited',request=response.request,response=response)
+    monkeypatch.setattr(source_captions, 'read_document', fetch)
+    cache = StageCache(tmp_path)
+    path = source_captions.fetch_manual_captions(info, 'English', cache)
+    assert json.loads(path.read_text())['retry_at'] == 1900.
+    assert path.name in retained_files(tmp_path)
+    source_captions.fetch_manual_captions(info, 'English', cache)
+    assert len(calls) == 1
+    clock[0] = 1901.
+    source_captions.fetch_manual_captions(info, 'English', cache)
+    assert len(calls) == 2
+
+
 def test_soak_retries_changed_code_not_unchanged_failures_or_finished_cases():
     from karaoke.tools.soak import eligible
     assert eligible({'attempts': []}, 'v1', 100)
