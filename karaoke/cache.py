@@ -157,6 +157,13 @@ class SongCache:
                 break
             folder = self.folder(job['id'])
             if job['status'] == 'failed' and (folder/'download/source.mkv').is_file():
+                source_info = folder/'source.json'
+                try:
+                    audio_only = json.loads(source_info.read_text()).get('audio_only')
+                except (OSError, ValueError):
+                    audio_only = False
+                if audio_only:
+                    continue  # A tested audio download is not cheap video-only cache.
                 video = folder/'download/source.mkv'
             elif job['status'] == 'completed' and can_restore_video(folder, job.get('result')):
                 video = folder/job['result']['artifacts']['mv']['path']

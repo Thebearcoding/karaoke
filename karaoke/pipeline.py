@@ -119,7 +119,7 @@ def create_poster(source, output, *, thumbnail=None, seconds=30):
 
 class Pipeline:
     def __init__(self, request, output, *, separator_python=None, device='auto', text_model='gpt-5-mini',
-                 max_duration=900, catalog_root=ROOT, cookies_file=None):
+                 max_duration=900, catalog_root=ROOT, cookies_file=None, audio_only=False):
         self.request = JobRequest.model_validate(request).model_dump()
         self.output = Path(output).resolve()
         self.output.mkdir(parents=True, exist_ok=True)
@@ -127,10 +127,12 @@ class Pipeline:
         self.separator_python = separator_python or (str(default_separator) if default_separator.exists() else sys.executable)
         self.device, self.text_model = device, text_model
         self.max_duration, self.catalog_root, self.cookies_file = max_duration, catalog_root, cookies_file
+        self.audio_only = audio_only
         self.active, self.timings, self.lock = set(), {}, threading.Lock()
         self.stage_progress = {}
         self.song_info = {}
         self.source = self.output/'download/source.mkv'
+        self.video = self.source
         self.vocals = self.output/'music-separation/song/vocals.wav'
         self.checkpoints = StageCache(self.output)
 
@@ -250,7 +252,7 @@ class Pipeline:
                     log.seek(0, 2)
                     log.seek(max(0, log.tell()-16384))
                     diagnostic = log.read().decode(errors='replace')
-                if name == 'download':
+                if name in ('download', 'download_video'):
                     raise StageFailure(name, download_failure(diagnostic))
                 if name == 'align_words' and any(message in diagnostic for message in (
                         'Empty alignment audio', 'FFmpeg failed to read "[]"')):
@@ -269,6 +271,7 @@ class Pipeline:
                                           duration_seconds=sf.info(audio).duration)])
 
     def download(self, *, artwork=True, format_id=None):
+        artwork = artwork and not self.audio_only
         cached = self.output/'source.json'
         if cached.exists() and self.source.is_file() and (self.output/'download/source.info.json').is_file():
             started = time.perf_counter()
@@ -277,9 +280,11 @@ class Pipeline:
                 if not 0 < source['duration'] <= self.max_duration+1:
                     raise StageFailure('download', '缓存视频超过当前时长上限')
                 metadata = json.loads((self.output/'download/source.info.json').read_text())
+                if source.get('audio_only') and not self.audio_only:
+                    metadata = self.promote_video(metadata, source)
                 self.phase(song_info=video_song_info(metadata))
                 if artwork and not (self.output/'poster.jpg').exists():
-                    create_poster(self.source, self.output/'poster.jpg', seconds=min(30, source['duration']*.1))
+                    create_poster(self.video, self.output/'poster.jpg', seconds=min(30, source['duration']*.1))
                 self.timings['reuse_download'] = round(time.perf_counter()-started, 3)
                 return metadata, source['duration']
         if (self.output/'download').exists():
@@ -303,7 +308,8 @@ class Pipeline:
             '--progress-template', 'postprocess:KARAOKE_STAGE_PROGRESS {"detail":"合并视频"}',
             '--write-info-json', '--no-overwrites', '--retries', '2', '--fragment-retries', '2',
             '--socket-timeout', '25', '--max-filesize', '2G', '--match-filter',
-            f'!is_live & duration <= {self.max_duration}', '-f', format_id or 'bv[height<=1080]+ba/b[height<=1080]',
+            f'!is_live & duration <= {self.max_duration}', '-f', format_id or (
+                'ba' if self.audio_only else 'bv[height<=1080]+ba/b[height<=1080]'),
             '--merge-output-format', 'mkv', '--remux-video', 'mkv',
             '-o', self.output/'download/source.%(ext)s']
         if self.cookies_file:
@@ -317,7 +323,8 @@ class Pipeline:
         self.phase(song_info=video_song_info(metadata))
         probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_streams',
             '-show_format', '-of', 'json', str(self.source)]))
-        if not {'audio', 'video'} <= {s['codec_type'] for s in probe['streams']}:
+        required = {'audio'} if self.audio_only else {'audio', 'video'}
+        if not required <= {s['codec_type'] for s in probe['streams']}:
             raise StageFailure('download', '输入必须同时包含视频和音频')
         duration = float(probe['format']['duration'])
         if not 0 < duration <= self.max_duration+1:
@@ -326,8 +333,50 @@ class Pipeline:
             create_poster(self.source, self.output/'poster.jpg', thumbnail=metadata.get('thumbnail'),
                           seconds=min(30, duration*.1))
         write_json(self.output/'source.json', dict(url=url, input_url=self.request['url'], sha256=file_hash(self.source),
-                                                 duration=duration, probe=probe))
+            duration=duration, probe=probe, audio_only='video' not in {s['codec_type'] for s in probe['streams']}))
         return metadata, duration
+
+    def promote_video(self, metadata, source):
+        """Add this video's picture while preserving the already tested audio stream."""
+        from .exact_stems import decode_source, pcm_sha
+        folder = self.output/'video-download'
+        video, info = folder/'source.mkv', folder/'source.info.json'
+        with self.checkpoints.stage('download_video', inputs=[self.source], outputs=[video, info],
+                config=dict(url=self.request['url'], format='bv[height<=1080]/b[height<=1080]')) as reused:
+            if not reused:
+                folder.mkdir(exist_ok=True)
+                command = [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--no-playlist',
+                    '--write-info-json', '--no-overwrites', '--retries', '2', '--fragment-retries', '2',
+                    '--socket-timeout', '25', '--max-filesize', '2G', '--match-filter',
+                    f'!is_live & duration <= {self.max_duration}', '-f', 'bv[height<=1080]/b[height<=1080]',
+                    '--remux-video', 'mkv', '-o', folder/'source.%(ext)s']
+                if self.cookies_file:
+                    command.extend(['--cookies', self.cookies_file])
+                self.run('download_video', command+[self.request['url']], timeout=900)
+        added = json.loads(info.read_text())
+        if not metadata.get('id') or (added.get('id'), added.get('extractor_key')) != (
+                metadata['id'], metadata.get('extractor_key')):
+            raise StageFailure('verify_video', '补充的视频与已测试音频来源不同')
+        merged = folder/'with-audio.mkv'
+        with self.checkpoints.stage('prepare_video', inputs=[self.source, video, info],
+                outputs=[merged], code=[ROOT/'pipeline.py']) as reused:
+            if not reused:
+                try:
+                    subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(video),
+                        '-i', str(self.source), '-map', '0:v:0', '-map', '1:a:0', '-c', 'copy', str(merged)], check=True)
+                    original, rate, _ = decode_source(self.source)
+                    promoted, new_rate, _ = decode_source(merged)
+                    if rate != new_rate or pcm_sha(original) != pcm_sha(promoted):
+                        raise StageFailure('verify_video', '补充视频改变了已测试音频，保留原音频及检查点')
+                    probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_streams',
+                        '-show_format', '-of', 'json', str(merged)]))
+                    if abs(float(probe['format']['duration'])-source['duration']) > 1:
+                        raise StageFailure('verify_video', '补充视频与已测试音频时长不匹配')
+                except BaseException:
+                    merged.unlink(missing_ok=True)
+                    raise
+        self.video = merged
+        return dict(metadata, format_id=added['format_id']+'+'+metadata['format_id'])
 
     def prepare_text(self, metadata, duration):
         self.run('package_two_stems', [sys.executable, ROOT/'exact_stems.py', 'build',
@@ -345,7 +394,9 @@ class Pipeline:
             with self.checkpoints.stage('prepare_lyrics',
                     inputs=[self.output/'asr/transcription.json', self.output/'vocals-16k.wav'],
                     outputs=[self.output/'lyrics.json', self.output/'anchors.json', self.output/'asr/filtered.json'],
-                    config=dict(request=self.request, metadata=metadata, duration=duration, model=self.text_model,
+                    config=dict(request=self.request,
+                                metadata={k: metadata.get(k) for k in ('title', 'track', 'artist', 'artists', 'uploader')},
+                                duration=duration, model=self.text_model,
                                 implementation=inspect.getsource(type(self).prepare_lyrics)),
                     code=[ROOT/p for p in ('song_sources.py', 'anchors_from_asr.py', 'transcribe_lyrics.py',
                                            'subtitles.py', 'job_schema.py')] + catalog) as reused:
@@ -480,10 +531,12 @@ class Pipeline:
             self.align(lyrics, duration)
             packaging.result()
         stems = json.loads((self.output/'stems/manifest.json').read_text())
-        artifacts = dict(mv='mv.mp4', instrumental='stems/instrumental.wav',
+        artifacts = dict(instrumental='stems/instrumental.wav',
             backing_vocals='stems/backing-vocals.wav', lead_vocals='stems/lead.wav',
             instrumental_preview='stems/instrumental.mp3', backing_vocals_preview='stems/backing-vocals.mp3',
             lead_vocals_preview='stems/lead.mp3', subtitles='cues.json')
+        if not self.audio_only:
+            artifacts['mv'] = 'mv.mp4'
         if (self.output/'poster.jpg').is_file():
             artifacts['poster'] = 'poster.jpg'
         result = dict(title=lyrics['title'], artist=lyrics['artist'], language=lyrics['language'],
@@ -491,19 +544,21 @@ class Pipeline:
             source_format=metadata.get('format_id'), artifacts={key: dict(path=value) for key, value in artifacts.items()},
             quality=json.loads((self.output/'quality.json').read_text()),
             reconstruction=stems['reconstruction']['vocal_first'], device=self.device)
-        self.render_video(result)
+        if not self.audio_only:
+            self.render_video(result)
         for artifact in result['artifacts'].values():
             path = self.output/artifact['path']
             artifact.update(bytes=path.stat().st_size, sha256=file_hash(path))
         result.update(processing_seconds=round(time.perf_counter()-started, 3), timings=self.timings,
-                      reused_stages=self.checkpoints.reused)
-        write_json(self.output/'result.json', result)
+                      reused_stages=self.checkpoints.reused,
+                      validation_scope='audio_and_lyrics' if self.audio_only else 'full_mv')
+        write_json(self.output/('audio-result.json' if self.audio_only else 'result.json'), result)
         return result
 
     def render_video(self, result):
         paths = {name: self.output/a['path'] for name, a in result['artifacts'].items()}
         with self.checkpoints.stage('render',
-                inputs=[self.source, paths['instrumental'], paths['backing_vocals'], paths['subtitles']],
+                inputs=[self.video, paths['instrumental'], paths['backing_vocals'], paths['subtitles']],
                 outputs=[paths['mv']],
                 config={**{key: result[key] for key in ('title', 'artist', 'language', 'mv_audio',
                     'duration_seconds', 'shared_preview_gain')},
@@ -525,7 +580,7 @@ class Pipeline:
         write_json(self.output/'song-info.json', dict(title=result['title'], original_artist=result['artist']))
         rendered = self.output/'rendered-mv.mp4'
         rendered.unlink(missing_ok=True)
-        self.run('render', [sys.executable, ROOT/'render_lyric_progress.py', '--video', self.source,
+        self.run('render', [sys.executable, ROOT/'render_lyric_progress.py', '--video', self.video,
             '--audio', mixed, '--cues', paths['subtitles'], '--song-info', self.output/'song-info.json',
             '--language', {'English': 'Latin'}.get(result['language'], result['language']),
             '--duration', result['duration_seconds'], '--gain', result['shared_preview_gain'],
@@ -565,13 +620,14 @@ def main():
     parser.add_argument('--request', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--restore-video', action='store_true')
+    parser.add_argument('--audio-only', action='store_true', help='Test all audio/subtitle stages without downloading or rendering video')
     args = parser.parse_args()
     pipeline = Pipeline(json.loads(args.request.read_text()), args.output,
         separator_python=os.getenv('KARAOKE_SEPARATOR_PYTHON'), device=os.getenv('KARAOKE_DEVICE', 'auto'),
         text_model=os.getenv('KARAOKE_TEXT_MODEL', 'gpt-5-mini'),
         max_duration=int(os.getenv('KARAOKE_MAX_DURATION_SECONDS', '900')),
         catalog_root=None if os.getenv('KARAOKE_DISABLE_LYRIC_CATALOG') == '1' else ROOT,
-        cookies_file=os.getenv('KARAOKE_COOKIES_FILE'))
+        cookies_file=os.getenv('KARAOKE_COOKIES_FILE'), audio_only=args.audio_only)
     try:
         pipeline.restore_video() if args.restore_video else pipeline.execute()
     except Exception as error:

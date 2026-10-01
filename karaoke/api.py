@@ -73,6 +73,10 @@ class Store:
                     key: value for key, value in (fields['song_info'] or {}).items()
                     if value is not None and value != ''}}
             doc.update(fields, updated_at=now())
+            if 'pipeline_version' in fields:
+                payload = {key: value for key, value in doc['input'].items() if key != 'force'}
+                cache_key = hashlib.sha256(json.dumps([doc['pipeline_version'], payload], sort_keys=True).encode()).hexdigest()
+                db.execute('UPDATE jobs SET cache_key=? WHERE id=?', (cache_key, job_id))
             db.execute('UPDATE jobs SET status=?, doc=? WHERE id=?',
                        (doc['status'], json.dumps(doc, ensure_ascii=False), job_id))
         self.on_change()
@@ -146,8 +150,9 @@ class Store:
 
 
 class Worker:
-    def __init__(self, store, command=None):
+    def __init__(self, store, command=None, version=None):
         self.store, self.command = store, command
+        self.version = version
         self.queue, self.current, self.process = asyncio.Queue(), None, None
 
     def prioritize(self, job_ids):
@@ -199,7 +204,9 @@ class Worker:
             job_id = self.queue.get_nowait()
             self.current = job_id
             folder = self.store.root/job_id
-            job = self.store.update(job_id, status='running', started_at=now())
+            job = self.store.read(job_id)
+            version = {'pipeline_version': self.version} if self.version and not job.get('restore_video') else {}
+            job = self.store.update(job_id, status='running', started_at=now(), **version)
             try:
                 (folder/'error.json').unlink(missing_ok=True)
                 if not self.store.cache.enforce(self.store.cache.headroom):
@@ -305,7 +312,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
         settings = {key: os.getenv(key) for key in ('KARAOKE_TEXT_MODEL', 'KARAOKE_ASR_FALLBACK_MODEL', 'KARAOKE_DEVICE',
             'KARAOKE_DISABLE_LYRIC_CATALOG', 'KARAOKE_FONT_FILE', 'KARAOKE_SEPARATOR_PYTHON')}
         version = hashlib.sha256((pipeline_fingerprint()+json.dumps(settings, sort_keys=True)).encode()).hexdigest()
-    worker = Worker(store, worker_command)
+    worker = Worker(store, worker_command, version)
     updates = Updates()
     store.on_change = updates.publish
     room = Room(store, worker, version, updates)

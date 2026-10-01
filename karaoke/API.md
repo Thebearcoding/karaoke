@@ -176,7 +176,17 @@ with httpx.Client(timeout=30) as client:
 
 ## 自动歌词与质量边界
 
-已核对的本地歌词只在视频身份和时长匹配时复用。新视频从分离人声生成 ASR，再由文本模型整理歌词和歌曲信息。自动整理结果标为 `asr_llm_draft` / `needs_review`；它不是出版歌词的正确性保证。文本和这个版本的演唱匹配不足、粗时间轴冲突或字体缺字时，任务明确失败，可提供修正后的 `lyrics` 再提交。
+已核对的本地歌词只在视频身份和时长匹配时复用。新视频从分离人声生成 ASR，按原文顺序分行，仅改变空白，不让文本模型增删歌词、重复句或改写唱词。结果标为 `asr_draft` / `needs_review`，附转录指纹；识别本身的错字、对白或幻听仍可能需要复核，这不是出版歌词的正确性保证。文本和词时间支持不足、粗时间轴冲突或字体缺字时仍明确失败，可提供修正后的 `lyrics` 再提交。文字来自 ASR 时，文字匹配率主要用于一致性检查，不能当作独立的识别或起音准确率。
+
+文本模型仅接收标题、音乐标签和上传者字段，用于整理歌曲信息，不接收或返回歌词。歌曲信息请求失败时保留视频标签和标题，并将原因记录在 `lyrics_provenance.metadata_error`；不会反复提交被拒绝的内容。ASR 阶段的错误仍正常报错和退避。
+
+### 先验证音频
+
+定位失败歌曲时，可在同一个任务目录运行 `python -m karaoke.pipeline --request REQUEST.json --output JOB_DIR --audio-only`。该模式只请求音频流，执行同一套解码、两次分离、精确封装、转录、歌词及逐字对齐，输出 `audio-result.json` 和七项音频／字幕产物，不生成 `result.json` 或 MV，也不能计为整曲 MV 回归通过。用 `karaoke.tools.soak.verify_outputs(..., audio_only=True)` 校验母版重组、文件哈希、全部 MP3 解码和字幕完整性。
+
+共享服务上的测试用 `python -m karaoke.tools.soak probe --manifest MANIFEST.json --data-dir DATA_DIR --job-id JOB_ID`。先暂停批量控制器及预处理 worker，并通过普通点歌接口注册任务；该命令检查来源退避和 worker 暂停状态，使用服务的缓存回收接口监测共享预算，超限时终止本次测试并保留检查点。它不会启动其他样本或将音频通过记作 MV 通过。
+
+音频通过后，在同一目录取消 `--audio-only` 再运行：仅补同一来源的画面，将已测试的音频流原样封装到独立容器，并检查 PCM 指纹。原音频文件和阶段输入不变，补画面不会使分离和对齐缓存失效；补视频失败也保留原音频和检查点。全部文件及播放验证通过后才计入最终 100 首结果。
 
 逐句音素细化有时会让后一句提前越过前一句。接口会检查全局起点顺序，对冲突行回退到原有粗对齐，并通过 `quality.line_order_fallback_lines` 标记；不会手工平移某个字来凑顺序。粗对齐本身有冲突时不生成伪造的时间轴。
 
@@ -193,7 +203,7 @@ MP3 试听使用 LAME 命令行写入完整的尾部填充信息，避免某些�
 | 环境变量 | 说明 |
 |---|---|
 | `OPENAI_API_KEY` | ASR 和自动歌词整理需要 |
-| `KARAOKE_TEXT_MODEL` | 默认 `gpt-5-mini`；仅负责元数据／歌词文本整理 |
+| `KARAOKE_TEXT_MODEL` | 默认 `gpt-5-mini`；仅整理歌曲元数据，不改写歌词 |
 | `KARAOKE_ASR_FALLBACK_MODEL` | 默认 `gpt-4o-transcribe`；仅在识别出现长串重复时恢复整首文本 |
 | `KARAOKE_DATA_DIR` | 默认 `karaoke/service-data`，保存 SQLite 任务状态和每个任务的文件 |
 | `KARAOKE_CACHE_MAX_GIB` | 初次创建缓存设置时的容量上限，默认 `10` GiB；之后以页面保存的值为准 |

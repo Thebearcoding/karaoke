@@ -80,11 +80,22 @@ class SignalIntegrity(unittest.TestCase):
 
     def test_exact_tail_repair_stays_bounded_and_respects_explicit_limit(self):
         source = np.array([[1e-30, -1e-30]], dtype='float32')
-        estimate = np.array([[2e-6, -2e-6]], dtype='float32')
+        estimate = np.array([[4.2e-6, -4.2e-6]], dtype='float32')
+        vocals, backing, repair = exact_split(source, estimate)
+        self.assertTrue(reconstruction_report(source, vocals, backing)['bitwise_equal'])
+        self.assertLessEqual(repair['maximum_vocal_change'], 1e-5)
         with self.assertRaisesRegex(ValueError, 'above the .* repair limit'):
-            exact_split(source, estimate)
+            exact_split(source, estimate*3)
         with self.assertRaisesRegex(ValueError, 'above the .* repair limit'):
             exact_split(source, estimate/10, repair_limit=1e-8)
+
+    def test_exact_tail_repair_does_not_expand_budget_for_non_silent_source(self):
+        source = np.array([[np.nextafter(1e-7, np.inf)]], dtype='float64')
+        estimate = np.array([[4.2e-6]], dtype='float64')
+        # A non-silent double-precision source can also suffer rounding. Its
+        # normal repair cap must not become an excuse to discard real content.
+        with self.assertRaisesRegex(ValueError, 'above the .* repair limit'):
+            exact_split(source, estimate)
 
     def test_reconstruction_check_detects_single_value_change(self):
         source = np.array([[.25, -.5], [0., .125]], dtype='float32')

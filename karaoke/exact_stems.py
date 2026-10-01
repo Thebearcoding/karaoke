@@ -45,7 +45,7 @@ def reconstruction_report(source, vocals, backing):
             'recombined_pcm_sha256': pcm_sha(combined)}
 
 
-def exact_split(source, estimate, repair_limit=1e-6):
+def exact_split(source, estimate, repair_limit=None):
     source = np.asarray(source, dtype='float64')
     vocals = np.array(estimate, dtype='float64', copy=True)
     if source.ndim != 2 or not source.size or source.shape != vocals.shape:
@@ -54,20 +54,29 @@ def exact_split(source, estimate, repair_limit=1e-6):
         raise ValueError('Non-finite audio')
     backing = source-vocals
     unequal = (vocals+backing).view('uint64') != source.view('uint64')
-    peak_correction = float(np.max(np.abs(vocals[unequal]), initial=0.))
-    if peak_correction > repair_limit:
+    changes = np.abs(vocals[unequal])
+    near_zero = np.abs(source[unequal]) <= 1e-12
+    # Decoder tails far below any audio sample can cancel a quiet model tail
+    # without retaining the source's low bits. Bound this narrowly: -240 dBFS
+    # source and at most -100 dBFS reassignment. Ordinary samples retain -120 dBFS.
+    limits = np.where(near_zero, 1e-5, 1e-6) if repair_limit is None else np.full(changes.shape, repair_limit)
+    excessive = np.flatnonzero(changes > limits)
+    if excessive.size:
+        index = excessive[np.argmax(changes[excessive])]
         raise ValueError(f'Exact addition would require changing a vocal sample by '
-                         f'{peak_correction:g}, above the {repair_limit:g} repair limit')
+                         f'{changes[index]:g}, above the {limits[index]:g} repair limit')
     # Extremely quiet decoder/model tails can still exceed float64's dynamic
-    # precision. Reassign only failed values at or below -120 dBFS to the complement.
-    # Model/resampling tails can exceed 1e-8 even when the decoded source is near zero.
+    # precision. Reassign only the failed, bounded values to the complement.
     # Also preserve a negative-zero source as (-0) + (-0), not (+0).
     vocals[unequal] = np.copysign(0., source[unequal])
     backing[unequal] = source[unequal]
     if not np.array_equal((vocals+backing).view('uint64'), source.view('uint64')):
         raise ArithmeticError('Exact reconstruction failed')
     return vocals, backing, {'reassigned_sample_values': int(np.count_nonzero(unequal)),
-        'maximum_vocal_change': peak_correction, 'permitted_change': repair_limit}
+        'maximum_vocal_change': float(np.max(changes, initial=0.)),
+        'permitted_change': float(np.max(limits, initial=repair_limit if repair_limit is not None else 1e-6)),
+        'near_zero_reassigned_sample_values': int(np.count_nonzero(near_zero)),
+        'near_zero_source_limit': 1e-12 if repair_limit is None else None}
 
 
 def decode_source(path):

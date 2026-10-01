@@ -6,11 +6,14 @@ import fcntl
 import gzip
 import hashlib
 import json
+import os
 from pathlib import Path
 import random
 import re
+import signal
 import sqlite3
 import subprocess
+import sys
 import time
 
 import httpx
@@ -159,11 +162,12 @@ def verify_stems(paths, expected_hash):
     return digest.hexdigest()
 
 
-def verify_outputs(client, base, data_dir, job):
+def verify_outputs(client, base, data_dir, job, *, audio_only=False):
     from karaoke.subtitles import normalized
     folder = (data_dir/job['id']).resolve()
-    result = json.loads((folder/'result.json').read_text())
-    if not REQUIRED <= result['artifacts'].keys():
+    result = json.loads((folder/('audio-result.json' if audio_only else 'result.json')).read_text())
+    required = REQUIRED-{'mv'} if audio_only else REQUIRED
+    if not required <= result['artifacts'].keys():
         raise ValueError('Missing required output artifacts')
     paths, hashes = {}, {}
     for name, artifact in result['artifacts'].items():
@@ -174,7 +178,7 @@ def verify_outputs(client, base, data_dir, job):
             digest = hashlib.file_digest(stream, 'sha256').hexdigest()
         if digest != artifact['sha256']:
             raise ValueError(f'Artifact checksum mismatch: {name}')
-        for start in (0, max(0, artifact['bytes']-1024)):
+        for start in (() if audio_only else (0, max(0, artifact['bytes']-1024))):
             end = min(artifact['bytes']-1, start+1023)
             response = client.get(f'{base}/v1/jobs/{job["id"]}/artifacts/{name}',
                                   headers={'Range': f'bytes={start}-{end}'})
@@ -196,6 +200,8 @@ def verify_outputs(client, base, data_dir, job):
     if any(normalized(''.join(u['text'] for u in c['units'])) != normalized(c['text']) for c in cues):
         raise ValueError('Subtitle units omit lyric text')
     for name in ('mv', 'instrumental_preview', 'backing_vocals_preview', 'lead_vocals_preview'):
+        if audio_only and name == 'mv':
+            continue
         probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_streams',
             '-show_format', '-of', 'json', str(paths[name])], timeout=30))
         needed = {'audio', 'video'} if name == 'mv' else {'audio'}
@@ -206,7 +212,8 @@ def verify_outputs(client, base, data_dir, job):
         command = ['ffmpeg', '-nostdin', '-v', 'error', '-xerror', '-i', str(paths[name])]
         command += ['-map', '0:v:0', '-map', '0:a:0'] if name == 'mv' else ['-map', '0:a:0']
         subprocess.run(command+['-f', 'null', '-'], check=True, capture_output=True, timeout=300)
-    return dict(artifact_sha256=hashes, reconstructed_pcm_sha256=reconstruction,
+    return dict(validation_scope='audio_and_lyrics' if audio_only else 'full_mv',
+                artifact_sha256=hashes, reconstructed_pcm_sha256=reconstruction,
                 subtitle_lines=len(cues), subtitle_units=len(units),
                 processing_seconds=result['processing_seconds'], timings=result['timings'],
                 quality=result['quality'], device=result['device'], reused_stages=result.get('reused_stages', []))
@@ -229,6 +236,64 @@ def wait_job(client, base, job_id):
                 if current['status'] not in ('queued', 'running'):
                     return current
     raise ConnectionError('Room event stream ended before completion')
+
+
+def run_probe(client, base, folder, command):
+    """Run one registered job under the live service's shared cache budget."""
+    health = client.get(base+'/health').raise_for_status().json()
+    job = client.get(f'{base}/v1/jobs/{folder.name}').raise_for_status().json()
+    if not health.get('preparation_paused') or health.get('running_job') or job['status'] != 'queued':
+        raise ValueError('Pause preparation and register a queued job before a focused probe')
+    with (folder.parent/'focused-probe.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with (folder/'probe.log').open('ab') as log:
+            process = subprocess.Popen(command, cwd=folder.parent.parent.parent,
+                stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                while True:
+                    storage = client.get(base+'/v1/storage').raise_for_status().json()
+                    if storage['used_bytes'] > storage['limit_bytes'] or not storage['can_prepare']:
+                        raise ValueError('Focused probe reached the shared cache or free-space limit')
+                    health = client.get(base+'/health').raise_for_status().json()
+                    if not health.get('preparation_paused') or health.get('running_job'):
+                        raise ValueError('Preparation resumed during the focused probe')
+                    result = process.poll()
+                    if result is not None:
+                        return result
+                    time.sleep(1)
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait()
+
+
+def probe(path, data_dir, base, job_id):
+    with httpx.Client(timeout=30) as client:
+        job = client.get(f'{base}/v1/jobs/{job_id}').raise_for_status().json()
+        state = json.loads(path.read_text())
+        case = next(c for c in state['cases'] if video_url(c['url']) == job['input']['url'])
+        retry_at = max(state['provider_backoff'].get(case['provider'], 0),
+                       state['provider_backoff'].get('openai', 0),
+                       (case.get('attempts') or [{}])[-1].get('next_retry_at') or 0)
+        if time.time() < retry_at:
+            raise ValueError(f'Provider backoff lasts until {datetime.fromtimestamp(retry_at, timezone.utc).isoformat()}')
+        folder = (data_dir/job['id']).resolve()
+        command = [sys.executable, '-u', '-m', 'karaoke.pipeline', '--request', str(folder/'request.json'),
+                   '--output', str(folder), '--audio-only']
+        version = client.get(base+'/health').raise_for_status().json()['pipeline_version']
+        code = run_probe(client, base, folder, command)
+        if code:
+            raise RuntimeError(f'Audio probe failed ({code}); inspect {folder / "error.json"} and probe.log')
+        evidence = verify_outputs(client, base, data_dir, job, audio_only=True)
+        if version != client.get(base+'/health').raise_for_status().json()['pipeline_version']:
+            raise ValueError('Pipeline changed during the focused probe')
+        evidence['pipeline_version'] = version
+        save(folder/'audio-verification.json', evidence)
+        print(json.dumps(evidence, ensure_ascii=False), flush=True)
 
 
 def record_failure(attempt, job, folder):
@@ -378,6 +443,7 @@ def run(path, data_dir, base):
                     print(f'Waiting for API reconnect: {type(error).__name__}', flush=True)
                     time.sleep(15)
                     continue
+                attempt['pipeline_version'] = job.get('pipeline_version', attempt['pipeline_version'])
                 if job['status'] == 'completed':
                     try:
                         evidence = verify_outputs(client, base, data_dir, job)
@@ -420,15 +486,20 @@ def run(path, data_dir, base):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('sample', 'run'))
+    parser.add_argument('action', choices=('sample', 'run', 'probe'))
     parser.add_argument('--manifest', type=Path, required=True)
     parser.add_argument('--data-dir', type=Path, required=True)
     parser.add_argument('--base-url', default='http://127.0.0.1:8746')
     parser.add_argument('--seed', type=int, default=20261001)
+    parser.add_argument('--job-id', help='A registered, queued job for an audio-only probe')
     args = parser.parse_args()
     args.manifest.parent.mkdir(parents=True, exist_ok=True)
     if args.action == 'sample':
         sample(args.manifest, args.data_dir, args.seed)
+    elif args.action == 'probe':
+        if not args.job_id:
+            parser.error('probe requires --job-id')
+        probe(args.manifest, args.data_dir, args.base_url.rstrip('/'), args.job_id)
     else:
         run(args.manifest, args.data_dir, args.base_url.rstrip('/'))
 

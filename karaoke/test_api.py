@@ -340,7 +340,7 @@ def test_soak_collects_retries_in_submission_order(tmp_path, monkeypatch):
     from karaoke.tools import soak
     cases = [dict(url=f'https://youtu.be/{i:011d}', title=str(i), language='English',
         provider='youtube', attempts=[dict(job_id=str(i), status='submitted',
-            pipeline_version='v2', submitted_at=f'2026-10-01T00:00:0{1-i}Z', entry_id=str(i))])
+            pipeline_version='v1', submitted_at=f'2026-10-01T00:00:0{1-i}Z', entry_id=str(i))])
         for i in range(2)]
     selection = [dict(url=c['url'], language=c['language']) for c in cases]
     manifest = tmp_path/'manifest.json'
@@ -359,7 +359,8 @@ def test_soak_collects_retries_in_submission_order(tmp_path, monkeypatch):
         else:
             job_id = path.removeprefix('/v1/jobs/')
             observed.append(job_id)
-            data = dict(id=job_id, status='failed', error={'code': 'processing_failed', 'message': 'test'})
+            data = dict(id=job_id, status='failed', pipeline_version='v2',
+                        error={'code': 'processing_failed', 'message': 'test'})
         return httpx.Response(200, json=data)
 
     client = httpx.Client(transport=httpx.MockTransport(respond))
@@ -369,6 +370,7 @@ def test_soak_collects_retries_in_submission_order(tmp_path, monkeypatch):
     saved = json.loads(manifest.read_text())['cases']
     assert [c['url'] for c in saved] == [c['url'] for c in cases]
     assert all(c['attempts'][-1]['status'] == 'failed' for c in saved)
+    assert all(c['attempts'][-1]['pipeline_version'] == 'v2' for c in saved)
 
 
 @pytest.mark.parametrize('provider', ['youtube', 'openai'])
@@ -628,6 +630,116 @@ def test_language_classification_uses_audio_metadata_not_subtitle_language():
     assert video_song_info(metadata)['language'] == 'English'
 
 
+@pytest.mark.parametrize('matching_video', [True, False])
+@pytest.mark.parametrize('audio_codec', ['pcm_s16le', 'libopus'])
+def test_audio_download_promotes_to_video_without_replacing_tested_audio(tmp_path, monkeypatch, matching_video, audio_codec):
+    from karaoke.exact_stems import decode_source, pcm_sha
+    pipeline = Pipeline(dict(url=URL), tmp_path, audio_only=True)
+    calls = []
+    def download(name, command, **kwargs):
+        calls.append(name)
+        path = pipeline.source if name == 'download' else tmp_path/'video-download/source.mkv'
+        args = ['ffmpeg', '-v', 'error', '-nostdin', '-f', 'lavfi', '-i']
+        if name == 'download':
+            assert command[command.index('-f')+1] == 'ba'
+            args += ['sine=frequency=440:duration=2', '-c:a', audio_codec]
+        else:
+            args += ['color=blue:s=160x90:r=30:d=2', '-c:v', 'libx264']
+        subprocess.run(args+[str(path)], check=True)
+        path.with_suffix('.info.json').write_text(json.dumps(dict(id='same' if matching_video or name=='download' else 'wrong',
+            extractor_key='Youtube', title='Example', duration=2, format_id='a1' if name=='download' else 'v1')))
+    monkeypatch.setattr(pipeline, 'run', download)
+    with patch('karaoke.pipeline.create_poster', side_effect=AssertionError('Audio test downloaded artwork')):
+        pipeline.download()
+        pipeline.download()
+    before = pcm_sha(decode_source(pipeline.source)[0])
+    assert calls == ['download'] and not (tmp_path/'result.json').exists()
+    pipeline.audio_only = False
+    if not matching_video:
+        with pytest.raises(StageFailure, match='来源不同'):
+            pipeline.download(artwork=False)
+        assert json.loads((tmp_path/'source.json').read_text())['audio_only']
+    else:
+        metadata, _ = pipeline.download(artwork=False)
+        assert metadata['format_id'] == 'v1+a1'
+        pipeline.download(artwork=False)
+        assert json.loads((tmp_path/'source.json').read_text())['audio_only']
+        assert pcm_sha(decode_source(pipeline.video)[0]) == before
+        assert pipeline.video != pipeline.source
+    assert calls == ['download', 'download_video']
+    assert pcm_sha(decode_source(pipeline.source)[0]) == before
+
+
+def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv(tmp_path, monkeypatch):
+    import soundfile as sf
+    from karaoke.exact_stems import pcm_sha, encode_preview
+    from karaoke.tools.soak import verify_outputs
+    folder = tmp_path/'job'
+    pipeline = Pipeline(dict(url=URL), folder, audio_only=True, device='cpu')
+    sample_rate = 44100
+    tone = (.1*np.sin(np.arange(sample_rate)*2*np.pi*440/sample_rate)).astype('float32')[:,None]
+    artifacts = folder/'stems'
+    artifacts.mkdir()
+    for name, scale in [('lead', .25), ('backing-vocals', .25), ('instrumental', .5)]:
+        sf.write(artifacts/f'{name}.wav', tone*scale, sample_rate, subtype='DOUBLE')
+        encode_preview(artifacts/f'{name}.wav', artifacts/f'{name}.mp3', 1, len(tone), 1)
+    (artifacts/'manifest.json').write_text(json.dumps(dict(preview_shared_gain=1,
+        reconstruction=dict(vocal_first=dict(source_pcm_sha256=pcm_sha(tone.astype('float64')))))))
+    sf.write(folder/'source-44100.wav', tone, sample_rate)
+    pipeline.vocals.parent.mkdir(parents=True)
+    sf.write(pipeline.vocals, tone, sample_rate)
+    (folder/'cues.json').write_text(json.dumps([dict(text='Hello',start=.1,end=.8,
+        units=[dict(text='Hello',first=0,stop=5,start=.1,end=.8)])]))
+    (folder/'quality.json').write_text('{}')
+    monkeypatch.setenv('OPENAI_API_KEY','unit-test-placeholder')
+    monkeypatch.setattr(pipeline, 'download', lambda: ({'format_id':'a1'},1))
+    stages=[]
+    monkeypatch.setattr(pipeline, 'run', lambda name,*args,**kwargs: stages.append(name))
+    monkeypatch.setattr(pipeline, 'prepare_text', lambda *args: dict(title='Example',artist='',language='English'))
+    monkeypatch.setattr(pipeline, 'align', lambda *args: stages.append('align'))
+    monkeypatch.setattr(pipeline, 'render_video', lambda *args: pytest.fail('Audio-only test rendered a video'))
+    result=pipeline.execute()
+    assert {'separate_music','separate_lead','package_three_stems','align'}<=set(stages)
+    assert result['validation_scope']=='audio_and_lyrics' and 'mv' not in result['artifacts']
+    assert not (folder/'result.json').exists()
+    evidence=verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
+    assert evidence['validation_scope']=='audio_and_lyrics' and len(evidence['artifact_sha256'])==7
+    with pytest.raises(FileNotFoundError):
+        verify_outputs(None,'',tmp_path,{'id':'job'})
+
+
+@pytest.mark.parametrize('oversized', [False, True])
+def test_focused_probe_obeys_shared_budget_and_preserves_checkpoints(tmp_path, oversized):
+    import httpx
+    import os
+    from karaoke.tools.soak import run_probe
+    folder = tmp_path/'job'
+    folder.mkdir()
+    (folder/'checkpoint.wav').write_bytes(b'reusable')
+    pidfile = folder/'pid'
+    code = ('import os,pathlib,time;'
+            f'pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid()));'
+            f'time.sleep({30 if oversized else 0})')
+    def respond(request):
+        if request.url.path == '/health':
+            data = dict(preparation_paused=True, running_job=None)
+        elif request.url.path == '/v1/storage':
+            data = dict(used_bytes=200 if oversized and pidfile.exists() else 20,
+                        limit_bytes=100, can_prepare=True)
+        else:
+            data = dict(status='queued')
+        return httpx.Response(200, json=data)
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        if oversized:
+            with pytest.raises(ValueError, match='cache or free-space limit'):
+                run_probe(client, 'http://test', folder, [sys.executable, '-c', code])
+        else:
+            assert run_probe(client, 'http://test', folder, [sys.executable, '-c', code]) == 0
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pidfile.read_text()), 0)
+    assert (folder/'checkpoint.wav').read_bytes() == b'reusable'
+
+
 def test_partial_song_information_updates_preserve_language_and_title(tmp_path):
     pipeline = Pipeline(dict(url=URL), tmp_path)
     pipeline.phase(song_info=dict(title='Video', language='Japanese'))
@@ -646,6 +758,16 @@ def test_restart_recovers_pending_and_marks_interrupted_jobs(tmp_path):
         old = client.get(f"/v1/jobs/{interrupted['id']}").json()
         assert old['status'] == 'failed' and old['error']['code'] == 'interrupted'
         assert finished(client, pending['id'])['status'] == 'completed'
+
+
+def test_queued_job_uses_executing_version_and_updates_cache_identity(tmp_path):
+    store = Store(tmp_path)
+    pending, _ = store.create(JobRequest(url=URL), 'before-update')
+    with TestClient(create_app(tmp_path, worker_command=fake_worker, version='after-update')) as client:
+        result = finished(client, pending['id'])
+        assert result['pipeline_version'] == 'after-update'
+        cached = client.post('/v1/jobs', json={'url': URL}).json()
+        assert cached['id'] == pending['id'] and cached['cache_hit']
 
 
 def test_shutdown_stops_current_job_and_preserves_the_queue(tmp_path):
@@ -739,15 +861,49 @@ def test_catalog_requires_video_identity_and_matching_duration(tmp_path):
 
 
 def test_automatic_lyrics_are_marked_as_draft_and_user_overrides_survive():
-    parsed = SongText(title='Detected', artist='Singer', language='English', lines=['One short line', 'One short line'])
+    parsed = SongText(title='Detected', artist='Singer', language='English', lines=['Invented replacement'])
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))], model='test-model', usage=None)
     with patch('karaoke.song_sources.OpenAI') as client:
         client.return_value.beta.chat.completions.parse.return_value = response
         result = prepare_song_text(dict(url=URL, title='User title'), {},
-            dict(language='english', segments=[dict(text='One short line', start=1, end=3)]),
+            dict(language='english', segments=[dict(text='One short line', start=1, end=3),
+                                               dict(text='One short line', start=4, end=6)]),
             120, catalog_root=None, model='test-model')
     assert result['title'] == 'User title' and result['lines'] == ['One short line', 'One short line']
     assert result['provenance']['needs_review'] is True
+    payload = json.loads(client.return_value.beta.chat.completions.parse.call_args.kwargs['messages'][1]['content'])
+    assert 'segments' not in payload and 'transcription' not in payload
+
+
+def test_lyric_text_survives_metadata_refusal_without_resubmitting_content():
+    from openai import ContentFilterFinishReasonError
+    with patch('karaoke.song_sources.OpenAI') as client:
+        parse = client.return_value.beta.chat.completions.parse
+        parse.side_effect = ContentFilterFinishReasonError()
+        result = prepare_song_text(dict(url=URL), dict(title='Source title'),
+            dict(language='english', segments=[dict(text="We're here. We're here again!", start=1, end=8)]),
+            120, catalog_root=None, model='test-model')
+    assert result['lines'] == ["We're here.", "We're here again!"]
+    assert result['title'] == 'Source title'
+    assert result['provenance']['metadata_error']['code'] == 'openai_content_rejected'
+    assert parse.call_count == 1
+
+
+@pytest.mark.parametrize('language,text', [
+    ('English', "One two three four five six seven eight nine ten eleven twelve. Don't lose déjà vu!"),
+    ('Chinese', '甲乙丙丁戊己庚辛壬癸甲乙丙丁戊己庚辛壬癸，今天hello world不要漏字。'),
+    ('Japanese', 'あいうえおかきくけこさしすせそたちつてとなにぬねの。もう一度。'),
+])
+def test_automatic_line_breaking_only_adds_whitespace(language, text):
+    parsed = SongText(title='Detected', artist='', language=language, lines=['Changed'])
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))], model='test', usage=None)
+    with patch('karaoke.song_sources.OpenAI') as client:
+        client.return_value.beta.chat.completions.parse.return_value = response
+        result = prepare_song_text(dict(url=URL), {}, dict(language=language, segments=[dict(text=text)]),
+                                   120, catalog_root=None, model='test-model')
+    assert ''.join(''.join(result['lines']).split()) == ''.join(text.split())
+    assert len(result['lines']) > 1
+    assert max(map(len, result['lines'])) < 80
 
 
 @pytest.mark.parametrize('extra,tail,rate,valid', [(0,0.,48000,True), (37,0.,48000,True),
@@ -859,6 +1015,21 @@ def test_video_eviction_still_protects_queue_and_transfers(tmp_path):
     assert store.cache.enforce()
     assert (tmp_path/first['id']/'mv.mp4').exists()
     assert store.read(second['id'])['status'] == 'video_evicted'
+
+
+def test_audio_only_failure_is_not_evicted_as_disposable_video(tmp_path):
+    store = Store(tmp_path)
+    audio, _ = store.create(JobRequest(url=URL), 'test')
+    folder = tmp_path/audio['id']
+    (folder/'download').mkdir()
+    (folder/'download/source.mkv').write_bytes(b'audio'*200)
+    (folder/'source.json').write_text(json.dumps(dict(audio_only=True)))
+    store.update(audio['id'], status='failed', last_accessed_at='1')
+    video = cache_fixture(store, '2', restorable=True)
+    store.cache.enforce()
+    store.cache.set_limit(store.cache.stats['used_bytes']-1)
+    assert (folder/'download/source.mkv').exists()
+    assert store.read(video['id'])['status'] == 'video_evicted'
 
 
 def test_video_restore_reuses_job_and_recovers_from_failure(tmp_path):
