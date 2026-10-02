@@ -3,8 +3,10 @@ import copy
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import time
 
@@ -19,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 from align_lyric_phonemes import SingingAligner, protect_units, protect_line_order
 from lyric_progress import canonical_positions
 from phoneme_progress import spoken_units
-from subtitles import presentation_cues, highlight_spans
+from subtitles import presentation_cues, highlight_spans, highlight_coverage_errors
 from stage_progress import progress_items
 
 
@@ -201,9 +203,30 @@ def process(job, model, protocol):
     if job['language'] == 'Chinese':
         cues, character_repairs = repair_character_groups(cues, baseline, wave, model, protocol)
         if job.get('original_audio'):
-            from cjk_recovery import AcousticWitness, recover_groups
+            from cjk_recovery import AcousticWitness, recover_groups, recover_context_groups, recover_repeated_groups
+            witness = AcousticWitness(job['original_audio'], model.device)
             cues, verified_repairs = recover_groups(cues, wave, model,
-                AcousticWitness(job['original_audio'], model.device), protocol)
+                witness, protocol)
+            cues, contextual_repairs = recover_context_groups(cues, wave, model, witness, protocol)
+            verified_repairs.extend(contextual_repairs)
+            cues, repeated_repairs = recover_repeated_groups(cues, wave, witness, protocol)
+            verified_repairs.extend(repeated_repairs)
+            if highlight_coverage_errors(cues, 'Chinese') and (ROOT/'models/alignment/qwen3-forced-aligner-0.6b/model.safetensors').is_file():
+                write(output/'qwen-input.json', cues)
+                try:
+                    with (output/'qwen.log').open('w') as log:
+                        subprocess.run([os.getenv('KARAOKE_QWEN_PYTHON', sys.executable), str(ROOT/'qwen_witness.py'),
+                            '--cues', str(output/'qwen-input.json'), '--audio', job['audio'],
+                            '--original', job['original_audio'], '--output', str(output/'qwen-witnesses.json'),
+                            '--device', str(model.device)], stdout=log, stderr=subprocess.STDOUT, check=True, timeout=300)
+                    views = json.loads((output/'qwen-witnesses.json').read_text())
+                    indices = {id(c): str(i) for i, c in enumerate(cues)}
+                    cues, alternate = recover_groups(cues, wave, model,
+                        lambda cue, _: views.get(indices[id(cue)], []), protocol)
+                    verified_repairs.extend(dict(r, verification_model='qwen3_forced_aligner') for r in alternate)
+                except (subprocess.SubprocessError, OSError, ValueError) as error:
+                    verified_repairs.append(dict(verification_model='qwen3_forced_aligner', accepted=False,
+                                                 reason=type(error).__name__))
         all_units = [u for c in cues for u in c['units']]
         for left, right in zip(all_units, all_units[1:]):
             left['end'] = min(left['end'], right['start'])

@@ -365,7 +365,7 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     }
     models = [code/'models/alignment'/name for name in (
         'whisper/large-v3-turbo.pt', 'sofa/mandarin/model.ckpt', 'sofa/english/model.ckpt',
-        'mms/model.pt')]
+        'mms/model.pt', 'qwen3-forced-aligner-0.6b/model.safetensors')]
     for model in models:
         model.parent.mkdir(parents=True, exist_ok=True)
         model.write_bytes(b'original model')
@@ -400,6 +400,16 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     fingerprint = module.pipeline_fingerprint()
     models[3].write_bytes(b'updated independent alignment model')
     assert module.pipeline_fingerprint() != fingerprint
+    prepare()
+    assert calls == ['align_context']
+    calls.clear()
+    fingerprint = module.pipeline_fingerprint()
+    models[4].write_bytes(b'updated optional verification model')
+    assert module.pipeline_fingerprint() != fingerprint
+    prepare()
+    assert calls == ['align_context']
+    calls.clear()
+    monkeypatch.setenv('KARAOKE_QWEN_PYTHON', '/different/isolated/python')
     prepare()
     assert calls == ['align_context']
     calls.clear()

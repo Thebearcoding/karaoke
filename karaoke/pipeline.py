@@ -51,9 +51,10 @@ def pipeline_fingerprint():
     for path in sorted((ROOT/'models/pretrained').glob('*roformer*')):
         stat = path.stat()
         digest.update(f'{path.name}:{stat.st_size}:{stat.st_mtime_ns}'.encode())
-    for path in sorted(p for directory in ('whisper', 'sofa', 'mms')
+    for path in sorted(p for directory in ('whisper', 'sofa', 'mms', 'qwen3-forced-aligner-0.6b')
                        for p in (ROOT/'models/alignment'/directory).rglob('*')):
-        if path.is_file() and path.suffix in ('.ckpt', '.pt', '.yaml', '.json'):
+        if path.is_file() and (path.suffix in ('.ckpt', '.pt', '.yaml', '.json') or
+                ('qwen3-forced-aligner-0.6b' in path.parts and path.suffix in ('.safetensors', '.txt'))):
             stat = path.stat()
             digest.update(f'{path.relative_to(ROOT)}:{stat.st_size}:{stat.st_mtime_ns}'.encode())
     for path in sorted((ROOT/'lyrics').glob('*.json')):
@@ -146,7 +147,7 @@ class Pipeline:
         alignment_code = [ROOT/p for p in ('align_lyrics_whisper.py', 'align_lyric_phonemes.py',
             'align_english_onsets.py', 'align_repeated_lyrics.py', 'phoneme_progress.py',
             'phonetic_align.py', 'anchors_from_asr.py', 'subtitles.py', 'lyric_progress.py',
-            'onset_consensus.py', 'word_onset_metrics.py', 'cjk_recovery.py', 'experiments/cjk-onsets-v003/run.py',
+            'onset_consensus.py', 'word_onset_metrics.py', 'cjk_recovery.py', 'qwen_witness.py', 'experiments/cjk-onsets-v003/run.py',
             'experiments/cjk-onsets-v003/protocol.json')]
         english = str(ROOT/'align_english_onsets.py') in [str(a) for a in command]
         specs = {
@@ -190,6 +191,9 @@ class Pipeline:
                 weights = sorted((ROOT/'models/alignment/sofa'/directory).rglob('*.ckpt'))
                 if name == 'align_context' and language == 'Chinese':
                     weights.append(ROOT/'models/alignment/mms/model.pt')
+                    weights.extend(p for p in (ROOT/'models/alignment/qwen3-forced-aligner-0.6b').glob('*')
+                                   if p.suffix in ('.safetensors', '.json', '.txt'))
+                    config['qwen_python'] = os.getenv('KARAOKE_QWEN_PYTHON', sys.executable)
             # An unrelated model download must not invalidate completed stages.
             config['weights'] = [(str(p), p.stat().st_size, p.stat().st_mtime_ns)
                 for p in weights if p.is_file()]

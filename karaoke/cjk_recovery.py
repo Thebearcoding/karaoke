@@ -109,6 +109,180 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol):
     return result, 'agreement across phonetic contexts, original and separated audio'
 
 
+def neighboring_context(cues, line, group):
+    """Keep complete Chinese context while excluding adjacent foreign vocals."""
+    text, anchors, offset = '', [], 0
+    for index in range(max(0, line-1), min(len(cues), line+2)):
+        if index == line:
+            offset = len(text)
+        anchors.extend(dict(u, first=u['first']+len(text), stop=u['stop']+len(text))
+                       for u in cues[index]['units'])
+        text += cues[index]['text']+' '
+    foreign = [i for i, c in enumerate(text) if c.isalnum() and not '\u3400' <= c <= '\u9fff']
+    first = max((i+1 for i in foreign if i < offset+group['first']), default=0)
+    stop = min((i for i in foreign if i >= offset+group['stop']), default=len(text))
+    left = max((u['end'] for u in anchors if u['stop'] <= first), default=0.)
+    right = min((u['start'] for u in anchors if u['first'] >= stop), default=float('inf'))
+    anchors = [dict(u, first=u['first']-first, stop=u['stop']-first)
+               for u in anchors if first <= u['first'] and u['stop'] <= stop]
+    if not anchors or anchors[-1]['end']-anchors[0]['start'] > 30:
+        raise ValueError('No bounded Chinese lyric context')
+    return (dict(text=text[first:stop], units=anchors, aligned_start=anchors[0]['start'],
+                 aligned_end=anchors[-1]['end']), offset-first, left, right)
+
+
+def recover_context_groups(cues, wave, model, witness, protocol):
+    """Recheck neighbors too when a stale word boundary blocks a real onset."""
+    result, reports = deepcopy(cues), []
+    for line, cue in enumerate(cues):
+        for group in cue['units']:
+            if (len(list(highlight_spans(group['text'], 'Chinese'))) < 2 or
+                    any(c.isalnum() and not '\u3400' <= c <= '\u9fff' for c in group['text'])):
+                continue
+            current = result[line]['units']
+            index = next((i for i, u in enumerate(current)
+                          if (u['first'], u['stop']) == (group['first'], group['stop'])), None)
+            if index is None:  # An earlier joint repair already covered this group.
+                continue
+            report = dict(line=line+1, first=group['first'], stop=group['stop'],
+                          phase='neighbor_context', attempts=[], accepted=False)
+            reports.append(report)
+            try:
+                context, offset, left, right = neighboring_context(cues, line, group)
+                parsed = spoken_units(context['text'], 'Chinese')
+                independent = witness(context, wave)
+                decoders = [('phonemes', (1., 1.5, 2.))]
+                if 'context_padding_seconds' in protocol:
+                    decoders.append(('ctc', protocol['context_padding_seconds']))
+                # Grow the repair only within this line. Every newly included
+                # neighbor needs the same independent evidence as the group.
+                ranges = sorted(((lo, hi) for lo in range(index+1)
+                                 for hi in range(index+1, len(current)+1)), key=lambda r: r[1]-r[0])
+                for decoder, pads in decoders:
+                    windows = [(max(left, context['aligned_start']-pad),
+                                min(right, len(wave)/44100, context['aligned_end']+pad)) for pad in pads]
+                    if len(set(windows)) != 3 or any(b <= a for a, b in windows):
+                        continue
+                    options = {'decoder': 'ctc'} if decoder == 'ctc' else {}
+                    predictions = [model.infer(wave[round(a*44100):round(b*44100)], a, parsed,
+                                               context, **options)['units'] for a, b in windows]
+                    for lo, hi in ranges:
+                        first, stop = current[lo]['first'], current[hi-1]['stop']
+                        text = cue['text'][first:stop]
+                        if any(c.isalnum() and not '\u3400' <= c <= '\u9fff' for c in text):
+                            continue
+                        previous = current[lo-1] if lo else (result[line-1]['units'][-1] if line else None)
+                        following = current[hi] if hi < len(current) else (
+                            result[line+1]['units'][0] if line+1 < len(result) else None)
+                        bounds = [previous['end'] if previous else 0.,
+                                  following['start'] if following else len(wave)/44100]
+
+                        def select(views):
+                            return [[dict(u, first=u['first']-offset, stop=u['stop']-offset) for u in view
+                                     if first+offset <= u['first'] and u['stop'] <= stop+offset] for view in views]
+
+                        primary, secondary = select(predictions), select(independent)
+                        replacement, reason = corroborated_group(dict(first=first, stop=stop, text=text),
+                            primary, secondary, wave, bounds, protocol)
+                        report['attempts'].append(dict(decoder=decoder, first=first, stop=stop, reason=reason,
+                            predictions=primary, witnesses=secondary, bounds=bounds, source_windows=windows))
+                        if replacement is not None:
+                            if decoder == 'ctc':
+                                for unit in replacement:
+                                    unit['timing_source'] = 'cross_model_ctc'
+                            current[lo:hi] = replacement
+                            report.update(accepted=True, decoder=decoder)
+                            break
+                    if report['accepted']:
+                        break
+            except (ValueError, RuntimeError, OSError) as error:
+                report['reason'] = str(error)
+    result, reverted = protect_line_order(result, cues)
+    for report in reports:
+        if report['line'] in reverted:
+            report.update(accepted=False, reason='reverted to preserve lyric order')
+    return result, reports
+
+
+def recover_repeated_groups(cues, wave, witness, protocol):
+    """Transfer verified onsets through four audio paths, then check the target."""
+    from align_repeated_lyrics import agree_onset, audio_features, audio_path, audible
+    from librosa.util.exceptions import ParameterError
+    from lyric_progress import canonical_positions
+
+    result, reports, features = deepcopy(cues), [], None
+    keys = [canonical_positions(c['text'], 'Chinese')[0] for c in cues]
+    for line, cue in enumerate(cues):
+        if len(keys[line]) < 5:
+            continue
+        observed = None
+        for index, group in enumerate(cue['units']):
+            spans = [(group['first']+a, group['first']+b) for a, b in highlight_spans(group['text'], 'Chinese')]
+            if len(spans) < 2:
+                continue
+            for source_line, source in enumerate(cues):
+                if source_line == line or keys[source_line] != keys[line]:
+                    continue
+                reference = {len(canonical_positions(source['text'][:u['first']], 'Chinese')[0]): u
+                             for u in source['units']}
+                units = [reference.get(len(canonical_positions(cue['text'][:a], 'Chinese')[0])) for a, _ in spans]
+                if any(u is None or u.get('timing_source') not in ('cross_model_phonemes', 'cross_model_ctc')
+                       or len(list(highlight_spans(u['text'], 'Chinese'))) != 1 for u in units):
+                    continue
+                report = dict(line=line+1, first=group['first'], stop=group['stop'],
+                              reference_line=source_line+1, phase='verified_repeat', accepted=False)
+                reports.append(report)
+                try:
+                    if features is None:
+                        original, rate = sf.read(witness.original_audio, dtype='float32', always_2d=True)
+                        features = [*audio_features(wave, 44100).items(),
+                                    *audio_features(original.mean(axis=1), rate).items()]
+                    paths = [(name, audio_path(data, source, cue)) for name, data in features]
+                    report['path_costs'] = [path[2] for _, path in paths]
+                    if any(path[2] > (.35 if name == 'pitch' else .85) for name, path in paths):
+                        raise ValueError('Repeated audio is not sufficiently similar')
+                    if observed is None:
+                        observed = witness(cue, wave)
+                    previous = cue['units'][index-1] if index else (cues[line-1]['units'][-1] if line else None)
+                    following = cue['units'][index+1] if index+1 < len(cue['units']) else (
+                        cues[line+1]['units'][0] if line+1 < len(cues) else None)
+                    lower, upper = previous['end'] if previous else 0., following['start'] if following else len(wave)/44100
+                    replacement, estimates = [], []
+                    for (a, b), unit in zip(spans, units):
+                        values = [float(np.interp(unit['start'], x, y)) for _, (x, y, _) in paths]
+                        estimates.append(values)
+                        onset = agree_onset(values, protocol['maximum_spread_seconds'],
+                                            cue['aligned_start'], cue['aligned_end'])
+                        matches = [next((u for u in view if (u['first'], u['stop']) == (a, b)), None)
+                                   for view in observed]
+                        if (onset is None or not lower <= onset < upper or len(matches) != 2 or
+                                any(u is None or u['text'] != cue['text'][a:b] or
+                                    not np.isfinite([u['start'], u['end']]).all() or u['end'] <= u['start'] or
+                                    abs(u['start']-onset) > .1 for u in matches) or
+                                abs(matches[0]['start']-matches[1]['start']) > .1):
+                            raise ValueError('Repeated onset lacks independent target support')
+                        replacement.append(dict(first=a, stop=b, text=cue['text'][a:b], start=onset,
+                            timing_source='repeated_lyric_audio', reference_line=source_line+1))
+                    for i, unit in enumerate(replacement):
+                        unit['end'] = replacement[i+1]['start'] if i+1 < len(replacement) else min(group['end'], upper)
+                        if unit['end']-unit['start'] < .035 or not audible(
+                                wave[round(unit['start']*44100):round((unit['start']+.035)*44100)],
+                                float(np.sqrt(np.mean(wave**2)))):
+                            raise ValueError('Repeated onset has no audible interval')
+                    current = result[line]['units']
+                    where = next(i for i, u in enumerate(current) if (u['first'], u['stop']) == (group['first'], group['stop']))
+                    current[where:where+1] = replacement
+                    report.update(accepted=True, estimates=estimates, replacement=replacement)
+                    break
+                except (ValueError, RuntimeError, OSError, ParameterError) as error:
+                    report['reason'] = str(error)
+    result, reverted = protect_line_order(result, cues)
+    for report in reports:
+        if report['line'] in reverted:
+            report.update(accepted=False, reason='reverted to preserve lyric order')
+    return result, reports
+
+
 def recover_groups(cues, wave, model, witness, protocol):
     """Keep foreign words intact while retrying adjacent Chinese compounds."""
     result, reports = deepcopy(cues), []

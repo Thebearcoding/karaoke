@@ -73,12 +73,15 @@ cp karaoke/dependencies/english-alignment.json karaoke/research/word-onset-2026-
 | 英文音素对齐 | 上一步的固定版本仓库 | `karaoke/research/word-onset-2026-09-18/lyrics-alignment-multilingual/checkpoints/checkpoint_Baseline` |
 | Whisper 粗对齐 | stable-whisper 自动下载 | `karaoke/models/alignment/whisper/` |
 | 中文合并字组的独立声学复核（可选） | [MMS_FA](https://dl.fbaipublicfiles.com/mms/torchaudio/ctc_alignment_mling_uroman/model.pt) | `karaoke/models/alignment/mms/model.pt` |
+| 中文残余字组的后备复核（可选） | [Qwen3 ForcedAligner 0.6B](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B/tree/c7cbfc2048c462b0d63a45797104fc9db3ad62b7) | `karaoke/models/alignment/qwen3-forced-aligner-0.6b/` |
 
 权重和压缩包的校验值分别记录在 [separation.json](karaoke/dependencies/separation.json)、[sofa-mandarin.json](karaoke/dependencies/sofa-mandarin.json)、[sofa-japanese.json](karaoke/dependencies/sofa-japanese.json)。`separation.json` 也保留了早期对照模型的来源；正式流程只需要 F 和 Anvuew。可用 `shasum -a 256 文件路径` 核对下载内容。上游若更新了 `main` 对应的文件，应以这里记录的 SHA-256 判断是否还是同一个模型。
 
 这些模型和上游源码遵循各自的许可。仓库只保存调用代码、配置和来源，不重新分发其权重或第三方源码。
 
 MMS_FA 的校验值见 [mms-alignment.json](karaoke/dependencies/mms-alignment.json)。它只复核仍然合并的中文字组：分别对原音和分离人声对齐，再与 SOFA 的三个上下文结果比较。运行中不自动下载该模型；缺少权重会保留原结果与原因，不能把未能拆开的字组标成通过。没有问题的字组及非中文歌曲不调用它。
+
+后备 Qwen 复核在独立子进程运行，避免其 Transformers 版本与主环境冲突。按上面固定版本下载完整模型目录，文件哈希见 [qwen-forced-aligner.json](karaoke/dependencies/qwen-forced-aligner.json)。可创建独立环境，安装匹配本机的 torch 及 `karaoke/requirements-qwen.txt`，然后设置 `KARAOKE_QWEN_PYTHON=/绝对路径/.venv-qwen/bin/python`。已有的 `karaoke/research/subtitles-2026-09-18/python-deps` 也只在这个子进程加载。该路径仅处理此前仍未拆开的中文字组，禁用 SDK 时间插值；没有依赖或证据不符时保留原失败，不自动下载或改写时间。
 
 ## 5. 运行配置
 
