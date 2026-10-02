@@ -443,6 +443,29 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     (folder/'lead-separation/song/vocals.wav').write_bytes(b'updated lead audio')
     prepare()
     assert calls == ['transcribe']
+    # An English phrase makes the English pronunciation assets relevant only
+    # to the final cross-model repair, not to prior separation or recognition.
+    (folder/'lyrics.json').write_text(json.dumps(dict(language='Japanese', lines=['go home now'])))
+    dictionary = code/'models/alignment/sofa/english/dict.txt'
+    dictionary.write_text('go G OW\n')
+    g2p = code/'research/word-onset-2026-09-18/labelmakr/models/g2p_model.py'
+    g2p.parent.mkdir(parents=True)
+    g2p.write_text('pronunciation = 1\n')
+    (code/'align_english_sofa.py').write_text('aligner = 1\n')
+    prepare()
+    calls.clear()
+    for asset in (dictionary, g2p, models[3]):
+        fingerprint = module.pipeline_fingerprint()
+        asset.write_bytes(asset.read_bytes()+b'updated')
+        assert module.pipeline_fingerprint() != fingerprint
+        prepare()
+        assert calls == ['align_context']
+        calls.clear()
+    fingerprint = module.pipeline_fingerprint()
+    (dictionary.parent/'README.txt').write_text('Documentation only')
+    assert module.pipeline_fingerprint() == fingerprint
+    prepare()
+    assert calls == []
 
 
 @pytest.mark.parametrize('formatting', ['lyrics', 'symbols', 'annotations', 'unavailable'])

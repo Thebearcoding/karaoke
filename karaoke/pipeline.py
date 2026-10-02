@@ -54,10 +54,13 @@ def pipeline_fingerprint():
         digest.update(f'{path.name}:{stat.st_size}:{stat.st_mtime_ns}'.encode())
     for path in sorted(p for directory in ('whisper', 'sofa', 'mms', 'qwen3-forced-aligner-0.6b')
                        for p in (ROOT/'models/alignment'/directory).rglob('*')):
-        if path.is_file() and (path.suffix in ('.ckpt', '.pt', '.yaml', '.json') or
+        if path.is_file() and (path.suffix in ('.ckpt', '.pt', '.ptsd', '.yaml', '.json') or path.name == 'dict.txt' or
                 ('qwen3-forced-aligner-0.6b' in path.parts and path.suffix in ('.safetensors', '.txt'))):
             stat = path.stat()
             digest.update(f'{path.relative_to(ROOT)}:{stat.st_size}:{stat.st_mtime_ns}'.encode())
+    g2p = ROOT/'research/word-onset-2026-09-18/labelmakr/models/g2p_model.py'
+    if g2p.is_file():
+        digest.update(g2p.read_bytes())
     for path in sorted((ROOT/'lyrics').glob('*.json')):
         digest.update(path.read_bytes())
     return digest.hexdigest()
@@ -190,6 +193,15 @@ class Pipeline:
                 language = 'English' if english else json.loads((self.output/'lyrics.json').read_text())['language']
                 directory = {'Chinese': 'mandarin', 'Japanese': 'japanese', 'English': 'english'}[language]
                 weights = sorted((ROOT/'models/alignment/sofa'/directory).rglob('*.ckpt'))
+                if name == 'align_context' and language != 'English' and any(c.isascii() and c.isalpha()
+                        for line in json.loads((self.output/'lyrics.json').read_text()).get('lines', []) for c in line):
+                    weights.append(ROOT/'models/alignment/mms/model.pt')
+                    weights.extend(p for p in (ROOT/'models/alignment/sofa/english').rglob('*')
+                                   if p.suffix in ('.ckpt', '.ptsd', '.yaml') or p.name == 'dict.txt')
+                    code = code+[ROOT/'align_english_sofa.py']
+                    g2p = ROOT/'research/word-onset-2026-09-18/labelmakr/models/g2p_model.py'
+                    if g2p.is_file():
+                        code = code+[g2p]
                 if name == 'align_context' and language == 'Chinese':
                     weights.append(ROOT/'models/alignment/mms/model.pt')
                     weights.extend(p for p in (ROOT/'models/alignment/qwen3-forced-aligner-0.6b').glob('*')

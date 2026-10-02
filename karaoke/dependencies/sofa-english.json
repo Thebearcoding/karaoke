@@ -1,0 +1,33 @@
+{
+  "url": "https://github.com/spicytigermeat/LabelMakr/releases/download/tgm_en_v100/tgm_en_v100.zip",
+  "archive_sha256": "78a928ba737a72a0ad1dca10c7738a7073681df680edde122bea83f9daa8de48",
+  "files": [
+    {
+      "path": "karaoke/models/alignment/sofa/english/tgm_en_v100/model.ckpt",
+      "sha256": "6aba5f0ba3461155bf0c20190df85fad580de42409784737573309f6962449ff",
+      "bytes": 406079728
+    },
+    {
+      "path": "karaoke/models/alignment/sofa/english/tgm_en_v100/dict.txt",
+      "sha256": "b5af446c210ac90e521965ff1e47a447a2497520077cfbe87757c6faafeaccaa",
+      "bytes": 3377772
+    },
+    {
+      "path": "karaoke/models/alignment/sofa/english/tgm_en_v100/g2p/cfg.yaml",
+      "sha256": "15195a671231e1a11cef0c8f47156a8689a0e5e08bca27f5c084c97f5aa0234c",
+      "bytes": 1131
+    },
+    {
+      "path": "karaoke/models/alignment/sofa/english/tgm_en_v100/g2p/model.ptsd",
+      "sha256": "3b8e5266f1ad94b75f89a90fe03e665db3ab1693b5c11def70977d796f4961e9",
+      "bytes": 1772866
+    }
+  ],
+  "g2p_source": {
+    "url": "https://raw.githubusercontent.com/spicytigermeat/LabelMakr/ce4d03a83cc9527cf9ceb96431ba6cca3dda2197/models/g2p_model.py",
+    "revision": "ce4d03a83cc9527cf9ceb96431ba6cca3dda2197",
+    "sha256": "d5e610bae6bff109d9395ca9ab0cfa6543b6193c7226e1c38788d105992ad90b",
+    "bytes": 7105,
+    "path": "karaoke/research/word-onset-2026-09-18/labelmakr/models/g2p_model.py"
+  }
+}

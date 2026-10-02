@@ -71,6 +71,7 @@ cp karaoke/dependencies/english-alignment.json karaoke/research/word-onset-2026-
 | 中文音素对齐 | [SOFA Mandarin](https://github.com/qiuqiao/SOFA/releases/download/v1.0.1/pretrained_mandarin_singing.zip) | 解压到 `karaoke/models/alignment/sofa/mandarin/`，保留压缩包子目录 |
 | 日文音素对齐 | [SOFA Japanese](https://github.com/ariikamusic/SOFA_Models/releases/download/akm_ja_v001/akm_ja_v001.zip) | 解压到 `karaoke/models/alignment/sofa/japanese/`，保留压缩包子目录 |
 | 英文音素对齐 | 上一步的固定版本仓库 | `karaoke/research/word-onset-2026-09-18/lyrics-alignment-multilingual/checkpoints/checkpoint_Baseline` |
+| 中日文歌曲中英文词组的复核（可选） | [SOFA English tgm_en_v100](https://github.com/spicytigermeat/LabelMakr/releases/download/tgm_en_v100/tgm_en_v100.zip) | 解压到 `karaoke/models/alignment/sofa/english/`，保留 `tgm_en_v100/` 子目录及其字典、G2P 文件 |
 | Whisper 粗对齐 | stable-whisper 自动下载 | `karaoke/models/alignment/whisper/` |
 | 可选本地批量 ASR | `Systran/faster-whisper-large-v3`（完整 CTranslate2 模型） | `KARAOKE_WHISPER_MODEL` |
 | 中文合并字组的独立声学复核（可选） | [MMS_FA](https://dl.fbaipublicfiles.com/mms/torchaudio/ctc_alignment_mling_uroman/model.pt) | `karaoke/models/alignment/mms/model.pt` |
@@ -80,7 +81,12 @@ cp karaoke/dependencies/english-alignment.json karaoke/research/word-onset-2026-
 
 这些模型和上游源码遵循各自的许可。仓库只保存调用代码、配置和来源，不重新分发其权重或第三方源码。
 
-MMS_FA 的校验值见 [mms-alignment.json](karaoke/dependencies/mms-alignment.json)。它只复核仍然合并的中文字组：分别对原音和分离人声对齐，再与 SOFA 的三个上下文结果比较。运行中不自动下载该模型；缺少权重会保留原结果与原因，不能把未能拆开的字组标成通过。没有问题的字组及非中文歌曲不调用它。
+MMS_FA 的校验值见 [mms-alignment.json](karaoke/dependencies/mms-alignment.json)。它复核仍然合并的中文字组，以及中日文歌曲中纯英文句的合并词组：分别对原音和分离人声对齐，再与 SOFA 的三个上下文结果比较。运行中不自动下载该模型；缺少权重会保留原结果与原因，不能把未能拆开的字词标成通过。没有问题的字词不调用它。
+
+英文词组复核还需要 LabelMakr 的 G2P 源文件，放到
+`karaoke/research/word-onset-2026-09-18/labelmakr/models/g2p_model.py`。
+固定源码 URL、模型与字典哈希见 [sofa-english.json](karaoke/dependencies/sofa-english.json)；
+该模块复用主环境的 PyTorch，不需要安装 LabelMakr GUI 或覆盖主环境依赖。
 
 后备 Qwen 复核在独立子进程运行，避免其 Transformers 版本与主环境冲突。按上面固定版本下载完整模型目录，文件哈希见 [qwen-forced-aligner.json](karaoke/dependencies/qwen-forced-aligner.json)。可创建独立环境，安装匹配本机的 torch 及 `karaoke/requirements-qwen.txt`，然后设置 `KARAOKE_QWEN_PYTHON=/绝对路径/.venv-qwen/bin/python`。已有的 `karaoke/research/subtitles-2026-09-18/python-deps` 也只在这个子进程加载。该路径仅处理此前仍未拆开的中文字组，禁用 SDK 时间插值；没有依赖或证据不符时保留原失败，不自动下载或改写时间。
 

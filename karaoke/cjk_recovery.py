@@ -1,4 +1,4 @@
-"""Recover merged Chinese highlights with independent acoustic corroboration."""
+"""Recover merged highlights with independent acoustic corroboration."""
 from copy import deepcopy
 import re
 
@@ -107,6 +107,69 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol):
     for left, right in zip(result, result[1:]):
         left['end'] = min(left['end'], right['start'])
     return result, 'agreement across phonetic contexts, original and separated audio'
+
+
+def recover_latin_groups(cues, wave, witness, protocol, model=None):
+    """Use English acoustics for English lines inside a Chinese/Japanese song."""
+    result, reports = deepcopy(cues), []
+    for line, cue in enumerate(cues):
+        if any(c.isalnum() and not c.isascii() for c in cue['text']):
+            continue
+        groups = [u for u in cue['units'] if len(list(highlight_spans(u['text'], 'English'))) > 1
+                  and u.get('timing_source') != 'repeated_lyric_audio']
+        if not groups:
+            continue
+        report = dict(line=line+1, language='English', groups=[])
+        reports.append(report)
+        try:
+            if model is None:
+                from align_english_sofa import EnglishSofaAligner
+                model = EnglishSofaAligner(witness.device)
+            if cue['aligned_end']-cue['aligned_start'] > 30:
+                raise ValueError('English lyric recovery context exceeds 30 seconds')
+            spans = list(highlight_spans(cue['text'], 'English'))
+            words = [cue['text'][a:b] for a, b in spans]
+            windows = [(max(0., cue['aligned_start']-pad),
+                        min(len(wave)/44100, cue['aligned_end']+pad))
+                       for pad in protocol['context_padding_seconds']]
+            if len(set(windows)) != 3 or any(b <= a for a, b in windows):
+                raise ValueError('English recovery requires three distinct audio contexts')
+            predictions = []
+            for begin, end in windows:
+                aligned, _, _ = model.align(wave[round(begin*44100):round(end*44100)], words)
+                if [u['text'] for u in aligned] != words:
+                    raise ValueError('English phonetic alignment changed the required words')
+                predictions.append([dict(first=a, stop=b, text=cue['text'][a:b],
+                    start=u['start']+begin, end=u['end']+begin) for (a, b), u in zip(spans, aligned)])
+            independent = witness(cue, wave)
+            report.update(source_windows=windows, predictions=predictions, witnesses=independent,
+                          model_identity=model.model_identity)
+            replacements = {}
+            for group in groups:
+                index = cue['units'].index(group)
+                previous = cue['units'][index-1] if index else (cues[line-1]['units'][-1] if line else None)
+                following = cue['units'][index+1] if index+1 < len(cue['units']) else (
+                    cues[line+1]['units'][0] if line+1 < len(cues) else None)
+                bounds = [previous['end'] if previous else 0., following['start'] if following else len(wave)/44100]
+                def select(views):
+                    return [[u for u in view if group['first'] <= u['first'] and u['stop'] <= group['stop']]
+                            for view in views]
+                replacement, reason = corroborated_group(group, select(predictions), select(independent),
+                                                         wave, bounds, protocol)
+                report['groups'].append(dict(first=group['first'], stop=group['stop'], bounds=bounds,
+                    accepted=replacement is not None, reason=reason))
+                if replacement is not None:
+                    replacements[(group['first'], group['stop'])] = replacement
+            result[line]['units'] = [part for u in cue['units']
+                for part in replacements.get((u['first'], u['stop']), [u])]
+        except (ValueError, RuntimeError, OSError) as error:
+            report['reason'] = str(error)
+    result, reverted = protect_line_order(result, cues)
+    for report in reports:
+        if report['line'] in reverted:
+            for group in report['groups']:
+                group.update(accepted=False, reason='reverted to preserve lyric order')
+    return result, reports
 
 
 def neighboring_context(cues, line, group, radius=1):

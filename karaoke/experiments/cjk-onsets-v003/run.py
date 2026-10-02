@@ -200,6 +200,7 @@ def process(job, model, protocol):
         decisions[i]['final'] = unit['start']
     character_repairs = []
     verified_repairs = []
+    witness = None
     if job['language'] == 'Chinese':
         cues, character_repairs = repair_character_groups(cues, baseline, wave, model, protocol)
         if job.get('original_audio'):
@@ -232,6 +233,12 @@ def process(job, model, protocol):
             left['end'] = min(left['end'], right['start'])
         if any(u['end'] <= u['start'] for u in all_units):
             raise ValueError('Non-positive character interval')
+    latin_repairs = []
+    if job.get('original_audio'):
+        from cjk_recovery import AcousticWitness, recover_latin_groups
+        witness = witness or AcousticWitness(job['original_audio'], model.device)
+        cues, latin_repairs = recover_latin_groups(cues, wave, witness, protocol)
+        all_units = [u for c in cues for u in c['units']]
     for cue in cues:
         cue.update(start=cue['units'][0]['start'], end=cue['units'][-1]['end'])
     cues, presentation = presentation_cues(cues, job['duration'], lead=0., tail=0., bridge_gap=0.)
@@ -243,7 +250,10 @@ def process(job, model, protocol):
         preserved_repeat_units=sum(u.get('timing_source') == 'repeated_lyric_audio' for u in all_units),
         accepted_window_units=sum(u.get('timing_source') == 'singing_window_consensus' for u in all_units),
         repaired_character_units=sum(u.get('timing_source') == 'singing_context_characters' for u in all_units),
-        corroborated_character_units=sum(u.get('timing_source') in ('cross_model_phonemes', 'cross_model_ctc') for u in all_units),
+        corroborated_character_units=sum(u.get('timing_source') in ('cross_model_phonemes', 'cross_model_ctc')
+            and any('\u3400' <= c <= '\u9fff' for c in u['text']) for u in all_units),
+        corroborated_latin_units=sum(u.get('timing_source') == 'cross_model_phonemes'
+            and any(c.isascii() and c.isalpha() for c in u['text']) for u in all_units),
         maximum_window_change_ms=max((abs(d['final']-d['previous'])*1000 for d in decisions), default=0),
         checkpoint=str(model.checkpoint), presentation=presentation,
         accuracy=None, accuracy_note='No independent manual onset reference supplied; consistency is not accuracy')
@@ -252,6 +262,7 @@ def process(job, model, protocol):
     write(output/'decisions.json', decisions)
     write(output/'character-repairs.json', character_repairs)
     write(output/'verified-repairs.json', verified_repairs)
+    write(output/'latin-repairs.json', latin_repairs)
     write(output/'report.json', report)
     print(json.dumps(report, ensure_ascii=False), flush=True)
     return report
