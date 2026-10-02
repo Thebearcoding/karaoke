@@ -107,8 +107,9 @@ class Room:
             state.update(position=self.position(state), playing=False, started_at=None)
             self.save(state)
 
-    def describe(self, entry):
-        job = self.store.read(entry['job_id'])
+    def describe(self, entry, job=None):
+        if job is None:
+            job = self.store.read(entry['job_id'])
         if job is None:
             return dict(**entry, title='歌曲已不可用', artist='', status='failed', artifacts={})
         result, inputs = job.get('result') or {}, job['input']
@@ -157,7 +158,7 @@ class Room:
                 continue
             seen[url] = priority
             song = by_url.get(url)
-            info = self.describe(dict(id=job['id'], job_id=job['id']))
+            info = self.describe(dict(id=job['id'], job_id=job['id']), job)
             if song is None:
                 song = dict(id=job['id'])
                 songs.append(song)

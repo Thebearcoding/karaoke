@@ -406,6 +406,7 @@ def main():
         anchors = None
         if job.get('anchors'):
             anchors = json.loads(Path(job['anchors']).read_text())
+        if anchors:
             assert [cue['text'] for cue in anchors] == lyrics['lines']
             blocks = alignment_blocks(anchors, audio)
         started = time.perf_counter()

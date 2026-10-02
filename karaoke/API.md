@@ -90,7 +90,7 @@ curl -sS http://127.0.0.1:8746/v1/jobs/任务UUID
 
 普通点歌与严格音频验收区分处理。普通点歌先查独立歌词文本，核对歌名、歌手、版本和录音时长，再做声学对齐；该路径的 `validation_scope=playback_lyrics_first`，不声称完成独立 ASR 覆盖率验证。没有适合的歌词才进入 ASR。文本或对齐失败可返回 `completed` 的可唱版本，`validation_scope=playback_with_lyrics_review`，`quality.playback_fallback` 保留错误与字幕模式，`lyrics_provenance.needs_review=true`。仅复用完整且时间合法的唱句作为白字字幕，不制造逐字起点；没有可信唱句则不生成字幕。音轨分离、文件和音频重组失败仍然阻止发布。`--audio-only` 固定回归继续执行原有完整验收，任何这类回退都不能计为通过。
 
-两首交叠时，普通 worker 使用数据目录中的 `stage-locks/` 协调分离、识别／对齐、编码三个独立工位；同工位单任务，不同工位可并行。`stage_progress.<阶段>.waiting=true` 表示尚未获得工位，等待不计入模型运行超时。任务结束或进程退出会释放工位；共享缓存预算保持不变。
+多首交错处理时，普通 worker 使用数据目录中的 `stage-locks/` 协调分离、识别／对齐、编码三个独立阶段；同阶段单任务，不同阶段可并行。`stage_progress.<阶段>.waiting=true` 表示尚未获得执行机会，等待不计入模型运行超时。任务结束或进程退出会释放阶段锁；共享缓存预算保持不变。
 
 外部语音／歌词服务错误还包含 `error.provider` 和 `error.retryable`：超时、连接或限流可以退避后重试；内容拒绝、认证或权限失败需要人工处理。错误码分别为 `openai_timeout`、`openai_connection`、`openai_rate_limit`、`openai_content_rejected`、`openai_authentication` 和 `openai_permission`。对外只返回固定说明，不暴露原始响应、请求头或密钥；已完成阶段仍按检查点规则保留。
 
@@ -335,7 +335,7 @@ ASR 固定宽度断行若留下孤立的单字或单词，会在同一短句内�
 | `KARAOKE_ASR_FALLBACK_MODEL` | 默认 `gpt-4o-transcribe`；识别文本或时间异常时恢复整首文本 |
 | `KARAOKE_DATA_DIR` | 默认 `karaoke/service-data`，保存 SQLite 任务状态和每个任务的文件 |
 | `KARAOKE_CACHE_MAX_GIB` | 初次创建缓存设置时的容量上限，默认 `10` GiB；之后以页面保存的值为准 |
-| `KARAOKE_PREPARATION_CONCURRENCY` | 同时准备歌曲数，`1`（默认）或 `2`；共用同一缓存预算 |
+| `KARAOKE_PREPARATION_CONCURRENCY` | 在途歌曲数上限，正整数（默认 `1`）；`none` 取消整首任务数量限制，仅由各阶段互斥锁和共享缓存预算约束 |
 | `KARAOKE_PORT` | 默认 `8746` |
 | `KARAOKE_HOST` | 默认 `127.0.0.1`；需要局域网设备点歌时可显式设为 `0.0.0.0` |
 | `KARAOKE_CORS_ORIGINS` | 允许调用接口的前端来源，逗号分隔；默认允许本地 8745 预览页 |
@@ -348,7 +348,7 @@ ASR 固定宽度断行若留下孤立的单字或单词，会在同一短句内�
 | `KARAOKE_FONT_FILE` | 可选的完整字体路径；Linux 可使用覆盖对应语言的 Noto Serif CJK 字体 |
 | `KARAOKE_DISABLE_LYRIC_CATALOG` | 设为 `1` 时强制走自动歌词，用于测试新歌流程 |
 
-单进程、单 GPU 队列运行；不要给同一数据目录启动多个 Uvicorn worker。队列可同时处理两首歌；`/health.running_jobs` 和房间快照的 `preparation_jobs` 列出全部运行任务，旧单数属性保留首项。暂停领取任务后，所有已经开始的歌曲仍会自然完成。并发处理各自监控共享缓存，并按运行任务数预留写入余量。独立的分离环境与主环境都需安装对应硬件的 PyTorch。CUDA 入口已接入；本次实际端到端运行平台是 Mac / MPS，未在 RTX 4090 上测时。
+单进程、单 GPU 队列运行；不要给同一数据目录启动多个 Uvicorn worker。`none` 模式下所有已点歌曲可进入流水线，同一种重阶段仍串行，不同阶段可以交错；`/health.preparation_concurrency` 返回 `null`，`running_jobs` 和房间快照的 `preparation_jobs` 列出全部在途任务，旧单数属性保留首项。暂停领取任务后，所有已经开始的歌曲仍会自然完成。并发处理各自监控共享缓存，并按运行任务数预留写入余量。独立的分离环境与主环境都需安装对应硬件的 PyTorch。CUDA 入口已接入；本次实际端到端运行平台是 Mac / MPS，未在 RTX 4090 上测时。
 
 维护时可在数据目录创建 `preparation.pause`，暂停领取下一项预处理任务；当前任务正常完成，歌单、排队顺序和缓存保护保持不变。该暂停跨服务重启保留，删除文件后继续，`/health.preparation_paused` 显示状态。批量回归应先暂停控制器，再暂停预处理；定向复现失败样本后才恢复整批。
 
