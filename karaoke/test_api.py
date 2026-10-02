@@ -4310,10 +4310,21 @@ def test_search_keeps_provider_order_when_original_has_no_channel_badge():
     original = dict(url=URL, title='The song (Official music video)', channel='A broadcaster',
                     channel_is_verified=None, channel_is_official_artist=False)
     cover = dict(item(1), title='The song (Cover)')
-    found = search_results('youtube', [original, cover, dict(item(2), title='Unrelated song')], 'The song')
+    found = search_results('youtube', [original, cover], 'The song')
     assert [x['url'] for x in found] == [URL, cover['url']]
     assert found[0]['official_evidence'] is None
     assert found[1]['official_evidence'] == 'youtube_official_artist_channel'
+
+
+@pytest.mark.parametrize('artist_badge', [True, False])
+def test_youtube_translated_titles_are_not_removed_by_literal_query_matching(artist_badge):
+    from karaoke.video_search import search_results
+    original = dict(url=URL, title='Nightfall - Official music video',
+                    channel='Original artist', channel_is_official_artist=artist_badge)
+    fan_edit = dict(url='https://www.youtube.com/watch?v=00000000001', title='【MAD】夜色')
+    cover = dict(url='https://www.youtube.com/watch?v=00000000002', title='夜色 (Cover)')
+    results = search_results('youtube', [original, fan_edit, cover], '夜色')
+    assert [row['url'] for row in results] == [URL, fan_edit['url'], cover['url']]
 
 
 @pytest.mark.parametrize('query,title,channel,expected', [
