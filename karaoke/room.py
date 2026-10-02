@@ -127,6 +127,7 @@ class Room:
                     if (job['status'] == 'completed' or job.get('restore_video')) and 'poster' in result.get('artifacts', {})
                     else featured.get('poster')), lyrics_need_review=result.get('quality', {}).get(
                 'lyrics_provenance', {}).get('needs_review', False),
+            lyrics_unavailable=result.get('quality', {}).get('playback_fallback', {}).get('subtitle_mode') == 'unavailable',
             artifacts={key: f"/v1/jobs/{job['id']}/artifacts/{key}"
                        for key in result.get('artifacts', {})})
 

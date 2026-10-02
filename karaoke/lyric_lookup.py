@@ -27,7 +27,7 @@ def names(value):
     match = re.fullmatch(r'([\u3400-\u9fff]+)\s+([A-Za-z][\x20-\x7e]*)', value)
     if match and not re.search(r'\b(live|remix|acoustic|instrumental|karaoke|remaster\w*)\b',
                                match[2], re.I):
-        result.append(match[1])
+        result.extend((match[2], match[1]))
     return result
 
 

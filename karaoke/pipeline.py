@@ -383,7 +383,7 @@ class Pipeline:
             '--write-info-json', '--no-overwrites', '--retries', '2', '--fragment-retries', '2',
             '--socket-timeout', '25', '--max-filesize', '2G', '--match-filter',
             f'!is_live & duration <= {self.max_duration}', '-f', format_id or (
-                'ba' if self.audio_only else 'bv[height<=1080]+ba/b[height<=1080]'),
+                'ba' if self.audio_only else 'bv[height<=720]+ba/b[height<=720]'),
             '--merge-output-format', 'mkv', '--remux-video', 'mkv',
             '-o', self.output/'download/source.%(ext)s']
         if self.cookies_file:
@@ -416,13 +416,13 @@ class Pipeline:
         folder = self.output/'video-download'
         video, info = folder/'source.mkv', folder/'source.info.json'
         with self.checkpoints.stage('download_video', inputs=[self.source], outputs=[video, info],
-                config=dict(url=self.request['url'], format='bv[height<=1080]/b[height<=1080]')) as reused:
+                config=dict(url=self.request['url'], format='bv[height<=720]/b[height<=720]')) as reused:
             if not reused:
                 folder.mkdir(exist_ok=True)
                 command = [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--no-playlist',
                     '--write-info-json', '--no-overwrites', '--retries', '2', '--fragment-retries', '2',
                     '--socket-timeout', '25', '--max-filesize', '2G', '--match-filter',
-                    f'!is_live & duration <= {self.max_duration}', '-f', 'bv[height<=1080]/b[height<=1080]',
+                    f'!is_live & duration <= {self.max_duration}', '-f', 'bv[height<=720]/b[height<=720]',
                     '--remux-video', 'mkv', '-o', folder/'source.%(ext)s']
                 if self.cookies_file:
                     command.extend(['--cookies', self.cookies_file])

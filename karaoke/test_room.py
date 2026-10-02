@@ -23,6 +23,21 @@ def ready_job(store, url=URL):
                         duration_seconds=10, artifacts=artifacts))
 
 
+def test_room_distinguishes_missing_lyrics_from_alignment_review(tmp_path):
+    app = create_app(tmp_path, version='test')
+    job = ready_job(app.state.store)
+    with TestClient(app) as client:
+        entry = client.post('/v1/room/entries', json={'job_id':job['id']}).json()['entries'][0]
+        assert not entry['lyrics_unavailable']
+        for mode in ('unavailable', 'partial_word', 'line'):
+            result = dict(job['result'], quality=dict(lyrics_provenance=dict(needs_review=True),
+                                                     playback_fallback=dict(subtitle_mode=mode)))
+            app.state.store.update(job['id'], result=result)
+            song = client.get('/v1/room').json()['entries'][0]
+            assert song['lyrics_need_review']
+            assert song['lyrics_unavailable'] == (mode == 'unavailable')
+
+
 def test_poster_survives_cleanup_and_browsing_does_not_refresh_lru(tmp_path):
     app = create_app(tmp_path, version='test')
     store = app.state.store

@@ -316,7 +316,8 @@ function updateTransport() {
   $('seek').max = song?.duration || 1;
   $('duration').textContent = time(song?.duration);
   $('playing-dot').hidden = !state.playing;
-  $('quality-note').hidden = !song?.lyrics_need_review;
+  $('quality-note').hidden = !song?.lyrics_need_review && !song?.lyrics_unavailable;
+  $('quality-note').textContent = song?.lyrics_unavailable ? '歌词暂缺' : '歌词待校对';
   const pitch = state.pitch_semitones || 0;
   $('pitch-value').textContent = pitch ? `${pitch > 0 ? '+' : '−'}${Math.abs(pitch)}` : '原调';
   $('pitch-value').setAttribute('aria-label', `当前${pitch ? `${pitch > 0 ? '升' : '降'} ${Math.abs(pitch)} 个半音` : '原调'}`);

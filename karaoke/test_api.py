@@ -759,6 +759,17 @@ def test_published_lyrics_reject_wrong_credits_versions_and_empty_text(change):
     assert published_candidate([dict(row, **change)], song, 'Official Music Video')[0] is None
 
 
+def test_published_lyrics_match_both_languages_of_bilingual_credits():
+    from karaoke.lyric_lookup import published_candidate
+    row = dict(trackId=123, trackTitle='晚風 Evening Wind', artists=[dict(artistName='林林 Lin Lin')],
+               album=dict(albumTitle='春天'), lyrics='微風裡慢慢歌唱')
+    for title, artist in [('Evening Wind', 'Lin Lin'), ('晚風', '林林')]:
+        lines, report = published_candidate([row], dict(title=title, artist=artist), 'Official Music Video')
+        assert lines == [row['lyrics']] and report['url'].endswith('/123')
+    for change in (dict(trackTitle='晚風 Live'), dict(artists=[dict(artistName='林林 Remix')])):
+        assert published_candidate([dict(row, **change)], dict(title='Evening Wind', artist='Lin Lin'), '')[0] is None
+
+
 @pytest.mark.parametrize('empty_anchor_file', [False, True])
 def test_direct_lyrics_reach_acoustic_aligner_without_asr_anchors(tmp_path, monkeypatch, empty_anchor_file):
     import soundfile as sf
@@ -1358,6 +1369,34 @@ def test_audio_download_promotes_to_video_without_replacing_tested_audio(tmp_pat
         assert pipeline.video != pipeline.source
     assert calls == ['download', 'download_video']
     assert pcm_sha(decode_source(pipeline.source)[0]) == before
+
+
+@pytest.mark.parametrize('mode,expected', [('full', '720+audio'), ('promote', '720'), ('audio', 'audio')])
+def test_download_selects_720p_without_reducing_audio_quality(tmp_path, monkeypatch, mode, expected):
+    from yt_dlp import YoutubeDL
+    pipeline = Pipeline(dict(url=URL), tmp_path, audio_only=mode == 'audio')
+    commands = []
+    class DownloadSelected(Exception):
+        pass
+    def capture(name, command, **kwargs):
+        commands.append(command)
+        raise DownloadSelected
+    monkeypatch.setattr(pipeline, 'run', capture)
+    with pytest.raises(DownloadSelected):
+        if mode == 'promote':
+            pipeline.source.parent.mkdir()
+            pipeline.source.write_bytes(b'cached audio')
+            pipeline.promote_video({}, {})
+        else:
+            pipeline.download(artwork=False)
+    formats = [dict(format_id=str(height), url=f'https://media.example/{height}.mp4', ext='mp4',
+                    height=height, vcodec='avc1', acodec='none') for height in (360, 720, 1080, 2160)]
+    formats += [dict(format_id=name, url=f'https://media.example/{name}.webm', ext='webm',
+                     vcodec='none', acodec='opus', abr=rate) for name, rate in [('small-audio', 64), ('audio', 160)]]
+    selector = commands[0][commands[0].index('-f')+1]
+    with YoutubeDL(dict(format=selector, quiet=True, no_warnings=True)) as downloader:
+        result = downloader.process_ie_result(dict(id='sample', title='sample', formats=formats), download=False)
+    assert result['format_id'] == expected
 
 
 @pytest.mark.parametrize('audio_only', [False, True])
