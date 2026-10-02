@@ -53,7 +53,8 @@ def recover_anchor_words(client, audio, lines, words, language, output, cache, m
             break
         _, (begin, end), _, source = max(windows)
         attempted.add(((begin, end), source))
-        config = dict(begin=begin, end=end, language=language, model='whisper-1', audio=source,
+        config = dict(begin=begin, end=end, language=language,
+                      model='local-whisper-large-v3' if local_asr.offline() else 'whisper-1', audio=source,
                       asr=local_asr.configuration())
         key = 'anchor_asr_'+hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:12]
         response_path, clip = output.parent/(key+'.json'), output.parent/(key+'.mp3')

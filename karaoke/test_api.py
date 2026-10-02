@@ -1519,6 +1519,45 @@ def test_audio_regression_prioritizes_due_failures_then_unfinished_cases(
         assert submitted == [cases[3]['url']]
 
 
+@pytest.mark.parametrize('kind,resolved', [('model', True), ('download', True), ('old_download', False), ('software', False), ('source_backoff', False)])
+def test_audio_controller_retries_only_resolved_external_failures(tmp_path, monkeypatch, kind, resolved):
+    import httpx
+    from karaoke.tools import soak
+    monkeypatch.setenv('KARAOKE_ASR_BACKEND', 'local')
+    error = dict(provider='openai', code='openai_access_denied') if kind == 'model' else dict(
+        code='alignment_failed' if kind == 'software' else 'download_failed')
+    attempt = dict(status='blocked', pipeline_version='old', error=error, finished_at='2026-10-02T10:00:00+00:00')
+    case = dict(url=URL, title='same source', language='English', provider='youtube', audio_attempts=[attempt],
+        download_attempts=[dict(status='downloaded_audio', finished_at=(
+            '2026-10-02T09:00:00+00:00' if kind == 'old_download' else '2026-10-02T11:00:00+00:00'))])
+    selection = [dict(url=URL, language='English')]
+    manifest = tmp_path/'manifest.json'
+    manifest.write_text(json.dumps(dict(cases=[case], provider_backoff={'openai': 2000, 'youtube': 2000 if kind == 'source_backoff' else 0},
+        selection_sha256=hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest())))
+    data = tmp_path/'jobs'; data.mkdir()
+    calls = []
+    def respond(request):
+        if request.url.path == '/health':
+            result = dict(pipeline_version='new', preparation_paused=True, running_job=None)
+        elif request.url.path == '/v1/room':
+            result = dict(entries=[], storage=dict(limit_bytes=1000, can_prepare=True))
+        else:
+            calls.append(json.loads(request.content)['url'])
+            raise RuntimeError('observed submission')
+        return httpx.Response(200, json=result)
+    client_type = httpx.Client
+    monkeypatch.setattr(soak.httpx, 'Client', lambda **kw: client_type(transport=httpx.MockTransport(respond)))
+    monkeypatch.setattr(soak.time, 'time', lambda: 1000)
+    if resolved:
+        with pytest.raises(RuntimeError, match='observed submission'):
+            soak.run_audio(manifest, data, 'http://test', keep_going=True)
+        assert calls == [URL]
+    else:
+        soak.run_audio(manifest, data, 'http://test', keep_going=True)
+        assert calls == []
+    assert json.loads(manifest.read_text())['cases'][0]['audio_attempts'] == [attempt]
+
+
 @pytest.mark.parametrize('delayed_ledger', ['attempts', 'audio_attempts', 'provider'])
 def test_focused_probe_respects_both_retry_ledgers(tmp_path, monkeypatch, delayed_ledger):
     import httpx

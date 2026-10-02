@@ -19,6 +19,7 @@ import time
 import httpx
 
 from karaoke.job_schema import provider_error, retry_after_seconds, video_url
+from karaoke.local_asr import offline
 
 
 REQUIRED = {'mv', 'instrumental', 'backing_vocals', 'lead_vocals', 'subtitles',
@@ -143,7 +144,22 @@ def retry_deadline(state, case):
     # Song metadata is optional; its text-model quota must not block ASR.
     required = (case['provider'], 'openai', 'openai:whisper-1',
                 'openai:'+os.getenv('KARAOKE_ASR_FALLBACK_MODEL', 'gpt-4o-transcribe'))
+    if offline():
+        required = (case['provider'],)
     return max((state['provider_backoff'].get(key, 0) for key in required), default=0)
+
+
+def resolved_audio_failure(case, version):
+    last = (case.get('audio_attempts') or [{}])[-1]
+    if last.get('status') not in ('blocked', 'external', 'failed'):
+        return False
+    error = last.get('error') or {}
+    if offline() and error.get('provider') == 'openai' and last.get('pipeline_version') != version:
+        return True
+    download = (case.get('download_attempts') or [{}])[-1]
+    return (error.get('code') == 'download_failed' and download.get('status') == 'downloaded_audio'
+            and bool(download.get('finished_at')) and bool(last.get('finished_at'))
+            and datetime.fromisoformat(download['finished_at']) > datetime.fromisoformat(last['finished_at']))
 
 
 def retry_fields(error, diagnostic, number, *, failed_at):
@@ -407,9 +423,12 @@ def run_audio(path, data_dir, base, *, case_url=None, defer_urls=(), keep_going=
                     continue
                 fixed_downloader = download_only and attempts and attempts[-1]['status'] == 'failed' and (
                     attempts[-1].get('controller_version') != controller_version)
-                if attempts and not fixed_downloader and not eligible({'attempts': attempts}, version, time.time()):
+                resolved = not download_only and resolved_audio_failure(case, version)
+                if attempts and not (fixed_downloader or resolved) and not eligible({'attempts': attempts}, version, time.time()):
                     continue
                 previous = (case.get('attempts') or [{}])[-1]
+                if offline() and (previous.get('error') or {}).get('provider') == 'openai':
+                    previous = {}
                 deadline = retry_deadline(state, case)
                 if download_only:
                     deadline = state['provider_backoff'].get(case['provider'], 0)
