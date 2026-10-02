@@ -8,7 +8,7 @@ from scipy.signal import resample_poly
 
 from align_lyric_phonemes import protect_line_order
 from phoneme_progress import ROOT, chinese_pronunciation_text, spoken_units
-from subtitles import highlight_spans
+from subtitles import highlight_coverage_errors, highlight_spans
 
 
 class AcousticWitness:
@@ -112,21 +112,47 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol):
     return result, 'agreement across phonetic contexts, original and separated audio'
 
 
+def latin_recovery_groups(cue):
+    """Expand incomplete words to whole source units, keeping foreign text out."""
+    ranges = []
+    for error in highlight_coverage_errors([cue], 'English'):
+        if 'first' not in error:
+            continue
+        indices = [i for i, u in enumerate(cue['units'])
+                   if u['first'] < error['stop'] and error['first'] < u['stop']]
+        if indices:
+            ranges.append((indices[0], indices[-1]+1))
+    merged = []
+    for lo, hi in sorted(set(ranges)):
+        if merged and lo < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(hi, merged[-1][1]))
+        else:
+            merged.append((lo, hi))
+    words = list(highlight_spans(cue['text'], 'English'))
+    for lo, hi in merged:
+        parts = cue['units'][lo:hi]
+        first, stop = parts[0]['first'], parts[-1]['stop']
+        text = cue['text'][first:stop]
+        if (any(c.isalnum() and not c.isascii() for c in text)
+                or any(u.get('timing_source') == 'repeated_lyric_audio' for u in parts)
+                or any(a < first < b or a < stop < b for a, b in words)):
+            continue
+        yield lo, hi, dict(first=first, stop=stop, text=text,
+                           start=parts[0]['start'], end=parts[-1]['end'])
+
+
 def recover_latin_groups(cues, wave, witness, protocol, model=None):
     """Use English acoustics for bounded English phrases in CJK songs."""
     result, reports = deepcopy(cues), []
     for line, cue in enumerate(cues):
-        groups = [u for u in cue['units'] if len(list(highlight_spans(u['text'], 'English'))) > 1
-                  and not any(c.isalnum() and not c.isascii() for c in u['text'])
-                  and u.get('timing_source') != 'repeated_lyric_audio']
         foreign = [i for i, c in enumerate(cue['text']) if c.isalnum() and not c.isascii()]
-        contexts, replacements = {}, {}
+        contexts, replacements = {}, []
         # Each run keeps its original character positions and foreign-word
         # audio boundaries; only the English text reaches the English model.
-        for group in groups:
+        for lo, hi, group in latin_recovery_groups(cue):
             first = max((i+1 for i in foreign if i < group['first']), default=0)
             stop = min((i for i in foreign if i >= group['stop']), default=len(cue['text']))
-            contexts.setdefault((first, stop), []).append(group)
+            contexts.setdefault((first, stop), []).append((lo, hi, group))
         for (first, stop), groups in contexts.items():
             context, left, right = cue, 0., len(wave)/44100
             if foreign:
@@ -165,10 +191,9 @@ def recover_latin_groups(cues, wave, witness, protocol, model=None):
                                for view in witness(context, wave)]
                 report.update(source_windows=windows, predictions=predictions, witnesses=independent,
                               model_identity=model.model_identity)
-                for group in groups:
-                    index = cue['units'].index(group)
-                    previous = cue['units'][index-1] if index else (cues[line-1]['units'][-1] if line else None)
-                    following = cue['units'][index+1] if index+1 < len(cue['units']) else (
+                for lo, hi, group in groups:
+                    previous = cue['units'][lo-1] if lo else (cues[line-1]['units'][-1] if line else None)
+                    following = cue['units'][hi] if hi < len(cue['units']) else (
                         cues[line+1]['units'][0] if line+1 < len(cues) else None)
                     bounds = [previous['end'] if previous else 0., following['start'] if following else len(wave)/44100]
                     def select(views):
@@ -179,11 +204,11 @@ def recover_latin_groups(cues, wave, witness, protocol, model=None):
                     report['groups'].append(dict(first=group['first'], stop=group['stop'], bounds=bounds,
                         accepted=replacement is not None, reason=reason))
                     if replacement is not None:
-                        replacements[(group['first'], group['stop'])] = replacement
+                        replacements.append((lo, hi, replacement))
             except (ValueError, RuntimeError, OSError) as error:
                 report['reason'] = str(error)
-        result[line]['units'] = [part for u in cue['units']
-            for part in replacements.get((u['first'], u['stop']), [u])]
+        for lo, hi, replacement in sorted(replacements, key=lambda row: row[0], reverse=True):
+            result[line]['units'][lo:hi] = replacement
     result, reverted = protect_line_order(result, cues)
     for report in reports:
         if report['line'] in reverted:

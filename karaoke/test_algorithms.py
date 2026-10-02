@@ -393,9 +393,9 @@ class SubtitleIntegrity(unittest.TestCase):
                          units=[dict(first=0, stop=1, text='後', start=5.2, end=5.8)])]
         protocol = dict(context_padding_seconds=[.35, .6, 1.],
                         maximum_spread_seconds=.08, minimum_relative_rms=.03)
-        for mixed in (False, True):
+        for mixed, fragmented in ((False, False), (True, False), (False, True), (True, True)):
             for mode in ('valid', 'one_witness', 'disagree', 'context_disagree', 'changed_words', 'crossing'):
-                with self.subTest(mode=mode, mixed=mixed):
+                with self.subTest(mode=mode, mixed=mixed, fragmented=fragmented):
                     calls = []
                     class Model:
                         model_identity = {'model': 'independent phoneme model'}
@@ -421,6 +421,9 @@ class SubtitleIntegrity(unittest.TestCase):
                             result[1][1]['start'] += .2
                         return result
                     before = deepcopy(original)
+                    if fragmented:
+                        before[1]['units'][:1] = [dict(first=0, stop=1, text='g', start=2., end=2.1),
+                                                 dict(first=1, stop=8, text='o home ', start=2.1, end=3.4)]
                     if mode == 'crossing':
                         before[0]['units'][0]['end'] = 2.2
                     if mixed:
@@ -446,6 +449,42 @@ class SubtitleIntegrity(unittest.TestCase):
                     else:
                         self.assertEqual(actual, before)
                         self.assertFalse(any(g['accepted'] for g in report[0]['groups']))
+
+    def test_split_english_word_requires_new_evidence_and_known_language_boundary(self):
+        from cjk_recovery import recover_latin_groups
+        protocol = dict(context_padding_seconds=[.35, .6, 1.],
+                        maximum_spread_seconds=.08, minimum_relative_rms=.03)
+        for mode in ('english', 'foreign', 'repeated'):
+            with self.subTest(mode=mode):
+                calls = []
+                class Model:
+                    model_identity = {'model': 'independent phoneme model'}
+                    def align(_, audio, words):
+                        self.assertEqual(words, ['home'])
+                        begin = float(audio[0])-.1
+                        calls.append(begin)
+                        return [dict(text='home', start=2.05-begin, end=2.55-begin)], None, .01
+                def witness(cue, wave):
+                    return [[dict(first=0, stop=4, text='home', start=2.06, end=2.54)] for _ in range(2)]
+                cue = dict(text='home', aligned_start=2., aligned_end=2.8, units=[
+                    dict(first=0, stop=2, text='ho', start=2., end=2.4),
+                    dict(first=2, stop=4, text='me', start=2.4, end=2.8)])
+                if mode == 'foreign':
+                    cue.update(text='あ home', units=[
+                        dict(first=0, stop=4, text='あ ho', start=2., end=2.4),
+                        dict(first=4, stop=6, text='me', start=2.4, end=2.8)])
+                if mode == 'repeated':
+                    cue['units'][0]['timing_source'] = 'repeated_lyric_audio'
+                actual, report = recover_latin_groups([cue], np.arange(44100*6)/44100+.1,
+                                                       witness, protocol, Model())
+                if mode == 'english':
+                    self.assertEqual(len(calls), 3)
+                    self.assertEqual(actual[0]['units'], [dict(first=0, stop=4, text='home',
+                        start=2.05, end=2.55, timing_source='cross_model_phonemes')])
+                    self.assertFalse(highlight_coverage_errors(actual, 'Japanese'))
+                else:
+                    self.assertEqual(actual, [cue])
+                    self.assertFalse(calls)
 
     def test_independent_witness_keeps_both_audio_views_inside_foreign_word_bounds(self):
         from types import SimpleNamespace
