@@ -503,11 +503,13 @@ def record_failure(attempt, job, folder):
             except (ValueError, OSError):
                 continue
     if diagnostics:
-        target = folder.parent/'soak-100'/f'{job["id"]}-{attempt["error_fingerprint"][:12]}.json.gz'
+        payload = json.dumps(diagnostics, ensure_ascii=False, sort_keys=True).encode()
+        digest = hashlib.sha256(payload).hexdigest()
+        target = folder.parent/'soak-100'/f'{job["id"]}-{attempt["error_fingerprint"][:12]}-{digest}.json.gz'
         target.parent.mkdir(exist_ok=True)
-        with gzip.open(target, 'wt', encoding='utf-8') as output:
-            json.dump(diagnostics, output, ensure_ascii=False)
-        attempt['reproduction_file'] = str(target)
+        if not target.exists():
+            target.write_bytes(gzip.compress(payload, mtime=0))
+        attempt.update(reproduction_file=str(target), diagnostic_sha256=digest)
     attempt.update(retry_fields(error, '\n'.join(logs), attempt.get('external_attempt', 1), failed_at=time.time()))
 
 

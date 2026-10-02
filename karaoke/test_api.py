@@ -220,8 +220,15 @@ def test_soak_preserves_failed_stage_diagnostics_after_cache_eviction(tmp_path):
     attempt = dict(external_attempt=1)
     error = dict(code='align_repeats_failed', message='Generic stage failure')
     record_failure(attempt, dict(id='job', error=error), folder)
+    (folder/'repeated-lyrics/run.json').write_text('{"attempts": [{"reason": "changed alignment"}]}')
+    retry = dict(external_attempt=1)
+    record_failure(retry, dict(id='job', error=error), folder)
     shutil.rmtree(folder)
 
+    assert attempt['error_fingerprint'] == retry['error_fingerprint']
+    assert attempt['reproduction_file'] != retry['reproduction_file']
+    with gzip.open(retry['reproduction_file'], 'rt') as stream:
+        assert json.load(stream)['repeated-lyrics/run.json'] == {'attempts': [{'reason': 'changed alignment'}]}
     with gzip.open(attempt['reproduction_file'], 'rt') as stream:
         saved = json.load(stream)
     assert saved['align_repeats.log'].endswith(traceback)
