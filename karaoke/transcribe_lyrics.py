@@ -289,6 +289,14 @@ def repair_loop_window(data, audio, duration, recognize, output, local_recognize
     if tail is not None:
         bad.extend(range(tail, len(segments)))
         bad = sorted(set(bad))
+    # A broken decode can surround its collapsed words with fluent inventions.
+    # Match anchors outside that decoder window, rather than using those words
+    # to constrain the independent repair. Missing seek metadata changes nothing.
+    decoder_windows = {segments[i]['seek'] for i in bad if tail is None and
+                       type(segments[i].get('seek')) is int and segments[i]['seek'] >= 0}
+    bad = sorted(set(bad) | {i for i, s in enumerate(segments)
+                            if type(s.get('seek')) is int and s['seek'] in decoder_windows
+                            and normalized(s['text'])})
     if not bad or not data.get('words') or song_language(data.get('language')) is None:
         return None
 
@@ -309,7 +317,8 @@ def repair_loop_window(data, audio, duration, recognize, output, local_recognize
     if not 0 < end-begin <= 90:
         return None
     clip = output/'loop-repair.mp3'
-    report = dict(begin=begin, end=end, left=left, right=right, unusable_segments=bad, accepted=False)
+    report = dict(begin=begin, end=end, left=left, right=right, unusable_segments=bad,
+                  decoder_windows=sorted(decoder_windows), accepted=False)
     try:
         subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-y', '-ss', str(begin), '-i', str(audio),
             '-t', str(end-begin), '-ar', '16000', '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '64k', str(clip)], check=True)

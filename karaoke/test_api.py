@@ -3295,6 +3295,48 @@ def test_local_asr_repair_keeps_surrounding_words_and_requires_matching_boundari
     assert not (output/'loop-repair.mp3').exists()
 
 
+@pytest.mark.parametrize('decoder_window', [600, None])
+@pytest.mark.parametrize('matching_boundary', [True, False])
+@pytest.mark.parametrize('distant_boundary', [True, False])
+def test_local_asr_repair_anchors_outside_corrupted_decoder_window(tmp_path, decoder_window, matching_boundary, distant_boundary):
+    from copy import deepcopy
+    from karaoke.transcribe_lyrics import repair_loop_window
+    import soundfile as sf
+
+    segments = [dict(start=3., end=5., text='此刻一起唱着歌'),
+        dict(start=6., end=8., text='貌似完整的错误句子', seek=decoder_window),
+        dict(start=9., end=10., text='哒'*100, seek=decoder_window),
+        dict(start=11., end=13., text='另一句错误识别结果', seek=decoder_window),
+        dict(start=105. if distant_boundary else 45., end=108. if distant_boundary else 48., text='走向明天的远方')]
+    original = dict(language='chinese', segments=segments,
+        words=[dict(start=s['start'], end=s['end'], word=s['text']) for s in segments])
+    preserved = deepcopy(original)
+    parts = [dict(start=.5, end=2.5, text='此刻一起唱着歌'),
+        dict(start=8., end=10., text='轻轻唱出这一句'),
+        dict(start=20., end=22., text='然后听见你的回答'),
+        dict(start=42.5, end=45.5, text='走向明天的远方' if matching_boundary else '完全不同的一句话')]
+    replacement = dict(language='chinese', segments=parts,
+        words=[dict(start=s['start'], end=s['end'], word=s['text']) for s in parts])
+    audio, output = tmp_path/'audio.wav', tmp_path/'asr'
+    sf.write(audio, np.zeros(60000), 1000)
+    output.mkdir()
+    with patch('karaoke.transcribe_lyrics.subprocess.run', wraps=subprocess.run) as extract:
+        actual = repair_loop_window(original, audio, 120 if distant_boundary else 60, lambda _: replacement, output)
+        if decoder_window is not None and distant_boundary:
+            extract.assert_not_called()
+    assert original == preserved
+    if decoder_window is None or not matching_boundary or distant_boundary:
+        assert actual is None
+    else:
+        result, report = actual
+        assert (report['begin'], report['end']) == (2.5, 48.5)
+        assert result['segments'] == [segments[0],
+            dict(start=10.5, end=12.5, text='轻轻唱出这一句'),
+            dict(start=22.5, end=24.5, text='然后听见你的回答'), segments[-1]]
+        assert result['words'][0] == original['words'][0]
+        assert result['words'][-1] == original['words'][-1]
+
+
 @pytest.mark.parametrize('recoverable', [True, False])
 @pytest.mark.parametrize('independent_source', [None, 'description', 'user', 'unrelated'])
 def test_truncated_recovery_text_cannot_drop_later_sung_words(tmp_path, recoverable, independent_source):
