@@ -25,6 +25,47 @@ function setup(onEnd=()=>{}) {
 }
 const clockOffset = () => 100-Date.now()/1000;
 
+test('a paused video loads its first frame before playback is requested', async () => {
+  const p=setup(); p.video.preload='metadata';
+  p.video.load=function () {
+    this.readyState=1;
+    if (this.preload === 'auto') queueMicrotask(() => {
+      this.readyState=2; this.dispatchEvent(new Event('loadeddata'));
+    });
+  };
+  let loaded=false;
+  const pending=p.load(song).then(()=>{loaded=true;});
+  try {
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(loaded,true);
+    assert.equal(p.video.paused,true);
+    assert.equal(p.sources.length,0);
+  } finally { p.clear(); await pending; }
+});
+
+test('media loading does not wait for an audio processor that needs a user gesture', async () => {
+  const p=setup(); p.ensureContext(); p.context.state='suspended';
+  let activateProcessor;
+  const processor=new Promise(resolve=>{activateProcessor=resolve;});
+  p.pitchFactory=()=>processor;
+  p.context.resume=async()=>{p.context.state='running';};
+  let loaded=false;
+  const pending=p.load(song).then(()=>{loaded=true;});
+  try {
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(loaded,true);
+    p.apply(state,clockOffset());
+    assert.equal(p.sources.length,0);
+    let unlocked=false;
+    const unlocking=p.unlock().then(()=>{unlocked=true;});
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(unlocked,false);
+    activateProcessor({input:{},setPitch(){},stop(){},start(){}});
+    await unlocking; p.apply(state,clockOffset());
+    assert.equal(p.sources.length,3);
+  } finally { activateProcessor({input:{},setPitch(){},stop(){},start(){}}); await pending; p.clear(); }
+});
+
 test('decoded audio cannot start the clock before the video is ready', async () => {
   const p=setup(); await p.unlock(); p.video.readyState=0;
   let loaded=false;

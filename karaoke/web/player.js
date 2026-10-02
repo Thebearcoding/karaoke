@@ -158,6 +158,7 @@ export class Player {
     this.entry = entry;
     this.buffers = null;
     this.ensureContext();
+    this.video.preload = 'auto';
     this.video.src = entry.artifacts.mv;
     this.video.load();
     const audioReady = Promise.all(['instrumental_preview', 'backing_vocals_preview', 'lead_vocals_preview'].map(async key => {
@@ -167,8 +168,7 @@ export class Player {
       if (!response.ok) throw new Error('音轨加载失败，请重试');
       return this.context.decodeAudioData(await response.arrayBuffer());
     }));
-    this.loading = Promise.all([audioReady, videoReady(this.video, signal)]).then(async ([buffers]) => {
-      await this.preparePitch();
+    this.loading = Promise.all([audioReady, videoReady(this.video, signal)]).then(([buffers]) => {
       if (signal.aborted) return;
       this.buffers = buffers;
     }).catch(error => {
