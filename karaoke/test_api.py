@@ -1305,6 +1305,34 @@ def test_playback_fallback_never_invents_missing_phrase_times(tmp_path, bad):
     assert json.loads((tmp_path/'quality.json').read_text())['playback_fallback']['subtitle_mode'] == 'unavailable'
 
 
+@pytest.mark.parametrize('bad', ['merged', 'text', 'span', 'nan', 'outside', 'backward'])
+def test_playback_fallback_preserves_other_lines_highlights(tmp_path, bad):
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    lines = ['一起唱', '今夜']
+    (tmp_path/'lyrics.json').write_text(json.dumps(dict(title='Example', artist='', language='Chinese',
+        lines=lines, provenance={})))
+    cues = [dict(text=text, start=start, end=start+1, status='candidate',
+                 units=[dict(text=char, first=i, stop=i+1, start=start+i*.2, end=start+(i+1)*.2)
+                        for i, char in enumerate(text)]) for text, start in zip(lines, [0, 2])]
+    if bad == 'merged': cues[0]['units'] = [dict(text=lines[0], first=0, stop=3, start=0, end=1)]
+    if bad == 'text': cues[0]['units'][0]['text'] = '错'
+    if bad == 'span': cues[0]['units'][0]['stop'] = 2
+    if bad == 'nan': cues[0]['units'][0]['start'] = float('nan')
+    if bad == 'outside': cues[0]['units'][0]['start'] = -.1
+    if bad == 'backward': cues[0]['units'][0]['start'] = .3
+    pipeline.aligned_cues = cues
+    pipeline.playback_fallback({}, 4, StageFailure('align_words', 'unresolved'))
+    output = json.loads((tmp_path/'cues.json').read_text())
+    assert output[0] == dict(text=lines[0], start=0, end=1, status='candidate', units=[])
+    assert output[1] == cues[1]
+    quality = json.loads((tmp_path/'quality.json').read_text())
+    assert quality['units'] == 2
+    assert quality['playback_fallback']['subtitle_mode'] == 'partial_word'
+    assert quality['playback_fallback']['unhighlighted_lines'] == [1]
+    assert quality['playback_fallback']['word_alignment_passed'] is False
+    assert quality['onset_accuracy'] is None
+
+
 def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv(tmp_path, monkeypatch):
     import soundfile as sf
     from karaoke.exact_stems import pcm_sha, encode_preview

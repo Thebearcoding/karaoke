@@ -143,6 +143,7 @@ class Pipeline:
         self.active, self.timings, self.lock = set(), {}, threading.Lock()
         self.stage_progress = {}
         self.song_info = {}
+        self.aligned_cues = None
         self.source = self.output/'download/source.mkv'
         self.video = self.source
         self.vocals = self.output/'music-separation/song/vocals.wav'
@@ -695,6 +696,7 @@ class Pipeline:
                 raise StageFailure('align_words', '英文词起点落在已定位的唱句上下文之外，需重新对齐')
             cues = [dict(c, status='candidate') for c in cues]
             cues, _ = presentation_cues(cues, duration, lead=0, tail=0, bridge_gap=0)
+        self.aligned_cues = cues
         units = [u for c in cues for u in c['units']]
         if not units or [c['text'] for c in cues] != lyrics['lines']:
             raise StageFailure('align_words', '最终字幕没有完整覆盖输入歌词')
@@ -805,6 +807,7 @@ class Pipeline:
 
     def playback_fallback(self, metadata, duration, error):
         """Keep singing available without presenting unverified word times as valid."""
+        from subtitles import highlight_coverage_errors, normalized
         lyrics_path = self.output/'lyrics.json'
         lyrics = dict(
             title=self.request.get('title') or metadata.get('track') or metadata.get('title') or 'Untitled',
@@ -817,12 +820,12 @@ class Pipeline:
         except (OSError, ValueError):
             pass
         cues, source = [], None
-        for name in ('alignment/cues.json', 'anchors.json'):
+        for name in ('final_alignment', 'alignment/cues.json', 'anchors.json'):
             path = self.output/name
-            if not path.is_file():
+            if name != 'final_alignment' and not path.is_file():
                 continue
             try:
-                candidate = json.loads(path.read_text())
+                candidate = self.aligned_cues if name == 'final_alignment' else json.loads(path.read_text())
                 if not candidate or [c['text'] for c in candidate] != lyrics['lines']:
                     continue
                 if any(c['status'] != 'candidate' or not all(isinstance(c[k], (int, float)) and math.isfinite(c[k])
@@ -830,18 +833,32 @@ class Pipeline:
                     continue
                 if any(a['end'] > b['start'] for a, b in zip(candidate, candidate[1:])):
                     continue
-                # Preserve measured phrase bounds; never manufacture word onsets.
-                cues = [dict(text=c['text'], start=c['start'], end=c['end'], status='candidate', units=[])
-                        for c in candidate]
+                for cue in candidate:
+                    units = cue.get('units', []) if name == 'final_alignment' else []
+                    try:
+                        valid = (units and not highlight_coverage_errors([cue], lyrics['language']) and
+                            normalized(''.join(u['text'] for u in units)) == normalized(cue['text']) and
+                            all(all(isinstance(u[k], (int, float)) and math.isfinite(u[k])
+                                    for k in ('start', 'end')) and
+                                cue['start'] <= u['start'] < u['end'] <= cue['end'] for u in units) and
+                            all(a['start'] < b['start'] for a, b in zip(units, units[1:])))
+                    except (AttributeError, KeyError, TypeError, ValueError):
+                        valid = False
+                    # Keep intact measured lines; one bad line must not erase the rest.
+                    cues.append(dict(cue, units=units) if valid else
+                                dict(text=cue['text'], start=cue['start'], end=cue['end'], status='candidate', units=[]))
                 source = name
                 break
             except (ValueError, KeyError, TypeError):
                 continue
-        warning = dict(error=processing_error(error, self.output), subtitle_mode='line' if cues else 'unavailable',
-                       phrase_timing_source=source, word_alignment_passed=False)
+        units = sum(len(c['units']) for c in cues)
+        warning = dict(error=processing_error(error, self.output),
+                       subtitle_mode='partial_word' if units else 'line' if cues else 'unavailable',
+                       phrase_timing_source=source, word_alignment_passed=False,
+                       unhighlighted_lines=[i for i, c in enumerate(cues, 1) if not c['units']])
         write_json(self.output/'playback-warning.json', warning)
         write_json(self.output/'cues.json', cues)
-        write_json(self.output/'quality.json', dict(lines=len(cues), units=0,
+        write_json(self.output/'quality.json', dict(lines=len(cues), units=units,
             lyrics_provenance=dict(lyrics.get('provenance', {}), needs_review=True),
             playback_fallback=warning, onset_accuracy=None, separation_purity=None))
         return lyrics
