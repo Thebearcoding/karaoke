@@ -409,7 +409,8 @@ def run_audio(path, data_dir, base, *, case_url=None, defer_urls=(), keep_going=
             def priority(case):
                 last = (case.get('audio_attempts') or case.get('attempts') or [{}])[-1]
                 status = last.get('status')
-                return (status not in ('failed', 'blocked', 'external'), status in ('passed', 'passed_audio'),
+                retry_after_survey = keep_going and status == 'external' and last.get('pipeline_version') == version
+                return (retry_after_survey, status not in ('failed', 'blocked', 'external'), status in ('passed', 'passed_audio'),
                         (last.get('finished_at') or '') if status == 'external' else '', not bool(case.get('audio_attempts')))
             candidates.sort(key=priority)
             case = candidates[0]

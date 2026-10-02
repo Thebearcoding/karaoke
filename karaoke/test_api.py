@@ -1331,8 +1331,12 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
     assert [e['id'] for e in room.read()['entries']] == [user_entry]
 
 
-@pytest.mark.parametrize('retry_at,expected_index', [(900, 1), (1100, 2)])
-def test_audio_regression_prioritizes_due_failures_then_unfinished_cases(tmp_path, monkeypatch, retry_at, expected_index):
+@pytest.mark.parametrize('retry_at,old_repaired,keep_going,expected_index', [
+    (900, False, False, 1), (1100, False, False, 2),
+    (900, True, False, 3), (900, True, True, 2), (1100, True, True, 2),
+])
+def test_audio_regression_prioritizes_due_failures_then_unfinished_cases(
+        tmp_path, monkeypatch, retry_at, old_repaired, keep_going, expected_index):
     import httpx
     from karaoke.tools import soak
     cases = [dict(url=f'https://www.youtube.com/watch?v={i:011d}', title=str(i),
@@ -1343,6 +1347,8 @@ def test_audio_regression_prioritizes_due_failures_then_unfinished_cases(tmp_pat
     cases[2]['attempts'] = [dict(status='submitted', pipeline_version='old')]
     cases[3]['audio_attempts'] = [dict(status='external', pipeline_version='current', next_retry_at=retry_at,
                                      finished_at='2026-10-01T02:00:00+00:00')]
+    if old_repaired:
+        cases[1]['audio_attempts'] = [dict(status='passed_audio', pipeline_version='current')]
     selection = [dict(url=c['url'], language=c['language']) for c in cases]
     manifest = tmp_path/'manifest.json'
     manifest.write_text(json.dumps(dict(cases=cases, provider_backoff={},
@@ -1352,17 +1358,27 @@ def test_audio_regression_prioritizes_due_failures_then_unfinished_cases(tmp_pat
     submitted = []
     def respond(request):
         if request.url.path == '/health':
-            return httpx.Response(200, json={'pipeline_version': 'current'})
+            return httpx.Response(200, json={'pipeline_version': 'current', 'preparation_paused': True, 'running_job': None})
         if request.url.path == '/v1/room':
-            return httpx.Response(200, json={'entries': []})
+            return httpx.Response(200, json={'entries': [], 'storage': {'limit_bytes': 1000, 'can_prepare': True}})
         submitted.append(json.loads(request.content)['url'])
         raise RuntimeError('observed first submission')
     client_type = httpx.Client
     monkeypatch.setattr(soak.httpx, 'Client', lambda **kwargs: client_type(transport=httpx.MockTransport(respond)))
     monkeypatch.setattr(soak.time, 'time', lambda: 1000)
     with pytest.raises(RuntimeError, match='observed first submission'):
-        soak.run_audio(manifest, data, 'http://test')
+        soak.run_audio(manifest, data, 'http://test', keep_going=keep_going)
     assert submitted == [cases[expected_index]['url']]
+    # Deferring a due retry must not discard it: run it once the other work is done.
+    if keep_going and retry_at < 1000:
+        saved = json.loads(manifest.read_text())
+        for case in saved['cases'][:3]:
+            case['audio_attempts'] = [dict(status='passed_audio', pipeline_version='current')]
+        manifest.write_text(json.dumps(saved))
+        submitted.clear()
+        with pytest.raises(RuntimeError, match='observed first submission'):
+            soak.run_audio(manifest, data, 'http://test', keep_going=True)
+        assert submitted == [cases[3]['url']]
 
 
 @pytest.mark.parametrize('delayed_ledger', ['attempts', 'audio_attempts', 'provider'])
