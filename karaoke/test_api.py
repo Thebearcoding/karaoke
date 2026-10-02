@@ -1380,7 +1380,7 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
     # A downloaded source cannot count as audio/MV acceptance or trigger models.
     import soundfile as sf
     before_fetch = json.loads(manifest.read_text())
-    before_fetch['provider_backoff'] = {}
+    before_fetch['provider_backoff'] = {'openai': time.time()+1000, 'openai:whisper-1': time.time()+1000}
     manifest.write_text(json.dumps(before_fetch))
     version = 'prefetch'
     fetched = []
@@ -1397,14 +1397,15 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
     monkeypatch.setattr(soak, 'verify_outputs', lambda *a, **k: pytest.fail('Prefetch ran audio verification'))
     soak.run_audio(manifest, data, 'http://test', keep_going=True, download_only=True)
     after_fetch = json.loads(manifest.read_text())
-    assert len(fetched) == 3
+    assert len(fetched) == 2  # The source's own backoff still applies.
     assert [c.get('audio_attempts') for c in after_fetch['cases']] == [c.get('audio_attempts') for c in before_fetch['cases']]
-    assert all(c['attempts'] == [] and c['download_attempts'][-1]['status'] == 'downloaded_audio'
-               for c in after_fetch['cases'])
+    assert all(c['attempts'] == [] for c in after_fetch['cases'])
+    assert sum(bool(c.get('download_attempts')) and c['download_attempts'][-1]['status'] == 'downloaded_audio'
+               for c in after_fetch['cases']) == 2
     assert all(store.read(job_id)['status'] == 'queued' for job_id in fetched)
     assert [e['id'] for e in room.read()['entries']] == [user_entry]
     soak.run_audio(manifest, data, 'http://test', keep_going=True, download_only=True)
-    assert len(fetched) == 3
+    assert len(fetched) == 2
 
 
 @pytest.mark.parametrize('cache_state', ['valid', 'missing', 'corrupt', 'different_source'])

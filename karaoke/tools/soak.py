@@ -407,7 +407,13 @@ def run_audio(path, data_dir, base, *, case_url=None, defer_urls=(), keep_going=
                 if attempts and not eligible({'attempts': attempts}, version, time.time()):
                     continue
                 previous = (case.get('attempts') or [{}])[-1]
-                if time.time() < max(retry_deadline(state, case), previous.get('next_retry_at') or 0):
+                deadline = retry_deadline(state, case)
+                if download_only:
+                    deadline = state['provider_backoff'].get(case['provider'], 0)
+                    previous = (case.get('audio_attempts') or [previous])[-1]
+                    if previous.get('error', {}).get('code') != 'download_failed':
+                        previous = {}
+                if time.time() < max(deadline, previous.get('next_retry_at') or 0):
                     continue
                 candidates.append(case)
             if not candidates:
