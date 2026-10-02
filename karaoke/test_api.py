@@ -521,7 +521,8 @@ def test_manual_caption_failure_obeys_backoff_and_keeps_cached_diagnostics(tmp_p
     assert len(calls) == 2
 
 
-def test_online_lyrics_correct_asr_text_without_using_provider_times(tmp_path, monkeypatch):
+@pytest.mark.parametrize('padded', [False, True])
+def test_online_lyrics_correct_asr_text_without_using_provider_times(tmp_path, monkeypatch, padded):
     import soundfile as sf
     from urllib.parse import parse_qs, urlsplit
     from karaoke import lyric_lookup, pipeline as module
@@ -538,24 +539,31 @@ def test_online_lyrics_correct_asr_text_without_using_provider_times(tmp_path, m
         calls.append(query)
         return [row] if query['track_name'] == ['晚風'] else []
     monkeypatch.setattr(lyric_lookup, 'read_document', fetch)
-    words = [dict(word=text, start=10+i, end=10.9+i) for i,text in enumerate(lines)]
+    offset, duration = (2, 20) if padded else (0, 15)
+    words = [dict(word=text, start=offset+10+i, end=offset+10.9+i) for i,text in enumerate(lines)]
     transcription = dict(language='Chinese', text='\n'.join(lines), words=words)
     (tmp_path/'asr').mkdir()
     (tmp_path/'asr/transcription.json').write_text(json.dumps(transcription))
-    sf.write(tmp_path/'vocals-16k.wav', np.ones(16000*15)*.1, 16000)
+    audio = np.zeros(16000*duration)
+    audio[16000*offset:16000*(offset+15)] = .1
+    sf.write(tmp_path/'vocals-16k.wav', audio, 16000)
+    source = tmp_path/'source-44100.wav'
+    sf.write(source, audio, 16000, subtype='DOUBLE')
+    original_hash = file_hash(source)
     draft = dict(title='晚風 Evening Wind', artist='林林 Lin Lin', language='Chinese',
                  lines=['微風你慢慢歌場', '星光下盡盡請停', '微風你慢慢歌場'], provenance=dict(kind='asr_draft'))
     monkeypatch.setattr(module, 'prepare_song_text', lambda *a, **k: json.loads(json.dumps(draft)))
-    pipeline.prepare_lyrics({}, 15)
+    pipeline.prepare_lyrics({}, duration)
     result = json.loads((tmp_path/'lyrics.json').read_text())
     assert result['lines'] == lines and result['provenance']['kind'] == 'online_lyric_text'
-    assert [a['start'] for a in json.loads((tmp_path/'anchors.json').read_text())] == [10,11,12]
+    assert [a['start'] for a in json.loads((tmp_path/'anchors.json').read_text())] == [offset+i for i in [10,11,12]]
+    assert file_hash(source) == original_hash
     assert len(calls) == 2
-    pipeline.prepare_lyrics({}, 15)
+    pipeline.prepare_lyrics({}, duration)
     assert len(calls) == 2  # A retry keeps the fetched text, just like downloaded audio.
     for kind in ('user_supplied', 'verified_catalog', 'video_description'):
         draft.update(lines=lines, provenance=dict(kind=kind))
-        pipeline.prepare_lyrics({}, 15)
+        pipeline.prepare_lyrics({}, duration)
         assert json.loads((tmp_path/'lyrics.json').read_text())['provenance']['kind'] == kind
     assert len(calls) == 2
 
@@ -576,6 +584,33 @@ def test_online_lyrics_reject_other_versions_and_unsupported_text(change):
     assert candidate and report['status'] == 'accepted'
     candidate, report = lyric_candidate(dict(status='ok', results=[dict(row, **change)]), song, transcription, 265.)
     assert candidate is None and report['status'] == 'no_supported_recording'
+
+
+@pytest.mark.parametrize('padding', ['zero', 'quiet', 'other_channel', 'all_silent', 'nonfinite', 'wrong_duration'])
+def test_lyric_duration_ignores_only_digital_padding(tmp_path, padding):
+    import soundfile as sf
+    from karaoke.lyric_lookup import lyric_candidate
+    source = tmp_path/'source.wav'
+    audio = np.zeros((20000, 2))
+    if padding != 'all_silent':
+        audio[2000:17000] = .1
+    if padding == 'quiet':
+        audio[[0, -1], :] = 1e-12
+    if padding == 'other_channel':
+        audio[:, 1] = 1e-12
+    if padding == 'nonfinite':
+        audio[3000, 0] = np.nan
+    sf.write(source, audio, 1000, subtype='DOUBLE')
+    song = dict(title='晚風', artist='林林', language='Chinese')
+    row = dict(id=1, trackName='晚風', artistName='林林', duration=15., instrumental=False,
+               plainLyrics='微風裡慢慢歌唱')
+    candidate, report = lyric_candidate(dict(status='ok', results=[row]), song,
+        dict(words=[dict(word=row['plainLyrics'])]), 40. if padding == 'wrong_duration' else 20., audio_path=source)
+    assert bool(candidate) is (padding == 'zero')
+    if candidate:
+        assert report['duration_basis']['nonzero_duration'] == 15.
+        assert report['duration_basis']['leading_zero_seconds'] == 2.
+        assert report['duration_basis']['trailing_zero_seconds'] == 3.
 
 
 def test_online_lyric_fetch_retries_after_backoff_and_invalidates_changed_source(tmp_path, monkeypatch):

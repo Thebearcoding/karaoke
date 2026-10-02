@@ -72,13 +72,42 @@ def fetch_lyrics(song, metadata_path, cache):
     return json.loads(path.read_text())
 
 
-def lyric_candidate(packet, song, transcription, duration):
+def unpadded_duration(audio_path, duration):
+    """Measure exact-zero padding in the original PCM, without trimming audio."""
+    import numpy as np
+    import soundfile as sf
+    from .stage_cache import digest
+    audio_path = Path(audio_path)
+    if not audio_path.is_file():
+        return None
+    first, last, offset = None, 0, 0
+    with sf.SoundFile(audio_path) as audio:
+        rate, frames = audio.samplerate, audio.frames
+        if abs(frames/rate-duration) > 1.:
+            return None
+        for block in audio.blocks(blocksize=rate*5, dtype='float64', always_2d=True):
+            if not np.isfinite(block).all():
+                return None
+            nonzero = np.flatnonzero(np.any(block != 0, axis=1))
+            if nonzero.size:
+                if first is None:
+                    first = offset+int(nonzero[0])
+                last = offset+int(nonzero[-1])+1
+            offset += len(block)
+    if first is None:
+        return None
+    return dict(kind='nonzero_pcm', audio_sha256=digest(audio_path),
+                recording_duration=frames/rate, nonzero_duration=(last-first)/rate,
+                leading_zero_seconds=first/rate, trailing_zero_seconds=(frames-last)/rate)
+
+
+def lyric_candidate(packet, song, transcription, duration, *, audio_path=None):
     report = {key: value for key, value in packet.items() if key != 'results'}
     if packet.get('status') != 'ok':
         return None, report
     language = song['language']
     observed = [u for w in transcription.get('words', []) for u in text_units(w['word'], language)]
-    candidates = []
+    candidates, padding, padding_checked = [], None, False
     for row in packet['results']:
         # A text search can return covers, live cuts and unrelated recordings.
         # Identity and duration must agree before using any audio-text score.
@@ -86,8 +115,16 @@ def lyric_candidate(packet, song, transcription, duration):
                 not identity(song['artist']) & identity(row.get('artistName')) or row.get('instrumental') is not False):
             continue
         try:
-            difference = abs(float(row['duration'])-duration)
-            if not math.isfinite(difference) or difference > max(3., min(10., duration*.02)):
+            reference_duration, basis = duration, None
+            difference = abs(float(row['duration'])-reference_duration)
+            if difference > max(3., min(10., duration*.02)) and audio_path is not None:
+                if not padding_checked:
+                    padding = unpadded_duration(audio_path, duration)
+                    padding_checked = True
+                if padding is not None:
+                    reference_duration, basis = padding['nonzero_duration'], padding
+                    difference = abs(float(row['duration'])-reference_duration)
+            if not math.isfinite(difference) or difference > max(3., min(10., reference_duration*.02)):
                 continue
             text = row['plainLyrics']
             if not isinstance(text, str) or not text.strip() or len(text) > 30000 or re.search(r'\[[^\]\n]+\]', text):
@@ -103,6 +140,7 @@ def lyric_candidate(packet, song, transcription, duration):
         candidates.append((min(support, coverage), -difference, lines, dict(
             id=row['id'], track=row['trackName'], artist=row['artistName'], album=row.get('albumName'),
             duration=row['duration'], text_support=support, audio_word_coverage=coverage,
+            duration_basis=basis or dict(kind='recording', recording_duration=duration),
             text_sha256=hashlib.sha256(text.encode()).hexdigest())))
     if not candidates:
         return None, dict(report, status='no_supported_recording')
