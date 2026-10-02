@@ -349,8 +349,8 @@ def probe(path, data_dir, base, job_id):
         print(json.dumps(evidence, ensure_ascii=False), flush=True)
 
 
-def run_audio(path, data_dir, base, *, case_url=None, defer_urls=()):
-    """Stop at the first software failure; retain an independent audio ledger."""
+def run_audio(path, data_dir, base, *, case_url=None, defer_urls=(), keep_going=False):
+    """Retain each audio outcome; optionally continue past failed songs."""
     from karaoke.api import Store
     if case_url is not None:
         case_url = video_url(case_url)
@@ -373,6 +373,7 @@ def run_audio(path, data_dir, base, *, case_url=None, defer_urls=()):
             version = health['pipeline_version']
             state['audio_pipeline_version'] = version
             state['audio_deferred_urls'] = sorted(deferred)
+            state['audio_keep_going'] = keep_going
             state['audio_passed_current_version'] = sum(bool(c.get('audio_attempts')) and
                 c['audio_attempts'][-1]['status'] == 'passed_audio' and
                 c['audio_attempts'][-1]['pipeline_version'] == version for c in state['cases'])
@@ -387,7 +388,7 @@ def run_audio(path, data_dir, base, *, case_url=None, defer_urls=()):
                    for c in state['cases']):
                 print('Reconcile the unfinished audio attempt before starting another', flush=True)
                 return
-            if any(c.get('audio_attempts') and c['audio_attempts'][-1]['status'] == 'failed' and
+            if not keep_going and any(c.get('audio_attempts') and c['audio_attempts'][-1]['status'] == 'failed' and
                    c['audio_attempts'][-1]['pipeline_version'] == version for c in candidates_scope):
                 print('Repair the audio failure before resuming this pipeline version', flush=True)
                 return
@@ -413,6 +414,15 @@ def run_audio(path, data_dir, base, *, case_url=None, defer_urls=()):
             candidates.sort(key=priority)
             case = candidates[0]
             room = client.get(base+'/v1/room').raise_for_status().json()
+            if keep_going:
+                if not health.get('preparation_paused') or health.get('running_job'):
+                    raise ValueError('Pause preparation before continuing audio regression')
+                storage = room['storage']
+                if state.get('cache_limit_bytes', storage['limit_bytes']) != storage['limit_bytes']:
+                    raise ValueError('Cache limit changed during audio regression')
+                if not storage['can_prepare']:
+                    print('Waiting for cache space; user queue remains protected', flush=True)
+                    return
             existing = {e['id'] for e in room['entries']}
             room = client.post(base+'/v1/room/entries', json=dict(url=case['url'], source_title=case['title'])).raise_for_status().json()
             entry = next(e for e in room['entries'] if e['id'] not in existing)
@@ -425,11 +435,15 @@ def run_audio(path, data_dir, base, *, case_url=None, defer_urls=()):
             folder = data_dir/job['id']
             command = [sys.executable, '-u', '-m', 'karaoke.pipeline', '--request', str(folder/'request.json'),
                        '--output', str(folder), '--audio-only']
+            probe_finished = False
             try:
                 cached_full = job['status'] == 'completed'
-                if not cached_full and run_probe(client, base, folder, command):
+                exit_code = 0 if cached_full else run_probe(client, base, folder, command)
+                probe_finished = True
+                if exit_code:
                     raise RuntimeError('Audio pipeline failed; retained diagnostics')
                 if client.get(base+'/health').raise_for_status().json()['pipeline_version'] != version:
+                    probe_finished = False
                     raise RuntimeError('Pipeline changed during audio regression')
                 evidence = verify_outputs(client, base, data_dir, job, audio_only=not cached_full)
                 evidence['pipeline_version'] = version
@@ -453,7 +467,8 @@ def run_audio(path, data_dir, base, *, case_url=None, defer_urls=()):
             if room['current_id'] != entry['id'] and any(e['id']==entry['id'] for e in room['entries']):
                 client.post(base+'/v1/room/commands',json=dict(action='remove',entry_id=entry['id'],revision=room['revision'])).raise_for_status()
             print(json.dumps({k:attempt.get(k) for k in ('job_id','status','error')},ensure_ascii=False),flush=True)
-            if case_url is not None or attempt['status'] in ('failed','blocked'):
+            if (case_url is not None or not probe_finished or
+                    (not keep_going and attempt['status'] in ('failed','blocked'))):
                 return
 
 
@@ -636,9 +651,13 @@ def main():
     scope.add_argument('--case-url', help='Verify only this frozen audio case, preserving batch pause files')
     scope.add_argument('--defer-url', action='append', default=[],
                        help='Explicitly defer a frozen audio case without deleting or passing it')
+    parser.add_argument('--keep-going', action='store_true',
+                        help='Record failed audio cases and continue without retrying unchanged failures')
     args = parser.parse_args()
     if (args.case_url or args.defer_url) and args.action != 'audio-run':
         parser.error('--case-url and --defer-url require audio-run')
+    if args.keep_going and args.action != 'audio-run':
+        parser.error('--keep-going requires audio-run')
     args.manifest.parent.mkdir(parents=True, exist_ok=True)
     if args.action == 'sample':
         sample(args.manifest, args.data_dir, args.seed)
@@ -648,7 +667,7 @@ def main():
         probe(args.manifest, args.data_dir, args.base_url.rstrip('/'), args.job_id)
     elif args.action == 'audio-run':
         run_audio(args.manifest, args.data_dir, args.base_url.rstrip('/'),
-                  case_url=args.case_url, defer_urls=args.defer_url)
+                  case_url=args.case_url, defer_urls=args.defer_url, keep_going=args.keep_going)
     else:
         run(args.manifest, args.data_dir, args.base_url.rstrip('/'))
 

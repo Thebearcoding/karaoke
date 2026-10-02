@@ -1145,6 +1145,7 @@ def test_audio_ready_job_releases_queue_protection_and_resumes_its_checkpoints(t
 def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separate(tmp_path,monkeypatch):
     import hashlib
     import httpx
+    from pathlib import Path
     from karaoke.room import AddSong,RoomCommand
     from karaoke.tools import soak
     data=tmp_path/'jobs';data.mkdir();(data/'preparation.pause').write_text('test')
@@ -1221,6 +1222,37 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
         soak.run_audio(manifest,data,'http://test',defer_urls=[URL])
     with pytest.raises(ValueError,match='fixed selection'):
         soak.run_audio(manifest,data,'http://test',case_url=URL)
+
+    # Survey mode retains the failure, verifies the other songs and does not
+    # retry the same broken input or remove a person's queue entry.
+    user_entry = room.add(AddSong(url=URL))['entries'][-1]['id']
+    version = 'survey'
+    def survey_execute(client, base, folder, command):
+        calls.append(folder.name)
+        if store.read(folder.name)['input']['url'] == cases[1]['url']:
+            (folder/'error.json').write_text(json.dumps(dict(code='align_words_failed', message='missing onset')))
+            (folder/'highlight-validation.json').write_text('{"errors":["missing onset"]}')
+            return 1
+        (folder/'audio-result.json').write_text(json.dumps(dict(title='Song', artist='', language='English', duration_seconds=100)))
+        return 0
+    monkeypatch.setattr(soak, 'run_probe', survey_execute)
+    soak.run_audio(manifest, data, 'http://test', keep_going=True)
+    saved = json.loads(manifest.read_text())
+    assert len(calls) == 8 and saved['audio_passed_current_version'] == 2
+    assert [c['audio_attempts'][-1]['status'] for c in saved['cases']] == ['passed_audio', 'failed', 'passed_audio']
+    assert Path(saved['cases'][1]['audio_attempts'][-1]['reproduction_file']).is_file()
+    assert all(c['attempts'] == [] for c in saved['cases'])
+    assert [e['id'] for e in room.read()['entries']] == [user_entry]
+    soak.run_audio(manifest, data, 'http://test', keep_going=True)
+    assert len(calls) == 8
+    version = 'interrupted-survey'
+    def interrupted_probe(*args):
+        calls.append('interrupted')
+        raise ValueError('Focused probe reached the shared cache or free-space limit')
+    monkeypatch.setattr(soak, 'run_probe', interrupted_probe)
+    soak.run_audio(manifest, data, 'http://test', keep_going=True)
+    assert len(calls) == 9
+    assert [e['id'] for e in room.read()['entries']] == [user_entry]
 
 
 @pytest.mark.parametrize('retry_at,expected_index', [(900, 1), (1100, 2)])
