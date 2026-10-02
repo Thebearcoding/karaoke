@@ -1089,6 +1089,22 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
     assert saved['cases'][2]['audio_attempts'][-1]['status']=='passed_audio'
     assert all(c['attempts']==[] for c in saved['cases'])
     assert room.read()['entries']==[]
+    # Explicitly defer the unresolved case while revalidating every other
+    # recording on the new version. Deferral never contributes a pass.
+    soak.run_audio(manifest,data,'http://test',defer_urls=[cases[1]['url']])
+    assert len(calls)==4 and pause.exists()
+    pause.unlink()
+    failure = saved['cases'][1]['audio_attempts'][:]
+    soak.run_audio(manifest,data,'http://test',defer_urls=[cases[1]['url']])
+    saved=json.loads(manifest.read_text())
+    assert len(calls)==5 and saved['audio_passed_current_version']==2
+    assert saved['audio_deferred_urls']==[cases[1]['url']]
+    assert saved['cases'][1]['audio_attempts']==failure
+    assert len(saved['cases'])==3 and room.read()['entries']==[]
+    soak.run_audio(manifest,data,'http://test',defer_urls=[cases[1]['url']])
+    assert len(calls)==5
+    with pytest.raises(ValueError,match='fixed selection'):
+        soak.run_audio(manifest,data,'http://test',defer_urls=[URL])
     with pytest.raises(ValueError,match='fixed selection'):
         soak.run_audio(manifest,data,'http://test',case_url=URL)
 

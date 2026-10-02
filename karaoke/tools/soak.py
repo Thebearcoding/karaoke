@@ -344,11 +344,12 @@ def probe(path, data_dir, base, job_id):
         print(json.dumps(evidence, ensure_ascii=False), flush=True)
 
 
-def run_audio(path, data_dir, base, *, case_url=None):
+def run_audio(path, data_dir, base, *, case_url=None, defer_urls=()):
     """Stop at the first software failure; retain an independent audio ledger."""
     from karaoke.api import Store
     if case_url is not None:
         case_url = video_url(case_url)
+    deferred = {video_url(url) for url in defer_urls}
     store = Store(data_dir)
     with path.with_suffix('.lock').open('a') as lock, httpx.Client(timeout=30) as client:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -357,12 +358,16 @@ def run_audio(path, data_dir, base, *, case_url=None):
             selection = [dict(url=c['url'], language=c['language']) for c in state['cases']]
             if hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest() != state['selection_sha256']:
                 raise ValueError('Fixed case selection changed')
-            candidates_scope = [c for c in state['cases'] if case_url is None or video_url(c['url']) == case_url]
+            if not deferred <= {video_url(c['url']) for c in state['cases']}:
+                raise ValueError('Deferred source is not in the fixed selection')
+            candidates_scope = [c for c in state['cases'] if video_url(c['url']) not in deferred
+                                and (case_url is None or video_url(c['url']) == case_url)]
             if not candidates_scope:
-                raise ValueError('Focused source is not in the fixed selection')
+                raise ValueError('No active source in the fixed selection')
             health = client.get(base+'/health').raise_for_status().json()
             version = health['pipeline_version']
             state['audio_pipeline_version'] = version
+            state['audio_deferred_urls'] = sorted(deferred)
             state['audio_passed_current_version'] = sum(bool(c.get('audio_attempts')) and
                 c['audio_attempts'][-1]['status'] == 'passed_audio' and
                 c['audio_attempts'][-1]['pipeline_version'] == version for c in state['cases'])
@@ -619,10 +624,13 @@ def main():
     parser.add_argument('--base-url', default='http://127.0.0.1:8746')
     parser.add_argument('--seed', type=int, default=20261001)
     parser.add_argument('--job-id', help='A registered, queued job for an audio-only probe')
-    parser.add_argument('--case-url', help='Verify only this frozen audio case, preserving batch pause files')
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument('--case-url', help='Verify only this frozen audio case, preserving batch pause files')
+    scope.add_argument('--defer-url', action='append', default=[],
+                       help='Explicitly defer a frozen audio case without deleting or passing it')
     args = parser.parse_args()
-    if args.case_url and args.action != 'audio-run':
-        parser.error('--case-url requires audio-run')
+    if (args.case_url or args.defer_url) and args.action != 'audio-run':
+        parser.error('--case-url and --defer-url require audio-run')
     args.manifest.parent.mkdir(parents=True, exist_ok=True)
     if args.action == 'sample':
         sample(args.manifest, args.data_dir, args.seed)
@@ -631,7 +639,8 @@ def main():
             parser.error('probe requires --job-id')
         probe(args.manifest, args.data_dir, args.base_url.rstrip('/'), args.job_id)
     elif args.action == 'audio-run':
-        run_audio(args.manifest, args.data_dir, args.base_url.rstrip('/'), case_url=args.case_url)
+        run_audio(args.manifest, args.data_dir, args.base_url.rstrip('/'),
+                  case_url=args.case_url, defer_urls=args.defer_url)
     else:
         run(args.manifest, args.data_dir, args.base_url.rstrip('/'))
 
