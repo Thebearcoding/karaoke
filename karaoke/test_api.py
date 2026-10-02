@@ -1603,23 +1603,26 @@ def test_lyric_wrapping_keeps_standalone_punctuation_without_empty_alignment_row
             prepare_song_text(dict(request, lyrics=['…', '“”']), {}, {}, 120, catalog_root=None, model='test')
 
 
-@pytest.mark.parametrize('selected,expected', [
-    ([3, 4, 5], ['踏过山河去寻你', '晚风吹过小树林', '踏过山河去寻你']),
-    ([], ['错字转录']),
-    ([3, 99], ['错字转录']),
-    ([4, 3], ['错字转录']),
-    ([3, 3], ['错字转录']),
+@pytest.mark.parametrize('language,lines', [
+    ('Chinese', ['踏过山河去寻你', '晚风吹过小树林', '踏过山河去寻你']),
+    ('Japanese', ['小さな猫が静かな庭の木陰で眠っている', '白い雲を見ながら静かな道をゆっくり歩いている',
+                  '小さな猫が静かな庭の木陰で眠っている']),
+    ('English', ['We walk along the quiet river while the moon shines above',
+                 'The stars are bright', 'We walk along the quiet river while the moon shines above']),
 ])
-def test_description_lyrics_select_existing_lines_without_rewriting(tmp_path, selected, expected):
-    description = '视频介绍\n作词：示例\n踏过山河去寻你\n晚风吹过小树林\n踏过山河去寻你\n订阅频道'
+@pytest.mark.parametrize('selected,accepted', [
+    ([3, 4, 5], True), ([], False), ([3, 99], False), ([4, 3], False), ([3, 3], False),
+])
+def test_description_lyrics_select_existing_lines_without_rewriting(tmp_path, selected, accepted, language, lines):
+    description = '\n'.join(['视频介绍', '作词：示例', *lines, '订阅频道'])
     parsed = SongText(title='Song', artist='Singer', lyric_line_numbers=selected)
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))], model='test', usage=None)
     with patch('karaoke.song_sources.OpenAI') as client:
         client.return_value.beta.chat.completions.parse.return_value = response
         result = prepare_song_text(dict(url=URL), dict(description=description),
-            dict(language='Chinese', segments=[dict(text='错字转录')]),
+            dict(language=language, segments=[dict(text='错字转录')]),
             120, catalog_root=None, model='test')
-    assert result['lines'] == expected
+    assert result['lines'] == (lines if accepted else ['错字转录'])
     assert result['provenance']['needs_review'] is True
     assert result['provenance']['kind'] == ('video_description' if selected == [3, 4, 5] else 'asr_draft')
     if selected == [3, 4, 5]:
@@ -1630,7 +1633,7 @@ def test_description_lyrics_select_existing_lines_without_rewriting(tmp_path, se
         import soundfile as sf
         pipeline = Pipeline(dict(url=URL), tmp_path/'job', catalog_root=None)
         (pipeline.output/'asr').mkdir()
-        (pipeline.output/'asr/transcription.json').write_text(json.dumps(dict(language='Chinese',
+        (pipeline.output/'asr/transcription.json').write_text(json.dumps(dict(language=language,
             segments=[dict(text='完全不同', start=1, end=3)], words=[dict(word='完全不同', start=1, end=3)])))
         sf.write(pipeline.output/'vocals-16k.wav', np.ones(5000)*.1, 1000)
         with patch('karaoke.song_sources.OpenAI') as client:

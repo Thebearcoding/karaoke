@@ -317,8 +317,9 @@ def prepare_song_text(request, metadata, transcription, duration, *, catalog_roo
                             1 <= i <= len(description_lines) for i in selected):
                         supplied = [description_lines[i-1] for i in selected if description_lines[i-1].strip()]
                         if supplied:
-                            result['lines'] = transcript_lines(dict(segments=[dict(text=line)
-                                for line in supplied]), language)
+                            # Keep authored phrase boundaries; fixed-width wrapping
+                            # can strand a sung suffix in its own alignment row.
+                            result['lines'] = supplied
                             result['provenance'].update(kind='video_description',
                                 description_sha256=hashlib.sha256(description.encode()).hexdigest(),
                                 lyric_line_numbers=selected)
