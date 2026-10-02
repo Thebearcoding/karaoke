@@ -50,9 +50,7 @@ export class Player {
             this.stop(); this.unlocked = false; this.onTick(position);
           });
         }
-        if (this.video.readyState >= 2 && Math.abs(this.video.currentTime - position) > 0.08) {
-          this.video.currentTime = Math.min(position, this.entry.duration);
-        }
+        this.syncVideo(position);
         this.onTick(position);
         if (position >= this.entry.duration - 0.025) {
           const id = this.entry.id;
@@ -63,6 +61,22 @@ export class Player {
       requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
+  }
+
+  syncVideo(position) {
+    const video = this.video;
+    if (this.videoPending || video.paused || video.seeking || video.readyState < 2) return;
+    const drift = position - video.currentTime;
+    // Let a seek finish and the decoder run before correcting again. Repeated
+    // currentTime writes can keep a slow decoder permanently seeking.
+    if (this.context.currentTime - this.lastVideoSeek < 1) return;
+    if (Math.abs(drift) > .25) {
+      video.playbackRate = 1;
+      video.currentTime = Math.min(position, this.entry.duration);
+      this.lastVideoSeek = this.context.currentTime;
+    } else {
+      video.playbackRate = Math.abs(drift) < .04 ? 1 : 1 + Math.max(-.1, Math.min(.1, drift));
+    }
   }
 
   ensureContext() {
@@ -126,6 +140,7 @@ export class Player {
   }
 
   stop() {
+    const wasPlaying = this.anchor !== null;
     for (const source of this.sources) {
       try { source.stop(); } catch { /* Already ended. */ }
       source.disconnect();
@@ -134,7 +149,8 @@ export class Player {
     this.anchor = null;
     this.signature = null;
     this.videoPending = false;
-    this.pitchChain?.stop();
+    this.video.playbackRate = 1;
+    if (wasPlaying) this.pitchChain?.stop();
     this.video.pause();
   }
 
@@ -188,7 +204,10 @@ export class Player {
       (state.playing && state.started_at ? Math.max(0, Date.now()/1000 + clockOffset - state.started_at) : 0));
     if (!state.playing || !state.started_at || !this.unlocked) {
       this.stop();
-      this.video.currentTime = position;
+      // An unopened playback tab may receive another device's playing clock.
+      // Keep its preview still instead of seeking on every preparation event.
+      const preview = this.unlocked ? position : state.position;
+      if (Math.abs(this.video.currentTime - preview) > .04) this.video.currentTime = preview;
       this.onTick(position);
       return;
     }
@@ -209,6 +228,7 @@ export class Player {
     this.anchor = this.audibleWhen - position;
     this.pitchChain?.start(this.audibleWhen);
     this.video.currentTime = position;
+    this.lastVideoSeek = this.context.currentTime;
     this.videoPending = true;
   }
 }

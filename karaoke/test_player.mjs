@@ -121,6 +121,10 @@ test('seek and pause stop all previous sources; end notification fires once', as
   assert.ok(previous.every(s=>s.stopped));assert.ok(p.sources.every(s=>Math.abs(s.started[1]-12)<.01));
   const seeked=[...p.sources];p.apply({...state,playing:false,started_at:null,position:14},clockOffset());
   assert.ok(seeked.every(s=>s.stopped));assert.equal(p.sources.length,0);assert.equal(p.video.currentTime,14);
+  p.video.seeking=true;
+  p.apply({...state,playing:false,started_at:null,position:15},clockOffset());
+  assert.equal(p.video.currentTime,15); // A new explicit seek supersedes the old request.
+  p.video.seeking=false;
   p.apply({...state,position:19},clockOffset());p.context.currentTime+=2;
   frame();frame();assert.deepEqual(ended,['one']);assert.equal(p.sources.length,0);
 });
@@ -156,4 +160,42 @@ test('live key changes affect the common mix without restarting; video follows a
   assert.ok(sources.every(s=>s.stopped));assert.equal(p.pitch,-2);
   p.apply({...state,position:8,pitch_semitones:0},clockOffset());
   assert.equal(p.pitch,0);
+});
+
+test('a slow video decoder can finish seeking while audio keeps its common clock', async () => {
+  const p=setup(); await p.unlock(); await p.load(song); p.apply(state,clockOffset());
+  const sources=[...p.sources], anchor=p.anchor;
+  let seeks=0, videoTime=p.video.currentTime;
+  Object.defineProperty(p.video,'currentTime',{get:()=>videoTime,set:value=>{videoTime=value;seeks++;p.video.seeking=true;}});
+  p.context.currentTime+=2; frame(); // One correction for a large gap.
+  assert.equal(seeks,1);
+  for (let i=0;i<120;i++) { p.context.currentTime+=1/60; frame(); }
+  assert.equal(seeks,1); // No retargeting while the decoder is seeking.
+  p.video.seeking=false; frame(); assert.equal(seeks,2);
+  p.video.seeking=false; p.context.currentTime+=.2; frame();
+  assert.equal(seeks,2); // Give the completed seek time to settle.
+  assert.deepEqual(p.sources,sources); assert.equal(p.anchor,anchor);
+  p.clear();
+});
+
+test('small video drift uses playback rate without seeking or changing audio', async () => {
+  const p=setup(); await p.unlock(); await p.load(song); p.apply(state,clockOffset());
+  p.context.currentTime+=2; p.video.currentTime=p.context.currentTime-p.anchor-.12;
+  const before=p.video.currentTime, sources=[...p.sources];
+  frame(); assert.equal(p.video.currentTime,before); assert.ok(p.video.playbackRate>1 && p.video.playbackRate<=1.1);
+  p.video.currentTime=p.context.currentTime-p.anchor+.12; frame(); assert.ok(p.video.playbackRate<1);
+  p.video.currentTime=p.context.currentTime-p.anchor; frame(); assert.equal(p.video.playbackRate,1);
+  assert.deepEqual(p.sources,sources);
+  p.clear(); assert.equal(p.video.playbackRate,1);
+});
+
+test('an unopened playback tab does not seek through another device\'s playing clock', async () => {
+  const p=setup(); await p.load(song);
+  let seeks=0, videoTime=0;
+  Object.defineProperty(p.video,'currentTime',{get:()=>videoTime,set:value=>{videoTime=value;seeks++;}});
+  p.apply(state,clockOffset());
+  for (let i=1;i<=20;i++) p.apply(state,clockOffset()+i);
+  assert.equal(seeks,1); assert.equal(videoTime,state.position); assert.equal(p.sources.length,0);
+  p.apply({...state,position:12},clockOffset()); assert.equal(videoTime,12);
+  p.clear();
 });
