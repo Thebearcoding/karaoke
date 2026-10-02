@@ -384,56 +384,104 @@ class SubtitleIntegrity(unittest.TestCase):
     def test_english_groups_in_cjk_songs_require_independent_acoustic_agreement(self):
         from copy import deepcopy
         from cjk_recovery import recover_latin_groups
-        original = [dict(text='前', aligned_start=1., aligned_end=1.8,
-                         units=[dict(first=0, stop=1, text='前', start=1., end=1.8)]),
+        original = [dict(text='前', aligned_start=.2, aligned_end=.8,
+                         units=[dict(first=0, stop=1, text='前', start=.2, end=.8)]),
                     dict(text='go home now', aligned_start=2., aligned_end=3.8, units=[
                         dict(first=0, stop=8, text='go home ', start=2., end=3.4),
                         dict(first=8, stop=11, text='now', start=3.4, end=3.8)]),
-                    dict(text='後', aligned_start=4.2, aligned_end=4.8,
-                         units=[dict(first=0, stop=1, text='後', start=4.2, end=4.8)])]
+                    dict(text='後', aligned_start=5.2, aligned_end=5.8,
+                         units=[dict(first=0, stop=1, text='後', start=5.2, end=5.8)])]
         protocol = dict(context_padding_seconds=[.35, .6, 1.],
                         maximum_spread_seconds=.08, minimum_relative_rms=.03)
-        for mode in ('valid', 'one_witness', 'disagree', 'context_disagree', 'changed_words', 'crossing'):
-            with self.subTest(mode=mode):
-                calls = []
-                class Model:
-                    model_identity = {'model': 'independent phoneme model'}
-                    def align(self, audio, words):
-                        begin = float(audio[0])-.1
-                        calls.append(begin)
-                        result = [dict(text=w, start=a-begin, end=b-begin) for w, a, b in
-                                  zip(words, [2.05, 2.55, 3.4], [2.45, 3.15, 3.8])]
-                        if mode == 'context_disagree' and len(calls) == 1:
-                            result[1]['start'] += .2
-                        if mode == 'changed_words':
-                            result[0]['text'] = 'different'
-                        return result, None, .01
-                def witness(cue, wave):
-                    result = [[dict(first=a, stop=b, text=cue['text'][a:b], start=start, end=end)
-                               for a, b, start, end in [(0, 2, 2.06, 2.44), (3, 7, 2.56, 3.14), (8, 11, 3.4, 3.8)]]
-                              for _ in range(2)]
-                    if mode == 'one_witness':
-                        result.pop()
-                    if mode == 'disagree':
-                        result[1][1]['start'] += .2
-                    return result
-                before = deepcopy(original)
-                if mode == 'crossing':
-                    before[0]['units'][0]['end'] = 2.2
-                wave = np.arange(44100*6)/44100+.1
-                actual, report = recover_latin_groups(before, wave, witness, protocol, Model())
-                self.assertEqual(before[1], original[1])
-                self.assertEqual(actual[0], before[0])
-                self.assertEqual(actual[2], before[2])
-                self.assertEqual(actual[1]['units'][-1], before[1]['units'][-1])
-                if mode == 'valid':
-                    np.testing.assert_allclose(calls, [1.65, 1.4, 1.])
-                    self.assertEqual([u['start'] for u in actual[1]['units']], [2.05, 2.55, 3.4])
-                    self.assertFalse(highlight_coverage_errors(actual, 'Japanese'))
-                    self.assertTrue(report[0]['groups'][0]['accepted'])
-                else:
-                    self.assertEqual(actual, before)
-                    self.assertFalse(any(g['accepted'] for g in report[0]['groups']))
+        for mixed in (False, True):
+            for mode in ('valid', 'one_witness', 'disagree', 'context_disagree', 'changed_words', 'crossing'):
+                with self.subTest(mode=mode, mixed=mixed):
+                    calls = []
+                    class Model:
+                        model_identity = {'model': 'independent phoneme model'}
+                        def align(_, audio, words):
+                            self.assertEqual(words, ['go', 'home', 'now'])
+                            begin = float(audio[0])-.1
+                            calls.append(begin)
+                            result = [dict(text=w, start=a-begin, end=b-begin) for w, a, b in
+                                      zip(words, [2.05, 2.55, 3.4], [2.45, 3.15, 3.8])]
+                            if mode == 'context_disagree' and len(calls) == 1:
+                                result[1]['start'] += .2
+                            if mode == 'changed_words':
+                                result[0]['text'] = 'different'
+                            return result, None, .01
+                    def witness(cue, wave):
+                        self.assertEqual(cue['text'], 'go home now')
+                        result = [[dict(first=a, stop=b, text=cue['text'][a:b], start=start, end=end)
+                                   for a, b, start, end in [(0, 2, 2.06, 2.44), (3, 7, 2.56, 3.14), (8, 11, 3.4, 3.8)]]
+                                  for _ in range(2)]
+                        if mode == 'one_witness':
+                            result.pop()
+                        if mode == 'disagree':
+                            result[1][1]['start'] += .2
+                        return result
+                    before = deepcopy(original)
+                    if mode == 'crossing':
+                        before[0]['units'][0]['end'] = 2.2
+                    if mixed:
+                        text, units = '', []
+                        for cue in before:
+                            units.extend(dict(u, first=u['first']+len(text), stop=u['stop']+len(text))
+                                         for u in cue['units'])
+                            text += cue['text']
+                        before = [dict(text=text, aligned_start=.2, aligned_end=5.8, units=units)]
+                    unchanged = deepcopy(before)
+                    wave = np.arange(44100*6)/44100+.1
+                    actual, report = recover_latin_groups(before, wave, witness, protocol, Model())
+                    self.assertEqual(before, unchanged)
+                    old_units = [u for c in before for u in c['units']]
+                    units = [u for c in actual for u in c['units']]
+                    self.assertEqual([units[0], units[-2], units[-1]],
+                                     [old_units[0], old_units[-2], old_units[-1]])
+                    if mode == 'valid':
+                        np.testing.assert_allclose(calls, [1.65, 1.4, 1.])
+                        self.assertEqual([u['start'] for u in units[1:-1]], [2.05, 2.55, 3.4])
+                        self.assertFalse(highlight_coverage_errors(actual, 'Japanese'))
+                        self.assertTrue(report[0]['groups'][0]['accepted'])
+                    else:
+                        self.assertEqual(actual, before)
+                        self.assertFalse(any(g['accepted'] for g in report[0]['groups']))
+
+    def test_independent_witness_keeps_both_audio_views_inside_foreign_word_bounds(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import torch
+        from cjk_recovery import AcousticWitness
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            weights = root/'models/alignment/mms/model.pt'
+            weights.parent.mkdir(parents=True)
+            weights.touch()
+            original = np.full(48000*6, .8, dtype='float32')
+            original[round(1.8*48000):4*48000] = .1
+            sf.write(root/'original.wav', original, 48000, subtype='FLOAT')
+            voice = np.full(44100*6, .8, dtype='float32')
+            voice[round(1.8*44100):4*44100] = .1
+            observed = []
+            def model(audio):
+                observed.append((audio.shape[1], audio.mean().item()))
+                return torch.zeros(1, 100, 3), None
+            witness = AcousticWitness(root/'original.wav', 'cpu')
+            witness.model = model
+            witness.bundle = SimpleNamespace(get_tokenizer=lambda: lambda words: words,
+                get_aligner=lambda: lambda emissions, words:
+                    [[SimpleNamespace(start=i*5, end=i*5+2)] for i in range(len(words))])
+            cue = dict(text='go home', aligned_start=2., aligned_end=3.8)
+            with patch('cjk_recovery.ROOT', root):
+                bounded = witness(dict(cue, audio_bounds=[1.8, 4.]), voice)
+                self.assertEqual([n for n, _ in observed], [35200, 35200])
+                self.assertTrue(all(abs(mean-.1) < .001 for _, mean in observed))
+                self.assertEqual([len(view) for view in bounded], [2, 2])
+                observed.clear()
+                witness(cue, voice)
+                self.assertEqual([n for n, _ in observed], [48000, 48000])
+                self.assertTrue(all(mean > .2 for _, mean in observed))
 
     def test_joint_recovery_rechecks_stale_neighbor_without_moving_foreign_words(self):
         from cjk_recovery import recover_context_groups
