@@ -4,11 +4,12 @@ import sys
 import time
 
 from fastapi.testclient import TestClient
+import pytest
 
 from karaoke.api import Store, Worker, create_app
 from karaoke.job_schema import JobRequest
 from karaoke.room import AddSong, RoomCommand, Updates
-from karaoke.test_api import URL, fake_worker, finished
+from karaoke.test_api import URL, cache_fixture, fake_worker, finished
 
 
 def ready_job(store, url=URL):
@@ -174,7 +175,7 @@ def test_independent_levels_preserve_playback_persist_and_presets_reset_them(tmp
 def test_pending_preparation_follows_playlist_without_interrupting_current(tmp_path):
     store = Store(tmp_path)
     worker = Worker(store)
-    worker.current = 'already-running'
+    worker.processes['already-running'] = None
     jobs = {name:store.create(JobRequest(url=f'https://youtu.be/{i:011d}'),'test')[0]['id']
             for i,name in enumerate(['a','b','c','standalone'])}
     for job in [*jobs.values(), jobs['a'], 'missing-job']:
@@ -246,6 +247,42 @@ def test_library_keeps_one_card_across_failed_jobs_and_retries(tmp_path):
     songs = [s for s in snapshot['library'] if s['url'] == URL]
     assert len(songs) == 1 and songs[0]['status'] == 'queued'
     assert songs[0]['job_id'] != job['id']
+
+
+@pytest.mark.parametrize('new_status', ['failed', 'source_ready', 'audio_ready', 'queued', 'running'])
+@pytest.mark.parametrize('video_evicted', [False, True])
+def test_library_keeps_existing_media_after_playlist_removal_and_new_attempt(tmp_path, new_status, video_evicted):
+    app = create_app(tmp_path, version='test')
+    store, room = app.state.store, app.state.room
+    old = cache_fixture(store, '1', restorable=True)
+    entry = room.add(AddSong(job_id=old['id']))['entries'][0]
+    room.command(RoomCommand(action='remove', entry_id=entry['id']))
+    folder = tmp_path/old['id']
+    assert (folder/'mv.mp4').exists()
+    if video_evicted:
+        (folder/'mv.mp4').unlink()
+        store.update(old['id'], status='video_evicted', restore_video=True)
+    newer, _ = store.create(JobRequest(**{**old['input'], 'force': True}), 'new-version')
+    store.update(newer['id'], status=new_status)
+    cards = [s for s in room.library() if s['url'] == old['input']['url']]
+    assert len(cards) == 1
+    assert cards[0]['job_id'] == old['id']
+    assert cards[0]['status'] == ('video_evicted' if video_evicted else 'completed')
+    assert room.read()['entries'] == []
+    added = room.add(AddSong(job_id=cards[0]['job_id']))['entries'][0]
+    assert added['job_id'] == old['id']
+    assert (folder/'instrumental').read_bytes() == b'keep me'
+
+
+def test_library_does_not_prefer_an_incomplete_old_result(tmp_path):
+    app = create_app(tmp_path, version='test')
+    store, room = app.state.store, app.state.room
+    old = cache_fixture(store, '1', restorable=True)
+    (tmp_path/old['id']/'instrumental').unlink()
+    store.update(old['id'], status='video_evicted', restore_video=True)
+    newer, _ = store.create(JobRequest(**{**old['input'], 'force': True}), 'new-version')
+    card = next(s for s in room.library() if s['url'] == old['input']['url'])
+    assert card['job_id'] == newer['id'] and card['status'] == 'queued'
 
 
 def test_sse_initial_snapshot_push_coalescing_and_disconnect():

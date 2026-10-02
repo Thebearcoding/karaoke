@@ -95,7 +95,9 @@ class Store:
             if not payload.force:
                 rows = db.execute("""SELECT doc FROM jobs WHERE
                     (cache_key=? AND status IN ('queued','running','completed'))
-                    OR status IN ('queued','failed','audio_ready','source_ready') OR json_extract(doc, '$.restore_video')=1 ORDER BY created_at DESC""", (key,)).fetchall()
+                    OR status IN ('queued','failed','audio_ready','source_ready') OR json_extract(doc, '$.restore_video')=1
+                    ORDER BY (status='completed') DESC, COALESCE(json_extract(doc, '$.restore_video'), 0) DESC,
+                             created_at DESC""", (key,)).fetchall()
                 for row in rows:
                     doc = json.loads(row[0])
                     if doc['status'] == 'queued':
@@ -158,10 +160,25 @@ class Store:
 
 
 class Worker:
-    def __init__(self, store, command=None, version=None):
+    def __init__(self, store, command=None, version=None, concurrency=1):
         self.store, self.command = store, command
         self.version = version
-        self.queue, self.current, self.process = asyncio.Queue(), None, None
+        if concurrency not in (1, 2):
+            raise ValueError('Preparation concurrency must be 1 or 2')
+        self.concurrency = concurrency
+        self.queue, self.processes = asyncio.Queue(), {}
+
+    @property
+    def current(self):
+        return next(iter(self.processes), None)
+
+    @property
+    def process(self):
+        return next(iter(self.processes.values()), None)
+
+    @property
+    def reserve(self):
+        return self.store.cache.headroom * max(1, len(self.processes))
 
     def prioritize(self, job_ids):
         pending = []
@@ -183,26 +200,24 @@ class Worker:
         self.store.cache.enforce()
         for job in self.store.list(100000, 'queued'):
             self.queue.put_nowait(job['id'])
-        self.task = asyncio.create_task(self.consume())
+        self.tasks = [asyncio.create_task(self.consume()) for _ in range(self.concurrency)]
 
     async def stop(self):
-        self.task.cancel()
-        try:
-            await self.task
-        except asyncio.CancelledError:
-            pass
+        for task in self.tasks:
+            task.cancel()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
 
-    async def terminate(self):
-        if self.process and self.process.returncode is None:
+    async def terminate(self, process):
+        if process and process.returncode is None:
             try:
-                os.killpg(self.process.pid, signal.SIGTERM)
+                os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
                 return
             try:
-                await asyncio.wait_for(self.process.wait(), 5)
+                await asyncio.wait_for(process.wait(), 5)
             except asyncio.TimeoutError:
-                os.killpg(self.process.pid, signal.SIGKILL)
-                await self.process.wait()
+                os.killpg(process.pid, signal.SIGKILL)
+                await process.wait()
 
     async def consume(self):
         while True:
@@ -215,13 +230,13 @@ class Worker:
             if (job or {}).get('status') != 'queued':
                 self.queue.task_done()
                 continue
-            self.current = job_id
+            process = self.processes[job_id] = None
             folder = self.store.root/job_id
             version = {'pipeline_version': self.version} if self.version and not job.get('restore_video') else {}
             job = self.store.update(job_id, status='running', started_at=now(), **version)
             try:
                 (folder/'error.json').unlink(missing_ok=True)
-                if not self.store.cache.enforce(self.store.cache.headroom):
+                if not self.store.cache.enforce(self.reserve):
                     raise CacheFull('歌曲缓存或硬盘剩余空间不足；请移除待唱歌曲、提高上限或释放磁盘后重试')
                 command = self.command(folder) if self.command else [sys.executable, '-u', '-m',
                     'karaoke.pipeline', '--request', str(folder/'request.json'), '--output', str(folder)]
@@ -230,12 +245,13 @@ class Worker:
                     if not self.command:
                         command.append('--restore-video')
                 with (folder/'worker.log').open('wb') as log:
-                    self.process = await asyncio.create_subprocess_exec(*command, cwd=ROOT.parent,
+                    process = await asyncio.create_subprocess_exec(*command, cwd=ROOT.parent,
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                         env={**os.environ, 'KARAOKE_EVENTS_STDOUT': '1'}, start_new_session=True)
-                    await self.supervise(log, job_id)
+                    self.processes[job_id] = process
+                    await self.supervise(log, job_id, process)
                 result_path = folder/'result.json'
-                if self.process.returncode == 0 and result_path.exists():
+                if process.returncode == 0 and result_path.exists():
                     result = json.loads(result_path.read_text())
                     if not {'mv', 'instrumental', 'backing_vocals', 'lead_vocals'} <= result['artifacts'].keys():
                         raise ValueError('Pipeline omitted a required output')
@@ -251,40 +267,40 @@ class Worker:
                         code='worker_failed', message='处理进程退出；请检查该任务的 worker.log')
                     self.store.update(job_id, status='failed', active_stages=[], error=error)
             except CacheFull as error:
-                await self.terminate()
+                await self.terminate(process)
                 self.store.update(job_id, status='failed', active_stages=[],
                                   error=dict(code='cache_full', message=str(error)))
             except asyncio.CancelledError:
-                await self.terminate()
+                await self.terminate(process)
                 self.store.update(job_id, status='failed', active_stages=[],
                     error=dict(code='interrupted', message='服务关闭，任务已中止；可重新提交链接'))
                 raise
             except Exception:
                 logging.getLogger(__name__).exception('Job %s failed output/worker validation', job_id)
-                await self.terminate()
+                await self.terminate(process)
                 self.store.update(job_id, status='failed', active_stages=[],
                     error=dict(code='worker_error', message='任务执行或输出验证失败；请检查服务器日志'))
             finally:
-                self.process, self.current = None, None
+                self.processes.pop(job_id)
                 self.store.cache.compact(self.store.read(job_id))
                 self.store.cache.enforce()
                 self.queue.task_done()
 
-    async def supervise(self, log, job_id):
+    async def supervise(self, log, job_id, process):
         async def output():
-            async for line in self.process.stdout:
+            async for line in process.stdout:
                 log.write(line)
                 log.flush()
                 if line.startswith(b'KARAOKE_PROGRESS '):
                     progress = json.loads(line[len(b'KARAOKE_PROGRESS '):])
                     self.store.update(job_id, **{key: progress[key]
                         for key in ('active_stages', 'stage_progress', 'timings', 'song_info') if key in progress})
-            await self.process.wait()
+            await process.wait()
 
         async def budget():
             while True:
                 await asyncio.sleep(1)
-                if not self.store.cache.enforce(self.store.cache.headroom):
+                if not self.store.cache.enforce(self.reserve):
                     raise CacheFull('预处理达到缓存或磁盘空间限制，已停止并清理临时文件；请释放空间后重试')
 
         tasks = [asyncio.create_task(output()), asyncio.create_task(budget())]
@@ -317,7 +333,8 @@ class LeasedFileResponse(FileResponse):
             self.cache.release(self.job_id)
 
 
-def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_bytes=None):
+def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_bytes=None,
+               worker_concurrency=None):
     store = Store(data_dir or os.getenv('KARAOKE_DATA_DIR', str(ROOT/'service-data')), cache_limit_bytes)
     if version is None:
         from .pipeline import pipeline_fingerprint
@@ -327,7 +344,8 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
             'KARAOKE_SEPARATION_BATCH_SIZE')}
         settings['asr'] = configuration()
         version = hashlib.sha256((pipeline_fingerprint()+json.dumps(settings, sort_keys=True)).encode()).hexdigest()
-    worker = Worker(store, worker_command, version)
+    worker = Worker(store, worker_command, version, worker_concurrency if worker_concurrency is not None
+                    else int(os.getenv('KARAOKE_PREPARATION_CONCURRENCY', '1')))
     updates = Updates()
     store.on_change = updates.publish
     room = Room(store, worker, version, updates)
@@ -368,6 +386,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
     @app.get('/health')
     async def health():
         return dict(status='ok', queued=worker.queue.qsize(), running_job=worker.current,
+                    running_jobs=list(worker.processes), preparation_concurrency=worker.concurrency,
                     preparation_paused=(store.root/'preparation.pause').exists(),
                     pipeline_version=version, device=os.getenv('KARAOKE_DEVICE', 'auto'))
 

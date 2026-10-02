@@ -331,6 +331,7 @@ ASR 固定宽度断行若留下孤立的单字或单词，会在同一短句内�
 | `KARAOKE_ASR_FALLBACK_MODEL` | 默认 `gpt-4o-transcribe`；识别文本或时间异常时恢复整首文本 |
 | `KARAOKE_DATA_DIR` | 默认 `karaoke/service-data`，保存 SQLite 任务状态和每个任务的文件 |
 | `KARAOKE_CACHE_MAX_GIB` | 初次创建缓存设置时的容量上限，默认 `10` GiB；之后以页面保存的值为准 |
+| `KARAOKE_PREPARATION_CONCURRENCY` | 同时准备歌曲数，`1`（默认）或 `2`；共用同一缓存预算 |
 | `KARAOKE_PORT` | 默认 `8746` |
 | `KARAOKE_HOST` | 默认 `127.0.0.1`；需要局域网设备点歌时可显式设为 `0.0.0.0` |
 | `KARAOKE_CORS_ORIGINS` | 允许调用接口的前端来源，逗号分隔；默认允许本地 8745 预览页 |
@@ -343,7 +344,7 @@ ASR 固定宽度断行若留下孤立的单字或单词，会在同一短句内�
 | `KARAOKE_FONT_FILE` | 可选的完整字体路径；Linux 可使用覆盖对应语言的 Noto Serif CJK 字体 |
 | `KARAOKE_DISABLE_LYRIC_CATALOG` | 设为 `1` 时强制走自动歌词，用于测试新歌流程 |
 
-单进程、单 GPU 队列运行；不要给同一数据目录启动多个 Uvicorn worker。独立的分离环境与主环境都需安装对应硬件的 PyTorch。CUDA 入口已接入；本次实际端到端运行平台是 Mac / MPS，未在 RTX 4090 上测时。
+单进程、单 GPU 队列运行；不要给同一数据目录启动多个 Uvicorn worker。队列可同时处理两首歌；`/health.running_jobs` 和房间快照的 `preparation_jobs` 列出全部运行任务，旧单数属性保留首项。暂停领取任务后，所有已经开始的歌曲仍会自然完成。并发处理各自监控共享缓存，并按运行任务数预留写入余量。独立的分离环境与主环境都需安装对应硬件的 PyTorch。CUDA 入口已接入；本次实际端到端运行平台是 Mac / MPS，未在 RTX 4090 上测时。
 
 维护时可在数据目录创建 `preparation.pause`，暂停领取下一项预处理任务；当前任务正常完成，歌单、排队顺序和缓存保护保持不变。该暂停跨服务重启保留，删除文件后继续，`/health.preparation_paused` 显示状态。批量回归应先暂停控制器，再暂停预处理；定向复现失败样本后才恢复整批。
 

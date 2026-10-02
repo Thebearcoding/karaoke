@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from .job_schema import JobRequest
+from .cache import can_restore_video
 
 PRESETS = {
     'instrumental': dict(instrumental=1., backing_vocals=0., lead_vocals=0.),
@@ -132,6 +133,7 @@ class Room:
         state = self.read()
         return {**state, 'entries': [self.describe(e) for e in state['entries']],
                 'server_time': time.time(), 'preparation_job': self.worker.current,
+                'preparation_jobs': list(self.worker.processes),
                 'storage': self.store.cache.snapshot(), 'library': self.library()}
 
     @staticmethod
@@ -142,21 +144,24 @@ class Room:
     def library(self):
         songs = [dict(song, status='unprepared') for song in self.featured()]
         by_url = {s['url']: s for s in songs}
-        seen = set()
+        seen = {}
         for job in self.store.list(1000):
             url = job['input']['url']
-            if url in seen:
-                continue
-            seen.add(url)
             result = job.get('result') or {}
             artifacts = result.get('artifacts', {})
             ready = job['status'] == 'completed' and bool(artifacts) and all(
                 (self.store.root/job['id']/a['path']).is_file() for a in artifacts.values())
+            priority = 2 if ready else int(bool(job.get('restore_video')) and
+                can_restore_video(self.store.root/job['id'], result))
+            if url in seen and priority <= seen[url]:
+                continue
+            seen[url] = priority
             song = by_url.get(url)
             info = self.describe(dict(id=job['id'], job_id=job['id']))
             if song is None:
                 song = dict(id=job['id'])
                 songs.append(song)
+                by_url[url] = song
             song.update({key: info[key] for key in ('title', 'artist', 'url', 'language', 'duration',
                 'poster', 'status', 'active_stages', 'stage_progress', 'error')})
             song['job_id'] = job['id'] if ready or job.get('restore_video') or job['status'] in ('queued', 'running') else None

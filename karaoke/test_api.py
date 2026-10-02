@@ -1683,24 +1683,103 @@ def test_pending_input_is_reused_after_version_change_without_merging_distinct_r
     assert not cached and different['id']!=original['id']
 
 
-def test_shutdown_stops_current_job_and_preserves_the_queue(tmp_path):
+@pytest.mark.parametrize('concurrency', [1, 2])
+def test_shutdown_stops_current_job_and_preserves_the_queue(tmp_path, concurrency):
     def slow_worker(folder):
         return [sys.executable, '-c', "import time;time.sleep(30)"]
-    app = create_app(tmp_path, worker_command=slow_worker, version='test')
+    app = create_app(tmp_path, worker_command=slow_worker, version='test', worker_concurrency=concurrency)
     with TestClient(app) as client:
-        current = client.post('/v1/jobs', json={'url': URL}).json()['id']
+        current = [client.post('/v1/jobs', json={'url': URL, 'force': True}).json()['id']
+                   for _ in range(concurrency)]
         queued = client.post('/v1/jobs', json={'url': 'https://youtu.be/2Vv-BfVoq4g'}).json()['id']
         deadline = time.monotonic()+5
-        while app.state.worker.process is None and time.monotonic() < deadline:
+        while (len(app.state.worker.processes) < concurrency or
+               any(p is None for p in app.state.worker.processes.values())) and time.monotonic() < deadline:
             time.sleep(.02)
-        process = app.state.worker.process
-        assert process is not None
+        processes = list(app.state.worker.processes.values())
+        assert len(processes) == concurrency and all(p is not None for p in processes)
         assert client.get(f'/v1/jobs/{queued}').json()['status'] == 'queued'
-    assert process.returncode is not None
-    assert app.state.store.read(current)['error']['code'] == 'interrupted'
+    assert all(p.returncode is not None for p in processes)
+    assert all(app.state.store.read(j)['error']['code'] == 'interrupted' for j in current)
     assert app.state.store.read(queued)['status'] == 'queued'
     with TestClient(create_app(tmp_path, worker_command=fake_worker, version='test')) as client:
         assert finished(client, queued)['status'] == 'completed'
+
+
+def test_two_workers_keep_progress_results_and_failure_isolated_and_honor_pause(tmp_path):
+    def controlled_worker(folder):
+        code = '''import json,pathlib,sys,time
+p=pathlib.Path(sys.argv[1])
+print('KARAOKE_PROGRESS '+json.dumps({'active_stages':['render'],'song_info':{'title':p.name}}),flush=True)
+(p/'started').touch()
+while not (p/'release').exists(): time.sleep(.02)
+if (p/'fail').exists():
+    (p/'error.json').write_text(json.dumps({'code':'fixture_failure','message':p.name}))
+    sys.exit(1)
+(p/'media').write_text(p.name)
+artifacts={name:{'path':'media','bytes':len(p.name)} for name in ['mv','instrumental','backing_vocals','lead_vocals']}
+(p/'result.json').write_text(json.dumps({'artifacts':artifacts}))
+'''
+        return [sys.executable, '-u', '-c', code, str(folder)]
+    app = create_app(tmp_path, worker_command=controlled_worker, version='test', worker_concurrency=2)
+    with TestClient(app) as client:
+        ids = [client.post('/v1/jobs', json={'url': URL, 'force': True}).json()['id'] for _ in range(3)]
+        deadline = time.monotonic()+5
+        while not all((tmp_path/j/'started').exists() for j in ids[:2]) and time.monotonic() < deadline:
+            time.sleep(.02)
+        health = client.get('/health').json()
+        assert health['running_jobs'] == ids[:2] and health['running_job'] == ids[0]
+        assert health['preparation_concurrency'] == 2 and health['queued'] == 1
+        assert client.get('/v1/room').json()['preparation_jobs'] == ids[:2]
+        assert not (tmp_path/ids[2]/'started').exists()
+        for j in ids[:2]:
+            job = app.state.store.read(j)
+            assert job['active_stages'] == ['render'] and job['song_info']['title'] == j
+        hold = tmp_path/'preparation.pause'
+        hold.touch()
+        (tmp_path/ids[0]/'fail').touch()
+        (tmp_path/ids[0]/'release').touch()
+        failed = finished(client, ids[0])
+        assert failed['error']['message'] == ids[0]
+        assert client.get('/health').json()['running_jobs'] == ids[1:2]
+        assert app.state.store.read(ids[1])['status'] == 'running'
+        (tmp_path/ids[1]/'release').touch()
+        assert finished(client, ids[1])['status'] == 'completed'
+        assert app.state.store.read(ids[2])['status'] == 'queued'
+        hold.unlink()
+        (tmp_path/ids[2]/'release').touch()
+        assert finished(client, ids[2])['status'] == 'completed'
+        for j in ids[1:]:
+            assert (tmp_path/j/'media').read_text() == j
+        assert client.get('/health').json()['running_jobs'] == []
+
+
+def test_parallel_workers_share_the_cache_limit(tmp_path):
+    def writer(folder):
+        code = '''import pathlib,sys,time
+p=pathlib.Path(sys.argv[1]);(p/'started').touch()
+while not (p.parent/'release').exists(): time.sleep(.02)
+(p/'working.wav').write_bytes(b'x'*110000)
+time.sleep(30)
+'''
+        return [sys.executable, '-c', code, str(folder)]
+    app = create_app(tmp_path, worker_command=writer, version='test',
+                     worker_concurrency=2, cache_limit_bytes=200000)
+    with TestClient(app) as client:
+        ids = [client.post('/v1/jobs', json={'url': URL, 'force': True}).json()['id'] for _ in range(2)]
+        deadline = time.monotonic()+5
+        while not all((tmp_path/j/'started').exists() for j in ids) and time.monotonic() < deadline:
+            time.sleep(.02)
+        assert len(app.state.worker.processes) == 2
+        (tmp_path/'release').touch()
+        deadline = time.monotonic()+5
+        while not any(app.state.store.read(j)['status'] == 'failed' for j in ids) and time.monotonic() < deadline:
+            time.sleep(.02)
+        failed = [app.state.store.read(j) for j in ids if app.state.store.read(j)['status'] == 'failed']
+        assert failed and all(j['error']['code'] == 'cache_full' for j in failed)
+        assert app.state.store.cache.limit == 200000
+    app.state.store.cache.enforce()
+    assert app.state.store.cache.snapshot()['used_bytes'] < 200000
 
 
 def test_preparation_hold_survives_restart_and_finishes_current_job(tmp_path):

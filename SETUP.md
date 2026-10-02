@@ -108,7 +108,7 @@ export KARAOKE_DEVICE=auto
 
 `auto` 按 CUDA → MPS → CPU 选择设备。Linux 还需用 `KARAOKE_FONT_FILE` 指定覆盖目标语言的字体文件，例如已安装的 Noto Serif CJK 字体。程序会检查缺字；不要用缺字方块继续导出。完整环境变量见 [API.md](karaoke/API.md)。
 
-保持一个 Uvicorn 进程、一个处理 worker；不要对同一数据目录使用多 worker。需要局域网遥控时再显式设置 `KARAOKE_HOST=0.0.0.0`，手机访问 `http://电脑IP:8746/?remote=1`。
+保持一个 Uvicorn 进程；不要对同一数据目录启动多个服务进程。`KARAOKE_PREPARATION_CONCURRENCY=2` 允许同一队列同时处理两首歌，默认值为 `1`；两首共用缓存预算，各自保存进度、结果和错误。需要局域网遥控时再显式设置 `KARAOKE_HOST=0.0.0.0`，手机访问 `http://电脑IP:8746/?remote=1`。
 
 长期在本机运行时，将服务与临时终端分开，并保存日志（macOS / Linux）：
 
@@ -118,6 +118,8 @@ nohup .venv/bin/python -u -m karaoke.api </dev/null >>karaoke/service-data/serve
 ```
 
 环境变量需在启动前设置。检查 `curl -fsS http://127.0.0.1:8746/health` 和 `tail -n 50 karaoke/service-data/server.log`；启动终端退出后应再次检查健康接口。`nohup` 不负责崩溃重启或开机启动；需要这两项时交给操作系统的服务管理器。重启前确认没有正在准备或播放的歌曲，再向监听进程发送 `TERM`，等它退出后启动，避免两个 worker 抢同一数据目录。
+
+新歌一直排队、`running_job` 为空时，检查 `/health` 的 `preparation_paused`。定向回归使用的 `KARAOKE_DATA_DIR/preparation.pause` 会暂停普通点歌处理；恢复日常使用前，确认同一数据目录没有定向处理进程，再移除这个暂停文件。回归清单旁的 `audio.pause` 和 `manifest.pause` 可继续保留，不影响普通点歌。
 
 网页能打开只说明本地服务正常，不代表下载网络可用。若日志出现 `Unable to connect to proxy` / `Tunnel connection failed: 403 Forbidden`，检查启动进程继承的代理环境。通过 Codex 启动长期服务时，应使用已获准访问视频站点的运行环境；不要把工具临时注入的受限代理当作应用代理，也不要在应用代码里擅自删除用户的代理设置。可在同一运行环境先执行 `python -m yt_dlp --ignore-config --skip-download --print title 视频URL` 验证。
 
