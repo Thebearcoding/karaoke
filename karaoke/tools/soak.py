@@ -324,8 +324,9 @@ def probe(path, data_dir, base, job_id):
         job = client.get(f'{base}/v1/jobs/{job_id}').raise_for_status().json()
         state = json.loads(path.read_text())
         case = next(c for c in state['cases'] if video_url(c['url']) == job['input']['url'])
-        retry_at = max(retry_deadline(state, case),
-                       (case.get('attempts') or [{}])[-1].get('next_retry_at') or 0)
+        retry_at = max(retry_deadline(state, case), *(
+            (case.get(key) or [{}])[-1].get('next_retry_at') or 0
+            for key in ('attempts', 'audio_attempts')))
         if time.time() < retry_at:
             raise ValueError(f'Provider backoff lasts until {datetime.fromtimestamp(retry_at, timezone.utc).isoformat()}')
         folder = (data_dir/job['id']).resolve()

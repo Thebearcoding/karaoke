@@ -1093,6 +1093,46 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
         soak.run_audio(manifest,data,'http://test',case_url=URL)
 
 
+@pytest.mark.parametrize('delayed_ledger', ['attempts', 'audio_attempts', 'provider'])
+def test_focused_probe_respects_both_retry_ledgers(tmp_path, monkeypatch, delayed_ledger):
+    import httpx
+    from karaoke.tools import soak
+    folder = tmp_path/'job'
+    folder.mkdir()
+    retained = folder/'separated.wav'
+    retained.write_bytes(b'already computed')
+    case = dict(url=URL, provider='youtube', attempts=[], audio_attempts=[])
+    state = dict(cases=[case], provider_backoff={})
+    if delayed_ledger == 'provider':
+        state['provider_backoff']['youtube'] = 1030
+    else:
+        case[delayed_ledger].append(dict(status='external', next_retry_at=1030))
+    manifest = tmp_path/'manifest.json'
+    manifest.write_text(json.dumps(state))
+    job = dict(id='job', status='queued', input=dict(url=URL))
+    def respond(request):
+        result = {'pipeline_version': 'current'} if request.url.path == '/health' else job
+        return httpx.Response(200, json=result)
+    client_type = httpx.Client
+    monkeypatch.setattr(soak.httpx, 'Client', lambda **kwargs: client_type(transport=httpx.MockTransport(respond)))
+    calls = []
+    def execute(*args):
+        calls.append(args[-1])
+        return 0
+    monkeypatch.setattr(soak, 'run_probe', execute)
+    monkeypatch.setattr(soak, 'verify_outputs', lambda *args, **kwargs: dict(validation_scope='audio_and_lyrics'))
+    monkeypatch.setattr(soak.time, 'time', lambda: 1000)
+    with pytest.raises(ValueError, match='Provider backoff'):
+        soak.probe(manifest, tmp_path, 'http://test', 'job')
+    assert calls == [] and not (folder/'audio-verification.json').exists()
+    assert retained.read_bytes() == b'already computed'
+    monkeypatch.setattr(soak.time, 'time', lambda: 1031)
+    soak.probe(manifest, tmp_path, 'http://test', 'job')
+    assert len(calls) == 1 and '--audio-only' in calls[0]
+    assert json.loads((folder/'audio-verification.json').read_text())['pipeline_version'] == 'current'
+    assert retained.read_bytes() == b'already computed'
+
+
 def test_partial_song_information_updates_preserve_language_and_title(tmp_path):
     pipeline = Pipeline(dict(url=URL), tmp_path)
     pipeline.phase(song_info=dict(title='Video', language='Japanese'))
