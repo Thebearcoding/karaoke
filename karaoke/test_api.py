@@ -217,6 +217,9 @@ def test_soak_preserves_failed_stage_diagnostics_after_cache_eviction(tmp_path):
     (folder/'align_repeats.log').write_text('old progress\n'*4000+traceback)
     (folder/'asr').mkdir()
     (folder/'asr/transcription.json').write_text('{"language": "chinese"}')
+    (folder/'asr-requests').mkdir()
+    rejected = {'language': 'zh', 'words': [{'word': 'bad draft', 'start': 1, 'end': 1}]}
+    (folder/'asr-requests/local-rejected.json').write_text(json.dumps(rejected))
     (folder/'repeated-lyrics').mkdir()
     (folder/'repeated-lyrics/run.json').write_text('{"attempts": []}')
     (folder/'vocals.mp3').write_bytes(b'private audio')
@@ -237,6 +240,7 @@ def test_soak_preserves_failed_stage_diagnostics_after_cache_eviction(tmp_path):
     assert saved['align_repeats.log'].endswith(traceback)
     assert len(saved['align_repeats.log'].encode()) <= 16384
     assert saved['asr/transcription.json'] == {'language': 'chinese'}
+    assert saved['asr-requests/local-rejected.json'] == rejected
     assert saved['repeated-lyrics/run.json'] == {'attempts': []}
     assert 'vocals.mp3' not in saved
     assert traceback in attempt['diagnostic_tail']

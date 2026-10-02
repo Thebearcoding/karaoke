@@ -542,7 +542,7 @@ def record_failure(attempt, job, folder):
     attempt.update(status='failed', error=error, finished_at=stamp(),
         error_fingerprint=hashlib.sha256(json.dumps(error, sort_keys=True).encode()).hexdigest())
     attempt['diagnostic_tail'] = '\n'.join(logs)
-    for pattern in ('asr/*.json', 'alignment/*.json', 'phonemes/*.json', 'context/**/*.json',
+    for pattern in ('asr/*.json', 'asr-requests/*.json', 'alignment/*.json', 'phonemes/*.json', 'context/**/*.json',
                     'repeated-lyrics/*.json', 'english-onsets/*.json',
                     'lyrics.json', 'anchors.json', 'word-cues.json', 'ordered-cues.json', 'quality.json',
                     'lyric-repeat-validation.json', 'highlight-validation.json'):
