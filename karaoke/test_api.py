@@ -3223,7 +3223,8 @@ def test_failed_original_asr_uses_lead_before_another_remote_request(tmp_path, m
 
 
 @pytest.mark.parametrize('problem', [None, 'padding', 'missing_boundary', 'wrong_language', 'overlap', 'loop'])
-def test_local_asr_repair_keeps_surrounding_words_and_requires_matching_boundaries(tmp_path, problem):
+@pytest.mark.parametrize('initial_error', ['loop', 'silence_warning', 'collapsed_phrase'])
+def test_local_asr_repair_keeps_surrounding_words_and_requires_matching_boundaries(tmp_path, problem, initial_error):
     from copy import deepcopy
     from karaoke.transcribe_lyrics import repair_loop_window, splice_loop_window
     import soundfile as sf
@@ -3236,6 +3237,15 @@ def test_local_asr_repair_keeps_surrounding_words_and_requires_matching_boundari
         words=[dict(start=3.,end=5.,word='此刻一起唱着歌'),
                dict(start=30.,end=32.,word='哒'*100),
                dict(start=45.,end=48.,word='走向明天的远方')])
+    if initial_error != 'loop':
+        text = '不应出现的虚构歌词内容'
+        original['segments'][1].update(text=text,
+            no_speech_prob=.9 if initial_error == 'silence_warning' else .1)
+        words = [dict(start=32., end=32., word=c) for c in text]
+        if initial_error == 'silence_warning':
+            words[0]['start'] = 30.
+        original['words'][1:2] = words
+    original['segments'].append(dict(start=55., end=60., text=''))
     replacement = dict(language='chinese', segments=[
         dict(start=.5,end=2.5,text='此刻一起唱着歌'),
         dict(start=8.,end=10.,text='轻轻唱出这一句'),
@@ -3261,20 +3271,26 @@ def test_local_asr_repair_keeps_surrounding_words_and_requires_matching_boundari
     result = splice_loop_window(original, damaged, 0, 2, 2.5)
     if problem not in (None, 'padding'):
         assert result is None
-        return
-    assert result['segments'][0] == original['segments'][0]
-    assert result['segments'][-1] == original['segments'][-1]
-    assert result['words'] == [original['words'][0],
-        dict(start=10.5,end=12.5,word='轻轻唱出这一句'),
-        dict(start=22.5,end=24.5,word='然后听见你的回答'), original['words'][-1]]
+    else:
+        assert result['segments'][0] == original['segments'][0]
+        assert result['segments'][-1] == original['segments'][-1]
+        assert result['words'] == [original['words'][0],
+            dict(start=10.5,end=12.5,word='轻轻唱出这一句'),
+            dict(start=22.5,end=24.5,word='然后听见你的回答'), original['words'][-1]]
     audio, output = tmp_path/'audio.wav', tmp_path/'asr'
     sf.write(audio, np.zeros(60000), 1000)
     output.mkdir()
     def recognize(path):
         assert path.is_file()
-        return replacement
-    repaired, report = repair_loop_window(original, audio, 60, recognize, output)
-    assert repaired == result and report['accepted']
+        return damaged
+    preserved = deepcopy(original)
+    actual = repair_loop_window(original, audio, 60, recognize, output)
+    report = json.loads((output/'loop-repair.json').read_text())
+    assert original == preserved
+    if result is None:
+        assert actual is None and not report['accepted']
+    else:
+        assert actual[0] == result and report['accepted']
     assert (report['begin'],report['end']) == (2.5,48.5)
     assert not (output/'loop-repair.mp3').exists()
 

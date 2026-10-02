@@ -279,10 +279,12 @@ def splice_loop_window(original, replacement, left, right, begin, end=None):
 
 
 def repair_loop_window(data, audio, duration, recognize, output, local_recognize=None):
-    """Try one bounded decode around a localized loop before retrying the song."""
+    """Try one bounded decode around an unusable passage before retrying the song."""
     from subtitles import normalized
     segments = data.get('segments') or []
-    bad = [i for i, s in enumerate(segments) if repetition_loop(dict(segments=[s]))]
+    bad = [i for i, s in enumerate(segments) if normalized(s['text']) and needs_recovery(dict(segments=[s],
+        words=[w for w in data.get('words') or []
+               if s.get('start', 0) <= w['start'] <= w['end'] <= s.get('end', duration)]))]
     tail = repeated_tail(data)
     if tail is not None:
         bad.extend(range(tail, len(segments)))
@@ -307,7 +309,7 @@ def repair_loop_window(data, audio, duration, recognize, output, local_recognize
     if not 0 < end-begin <= 90:
         return None
     clip = output/'loop-repair.mp3'
-    report = dict(begin=begin, end=end, left=left, right=right, accepted=False)
+    report = dict(begin=begin, end=end, left=left, right=right, unusable_segments=bad, accepted=False)
     try:
         subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-y', '-ss', str(begin), '-i', str(audio),
             '-t', str(end-begin), '-ar', '16000', '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '64k', str(clip)], check=True)
