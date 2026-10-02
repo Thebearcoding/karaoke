@@ -44,6 +44,15 @@ def identity(value, *, title=False):
     return {''.join(c for c in name if c.isalnum()) for name in aliases} - {''}
 
 
+def live_performance(value):
+    value = unicodedata.normalize('NFKC', value if isinstance(value, str) else '').casefold()
+    match = re.search(r'(?:^|[\(\[]|\s[-–—]\s)\s*live\s+(?:from|at|in)\s+([^()\[\]|\n]+)', value)
+    if match:
+        venue = re.sub(r'^the\s+', '', match[1].strip())
+        return ''.join(c for c in venue if c.isalnum()) or None
+    return None
+
+
 def fetch_lyrics(song, metadata_path, cache):
     titles, artists = names(song.get('title')), names(song.get('artist'))
     if not titles or not artists or not metadata_path.is_file():
@@ -109,10 +118,13 @@ def unpadded_duration(audio_path, duration):
                 leading_zero_seconds=first/rate, trailing_zero_seconds=(frames-last)/rate)
 
 
-def lyric_candidate(packet, song, transcription, duration, *, audio_path=None):
+def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, source_title=None):
     report = {key: value for key, value in packet.items() if key != 'results'}
     if packet.get('status') != 'ok':
         return None, report
+    performance = live_performance(source_title)
+    if performance:
+        report['required_live_performance'] = performance
     language = song['language']
     observed = [u for w in transcription.get('words', []) for u in text_units(w['word'], language)]
     candidates, padding, padding_checked = [], None, False
@@ -121,6 +133,8 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None):
         # Identity and duration must agree before using any audio-text score.
         if (not identity(song['title'], title=True) & identity(row.get('trackName'), title=True) or
                 not identity(song['artist']) & identity(row.get('artistName')) or row.get('instrumental') is not False):
+            continue
+        if performance and performance not in {live_performance(row.get(field)) for field in ('trackName', 'albumName')}:
             continue
         try:
             reference_duration, basis = duration, None

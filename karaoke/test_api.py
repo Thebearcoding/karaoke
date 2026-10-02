@@ -530,7 +530,8 @@ def test_manual_caption_failure_obeys_backoff_and_keeps_cached_diagnostics(tmp_p
 
 @pytest.mark.parametrize('padded', [False, True])
 @pytest.mark.parametrize('soundtrack_credit', [False, True])
-def test_online_lyrics_correct_asr_text_without_using_provider_times(tmp_path, monkeypatch, padded, soundtrack_credit):
+@pytest.mark.parametrize('performance', [None, 'same', 'different', 'unspecified'])
+def test_online_lyrics_correct_asr_text_without_using_provider_times(tmp_path, monkeypatch, padded, soundtrack_credit, performance):
     import soundfile as sf
     from urllib.parse import parse_qs, urlsplit
     from karaoke import lyric_lookup, pipeline as module
@@ -542,6 +543,10 @@ def test_online_lyrics_correct_asr_text_without_using_provider_times(tmp_path, m
     row = dict(id=1, trackName='晚風（大型紀錄片《遠山》主題歌）' if soundtrack_credit else '晚風',
                artistName='林林', duration=15., instrumental=False,
                plainLyrics='\n'.join(lines), syncedLyrics='[00:00.00]wrong times must be ignored')
+    if performance in ('same', 'different'):
+        row['albumName'] = 'Live at Elm Hall' if performance == 'same' else 'Live from Cedar Hall'
+    metadata = dict(title='林林 - 晚風 (Live from The Elm Hall) [Official Performance Video]' if performance else
+                         '林林 - 晚風 (We Live in Elm Hall) [Official Music Video]')
     calls = []
     def fetch(url):
         query = parse_qs(urlsplit(url).query)
@@ -562,17 +567,20 @@ def test_online_lyrics_correct_asr_text_without_using_provider_times(tmp_path, m
     draft = dict(title='晚風 Evening Wind', artist='林林 Lin Lin', language='Chinese',
                  lines=['微風你慢慢歌場', '星光下盡盡請停', '微風你慢慢歌場'], provenance=dict(kind='asr_draft'))
     monkeypatch.setattr(module, 'prepare_song_text', lambda *a, **k: json.loads(json.dumps(draft)))
-    pipeline.prepare_lyrics({}, duration)
+    pipeline.prepare_lyrics(metadata, duration)
     result = json.loads((tmp_path/'lyrics.json').read_text())
+    if performance in ('different', 'unspecified'):
+        assert result['provenance']['kind'] == 'asr_draft' and result['lines'] == draft['lines']
+        return
     assert result['lines'] == lines and result['provenance']['kind'] == 'online_lyric_text'
     assert [a['start'] for a in json.loads((tmp_path/'anchors.json').read_text())] == [offset+i for i in [10,11,12]]
     assert file_hash(source) == original_hash
     assert len(calls) == 2
-    pipeline.prepare_lyrics({}, duration)
+    pipeline.prepare_lyrics(metadata, duration)
     assert len(calls) == 2  # A retry keeps the fetched text, just like downloaded audio.
     for kind in ('user_supplied', 'verified_catalog', 'video_description'):
         draft.update(lines=lines, provenance=dict(kind=kind))
-        pipeline.prepare_lyrics({}, duration)
+        pipeline.prepare_lyrics(metadata, duration)
         assert json.loads((tmp_path/'lyrics.json').read_text())['provenance']['kind'] == kind
     assert len(calls) == 2
 

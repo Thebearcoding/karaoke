@@ -482,7 +482,7 @@ class Pipeline:
             from .lyric_lookup import fetch_lyrics, lyric_candidate
             packet = fetch_lyrics(lyrics, self.output/'download/source.info.json', self.checkpoints)
             lines, lookup_report = lyric_candidate(packet, lyrics, transcription, duration,
-                                                  audio_path=self.output/'source-44100.wav')
+                audio_path=self.output/'source-44100.wav', source_title=metadata.get('title'))
             lyrics['provenance']['lyric_lookup'] = lookup_report
             if lines is not None:
                 lyrics.update(lines=lines, provenance=dict(lyrics['provenance'], kind='online_lyric_text',
