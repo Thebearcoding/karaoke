@@ -35,10 +35,13 @@ def recover_anchor_words(client, audio, lines, words, language, output, cache, m
                 stop += 1
             before = [c for c in cues[:first] if c['status'] == 'candidate'][-2:]
             after = [c for c in cues[stop:] if c['status'] == 'candidate'][:2]
-            if before and after:
-                begin, end = max(0., before[0]['start']-.6), min(duration, after[-1]['end']+.6)
+            if before or after:
+                # Recording edges bound the audio request, never the sung onset.
+                begin = max(0., before[0]['start']-.6) if before else 0.
+                end = min(duration, after[-1]['end']+.6) if after else duration
                 if end-begin > 45:
-                    begin, end = max(0., before[-1]['start']-.6), min(duration, after[0]['end']+.6)
+                    begin = max(0., before[-1]['start']-.6) if before else begin
+                    end = min(duration, after[0]['end']+.6) if after else end
                 for left, right in ((begin, min(end, begin+45)), (max(begin, end-45), end)):
                     window = (round(left, 3), round(right, 3))
                     for preference, source in enumerate([audio]+([fallback_audio] if fallback_audio else [])):

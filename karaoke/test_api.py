@@ -1896,16 +1896,21 @@ def test_independent_lyrics_can_reuse_valid_original_asr_anchors(tmp_path, initi
 
 
 @pytest.mark.parametrize('bad_timing', [False, True])
-def test_missing_anchors_use_cached_context_without_lyric_prompt(tmp_path, bad_timing):
+@pytest.mark.parametrize('location', ['middle', 'opening', 'ending', 'unanchored'])
+def test_missing_anchors_use_cached_context_without_lyric_prompt(tmp_path, bad_timing, location):
     import soundfile as sf
     from karaoke.anchor_recovery import recover_anchor_words
     from karaoke.stage_cache import StageCache
     lines = ['first line', 'the missing middle passage', 'another missing longer passage', 'last line']
     audio = tmp_path/'audio.wav'
     sf.write(audio, np.ones(12000)*.1, 1000)
+    known = {'middle': [(lines[0],1.,2.), (lines[-1],8.,9.)],
+             'opening': [(lines[-1],8.,9.)], 'ending': [(lines[0],1.,2.)],
+             'unanchored': []}[location]
     words = [dict(word=text, start=a, end=b) for text,a,b in
-             [('序',0.,.2), (lines[0],1.,2.), (lines[-1],8.,9.), ('終',11.,11.2)]]
-    recovered = [dict(word=text, start=a-.4, end=b-.4) for text,a,b in
+             [('序',0.,.2), *known, ('終',11.,11.2)]]
+    begin = 0. if location == 'opening' else .4
+    recovered = [dict(word=text, start=a-begin, end=b-begin) for text,a,b in
                  [(lines[0],1.,2.), (lines[1],3.,4.), (lines[2],5.,6.), (lines[3],8.,9.)]]
     if bad_timing:
         recovered.reverse()
@@ -1919,15 +1924,21 @@ def test_missing_anchors_use_cached_context_without_lyric_prompt(tmp_path, bad_t
     output = tmp_path/'recovery.json'
     args = (client, audio, lines, words, 'English', output, StageCache(tmp_path), .55, 12.)
     result, _, score = recover_anchor_words(*args)
-    if bad_timing:
+    if bad_timing or location == 'unanchored':
         assert result == words and score < .55
     else:
         assert score == 1.
-        assert result[0] == words[0] and result[-1] == words[-1]
-        assert [(w['start'],w['end']) for w in result[1:-1]] == [(1.,2.), (3.,4.), (5.,6.), (8.,9.)]
-    assert len(calls) == 1 and not list(tmp_path.glob('*.mp3'))
-    assert recover_anchor_words(*args)[0] == result and len(calls) == 1
-    assert json.loads(output.read_text())['attempts'][0]['reused'] is True
+        expected = [dict(w, start=w['start']+begin, end=w['end']+begin) for w in recovered]
+        if location != 'opening':
+            expected.insert(0, words[0])
+        if location != 'ending':
+            expected.append(words[-1])
+        assert result == expected
+    count = int(location != 'unanchored')
+    assert len(calls) == count and not list(tmp_path.glob('*.mp3'))
+    assert recover_anchor_words(*args)[0] == result and len(calls) == count
+    if count:
+        assert json.loads(output.read_text())['attempts'][0]['reused'] is True
 
 
 def test_long_anchor_gap_can_use_cached_mix_and_keep_usable_asr_segments(tmp_path):
