@@ -1636,6 +1636,75 @@ def test_lyric_text_survives_metadata_refusal_without_resubmitting_content():
     assert parse.call_count == 1
 
 
+def test_song_metadata_survives_downstream_retries_without_freezing_transcription(tmp_path):
+    import soundfile as sf
+    pipeline = Pipeline(dict(url=URL), tmp_path, catalog_root=None)
+    (tmp_path/'asr').mkdir()
+    sf.write(tmp_path/'vocals-16k.wav', np.ones(5000)*.1, 1000)
+    def prepare(text):
+        (tmp_path/'asr/transcription.json').write_text(json.dumps(dict(language='English',
+            segments=[dict(text=text, start=1., end=2.)], words=[dict(word=text, start=1., end=2.)])))
+        pipeline.prepare_lyrics(dict(title='Source title'), 5.)
+        return json.loads((tmp_path/'lyrics.json').read_text())
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+        parsed=SongText(title='Song', artist='原歌手')))], model='test-model', usage=None)
+    with patch('karaoke.song_sources.OpenAI') as client:
+        parse = client.return_value.beta.chat.completions.parse
+        parse.return_value = response
+        first = prepare('First draft')
+        # A downstream retry must not re-query a stochastic metadata service,
+        # but new ASR text still flows through the lyric preparation step.
+        parse.side_effect = AssertionError('metadata was requested again')
+        second = prepare('Corrected draft')
+    assert first['artist'] == second['artist'] == '原歌手'
+    assert first['lines'] == ['First draft'] and second['lines'] == ['Corrected draft']
+    assert parse.call_count == 1
+
+
+@pytest.mark.parametrize('change', ['metadata', 'model', 'damaged_output'])
+def test_song_metadata_checkpoint_invalidates_changed_inputs_or_output(tmp_path, change):
+    from karaoke.stage_cache import StageCache
+    cache = StageCache(tmp_path)
+    metadata, model = dict(title='Source title'), 'test-model'
+    transcription = dict(language='English', text='Test lyrics')
+    def response(artist):
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            parsed=SongText(title='Song', artist=artist)))], model=model, usage=None)
+    with patch('karaoke.song_sources.OpenAI') as client:
+        parse = client.return_value.beta.chat.completions.parse
+        parse.side_effect = [response('First singer'), response('Second singer')]
+        prepare_song_text(dict(url=URL), metadata, transcription, 120,
+                          catalog_root=None, model=model, cache=cache)
+        if change == 'metadata':
+            metadata['description'] = 'A different recording'
+        elif change == 'model':
+            model = 'updated-model'
+        else:
+            (tmp_path/'song-metadata.json').write_text('{}')
+        result = prepare_song_text(dict(url=URL), metadata, transcription, 120,
+                                   catalog_root=None, model=model, cache=cache)
+    assert result['artist'] == 'Second singer' and parse.call_count == 2
+
+
+def test_failed_metadata_request_does_not_poison_the_checkpoint(tmp_path):
+    import httpx
+    from openai import APITimeoutError
+    from karaoke.stage_cache import StageCache
+    cache = StageCache(tmp_path)
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+        parsed=SongText(title='Song', artist='Singer')))], model='test-model', usage=None)
+    with patch('karaoke.song_sources.OpenAI') as client:
+        parse = client.return_value.beta.chat.completions.parse
+        parse.side_effect = [APITimeoutError(request=httpx.Request('POST', 'https://example.test')), response]
+        first = prepare_song_text(dict(url=URL), {}, dict(language='English', text='Test lyrics'),
+                                  120, catalog_root=None, model='test-model', cache=cache)
+        second = prepare_song_text(dict(url=URL), {},
+                                   dict(language='English', text='Test lyrics'),
+                                   120, catalog_root=None, model='test-model', cache=cache)
+    assert first['provenance']['metadata_error']['code'] == 'openai_timeout'
+    assert second['artist'] == 'Singer' and parse.call_count == 2
+
+
 @pytest.mark.parametrize('source', ['asr', 'description', 'user'])
 @pytest.mark.parametrize('language,lines,expected', [
     ('English', ['“', 'Will you stay?”', 'I’ll wait here!'], ['“Will you stay?”', 'I’ll wait here!']),

@@ -475,7 +475,7 @@ class Pipeline:
         transcription, rejected = filter_silent_transcription(transcription, audio, rate)
         write_json(self.output/'asr/filtered.json', dict(transcription=transcription, rejected=rejected))
         lyrics = prepare_song_text(self.request, metadata, transcription, duration,
-            catalog_root=self.catalog_root, model=self.text_model)
+            catalog_root=self.catalog_root, model=self.text_model, cache=self.checkpoints)
         caption_path = self.output/'source-captions.json'
         if lyrics['provenance']['kind'] == 'asr_draft' and caption_path.is_file():
             from .source_captions import caption_candidate, manual_track
