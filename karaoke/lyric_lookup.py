@@ -30,10 +30,18 @@ def names(value):
     return result
 
 
-def identity(value):
+def identity(value, *, title=False):
     converter = OpenCC('tw2s')
-    return {''.join(c for c in converter.convert(name).casefold() if c.isalnum())
-            for name in names(value)} - {''}
+    aliases = [converter.convert(name).casefold() for name in names(value)]
+    if title:
+        for name in list(aliases):
+            # A soundtrack credit describes its use, not another performance.
+            # Only strip this explicit grammar; keep live/remix/version labels.
+            match = re.fullmatch(r'(.+?)\s*\((?:大型)?(?:纪录片|电影|电视剧|动画片|网络剧|网剧|剧集)?'
+                                 r'\s*《[^《》()]+》\s*(?:主题[歌曲]|片[头尾]曲|插曲)\)', name)
+            if match:
+                aliases.append(match[1])
+    return {''.join(c for c in name if c.isalnum()) for name in aliases} - {''}
 
 
 def fetch_lyrics(song, metadata_path, cache):
@@ -111,7 +119,7 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None):
     for row in packet['results']:
         # A text search can return covers, live cuts and unrelated recordings.
         # Identity and duration must agree before using any audio-text score.
-        if (not identity(song['title']) & identity(row.get('trackName')) or
+        if (not identity(song['title'], title=True) & identity(row.get('trackName'), title=True) or
                 not identity(song['artist']) & identity(row.get('artistName')) or row.get('instrumental') is not False):
             continue
         try:

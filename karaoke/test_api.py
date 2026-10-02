@@ -522,7 +522,8 @@ def test_manual_caption_failure_obeys_backoff_and_keeps_cached_diagnostics(tmp_p
 
 
 @pytest.mark.parametrize('padded', [False, True])
-def test_online_lyrics_correct_asr_text_without_using_provider_times(tmp_path, monkeypatch, padded):
+@pytest.mark.parametrize('soundtrack_credit', [False, True])
+def test_online_lyrics_correct_asr_text_without_using_provider_times(tmp_path, monkeypatch, padded, soundtrack_credit):
     import soundfile as sf
     from urllib.parse import parse_qs, urlsplit
     from karaoke import lyric_lookup, pipeline as module
@@ -531,7 +532,8 @@ def test_online_lyrics_correct_asr_text_without_using_provider_times(tmp_path, m
     info = tmp_path/'download/source.info.json'
     info.write_text(json.dumps(dict(id='example')))
     lines = ['微風裡慢慢歌唱', '星光下靜靜傾聽', '微風裡慢慢歌唱']
-    row = dict(id=1, trackName='晚風', artistName='林林', duration=15., instrumental=False,
+    row = dict(id=1, trackName='晚風（大型紀錄片《遠山》主題歌）' if soundtrack_credit else '晚風',
+               artistName='林林', duration=15., instrumental=False,
                plainLyrics='\n'.join(lines), syncedLyrics='[00:00.00]wrong times must be ignored')
     calls = []
     def fetch(url):
@@ -570,6 +572,12 @@ def test_online_lyrics_correct_asr_text_without_using_provider_times(tmp_path, m
 
 @pytest.mark.parametrize('change', [
     dict(artistName='另一個歌手'), dict(trackName='別的歌'), dict(trackName='晚風 Live'),
+    dict(trackName='晚風 (Live)（電影《遠山》主題曲）'),
+    dict(trackName='晚風（電影《遠山》主題曲）Live'),
+    dict(trackName='晚風（現場演唱《遠山》主題曲）'),
+    dict(trackName='晚風（電影《遠山》主題曲混音版）'),
+    dict(trackName='晚風（鋼琴版）'), dict(trackName='別的歌（電影《遠山》主題曲）'),
+    dict(artistName='林林（電影《遠山》主題曲）'),
     dict(duration=309), dict(duration=float('nan')), dict(instrumental=True),
     dict(plainLyrics='毫不相干的文字'), dict(plainLyrics='[Music] 微風裡慢慢歌唱'),
     dict(trackName=['malformed']), dict(plainLyrics=None),
