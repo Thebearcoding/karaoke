@@ -198,6 +198,8 @@ class Pipeline:
             config['weights'] = [(str(p), p.stat().st_size, p.stat().st_mtime_ns)
                 for p in weights if p.is_file()]
         if name == 'transcribe':
+            if '--lead-audio' in command:
+                inputs = [*inputs, command[command.index('--lead-audio')+1]]
             config['fallback_model'] = os.getenv('KARAOKE_ASR_FALLBACK_MODEL', 'gpt-4o-transcribe')
             weights = ROOT/'models/alignment/whisper/large-v3-turbo.pt'
             config['local_repair_weights'] = (weights.stat().st_size, weights.stat().st_mtime_ns) if weights.is_file() else None
@@ -400,16 +402,22 @@ class Pipeline:
         self.video = merged
         return dict(metadata, format_id=added['format_id']+'+'+metadata['format_id'])
 
-    def prepare_text(self, metadata, duration):
+    def prepare_text(self, metadata, duration, lead_task=None):
         self.run('package_two_stems', [sys.executable, ROOT/'exact_stems.py', 'build',
             '--source', self.source, '--vocals-estimate', self.vocals, '--output', self.output/'two-stems'])
         self.run('resample_vocals', ['ffmpeg', '-v', 'error', '-nostdin', '-i', self.vocals,
             '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', self.output/'vocals-16k.wav',
             '-ar', '16000', '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '64k', self.output/'vocals-asr.mp3'])
         language = self.request.get('language') or video_song_info(metadata).get('language', 'auto')
+        # Finish the lead stem before ASR can need it. Packaging and resampling
+        # above still overlap separation, and separation failures propagate here.
+        if lead_task is not None:
+            lead_task.result()
+        lead = self.output/'lead-separation/song/vocals.wav'
         self.run('transcribe', [sys.executable, ROOT/'transcribe_lyrics.py', '--audio',
             self.output/'vocals-asr.mp3', '--language', language,
             '--original-audio', self.output/'source-44100.wav',
+            *(['--lead-audio', lead] if lead.is_file() else []),
             '--allow-unresolved-text', '--output', self.output/'asr'])
         self.phase('prepare_lyrics', True)
         started = time.perf_counter()
@@ -672,11 +680,10 @@ class Pipeline:
             '--output', self.output/'music-separation'])
         self.inputs(self.vocals, 'vocal-inputs.json')
         with ThreadPoolExecutor(max_workers=2) as pool:
-            text = pool.submit(self.prepare_text, metadata, source_duration)
-            self.run('separate_lead', common + ['--model', 'karaoke_bs_roformer_anvuew.ckpt', '--config',
+            lead = pool.submit(self.run, 'separate_lead', common + ['--model', 'karaoke_bs_roformer_anvuew.ckpt', '--config',
                 ROOT/'models/pretrained/karaoke_bs_roformer_anvuew.yaml', '--target-stem', 'Vocals',
                 '--inputs', self.output/'vocal-inputs.json', '--output', self.output/'lead-separation'])
-            lyrics = text.result()
+            lyrics = self.prepare_text(metadata, source_duration, lead)
         with ThreadPoolExecutor(max_workers=2) as pool:
             packaging = pool.submit(self.run, 'package_three_stems', [sys.executable, ROOT/'three_stems.py',
                 'build', '--existing', self.output/'two-stems', '--lead-estimate',

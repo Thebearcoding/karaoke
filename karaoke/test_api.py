@@ -370,7 +370,8 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     stages = {
         'align_words': [sys.executable, code/'align_lyrics_whisper.py'],
         'align_phonemes': [sys.executable, code/'align_lyric_phonemes.py'],
-        'transcribe': [sys.executable, code/'transcribe_lyrics.py'],
+        'transcribe': [sys.executable, code/'transcribe_lyrics.py',
+                      '--lead-audio', folder/'lead-separation/song/vocals.wav'],
         'align_context': [sys.executable, code/'experiments/cjk-onsets-v003/run.py'],
     }
     models = [code/'models/alignment'/name for name in (
@@ -434,6 +435,10 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     (folder/'source-44100.wav').write_bytes(b'updated original audio')
     prepare()
     assert calls == ['transcribe', 'align_context']
+    calls.clear()
+    (folder/'lead-separation/song/vocals.wav').write_bytes(b'updated lead audio')
+    prepare()
+    assert calls == ['transcribe']
 
 
 @pytest.mark.parametrize('formatting', ['lyrics', 'symbols', 'annotations'])
@@ -2549,7 +2554,8 @@ def test_asr_request_cache_checks_input_parameters_and_response(tmp_path):
 
 @pytest.mark.parametrize('problem', [None, 'loop', 'collapsed', 'outside_audio',
                                      'wrong_language', 'unsupported_language', 'duration', 'missing_model'])
-def test_unusable_vocal_asr_rechecks_original_audio_before_whole_song_retry(tmp_path, monkeypatch, problem):
+@pytest.mark.parametrize('track', ['original', 'lead'])
+def test_unusable_vocal_asr_rechecks_recording_tracks_before_whole_song_retry(tmp_path, monkeypatch, problem, track):
     from copy import deepcopy
     import soundfile as sf
 
@@ -2591,19 +2597,49 @@ def test_unusable_vocal_asr_rechecks_original_audio_before_whole_song_retry(tmp_
 
     monkeypatch.setattr('karaoke.transcribe_lyrics.cached_local_recognition', local)
     client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create)))
+    options = {track+'_audio': original}
     if problem is None:
-        data, recovery = transcribe(client, audio, language, '', output, original_audio=original)
-        assert data == candidate and recovery['original_audio']['accepted']
+        data, recovery = transcribe(client, audio, language, '', output, **options)
+        assert data == candidate and recovery[track+'_audio']['accepted']
         assert recovery['text_model'] == 'local-large-v3-turbo'
         assert calls == ['whisper-1', 'local']
     else:
         with pytest.raises(RuntimeError, match='provider recovery still needed'):
-            transcribe(client, audio, language, '', output, original_audio=original)
-        report = json.loads((output/'original-recovery.json').read_text())
+            transcribe(client, audio, language, '', output, **options)
+        report = json.loads((output/f'{track}-recovery.json').read_text())
         assert not report['accepted'] and report['reason']
         assert calls == ['whisper-1'] + ([] if problem == 'duration' else ['local']) + ['gpt-4o-transcribe']
     assert candidate == preserved
     assert json.loads((output/'initial-transcription.json').read_text()) == initial
+
+
+def test_failed_original_asr_uses_lead_before_another_remote_request(tmp_path, monkeypatch):
+    import soundfile as sf
+
+    audio, original, lead = [tmp_path/(name+'.wav') for name in ('vocals', 'original', 'lead')]
+    for path in (audio, original, lead):
+        sf.write(path, np.full(3000, .01), 1000)
+    output = tmp_path/'asr'
+    output.mkdir()
+    broken = dict(language='en', text='word '*100,
+        segments=[dict(start=.5, end=2.5, text='word '*100)], words=[])
+    valid = dict(language='en', text='A quiet ending',
+        segments=[dict(start=.5, end=2.5, text='A quiet ending')],
+        words=[dict(word='A', start=.5, end=1), dict(word='quiet', start=1, end=2),
+               dict(word='ending', start=2, end=2.5)])
+    calls = []
+    def recognize(path, language, target):
+        calls.append(path)
+        return broken if path == original else valid
+    def remote(**request):
+        assert request['model'] == 'whisper-1'
+        return SimpleNamespace(model_dump=lambda: broken)
+    monkeypatch.setattr('karaoke.transcribe_lyrics.cached_local_recognition', recognize)
+    client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=remote)))
+    result, recovery = transcribe(client, audio, 'en', '', output, original_audio=original, lead_audio=lead)
+    assert result == valid and calls == [original, lead]
+    assert not recovery['original_audio']['accepted'] and recovery['lead_audio']['accepted']
+    assert json.loads((output/'initial-transcription.json').read_text()) == broken
 
 
 @pytest.mark.parametrize('problem', [None, 'padding', 'missing_boundary', 'wrong_language', 'overlap', 'loop'])

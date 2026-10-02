@@ -279,32 +279,33 @@ def repair_loop_window(data, audio, duration, recognize, output, local_recognize
         clip.unlink(missing_ok=True)
 
 
-def recover_original_audio(audio, language, duration, output):
-    """Recheck the original mix when separated vocals produce unusable ASR."""
+def recover_audio(audio, language, duration, output, name):
+    """Recheck another track of the same recording after unusable vocal ASR."""
     import soundfile as sf
     report = dict(source=str(audio), model='local-large-v3-turbo', accepted=False)
     candidate = None
     try:
         if abs(sf.info(audio).duration-duration) > .05:
-            raise ValueError('Original audio duration differs from the vocal recording')
+            raise ValueError('Recovery audio duration differs from the vocal recording')
         report['source_sha256'] = digest(audio)
         candidate = cached_local_recognition(audio, language, output)
         detected = song_language(candidate.get('language'))
         if detected is None or (language != 'auto' and detected != song_language(language)):
-            raise ValueError('Original audio recovery has an unsupported or conflicting language')
+            raise ValueError('Recovery audio has an unsupported or conflicting language')
         if needs_recovery(candidate) or not candidate.get('words') or not candidate.get('segments'):
-            raise ValueError('Original audio recovery still has unusable text or timing')
+            raise ValueError('Recovery audio still has unusable text or timing')
         if any(not 0 <= item['start'] <= item['end'] <= duration+.05
                for kind in ('segments', 'words') for item in candidate[kind]):
-            raise ValueError('Original audio recovery extends outside the recording')
+            raise ValueError('Recovery audio extends outside the recording')
         report['accepted'] = True
     except (ValueError, RuntimeError, OSError, KeyError) as error:
         report['reason'] = str(error)
-    (output/'original-recovery.json').write_text(json.dumps(report, ensure_ascii=False)+'\n')
+    (output/f'{name}-recovery.json').write_text(json.dumps(report, ensure_ascii=False)+'\n')
     return candidate if report['accepted'] else None, report
 
 
-def transcribe(client, audio, language, hint, output, *, allow_unresolved_text=False, original_audio=None):
+def transcribe(client, audio, language, hint, output, *, allow_unresolved_text=False,
+               original_audio=None, lead_audio=None):
     options = {} if language == 'auto' else {'language': language}
 
     def unusable(prediction):
@@ -351,11 +352,12 @@ def transcribe(client, audio, language, hint, output, *, allow_unresolved_text=F
             text_model='local-large-v3-turbo' if report['right'] is None else 'whisper-1', loop_repair=report)
     if repeated_tail(data) is not None and song_language(data.get('language')) is not None:
         raise ValueError('重复的结尾转录未通过局部核验，已保留诊断')
-    if original_audio is not None:
-        original, report = recover_original_audio(original_audio, language, duration, output)
-        recovery['original_audio'] = report
-        if original is not None:
-            return original, dict(recovery, triggered=True, text_model='local-large-v3-turbo')
+    for name, track in (('original', original_audio), ('lead', lead_audio)):
+        if track is not None:
+            candidate, report = recover_audio(track, language, duration, output, name)
+            recovery[name+'_audio'] = report
+            if candidate is not None:
+                return candidate, dict(recovery, triggered=True, text_model='local-large-v3-turbo')
     fallback_model = os.getenv('KARAOKE_ASR_FALLBACK_MODEL', 'gpt-4o-transcribe')
     # Keep full recording context for text: independent chunks can omit a split
     # syllable or duplicate the opening of the next lyric. Chunks only locate words.
@@ -461,6 +463,8 @@ def main():
     parser.add_argument('--audio', type=Path, required=True)
     parser.add_argument('--original-audio', type=Path,
         help='Same recording before separation, for recovery of unusable vocal ASR')
+    parser.add_argument('--lead-audio', type=Path,
+        help='Same recording after lead/backing separation, for local ASR recovery')
     parser.add_argument('--language', default='auto')
     parser.add_argument('--hint', default='')
     parser.add_argument('--allow-unresolved-text', action='store_true',
@@ -476,7 +480,8 @@ def main():
     args.output.mkdir(parents=True)
     try:
         data, recovery = transcribe(client, args.audio, language, args.hint, args.output,
-            allow_unresolved_text=args.allow_unresolved_text, original_audio=args.original_audio)
+            allow_unresolved_text=args.allow_unresolved_text, original_audio=args.original_audio,
+            lead_audio=args.lead_audio)
     except Exception as error:
         from job_schema import provider_error
         details = provider_error(error)
