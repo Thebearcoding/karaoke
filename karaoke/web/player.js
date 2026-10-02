@@ -1,6 +1,31 @@
 // All three stems share one AudioContext clock. Video follows that clock.
 import {createPitchShift} from './pitch-shift.js';
 
+function videoReady(video, signal) {
+  if (video.readyState >= 2) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const finish = error => {
+      clearTimeout(timer);
+      video.removeEventListener('loadeddata', check);
+      video.removeEventListener('canplay', check);
+      video.removeEventListener('error', failed);
+      signal.removeEventListener('abort', aborted);
+      error ? reject(error) : resolve();
+    };
+    const check = () => { if (video.readyState >= 2) finish(); };
+    const failed = () => finish(new Error('视频加载失败，请重试'));
+    const aborted = () => finish();
+    const timer = setTimeout(() => finish(new Error('视频加载超时，请重试')), 30000);
+    video.addEventListener('loadeddata', check);
+    video.addEventListener('canplay', check);
+    video.addEventListener('error', failed);
+    signal.addEventListener('abort', aborted, {once:true});
+    if (signal.aborted) aborted();
+    else if (video.error) failed();
+    else check();
+  });
+}
+
 export class Player {
   constructor(video, onTick, onEnd, pitchFactory = createPitchShift) {
     this.video = video;
@@ -135,13 +160,14 @@ export class Player {
     this.ensureContext();
     this.video.src = entry.artifacts.mv;
     this.video.load();
-    this.loading = Promise.all(['instrumental_preview', 'backing_vocals_preview', 'lead_vocals_preview'].map(async key => {
+    const audioReady = Promise.all(['instrumental_preview', 'backing_vocals_preview', 'lead_vocals_preview'].map(async key => {
       const url = entry.artifacts[key];
       if (!url) throw new Error('这首歌的试听音轨不完整，请重新准备');
       const response = await fetch(url, {signal});
       if (!response.ok) throw new Error('音轨加载失败，请重试');
       return this.context.decodeAudioData(await response.arrayBuffer());
-    })).then(async buffers => {
+    }));
+    this.loading = Promise.all([audioReady, videoReady(this.video, signal)]).then(async ([buffers]) => {
       await this.preparePitch();
       if (signal.aborted) return;
       this.buffers = buffers;

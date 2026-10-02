@@ -14,7 +14,8 @@ from rapidfuzz.distance import Levenshtein
 
 from .anchors_from_asr import text_units
 from .job_schema import retry_after_seconds
-from .song_sources import transcript_lines
+from .song_sources import (SongText, extract_song_metadata, find_verified_lyrics,
+                           transcript_lines, video_song_info)
 from .source_captions import read_document
 
 
@@ -61,6 +62,9 @@ def fetch_lyrics(song, metadata_path, cache):
     native = dict(track_name=titles[-1], artist_name=artists[-1])
     if native != queries[0]:
         queries.append(native)
+    simplified = {key: OpenCC('tw2s').convert(value) for key, value in native.items()}
+    if simplified not in queries:
+        queries.append(simplified)
     path, stage = cache.root/'lyric-lookup.json', 'fetch_lyric_text'
     try:
         old = json.loads(path.read_text())
@@ -74,6 +78,8 @@ def fetch_lyrics(song, metadata_path, cache):
             packet = dict(status='ok', queries=queries, results=[])
             try:
                 for query in queries:
+                    if query == simplified and simplified != native and packet['results']:
+                        break
                     response = read_document('https://lrclib.net/api/search?'+urlencode(query))
                     if not isinstance(response, list) or len(response) > 100:
                         raise ValueError('Invalid lyric search response')
@@ -118,6 +124,60 @@ def unpadded_duration(audio_path, duration):
                 leading_zero_seconds=first/rate, trailing_zero_seconds=(frames-last)/rate)
 
 
+def text_language(text):
+    if re.search(r'[\u3040-\u30ff]', text):
+        return 'Japanese'
+    if re.search(r'[\u3400-\u9fff]', text):
+        return 'Chinese'
+    if any(c.isalpha() for c in text) and all(not c.isalpha() or 'LATIN' in unicodedata.name(c, '') for c in text):
+        return 'English'
+    return None
+
+
+def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_root):
+    """Find supplied text before ASR; this is a candidate, not independent audio validation."""
+    song = video_song_info(metadata)
+    song.update({key: request[key] for key in ('title', 'artist', 'language') if request.get(key)})
+    lines, provenance = request.get('lyrics'), dict(kind='user_supplied')
+    if not lines:
+        catalog = find_verified_lyrics(request['url'], duration, catalog_root)
+        if catalog:
+            return dict(catalog, id='song', source_url=request['url'], provenance=dict(
+                catalog['provenance'], route='lyrics_first', needs_review=True, independent_asr_coverage=None))
+        description = (metadata.get('description') or '')[:30000]
+        description_lines = description.splitlines()
+        evidence = {key: metadata.get(key) for key in ('title', 'track', 'artist', 'artists', 'uploader')}
+        evidence['description_lines'] = [dict(number=i+1, text=line) for i, line in enumerate(description_lines)]
+        from openai import OpenAIError
+        try:
+            packet = (dict(parsed=None) if metadata.get('track') and song['artist'] else
+                      extract_song_metadata(evidence, model, cache))
+            parsed = SongText.model_validate(packet['parsed']) if packet['parsed'] is not None else None
+        except (OpenAIError, ValueError):
+            parsed = None
+        if parsed is not None:
+            song.update(title=request.get('title') or metadata.get('track') or parsed.title or song['title'],
+                        artist=song['artist'] or parsed.artist)
+            selected = parsed.lyric_line_numbers
+            if selected and selected == sorted(set(selected)) and all(1 <= i <= len(description_lines) for i in selected):
+                lines = [description_lines[i-1].strip() for i in selected if description_lines[i-1].strip()]
+                provenance = dict(kind='video_description', description_sha256=hashlib.sha256(description.encode()).hexdigest(),
+                                  lyric_line_numbers=selected)
+        if not lines:
+            packet = fetch_lyrics(song, cache.root/'download/source.info.json', cache)
+            lines, report = lyric_candidate(packet, song, None, duration, source_title=metadata.get('title'))
+            (cache.root/'lyrics-first-lookup.json').write_text(json.dumps(report, ensure_ascii=False)+'\n')
+            if not lines:
+                return None
+            song['language'] = report['language']
+            provenance = dict(kind='online_lyric_text', lyric_lookup=report, text_transform='whitespace_only')
+    language = song.get('language') or text_language(''.join(lines))
+    if not language or len(lines) > 1000 or any(not line.strip() or len(line) > 200 for line in lines):
+        return None
+    return dict(song, id='song', source_url=request['url'], language=language, lines=lines,
+                provenance=dict(provenance, needs_review=True, route='lyrics_first', independent_asr_coverage=None))
+
+
 def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, source_title=None):
     report = {key: value for key, value in packet.items() if key != 'results'}
     if packet.get('status') != 'ok':
@@ -125,8 +185,6 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
     performance = live_performance(source_title)
     if performance:
         report['required_live_performance'] = performance
-    language = song['language']
-    observed = [u for w in transcription.get('words', []) for u in text_units(w['word'], language)]
     candidates, padding, padding_checked = [], None, False
     for row in packet['results']:
         # A text search can return covers, live cuts and unrelated recordings.
@@ -151,20 +209,27 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
             text = row['plainLyrics']
             if not isinstance(text, str) or not text.strip() or len(text) > 30000 or re.search(r'\[[^\]\n]+\]', text):
                 continue
+            language = song.get('language') or text_language(text)
+            if language is None:
+                continue
             lines = transcript_lines(dict(text=text), language)
+            observed = [u for w in (transcription or {}).get('words', []) for u in text_units(w['word'], language)]
             expected = text_units(''.join(lines), language)
             matched = sum(b.src_end-b.src_start for b in Levenshtein.opcodes(expected, observed) if b.tag == 'equal')
             support, coverage = matched/max(1, len(expected)), matched/max(1, len(observed))
-            if not lines or len(lines) > 1000 or any(len(line) > 200 for line in lines) or min(support, coverage) < .55:
+            if (not lines or len(lines) > 1000 or any(len(line) > 200 for line in lines) or
+                    (transcription is not None and min(support, coverage) < .55)):
                 continue
         except (KeyError, TypeError, ValueError, OverflowError):
             continue
         candidates.append((min(support, coverage), -difference, lines, dict(
             id=row['id'], track=row['trackName'], artist=row['artistName'], album=row.get('albumName'),
-            duration=row['duration'], text_support=support, audio_word_coverage=coverage,
+            duration=row['duration'], language=language,
+            text_support=support if transcription is not None else None,
+            audio_word_coverage=coverage if transcription is not None else None,
             duration_basis=basis or dict(kind='recording', recording_duration=duration),
             text_sha256=hashlib.sha256(text.encode()).hexdigest())))
     if not candidates:
         return None, dict(report, status='no_supported_recording')
     best = max(candidates, key=lambda c: c[:2])
-    return best[2], dict(report, status='accepted', provider='lrclib', **best[3])
+    return best[2], dict(report, status='accepted' if transcription is not None else 'candidate', provider='lrclib', **best[3])

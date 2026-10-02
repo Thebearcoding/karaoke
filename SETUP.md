@@ -108,7 +108,7 @@ export KARAOKE_DEVICE=auto
 
 `auto` 按 CUDA → MPS → CPU 选择设备。Linux 还需用 `KARAOKE_FONT_FILE` 指定覆盖目标语言的字体文件，例如已安装的 Noto Serif CJK 字体。程序会检查缺字；不要用缺字方块继续导出。完整环境变量见 [API.md](karaoke/API.md)。
 
-保持一个 Uvicorn 进程；不要对同一数据目录启动多个服务进程。`KARAOKE_PREPARATION_CONCURRENCY=2` 允许同一队列同时处理两首歌，默认值为 `1`；两首共用缓存预算，各自保存进度、结果和错误。需要局域网遥控时再显式设置 `KARAOKE_HOST=0.0.0.0`，手机访问 `http://电脑IP:8746/?remote=1`。
+保持一个 Uvicorn 进程；不要对同一数据目录启动多个服务进程。`KARAOKE_PREPARATION_CONCURRENCY=2` 允许两首歌交叠准备，默认值为 `1`。分离、识别／对齐、视频编码各有一个共享工位：第一首对齐时第二首可以分离，同类重任务依次执行。任务共用缓存预算，各自保存进度、结果和错误。需要局域网遥控时再显式设置 `KARAOKE_HOST=0.0.0.0`，手机访问 `http://电脑IP:8746/?remote=1`。
 
 长期在本机运行时，将服务与临时终端分开，并保存日志（macOS / Linux）：
 

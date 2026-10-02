@@ -20,10 +20,37 @@ globalThis.fetch = async url => ({ok:true,arrayBuffer:async()=>url});
 const song = {id:'one',duration:20,artifacts:{mv:'video.mp4',instrumental_preview:'instrumental',backing_vocals_preview:'backing',lead_vocals_preview:'lead'}};
 const state = {current_id:'one',position:3,started_at:100,playing:true,mix:'karaoke'};
 function setup(onEnd=()=>{}) {
-  const video = {currentTime:0,readyState:4,load(){},removeAttribute(){},pause(){this.paused=true;},play(){this.paused=false;return Promise.resolve();}};
+  const video = Object.assign(new EventTarget(), {currentTime:0,readyState:4,load(){},removeAttribute(){},pause(){this.paused=true;},play(){this.paused=false;return Promise.resolve();}});
   return new Player(video,()=>{},onEnd);
 }
 const clockOffset = () => 100-Date.now()/1000;
+
+test('decoded audio cannot start the clock before the video is ready', async () => {
+  const p=setup(); await p.unlock(); p.video.readyState=0;
+  let loaded=false;
+  const pending=p.load(song).then(()=>{loaded=true;});
+  await new Promise(resolve=>setImmediate(resolve));
+  p.apply(state,clockOffset());
+  assert.equal(loaded,false); assert.equal(p.sources.length,0); assert.equal(p.buffers,null);
+  p.video.readyState=1; p.video.dispatchEvent(new Event('loadeddata'));
+  await new Promise(resolve=>setImmediate(resolve)); assert.equal(loaded,false);
+  p.video.readyState=2; p.video.dispatchEvent(new Event('canplay'));
+  await pending; p.apply(state,clockOffset()); assert.equal(p.sources.length,3);
+  p.clear();
+});
+
+test('a failed or superseded video never releases stale audio', async () => {
+  const p=setup(); await p.unlock(); p.video.readyState=0;
+  const failed=p.load(song);
+  p.video.dispatchEvent(new Event('error'));
+  await assert.rejects(failed,/视频加载失败/); assert.equal(p.buffers,null);
+  const old=p.load(song);
+  const current=p.load({...song,id:'two'});
+  await old; assert.equal(p.buffers,null);
+  p.video.readyState=2; p.video.dispatchEvent(new Event('canplay'));
+  await current; assert.equal(p.entry.id,'two');
+  p.clear();
+});
 
 test('stems begin together; mode and volume changes do not restart or seek', async () => {
   const p=setup();await p.unlock();await p.load(song);p.apply(state,clockOffset());

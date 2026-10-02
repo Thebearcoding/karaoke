@@ -88,6 +88,10 @@ curl -sS http://127.0.0.1:8746/v1/jobs/任务UUID
 
 状态依次为 `queued`、`running`、`completed`；失败为 `failed`，通过 `error.code` 与 `error.message` 获取原因。`active_stages` 会显示当前正在下载、分离、整理歌词、对齐还是渲染。同一首歌的独立步骤可并行，因此可能同时显示两个阶段。
 
+普通点歌与严格音频验收区分处理。普通点歌先查独立歌词文本，核对歌名、歌手、版本和录音时长，再做声学对齐；该路径的 `validation_scope=playback_lyrics_first`，不声称完成独立 ASR 覆盖率验证。没有适合的歌词才进入 ASR。文本或对齐失败可返回 `completed` 的可唱版本，`validation_scope=playback_with_lyrics_review`，`quality.playback_fallback` 保留错误与字幕模式，`lyrics_provenance.needs_review=true`。仅复用完整且时间合法的唱句作为白字字幕，不制造逐字起点；没有可信唱句则不生成字幕。音轨分离、文件和音频重组失败仍然阻止发布。`--audio-only` 固定回归继续执行原有完整验收，任何这类回退都不能计为通过。
+
+两首交叠时，普通 worker 使用数据目录中的 `stage-locks/` 协调分离、识别／对齐、编码三个独立工位；同工位单任务，不同工位可并行。`stage_progress.<阶段>.waiting=true` 表示尚未获得工位，等待不计入模型运行超时。任务结束或进程退出会释放工位；共享缓存预算保持不变。
+
 外部语音／歌词服务错误还包含 `error.provider` 和 `error.retryable`：超时、连接或限流可以退避后重试；内容拒绝、认证或权限失败需要人工处理。错误码分别为 `openai_timeout`、`openai_connection`、`openai_rate_limit`、`openai_content_rejected`、`openai_authentication` 和 `openai_permission`。对外只返回固定说明，不暴露原始响应、请求头或密钥；已完成阶段仍按检查点规则保留。
 
 `stage_progress` 按阶段提供实测计数，例如 `{"separate_music":{"completed":12,"total":40,"unit":"chunks","detail":null}}`。下载按视频／音频分别计字节，分离计已处理音频块，对齐计已处理段落／行，渲染计已送入编码器的帧。`total` 缺失时不计算百分比；加载模型、在线歌词请求、封装与校验仅提供阶段或 `detail`。这些是当前步骤的工作量，不能相加当作整首歌的时间百分比。只有成品通过校验后才会进入 `completed`。

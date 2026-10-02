@@ -1,10 +1,12 @@
 """URL-to-karaoke adapter for the existing, versioned separation/alignment stages."""
 import argparse
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
 import inspect
 import json
+import math
 import os
 from pathlib import Path
 import selectors
@@ -252,6 +254,37 @@ class Pipeline:
                 self.run_process(name, command, timeout)
 
     def run_process(self, name, command, timeout=3600):
+        with self.stage_slot(name):
+            return self.run_subprocess(name, command, timeout)
+
+    @contextmanager
+    def stage_slot(self, name):
+        """Different songs overlap stages, but share each expensive model lane."""
+        directory = os.getenv('KARAOKE_STAGE_LOCK_DIR')
+        lane = ('separation' if name.startswith('separate_') else
+                'alignment' if name == 'transcribe' or name.startswith('align_') else
+                'render' if name == 'render' else None)
+        if not directory or lane is None:
+            yield
+            return
+        import fcntl
+        folder = Path(directory)
+        folder.mkdir(parents=True, exist_ok=True)
+        with (folder/(lane+'.lock')).open('a') as slot:
+            try:
+                fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                with self.lock:
+                    self.active.add(name)
+                    self.stage_progress[name] = dict(waiting=True, detail='等待前一首完成此阶段')
+                    self.publish_progress()
+                fcntl.flock(slot, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(slot, fcntl.LOCK_UN)
+
+    def run_subprocess(self, name, command, timeout=3600):
         self.phase(name, True)
         started = time.perf_counter()
         try:
@@ -424,6 +457,21 @@ class Pipeline:
         self.run('resample_vocals', ['ffmpeg', '-v', 'error', '-nostdin', '-i', self.vocals,
             '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', self.output/'vocals-16k.wav',
             '-ar', '16000', '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '64k', self.output/'vocals-asr.mp3'])
+        if not self.audio_only and not local_asr.offline():
+            from .lyric_lookup import prepare_online_lyrics
+            self.phase('prepare_lyrics', True)
+            try:
+                lyrics = prepare_online_lyrics(self.request, metadata, duration, self.checkpoints,
+                                               self.text_model, self.catalog_root)
+                if lyrics is not None:
+                    write_json(self.output/'lyrics.json', lyrics)
+                    # An empty anchor list selects direct acoustic alignment.
+                    # Neither the lyric provider nor a fabricated transcript supplies times.
+                    write_json(self.output/'anchors.json', [])
+                    self.phase(song_info={key: lyrics[key] for key in ('title', 'artist', 'language')})
+                    return lyrics
+            finally:
+                self.phase('prepare_lyrics', False)
         language = self.request.get('language') or 'auto'
         # Finish the lead stem before ASR can need it. Packaging and resampling
         # above still overlap separation, and separation failures propagate here.
@@ -660,8 +708,9 @@ class Pipeline:
         write_json(output/'highlight-validation.json', dict(errors=highlight_errors))
         if highlight_errors:
             raise StageFailure('align_words', '部分字词缺少独立的高亮起点；对齐诊断已保留')
-        repeats = json.loads((output/'asr/lyric-repeats.json').read_text())
-        missing = missing_repetitions(repeats['reference_lines'], cues, repeats['words'], language, duration)
+        direct = lyrics['provenance'].get('route') == 'lyrics_first'
+        repeats = None if direct else json.loads((output/'asr/lyric-repeats.json').read_text())
+        missing = None if direct else missing_repetitions(repeats['reference_lines'], cues, repeats['words'], language, duration)
         write_json(output/'lyric-repeat-validation.json', dict(missing=missing))
         if missing:
             raise StageFailure('align_words', '最终字幕仍遗漏已识别出的重复唱段；详情已保留')
@@ -669,14 +718,15 @@ class Pipeline:
         write_json(output/'quality.json', dict(lines=len(cues), units=len(units),
             lyrics_provenance=lyrics['provenance'], onset_accuracy=None, separation_purity=None,
             english_context_scope=english_context_scope,
-            restored_repetitions=len(repeats['expansions']),
+            independent_asr_coverage=None if direct else True,
+            restored_repetitions=0 if direct else len(repeats['expansions']),
             fallback_units=sum(u.get('timing_source') == 'prior_word_fallback' for u in units),
             line_order_fallback_lines=order_fallbacks,
             countdown_events=countdown_events(cues)))
 
     def execute(self):
         started = time.perf_counter()
-        if not local_asr.offline() and not os.getenv('OPENAI_API_KEY'):
+        if self.audio_only and not local_asr.offline() and not os.getenv('OPENAI_API_KEY'):
             raise StageFailure('configuration', '请在启动服务前设置 OPENAI_API_KEY，用于 ASR 和歌词整理')
         if not shutil.which(self.separator_python):
             raise StageFailure('configuration', '找不到分离环境的 Python，请设置 KARAOKE_SEPARATOR_PYTHON')
@@ -696,16 +746,35 @@ class Pipeline:
             ROOT/'models/pretrained/vocals_mel_band_roformer.yaml', '--inputs', self.output/'mixture-inputs.json',
             '--output', self.output/'music-separation'])
         self.inputs(self.vocals, 'vocal-inputs.json')
+        text_error = None
         with ThreadPoolExecutor(max_workers=2) as pool:
             lead = pool.submit(self.run, 'separate_lead', common + ['--model', 'karaoke_bs_roformer_anvuew.ckpt', '--config',
                 ROOT/'models/pretrained/karaoke_bs_roformer_anvuew.yaml', '--target-stem', 'Vocals',
                 '--inputs', self.output/'vocal-inputs.json', '--output', self.output/'lead-separation'])
-            lyrics = self.prepare_text(metadata, source_duration, lead)
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            packaging = pool.submit(self.run, 'package_three_stems', [sys.executable, ROOT/'three_stems.py',
-                'build', '--existing', self.output/'two-stems', '--lead-estimate',
-                self.output/'lead-separation/song/vocals.wav', '--output', self.output/'stems'])
-            self.align(lyrics, duration)
+            try:
+                lyrics = self.prepare_text(metadata, source_duration, lead)
+            except (StageFailure, ValueError) as error:
+                if self.audio_only or (isinstance(error, StageFailure) and error.stage not in ('transcribe', 'prepare_lyrics')):
+                    raise
+                text_error = error
+                lyrics = None
+            def package_stems():
+                # Alignment uses the first vocal stem and need not wait for
+                # lead/backing separation. Audio failures still prevent release.
+                lead.result()
+                self.run('package_three_stems', [sys.executable, ROOT/'three_stems.py',
+                    'build', '--existing', self.output/'two-stems', '--lead-estimate',
+                    self.output/'lead-separation/song/vocals.wav', '--output', self.output/'stems'])
+            packaging = pool.submit(package_stems)
+            if text_error is None:
+                try:
+                    self.align(lyrics, duration)
+                except (StageFailure, ValueError) as error:
+                    if self.audio_only:
+                        raise
+                    text_error = error
+            if text_error is not None:
+                lyrics = self.playback_fallback(metadata, duration, text_error)
             packaging.result()
         stems = json.loads((self.output/'stems/manifest.json').read_text())
         artifacts = dict(instrumental='stems/instrumental.wav',
@@ -728,9 +797,54 @@ class Pipeline:
             artifact.update(bytes=path.stat().st_size, sha256=file_hash(path))
         result.update(processing_seconds=round(time.perf_counter()-started, 3), timings=self.timings,
                       reused_stages=self.checkpoints.reused,
-                      validation_scope='audio_and_lyrics' if self.audio_only else 'full_mv')
+                      validation_scope=('playback_with_lyrics_review' if text_error is not None else
+                                        'playback_lyrics_first' if lyrics.get('provenance', {}).get('route') == 'lyrics_first' else
+                                        'audio_and_lyrics' if self.audio_only else 'full_mv'))
         write_json(self.output/('audio-result.json' if self.audio_only else 'result.json'), result)
         return result
+
+    def playback_fallback(self, metadata, duration, error):
+        """Keep singing available without presenting unverified word times as valid."""
+        lyrics_path = self.output/'lyrics.json'
+        lyrics = dict(
+            title=self.request.get('title') or metadata.get('track') or metadata.get('title') or 'Untitled',
+            artist=self.request.get('artist') or metadata.get('artist') or '',
+            language=self.request.get('language') or 'English', lines=[], provenance={})
+        try:
+            saved = json.loads(lyrics_path.read_text())
+            if isinstance(saved, dict) and isinstance(saved.get('lines'), list):
+                lyrics.update(saved)
+        except (OSError, ValueError):
+            pass
+        cues, source = [], None
+        for name in ('alignment/cues.json', 'anchors.json'):
+            path = self.output/name
+            if not path.is_file():
+                continue
+            try:
+                candidate = json.loads(path.read_text())
+                if not candidate or [c['text'] for c in candidate] != lyrics['lines']:
+                    continue
+                if any(c['status'] != 'candidate' or not all(isinstance(c[k], (int, float)) and math.isfinite(c[k])
+                       for k in ('start', 'end')) or not 0 <= c['start'] < c['end'] <= duration+.001 for c in candidate):
+                    continue
+                if any(a['end'] > b['start'] for a, b in zip(candidate, candidate[1:])):
+                    continue
+                # Preserve measured phrase bounds; never manufacture word onsets.
+                cues = [dict(text=c['text'], start=c['start'], end=c['end'], status='candidate', units=[])
+                        for c in candidate]
+                source = name
+                break
+            except (ValueError, KeyError, TypeError):
+                continue
+        warning = dict(error=processing_error(error, self.output), subtitle_mode='line' if cues else 'unavailable',
+                       phrase_timing_source=source, word_alignment_passed=False)
+        write_json(self.output/'playback-warning.json', warning)
+        write_json(self.output/'cues.json', cues)
+        write_json(self.output/'quality.json', dict(lines=len(cues), units=0,
+            lyrics_provenance=dict(lyrics.get('provenance', {}), needs_review=True),
+            playback_fallback=warning, onset_accuracy=None, separation_purity=None))
+        return lyrics
 
     def render_video(self, result):
         paths = {name: self.output/a['path'] for name, a in result['artifacts'].items()}

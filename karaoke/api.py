@@ -247,7 +247,8 @@ class Worker:
                 with (folder/'worker.log').open('wb') as log:
                     process = await asyncio.create_subprocess_exec(*command, cwd=ROOT.parent,
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-                        env={**os.environ, 'KARAOKE_EVENTS_STDOUT': '1'}, start_new_session=True)
+                        env={**os.environ, 'KARAOKE_EVENTS_STDOUT': '1',
+                             'KARAOKE_STAGE_LOCK_DIR': str(self.store.root/'stage-locks')}, start_new_session=True)
                     self.processes[job_id] = process
                     await self.supervise(log, job_id, process)
                 result_path = folder/'result.json'

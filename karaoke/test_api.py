@@ -664,6 +664,59 @@ def test_online_lyrics_reject_other_versions_and_unsupported_text(change):
     assert candidate is None and report['status'] == 'no_supported_recording'
 
 
+@pytest.mark.parametrize('found', [True, False])
+@pytest.mark.parametrize('audio_only', [True, False])
+def test_online_lyric_candidate_skips_asr_only_for_interactive_playback(tmp_path, monkeypatch, found, audio_only):
+    from karaoke import lyric_lookup
+    from concurrent.futures import Future
+    pipeline = Pipeline(dict(url=URL), tmp_path, audio_only=audio_only)
+    lyrics = dict(title='Evening', artist='Singer', language='English', lines=['Stars above the quiet shore'],
+                  provenance=dict(kind='online_lyric_text', route='lyrics_first', needs_review=True))
+    monkeypatch.setenv('KARAOKE_ASR_BACKEND', 'api')
+    monkeypatch.setattr(lyric_lookup, 'prepare_online_lyrics', lambda *a: lyrics if found else None)
+    stages = []
+    def run(name, *args, **kwargs):
+        stages.append(name)
+        if name == 'transcribe':
+            raise StageFailure('transcribe', 'ASR reached')
+    monkeypatch.setattr(pipeline, 'run', run)
+    lead = Future()
+    lead.set_result(None)
+    if found and not audio_only:
+        assert pipeline.prepare_text({}, 30, lead) == lyrics
+        assert 'transcribe' not in stages
+        assert json.loads((tmp_path/'anchors.json').read_text()) == []
+        assert not (tmp_path/'asr').exists()
+    else:
+        with pytest.raises(StageFailure, match='ASR reached'):
+            pipeline.prepare_text({}, 30, lead)
+
+
+def test_lyrics_first_search_uses_metadata_duration_and_retains_review_status(tmp_path, monkeypatch):
+    from karaoke import lyric_lookup
+    from karaoke.stage_cache import StageCache
+    (tmp_path/'download').mkdir()
+    (tmp_path/'download/source.info.json').write_text('{"id":"fixture"}')
+    row = dict(id=1, trackName='晚风', artistName='林林', duration=30., instrumental=False,
+               plainLyrics='微風裡慢慢歌唱\n星光下靜靜傾聽', syncedLyrics='[99:99]irrelevant')
+    queries = []
+    def fetch(url):
+        queries.append(url)
+        return [] if len(queries) == 1 else [dict(row, artistName='Wrong singer'), dict(row, duration=80), row]
+    monkeypatch.setattr(lyric_lookup, 'read_document', fetch)
+    monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', lambda *a: pytest.fail('Tagged recording needs no model'))
+    result = lyric_lookup.prepare_online_lyrics(dict(url=URL), dict(track='晚風', artist='林林'),
+                                               30, StageCache(tmp_path), 'unused', None)
+    assert len(queries) == 2 and result['lines'] == row['plainLyrics'].splitlines()
+    assert result['language'] == 'Chinese'
+    provenance = result['provenance']
+    assert provenance['needs_review'] and provenance['route'] == 'lyrics_first'
+    assert provenance['independent_asr_coverage'] is None
+    assert provenance['lyric_lookup']['status'] == 'candidate'
+    assert provenance['lyric_lookup']['audio_word_coverage'] is None
+    assert provenance['lyric_lookup']['text_sha256'] == hashlib.sha256(row['plainLyrics'].encode()).hexdigest()
+
+
 @pytest.mark.parametrize('padding', ['zero', 'quiet', 'other_channel', 'all_silent', 'nonfinite', 'wrong_duration'])
 def test_lyric_duration_ignores_only_digital_padding(tmp_path, padding):
     import soundfile as sf
@@ -939,6 +992,46 @@ while not pathlib.Path(sys.argv[1]).exists(): time.sleep(.01)
     assert 'not-json' in (tmp_path/'separate_lead.log').read_text()
 
 
+def test_stage_pipeline_overlaps_different_work_but_serializes_separation(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    monkeypatch.setenv('KARAOKE_STAGE_LOCK_DIR', str(tmp_path/'slots'))
+    first, second = [Pipeline(dict(url=URL), tmp_path/name) for name in ('first', 'second')]
+    code = '''import pathlib,sys,time
+pathlib.Path(sys.argv[1]).touch()
+while not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)
+'''
+    def stage(pipeline, name, label):
+        pipeline.run_process(name, [sys.executable, '-c', code,
+            str(tmp_path/(label+'.started')), str(tmp_path/(label+'.release'))], timeout=10)
+    def wait(check):
+        deadline = time.monotonic()+8
+        while not check() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert check()
+    def first_song():
+        stage(first, 'separate_music', 'first-separation')
+        stage(first, 'align_words', 'first-alignment')
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        one = pool.submit(first_song)
+        two = None
+        try:
+            wait(lambda: (tmp_path/'first-separation.started').exists())
+            two = pool.submit(stage, second, 'separate_lead', 'second-separation')
+            wait(lambda: second.stage_progress.get('separate_lead', {}).get('waiting'))
+            assert not (tmp_path/'second-separation.started').exists()
+            (tmp_path/'first-separation.release').touch()
+            wait(lambda: (tmp_path/'first-alignment.started').exists() and
+                         (tmp_path/'second-separation.started').exists())
+            assert not one.done() and not two.done()
+        finally:
+            for label in ('first-separation', 'first-alignment', 'second-separation'):
+                (tmp_path/(label+'.release')).touch()
+        one.result()
+        if two is not None:
+            two.result()
+    assert not first.active and not second.active
+
+
 def test_silent_subprocess_still_obeys_timeout(tmp_path):
     pipeline = Pipeline(dict(url=URL), tmp_path)
     with pytest.raises(StageFailure, match='超过允许的处理时间'):
@@ -1106,6 +1199,85 @@ def test_audio_download_promotes_to_video_without_replacing_tested_audio(tmp_pat
         assert pipeline.video != pipeline.source
     assert calls == ['download', 'download_video']
     assert pcm_sha(decode_source(pipeline.source)[0]) == before
+
+
+@pytest.mark.parametrize('audio_only', [False, True])
+@pytest.mark.parametrize('failure', ['transcribe', 'prepare_lyrics', 'align_words', 'align_phonemes', 'separate_lead', 'package_three_stems', 'overlap'])
+def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(tmp_path, monkeypatch, audio_only, failure):
+    import soundfile as sf
+    pipeline = Pipeline(dict(url=URL), tmp_path, audio_only=audio_only, device='cpu')
+    sf.write(tmp_path/'source-44100.wav', np.zeros(44100), 44100)
+    pipeline.vocals.parent.mkdir(parents=True)
+    sf.write(pipeline.vocals, np.zeros(44100), 44100)
+    (tmp_path/'stems').mkdir()
+    for name in ('instrumental', 'backing-vocals', 'lead'):
+        for extension in ('wav', 'mp3'):
+            (tmp_path/f'stems/{name}.{extension}').write_bytes(b'artifact fixture')
+    (tmp_path/'stems/manifest.json').write_text(json.dumps(dict(
+        preview_shared_gain=.8, reconstruction=dict(vocal_first={'verified': True}))))
+    lyrics = dict(title='Example', artist='Singer', language='English', lines=['A little song'], provenance={})
+    (tmp_path/'lyrics.json').write_text(json.dumps(lyrics))
+    (tmp_path/'alignment').mkdir()
+    coarse = [dict(text='A little song', start=.1, end=.9, status='candidate')]
+    (tmp_path/'alignment/cues.json').write_text(json.dumps(coarse))
+    monkeypatch.setenv('OPENAI_API_KEY', 'unit-test-placeholder')
+    monkeypatch.setattr(pipeline, 'download', lambda: ({'format_id': 'fixture'}, 1))
+    alignment_started = threading.Event()
+    def fail(stage):
+        if stage == 'separate_lead' and failure == 'overlap':
+            assert alignment_started.wait(10), 'Alignment waited for independent lead separation'
+        if stage == failure:
+            raise StageFailure(stage, 'fixture failure')
+    monkeypatch.setattr(pipeline, 'run', lambda stage, *a, **kw: fail(stage))
+    def prepare(*args):
+        fail('transcribe')
+        fail('prepare_lyrics')
+        if failure != 'overlap':
+            args[-1].result()
+        return lyrics
+    monkeypatch.setattr(pipeline, 'prepare_text', prepare)
+    def align(*args):
+        alignment_started.set()
+        (tmp_path/'quality.json').write_text('{}')
+        (tmp_path/'cues.json').write_text(json.dumps(coarse))
+        fail('align_words')
+        fail('align_phonemes')
+    monkeypatch.setattr(pipeline, 'align', align)
+    monkeypatch.setattr(pipeline, 'render_video', lambda result: (tmp_path/'mv.mp4').write_bytes(b'video fixture'))
+    if failure == 'overlap':
+        result = pipeline.execute()
+        assert result['validation_scope'] == ('audio_and_lyrics' if audio_only else 'full_mv')
+    elif audio_only or failure in ('separate_lead', 'package_three_stems'):
+        with pytest.raises(StageFailure, match='fixture failure'):
+            pipeline.execute()
+        assert not (tmp_path/'result.json').exists()
+    else:
+        result = pipeline.execute()
+        assert result['validation_scope'] == 'playback_with_lyrics_review'
+        assert result['quality']['lyrics_provenance']['needs_review']
+        assert not result['quality']['playback_fallback']['word_alignment_passed']
+        assert result['quality']['playback_fallback']['error']['code'] == failure+'_failed'
+        assert json.loads((tmp_path/'cues.json').read_text()) == [dict(coarse[0], units=[])]
+        assert 'mv' in result['artifacts'] and result['shared_preview_gain'] == .8
+        assert not (tmp_path/'audio-result.json').exists()
+
+
+@pytest.mark.parametrize('bad', ['text', 'overlap', 'missing', 'nan'])
+def test_playback_fallback_never_invents_missing_phrase_times(tmp_path, bad):
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    (tmp_path/'lyrics.json').write_text(json.dumps(dict(title='Example', artist='', language='English',
+        lines=['First line', 'Next line'], provenance={})))
+    (tmp_path/'alignment').mkdir()
+    cues = [dict(text=text, start=start, end=end, status='candidate')
+            for text, start, end in [('First line', 0, 1), ('Next line', 2, 3)]]
+    if bad == 'text': cues[0]['text'] = 'Wrong lyric'
+    if bad == 'overlap': cues[1]['start'] = .5
+    if bad == 'missing': cues[0]['start'] = None
+    if bad == 'nan': cues[0]['start'] = float('nan')
+    (tmp_path/'alignment/cues.json').write_text(json.dumps(cues))
+    pipeline.playback_fallback({}, 4, StageFailure('align_words', 'unresolved'))
+    assert json.loads((tmp_path/'cues.json').read_text()) == []
+    assert json.loads((tmp_path/'quality.json').read_text())['playback_fallback']['subtitle_mode'] == 'unavailable'
 
 
 def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv(tmp_path, monkeypatch):
@@ -3635,6 +3807,26 @@ def test_lru_protects_playlist_running_jobs_and_active_downloads(tmp_path):
     assert store.cache.enforce()
     assert store.read(downloaded['id'])['status'] == 'evicted'
     assert all((store.root/j['id']).exists() for j in (first,second,active))
+
+
+def test_preview_and_fallback_keep_resumable_work_and_failure_diagnostics(tmp_path):
+    from karaoke.stage_cache import StageCache
+    store = Store(tmp_path/'cache')
+    job = cache_fixture(store, '1')
+    folder = store.root/job['id']
+    working = folder/'retained-stem.wav'
+    with StageCache(folder).stage('separation', inputs=[folder/'request.json'], outputs=[working]):
+        working.write_bytes(b'computed audio')
+    diagnostic = folder/'highlight-validation.json'
+    diagnostic.write_text('{"errors":[{"line":1}]}')
+    result = dict(job['result'], validation_scope='playback_audio_preview',
+                  quality=dict(playback_fallback=dict(subtitle_mode='pending')))
+    store.cache.compact(store.update(job['id'], result=result))
+    assert working.exists() and diagnostic.exists()
+    result['validation_scope'] = 'playback_with_lyrics_review'
+    store.cache.compact(store.update(job['id'], result=result))
+    assert diagnostic.exists()
+    assert not working.exists()  # Published audio replaces temporary separation work.
 
 
 def test_compaction_keeps_outputs_and_bounded_logs_without_following_symlinks(tmp_path):
