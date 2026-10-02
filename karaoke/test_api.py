@@ -2819,7 +2819,8 @@ def test_normal_choruses_do_not_trigger_asr_retry(tmp_path, language):
         client.audio.transcriptions.create.assert_called_once()
 
 
-@pytest.mark.parametrize('tail', ['silence', 'quiet', 'quiet_stereo', 'negative_time', 'outside_audio'])
+@pytest.mark.parametrize('tail', ['silence', 'quiet', 'quiet_stereo', 'negative_time', 'outside_audio',
+                                  'silent_parent', 'quiet_parent', 'mismatched_parent', 'shared_parent'])
 def test_asr_checks_exact_silence_before_repeating_full_recording(tmp_path, tail):
     from copy import deepcopy
     import soundfile as sf
@@ -2840,6 +2841,15 @@ def test_asr_checks_exact_silence_before_repeating_full_recording(tmp_path, tail
                   dict(start=start, end=start, text=' invented ending')],
         words=[dict(start=.5, end=1.5, word='opening'),
                *[dict(start=start, end=start, word='invented') for _ in range(8)]])
+    if tail.endswith('_parent'):
+        for word in initial['words'][1:]:
+            word.update(start=3.5, end=3.5)
+        initial['segments'][-1].update(start=2.8, end=3.5, words=deepcopy(initial['words'][1:]))
+        if tail == 'mismatched_parent':
+            for word in initial['segments'][-1]['words']:
+                word['word'] = 'different'
+        if tail == 'shared_parent':
+            initial['segments'][0]['words'] = deepcopy(initial['words'][1:])
     original, calls = deepcopy(initial), []
     assert needs_recovery(initial)
 
@@ -2850,7 +2860,8 @@ def test_asr_checks_exact_silence_before_repeating_full_recording(tmp_path, tail
         return SimpleNamespace(model_dump=lambda: initial)
 
     client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create)))
-    if tail == 'silence':
+    silent = tail in ('silence', 'silent_parent')
+    if silent:
         result, recovery = transcribe(client, audio, 'auto', '', output)
         assert calls == ['whisper-1'] and not recovery['triggered']
         assert result['words'] == original['words'][:1]
@@ -2862,11 +2873,14 @@ def test_asr_checks_exact_silence_before_repeating_full_recording(tmp_path, tail
     assert initial == original
     assert json.loads((output/'initial-transcription.json').read_text()) == original
     report = json.loads((output/'silence-filter.json').read_text())
-    assert report['applied'] == (tail == 'silence')
-    if tail == 'silence':
+    assert report['applied'] == silent
+    if silent:
         assert len(report['rejected']) == 9
         assert {r['reason'] for r in report['rejected']} == {'digital_silence'}
-    if tail.startswith('quiet'):
+    if tail == 'silent_parent':
+        assert all(r['silent_parent'] == dict(start=2.8, end=3.5)
+                   for r in report['rejected'] if r['kind'] == 'words')
+    if tail in ('quiet', 'quiet_stereo'):
         assert not report['rejected']
 
 

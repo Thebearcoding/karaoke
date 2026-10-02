@@ -481,6 +481,7 @@ def filter_silent_transcription(data, audio, sample_rate):
     for kind in ('segments', 'words'):
         filtered[kind] = []
         for item in data.get(kind) or []:
+            silent_parent = None
             start, end = item['start'], item['end']
             if not all(math.isfinite(t) for t in (start, end)) or not 0 <= start <= end:
                 reason = 'invalid_time_range'
@@ -490,8 +491,24 @@ def filter_silent_transcription(data, audio, sample_rate):
                 right = min(len(audio), math.ceil((end+.25)*sample_rate))
                 reason = ('outside_audio' if right <= left else
                           'digital_silence' if not audio[left:right].any() else None)
+                if kind == 'words' and reason == 'outside_audio':
+                    # Batched Whisper may collapse trailing words beyond EOF.
+                    # Only inherit silence from their exact, measured parent;
+                    # unrelated or ambiguously attached words still need recovery.
+                    silent_parent = next((r['item'] for r in rejected
+                        if r['kind'] == 'segments' and r['reason'] == 'digital_silence'
+                        and r['item']['start'] <= start <= end <= r['item']['end']
+                        and item in (r['item'].get('words') or [])), None)
+                    if silent_parent is not None and not any(
+                            item in (s.get('words') or []) for s in filtered['segments']):
+                        reason = 'digital_silence'
+                    else:
+                        silent_parent = None
             if reason:
-                rejected.append(dict(kind=kind, reason=reason, item=item))
+                record = dict(kind=kind, reason=reason, item=item)
+                if silent_parent is not None:
+                    record['silent_parent'] = {key: silent_parent[key] for key in ('start', 'end')}
+                rejected.append(record)
             else:
                 filtered[kind].append(item)
     filtered['text'] = ''.join(item.get('text', '') for item in filtered['segments'])
