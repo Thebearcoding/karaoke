@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from .job_schema import JobRequest, provider_error, song_language, video_url
-from .song_sources import (independent_transcript_support, missing_repetitions, prepare_song_text,
+from .song_sources import (independent_transcript_support, lyric_coverage, missing_repetitions, prepare_song_text,
                            restore_repetitions, transcript_lines, video_song_info)
 from .stage_progress import parse_progress
 from .cache import can_restore_video
@@ -508,14 +508,27 @@ class Pipeline:
                 self.output/'vocals-16k.wav', lyrics['lines'], candidates[selected], lyrics['language'],
                 recovery_path, self.checkpoints, .55, duration,
                 fallback_audio=raw_audio if raw_audio.is_file() else None)
-        if covered < .55 and lyrics['provenance']['kind'] == 'video_description':
-            # Optional metadata can contain a diary or synopsis. Only replace
-            # it when separately recognized words corroborate the ASR text;
-            # the text must never qualify by matching its own original times.
+        for _ in range(2):
+            repeats = dict(reference_lines=lyrics['lines'], words=candidates[selected], expansions=[], status='unavailable')
+            if covered >= .55:
+                lines, anchors, repeats = restore_repetitions(lyrics['lines'], anchors, candidates[selected],
+                    lyrics['language'], duration, allow_expansion=lyrics['provenance']['kind'] == 'video_description')
+                lyrics = dict(lyrics, lines=lines)
+                if repeats['expansions']:
+                    lyrics['provenance'].update(text_transform='source_repetitions',
+                                                repetitions=repeats['expansions'])
+                covered = sum(c['matched_fraction']*len(c['text']) for c in anchors)/max(1, sum(map(len, lines)))
+            coverage = lyric_coverage(anchors, candidates[selected], lyrics['language'], duration,
+                                      other_words=transcription.get('words') or [])
+            if lyrics['provenance']['kind'] != 'video_description' or (covered >= .55 and coverage['status'] == 'complete'):
+                break
+            # A description can quote a few perfectly matching lines while
+            # omitting most of the song. The replacement needs separate word
+            # evidence, just as it does for an unrelated diary or synopsis.
             support = independent_transcript_support(transcription, report, lyrics['language'])
             if support is not None and support >= .55:
                 rejected_description = dict(lines=lyrics['lines'], provenance=lyrics['provenance'],
-                                            anchor_coverage=covered)
+                                            anchor_coverage=covered, lyric_coverage=coverage)
                 lyrics = dict(lyrics, lines=transcript_lines(transcription, lyrics['language']),
                     provenance=dict(kind='asr_draft', needs_review=True, text_transform='whitespace_only',
                         transcription_sha256=lyrics['provenance']['transcription_sha256'],
@@ -526,15 +539,10 @@ class Pipeline:
                 selected = 'independently_corroborated_transcription'
                 matches[selected] = (anchors, covered)
                 candidates[selected] = candidates['transcription']
-        repeats = dict(reference_lines=lyrics['lines'], words=candidates[selected], expansions=[], status='unavailable')
-        if covered >= .55:
-            lines, anchors, repeats = restore_repetitions(lyrics['lines'], anchors, candidates[selected],
-                lyrics['language'], duration, allow_expansion=lyrics['provenance']['kind'] == 'video_description')
-            lyrics = dict(lyrics, lines=lines)
-            if repeats['expansions']:
-                lyrics['provenance'].update(text_transform='source_repetitions',
-                                            repetitions=repeats['expansions'])
-            covered = sum(c['matched_fraction']*len(c['text']) for c in anchors)/max(1, sum(map(len, lines)))
+            else:
+                break
+        repeats['lyric_coverage'] = coverage
+        repeats['other_coverage_words'] = transcription.get('words') or []
         write_json(self.output/'asr/lyric-repeats.json', repeats)
         write_json(self.output/'asr/filtered.json', dict(transcription=transcription, rejected=rejected,
             anchor_source=selected, anchor_coverage={name: match[1] for name, match in matches.items()},
@@ -545,6 +553,8 @@ class Pipeline:
             raise StageFailure('prepare_lyrics', '歌词与这个视频的演唱匹配不足；请提交本版本的 lyrics 后重试')
         if repeats['status'] != 'complete':
             raise StageFailure('prepare_lyrics', '检测到歌词缺少重复唱段，但证据不足以自动恢复；详情已保留')
+        if coverage['status'] != 'complete':
+            raise StageFailure('prepare_lyrics', '歌词未覆盖完整演唱；遗漏唱段的识别证据已保留')
 
     def align(self, lyrics, duration):
         from lyric_progress import build

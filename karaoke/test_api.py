@@ -1039,6 +1039,11 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
     subtitle_path.write_text(original)
     result['artifacts']['subtitles'].update(bytes=subtitle_path.stat().st_size, sha256=file_hash(subtitle_path))
     (folder/'audio-result.json').write_text(json.dumps(result))
+    repeated = json.loads(repeat_path.read_text())
+    repeat_path.write_text(json.dumps(dict(repeated, words=[*repeated['words'],
+        dict(word='An entire later verse was omitted from the lyrics', start=.85, end=.99)])))
+    with pytest.raises(ValueError, match='lyric passages'):
+        verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
     repeat_path.write_text(json.dumps(dict(status='failed')))
     with pytest.raises(ValueError, match='repetitions'):
         verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
@@ -1549,6 +1554,62 @@ def test_bad_description_uses_only_independently_corroborated_transcript(tmp_pat
     assert provenance['rejected_description']['anchor_coverage'] < .55
     anchors = json.loads((pipeline.output/'anchors.json').read_text())
     assert [(c['start'], c['end']) for c in anchors] == [(1., 4.)]
+
+
+@pytest.mark.parametrize('source', ['independent', 'initial_excerpt', 'same_request', 'user', 'complete_description'])
+def test_matching_description_excerpt_cannot_replace_the_whole_song(tmp_path, source):
+    import soundfile as sf
+    lines = ['春风吹过青青山坡', '小河映着远处灯火', '旅人沿着石阶远行', '我们相约明天再见']
+    supplied = lines if source == 'complete_description' else lines[-1:]
+    request = dict(url=URL)
+    if source == 'user':
+        request.update(lyrics=supplied, language='zh')
+    pipeline = Pipeline(request, tmp_path/'job', catalog_root=None)
+    folder = pipeline.output/'asr'
+    folder.mkdir()
+    words = [dict(word=text, start=1+2*i, end=2+2*i) for i, text in enumerate(lines)]
+    transcription = dict(language='Chinese', segments=[dict(text='\n'.join(lines), start=0., end=9.)], words=words)
+    if source == 'initial_excerpt':
+        (folder/'initial-transcription.json').write_text(json.dumps(dict(language='Chinese',
+            segments=[dict(text=lines[-1], start=7., end=8.)], words=words[-1:])))
+        words[-1] = dict(words[-1], word='他们相约明天再见')
+    (folder/'transcription.json').write_text(json.dumps(transcription))
+    (folder/'run.json').write_text(json.dumps(dict(recovery=dict(
+        triggered=source != 'same_request', chunks=[dict(word_times_discarded=False)]))))
+    sf.write(pipeline.output/'vocals-16k.wav', np.full(10000, .1), 1000)
+    parsed = SongText(title='Song', artist='Singer', lyric_line_numbers=list(range(1, len(supplied)+1)))
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))], model='test', usage=None)
+    with patch('karaoke.song_sources.OpenAI') as client:
+        client.return_value.beta.chat.completions.parse.return_value = response
+        if source in ('same_request', 'user'):
+            with pytest.raises(StageFailure, match='未覆盖完整演唱'):
+                pipeline.prepare_lyrics(dict(description='\n'.join(supplied)), 10.)
+            return
+        pipeline.prepare_lyrics(dict(description='\n'.join(supplied)), 10.)
+    result = json.loads((pipeline.output/'lyrics.json').read_text())
+    assert result['lines'] == lines
+    if source in ('independent', 'initial_excerpt'):
+        rejected = result['provenance']['rejected_description']
+        assert rejected['anchor_coverage'] == 1.
+        assert rejected['lyric_coverage']['uncovered_passages']
+        if source == 'independent':
+            assert rejected['lyric_coverage']['recognized_coverage'] == .25
+    else:
+        assert result['provenance']['kind'] == 'video_description'
+
+
+def test_lyric_coverage_detects_a_missing_verse_despite_high_overall_match():
+    from karaoke.song_sources import lyric_coverage
+    lines = ['A small bird flies above the river', 'The wind carries our voices toward the hill',
+             'Morning sunshine lights the empty houses', 'We will find the garden in the valley']
+    words = [dict(word=text, start=1+2*i, end=2+2*i) for i, text in enumerate(lines)]
+    cues = [dict(text=w['word'], start=w['start'], end=w['end']) for w in words]
+    assert lyric_coverage(cues, words, 'English', 10.)['status'] == 'complete'
+    missing = lyric_coverage([cues[0], *cues[2:]], words, 'English', 10.)
+    assert missing['recognized_coverage'] > .55
+    assert missing['status'] == 'incomplete' and len(missing['uncovered_passages']) == 1
+    adlib = [*words, dict(word='hey', start=9., end=9.5)]
+    assert lyric_coverage(cues, adlib, 'English', 10.)['status'] == 'complete'
 
 
 @pytest.mark.parametrize('supplied', [False, True])

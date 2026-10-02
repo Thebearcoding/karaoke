@@ -241,11 +241,14 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False):
         from karaoke.onset_consensus import context_scope_violations
         if context_scope_violations(cues, result['quality'].get('english_context_scope')):
             raise ValueError('Word timing falls outside acoustic phrase context')
-    from karaoke.song_sources import missing_repetitions
+    from karaoke.song_sources import lyric_coverage, missing_repetitions
     repeats = json.loads((folder/'asr/lyric-repeats.json').read_text())
     if repeats['status'] != 'complete' or missing_repetitions(
             repeats['reference_lines'], cues, repeats['words'], result['language'], duration):
         raise ValueError('Subtitles omit recognized lyric repetitions')
+    if lyric_coverage(cues, repeats['words'], result['language'], duration,
+                      other_words=repeats.get('other_coverage_words', []))['status'] != 'complete':
+        raise ValueError('Subtitles omit recognized lyric passages')
     for name in ('mv', 'instrumental_preview', 'backing_vocals_preview', 'lead_vocals_preview'):
         if audio_only and name == 'mv':
             continue
