@@ -2942,6 +2942,17 @@ def test_offline_transcription_never_falls_back_to_an_api(tmp_path, monkeypatch,
             assert (output/'recovery.json').is_file()
 
 
+@pytest.mark.parametrize('collapsed,expected', [(1, False), (7, True)])
+def test_silence_warning_includes_collapsed_words_at_the_segment_end(collapsed, expected):
+    from karaoke.transcribe_lyrics import needs_recovery
+    words = [dict(word=f'word{i}', start=i, end=i+1) for i in range(5)]
+    words += [dict(word=f'tail{i}', start=5., end=5.) for i in range(collapsed)]
+    # The following phrase starts at the same boundary, but has real duration.
+    words += [dict(word=f'next{i}', start=5., end=6.+i) for i in range(8)]
+    data = dict(segments=[dict(text='A possible phrase', start=0., end=5., no_speech_prob=.7)], words=words)
+    assert needs_recovery(data) is expected
+
+
 def test_offline_metadata_and_vocal_review_keep_unverified_gaps(tmp_path, monkeypatch):
     from karaoke.song_sources import extract_song_metadata
     from karaoke.vocal_review import review_gaps, speech_intervals

@@ -152,7 +152,9 @@ def needs_recovery(data):
         if segment.get('no_speech_prob', 0) < .6:
             continue
         start, end = segment.get('start', 0), segment.get('end', 0)
-        words = [w for w in data.get('words') or [] if start <= w['start'] < end]
+        # A decoder can pile up hallucinated words exactly at the segment end.
+        # Include those zero-length words, without borrowing the next phrase.
+        words = [w for w in data.get('words') or [] if start <= w['start'] <= w['end'] <= end]
         collapsed = sum(w['end']-w['start'] <= .001 for w in words)
         if len(words) >= 3 and (end-start <= .2 or collapsed >= len(words)/2):
             return True
