@@ -1252,40 +1252,43 @@ class AlignmentIntegrity(unittest.TestCase):
         from align_english_onsets import align_job
 
         lines = ['first', 'second', 'third', 'fourth', 'fifth', 'last']
-        anchors = [dict(text=s, status='candidate', start=t, end=t+1)
-                   for s, t in zip(lines, (1., 4., 7., 10., 13., 16.))]
-        scope = [(i, i+1, i, i+1, 0., 30.) for i in range(6)]
-        scope[3] = (3, 4, 3, 4, 9.4, 11.4)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            sf.write(root/'audio.wav', np.zeros(30*16000), 16000)
             (root/'lyrics.json').write_text(json.dumps(dict(language='English', lines=lines)))
-            (root/'anchors.json').write_text(json.dumps(anchors))
-            for mode in ('repair', 'outside_scope', 'new_conflict'):
-                with self.subTest(mode=mode):
-                    def align(audio, words):
-                        times = {6: [1., 4., 9., 18., 20., 23.],
-                                 3: [.1, 1.1, 6.6], 4: [.1, .4, 6.6, 9.6],
-                                 5: [.6, 3.6, 6.6, 9.6, 12.6]}[len(words)].copy()
-                        if len(words) == 5:
-                            if mode == 'outside_scope': times[3] = 18.
-                            if mode == 'new_conflict': times[2] = 2.
-                        return [dict(text=w, start=t, end=t+.2, confidence=.9)
-                                for w, t in zip(words, times)], None, .02
-                    model = SimpleNamespace(method='singing', device='cpu', onset_ratio=.02,
-                                            model_identity={}, align=Mock(side_effect=align))
-                    with patch('align_english_onsets.context_blocks', return_value=list(scope)):
-                        report = align_job(model, dict(audio=str(root/'audio.wav'), lyrics=str(root/'lyrics.json'),
-                            anchors=str(root/'anchors.json'), output=str(root/mode)), full_song=True)
-                    result = json.loads((root/mode/'cues.json').read_text())
-                    self.assertEqual(model.align.call_count, 4)
-                    self.assertEqual(len(report['boundary_retries']), 2)
-                    self.assertFalse(report['boundary_retries'][0]['accepted'])
-                    self.assertEqual(report['boundary_retries'][1]['accepted'], mode == 'repair')
-                    self.assertEqual(report['scope_blocks'][3], (3, 4, 2, 5, 6.4, 14.6))
-                    expected = [1., 4., 7., 10., 20., 23.] if mode == 'repair' else [1., 4., 9., 7.5, 20., 23.]
-                    np.testing.assert_allclose([c['start'] for c in result], expected)
-                    self.assertEqual(bool(report['failures']), mode != 'repair')
+            for scale in (1, 4):
+                anchors = [dict(text=s, status='candidate', start=t*scale, end=(t+1)*scale)
+                           for s, t in zip(lines, (1., 4., 7., 10., 13., 16.))]
+                scope = [(i, i+1, i, i+1, 0., 30.*scale) for i in range(6)]
+                scope[3] = (3, 4, 3, 4, 9.4*scale, 11.4*scale)
+                sf.write(root/'audio.wav', np.zeros(30*scale*16000), 16000)
+                (root/'anchors.json').write_text(json.dumps(anchors))
+                for mode in ('repair', 'outside_scope', 'new_conflict'):
+                    with self.subTest(mode=mode, scale=scale):
+                        def align(audio, words):
+                            times = {6: [t*scale for t in (1., 4., 9., 18., 20., 23.)],
+                                     3: [.1, .5*scale+.6, 6*scale+.6],
+                                     4: [.1, .4, 6*scale+.6, 9*scale+.6],
+                                     5: [t*scale+.6 for t in (0, 3, 6, 9, 12)]}[len(words)]
+                            if len(words) == 5:
+                                if mode == 'outside_scope': times[3] = 18.*scale
+                                if mode == 'new_conflict': times[2] = 2.*scale
+                            return [dict(text=w, start=t, end=t+.2, confidence=.9)
+                                    for w, t in zip(words, times)], None, .02
+                        model = SimpleNamespace(method='singing', device='cpu', onset_ratio=.02,
+                                                model_identity={}, align=Mock(side_effect=align))
+                        output = root/f'{mode}-{scale}'
+                        with patch('align_english_onsets.context_blocks', return_value=list(scope)):
+                            report = align_job(model, dict(audio=str(root/'audio.wav'), lyrics=str(root/'lyrics.json'),
+                                anchors=str(root/'anchors.json'), output=str(output)), full_song=True)
+                        result = json.loads((output/'cues.json').read_text())
+                        self.assertEqual(model.align.call_count, 4)
+                        self.assertEqual(len(report['boundary_retries']), 2)
+                        self.assertFalse(report['boundary_retries'][0]['accepted'])
+                        self.assertEqual(report['boundary_retries'][1]['accepted'], mode == 'repair')
+                        self.assertEqual(report['scope_blocks'][3], (3, 4, 2, 5, 7*scale-.6, 14*scale+.6))
+                        expected = [1., 4., 7., 10., 20., 23.] if mode == 'repair' else [1., 4., 9., 7.5, 20., 23.]
+                        np.testing.assert_allclose([c['start'] for c in result], np.array(expected)*scale)
+                        self.assertEqual(bool(report['failures']), mode != 'repair')
 
     def test_english_phoneme_alignment_keeps_punctuation_out_of_spoken_words(self):
         import json

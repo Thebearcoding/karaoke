@@ -266,7 +266,7 @@ def align_job(aligner, job, full_song=False):
                 if any(anchors[i]['status'] != 'candidate' for i in (left, right-1)):
                     break
                 begin, end = max(0., anchors[left]['start']-.6), min(len(audio)/rate, anchors[right-1]['end']+.6)
-                if not 0 < end-begin <= 45:
+                if not 0 < end-begin <= 60:
                     break
                 previous = cues[first:last+1]
                 run_blocks([(first, last+1, left, right, begin, end)],
