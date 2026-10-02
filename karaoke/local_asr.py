@@ -36,7 +36,7 @@ def configuration():
         packages={name: version(name) for name in ('faster-whisper', 'ctranslate2')})
 
 
-def transcribe(model, samples, language, batch_size, *, contextual=False):
+def transcribe(model, samples, language, batch_size):
     from faster_whisper import BatchedInferencePipeline
     if not len(samples):
         raise ValueError('Local Whisper input is empty')
@@ -56,36 +56,28 @@ def transcribe(model, samples, language, batch_size, *, contextual=False):
     # window, including the final partial window. These are ASR bounds, not cues.
     windows = [dict(start=start/16000, end=min(start+window, len(samples))/16000)
                for start in range(0, len(samples), window)]
-    if contextual:
-        windows = [dict(start=0., end=duration)]
     segments = []
     if language is not None:
-        decoder = model if contextual else BatchedInferencePipeline(model)
-        options = {} if contextual else dict(batch_size=batch_size, clip_timestamps=windows)
-        result, _ = decoder.transcribe(samples, language=language,
-            beam_size=5, temperature=0, word_timestamps=True,
-            without_timestamps=False, condition_on_previous_text=contextual,
-            vad_filter=False, **options)
+        result, _ = BatchedInferencePipeline(model).transcribe(samples, language=language,
+            batch_size=batch_size, beam_size=5, temperature=0, word_timestamps=True,
+            without_timestamps=False, condition_on_previous_text=False,
+            vad_filter=False, clip_timestamps=windows)
         segments = [asdict(segment) for segment in result]
     return dict(language=language, duration=duration, text=''.join(s['text'] for s in segments),
         segments=segments, words=[w for s in segments for w in s['words'] or []],
         local_inference=dict(language_detection=detection, windows=windows,
-                             batch_size=1 if contextual else batch_size, vad_filter=False,
-                             contextual=contextual))
+                             batch_size=batch_size, vad_filter=False))
 
 
-def cached_recognition(audio, language, output, *, contextual=False):
+def cached_recognition(audio, language, output):
     from faster_whisper import WhisperModel
     from faster_whisper.audio import decode_audio
     config = dict(configuration(), language=language)
-    if contextual:
-        config.update(batch_size=1, contextual=True)
     model_path = Path(config['model'])
     key = hashlib.sha256((digest(audio)+json.dumps(config, sort_keys=True)).encode()).hexdigest()[:16]
-    mode = 'context' if contextual else 'batch'
-    path = output.parent/'asr-requests'/(mode+'-'+key+'.json')
+    path = output.parent/'asr-requests'/('batch-'+key+'.json')
     path.parent.mkdir(exist_ok=True)
-    with StageCache(output.parent).stage(mode+'_asr_'+key,
+    with StageCache(output.parent).stage('batch_asr_'+key,
             inputs=[audio, *[model_path/name for name in config['model_files']]],
             outputs=[path], config=config, code=[Path(__file__)]) as reused:
         if not reused:
@@ -93,8 +85,7 @@ def cached_recognition(audio, language, output, *, contextual=False):
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
             model = WhisperModel(str(model_path), device=device, compute_type=config['compute_type'],
                                  cpu_threads=4, local_files_only=True)
-            data = transcribe(model, decode_audio(str(audio), sampling_rate=16000), language,
-                              config['batch_size'], contextual=contextual)
+            data = transcribe(model, decode_audio(str(audio), sampling_rate=16000), language, config['batch_size'])
             data['local_inference'].update(config, device=device)
             path.write_text(json.dumps(data, ensure_ascii=False)+'\n')
     return json.loads(path.read_text())

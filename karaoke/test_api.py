@@ -2819,6 +2819,23 @@ def test_normal_choruses_do_not_trigger_asr_retry(tmp_path, language):
         client.audio.transcriptions.create.assert_called_once()
 
 
+@pytest.mark.parametrize('collapsed', [False, True])
+@pytest.mark.parametrize('nested_words', [False, True])
+def test_repeated_positive_length_phrases_still_reject_collapsed_word_loops(collapsed, nested_words):
+    from karaoke.transcribe_lyrics import needs_recovery
+    data = dict(segments=[], words=[])
+    for i in range(10):
+        words = [dict(word=char, start=i+j*.2, end=i+j*.2 if collapsed and j<3 else i+(j+1)*.2)
+                 for j, char in enumerate('甲乙丙丁戊')]
+        segment = dict(start=i, end=i+1., text='甲乙丙丁戊', no_speech_prob=.1)
+        if nested_words:
+            segment['words'] = words
+        data['segments'].append(segment)
+        data['words'].extend(words)
+    assert repetition_loop(data) == collapsed
+    assert needs_recovery(data) == collapsed
+
+
 @pytest.mark.parametrize('tail', ['silence', 'quiet', 'quiet_stereo', 'negative_time', 'outside_audio',
                                   'silent_parent', 'quiet_parent', 'mismatched_parent', 'shared_parent'])
 def test_asr_checks_exact_silence_before_repeating_full_recording(tmp_path, tail):
@@ -2967,8 +2984,7 @@ def test_local_asr_language_uses_the_recording_instead_of_only_the_intro(tmp_pat
 
 @pytest.mark.parametrize('batch_size', [1, 8])
 @pytest.mark.parametrize('language', ['en', 'auto', 'disagreement'])
-@pytest.mark.parametrize('contextual', [False, True])
-def test_local_whisper_batches_cover_the_recording_and_keep_word_times(monkeypatch, batch_size, language, contextual):
+def test_local_whisper_batches_cover_the_recording_and_keep_word_times(monkeypatch, batch_size, language):
     from dataclasses import dataclass
     from karaoke import local_asr
     @dataclass
@@ -2991,24 +3007,17 @@ def test_local_whisper_batches_cover_the_recording_and_keep_word_times(monkeypat
                               dict(word='song', start=31.375, end=32.75)])]), None
     monkeypatch.setitem(sys.modules, 'faster_whisper', SimpleNamespace(
         BatchedInferencePipeline=lambda model: SimpleNamespace(transcribe=run)))
-    result = local_asr.transcribe(SimpleNamespace(detect_language=detect, transcribe=run), samples,
-                                 'auto' if language == 'disagreement' else language, batch_size,
-                                 contextual=contextual)
+    result = local_asr.transcribe(SimpleNamespace(detect_language=detect), samples,
+                                 'auto' if language == 'disagreement' else language, batch_size)
     if language == 'disagreement':
         assert result['language'] is None and not calls and not result['words']
     else:
         assert result['words'][0]['start'] == 30.125 and result['words'][-1]['end'] == 32.75
         assert result['text'] == ' quiet song'
         assert calls[0]['language'] == ('en' if language == 'en' else 'ja')
-        assert not calls[0]['vad_filter']
-        assert calls[0]['condition_on_previous_text'] == contextual
-        if contextual:
-            assert 'clip_timestamps' not in calls[0] and 'batch_size' not in calls[0]
-            assert result['local_inference']['windows'] == [dict(start=0., end=len(samples)/16000)]
-        else:
-            assert calls[0]['batch_size'] == batch_size
-            assert calls[0]['clip_timestamps'] == [dict(start=0., end=30.), dict(start=30., end=60.),
-                                                   dict(start=60., end=len(samples)/16000)]
+        assert calls[0]['batch_size'] == batch_size and not calls[0]['vad_filter']
+        assert calls[0]['clip_timestamps'] == [dict(start=0., end=30.), dict(start=30., end=60.),
+                                               dict(start=60., end=len(samples)/16000)]
         assert bool(detected) == (language == 'auto')
 
 
@@ -3069,8 +3078,8 @@ def test_local_batch_cache_tracks_model_audio_and_batch_size(tmp_path, monkeypat
     monkeypatch.setitem(sys.modules, 'faster_whisper', SimpleNamespace(WhisperModel=lambda *a, **kw: None))
     monkeypatch.setitem(sys.modules, 'faster_whisper.audio', SimpleNamespace(decode_audio=lambda *a, **kw: [0.]))
     calls = []
-    def recognize(*args, **options):
-        calls.append((args, options))
+    def recognize(*args):
+        calls.append(args)
         return dict(text=f'transcript {len(calls)}', local_inference={})
     monkeypatch.setattr(local_asr, 'transcribe', recognize)
     first = local_asr.cached_recognition(audio, 'en', output)
@@ -3082,23 +3091,14 @@ def test_local_batch_cache_tracks_model_audio_and_batch_size(tmp_path, monkeypat
     monkeypatch.setenv('KARAOKE_WHISPER_BATCH_SIZE', '1')
     local_asr.cached_recognition(audio, 'en', output)
     assert len(calls) == 4
-    contextual = local_asr.cached_recognition(audio, 'en', output, contextual=True)
-    assert len(calls) == 5 and contextual != first
-    monkeypatch.setenv('KARAOKE_WHISPER_BATCH_SIZE', '8')
-    assert local_asr.cached_recognition(audio, 'en', output, contextual=True) == contextual
-    assert len(calls) == 5
 
 
 @pytest.mark.parametrize('problem', [None, 'loop', 'collapsed', 'outside_audio',
                                      'wrong_language', 'unsupported_language', 'duration', 'missing_model'])
 @pytest.mark.parametrize('track', ['original', 'lead'])
-@pytest.mark.parametrize('backend', ['api', 'local'])
-def test_unusable_vocal_asr_rechecks_recording_tracks_before_whole_song_retry(tmp_path, monkeypatch, problem, track, backend):
+def test_unusable_vocal_asr_rechecks_recording_tracks_before_whole_song_retry(tmp_path, monkeypatch, problem, track):
     from copy import deepcopy
     import soundfile as sf
-    from karaoke import transcribe_lyrics
-
-    monkeypatch.setenv('KARAOKE_ASR_BACKEND', backend)
 
     audio, original, output = tmp_path/'vocals.wav', tmp_path/'source.wav', tmp_path/'asr'
     output.mkdir()
@@ -3131,50 +3131,31 @@ def test_unusable_vocal_asr_rechecks_recording_tracks_before_whole_song_retry(tm
         return candidate
 
     def create(**request):
-        assert backend == 'api', 'Offline recovery must not call an API'
         calls.append(request['model'])
         if request['model'] != 'whisper-1':
             raise RuntimeError('provider recovery still needed')
         return SimpleNamespace(model_dump=lambda: initial)
 
-    def legacy(path, detected, target):
-        if backend == 'api':
-            return local(path, detected, target)
-        calls.append('legacy')
-        return initial
-    monkeypatch.setattr('karaoke.transcribe_lyrics.cached_local_recognition', legacy)
-    def offline(path, detected, target, *, contextual=False):
-        if contextual:
-            return local(path, detected, target)
-        calls.append('batch')
-        return initial
-    monkeypatch.setattr(transcribe_lyrics.local_asr, 'cached_recognition', offline)
+    monkeypatch.setattr('karaoke.transcribe_lyrics.cached_local_recognition', local)
     client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create)))
     options = {track+'_audio': original}
-    first = 'batch' if backend == 'local' else 'whisper-1'
     if problem is None:
         data, recovery = transcribe(client, audio, language, '', output, **options)
-        key = ('contextual_' if backend == 'local' else '')+track+'_audio'
-        assert data == candidate and recovery[key]['accepted']
-        assert recovery['text_model'] == ('local-whisper-contextual' if backend == 'local' else 'local-large-v3-turbo')
-        assert calls == [first] + (['legacy'] if backend == 'local' else []) + ['local']
+        assert data == candidate and recovery[track+'_audio']['accepted']
+        assert recovery['text_model'] == 'local-large-v3-turbo'
+        assert calls == ['whisper-1', 'local']
     else:
-        error, message = (ValueError, '本地 Whisper') if backend == 'local' else (RuntimeError, 'provider recovery still needed')
-        with pytest.raises(error, match=message):
+        with pytest.raises(RuntimeError, match='provider recovery still needed'):
             transcribe(client, audio, language, '', output, **options)
         report = json.loads((output/f'{track}-recovery.json').read_text())
         assert not report['accepted'] and report['reason']
-        assert calls == [first] + ([] if problem == 'duration' else
-            (['legacy', 'local'] if backend == 'local' else ['local'])) + ([] if backend == 'local' else ['gpt-4o-transcribe'])
+        assert calls == ['whisper-1'] + ([] if problem == 'duration' else ['local']) + ['gpt-4o-transcribe']
     assert candidate == preserved
     assert json.loads((output/'initial-transcription.json').read_text()) == initial
 
 
-@pytest.mark.parametrize('backend', ['api', 'local'])
-def test_failed_original_asr_uses_lead_before_another_remote_request(tmp_path, monkeypatch, backend):
+def test_failed_original_asr_uses_lead_before_another_remote_request(tmp_path, monkeypatch):
     import soundfile as sf
-    from karaoke import transcribe_lyrics
-    monkeypatch.setenv('KARAOKE_ASR_BACKEND', backend)
 
     audio, original, lead = [tmp_path/(name+'.wav') for name in ('vocals', 'original', 'lead')]
     for path in (audio, original, lead):
@@ -3192,13 +3173,8 @@ def test_failed_original_asr_uses_lead_before_another_remote_request(tmp_path, m
         calls.append(path)
         return broken if path == original else valid
     def remote(**request):
-        assert backend == 'api'
         assert request['model'] == 'whisper-1'
         return SimpleNamespace(model_dump=lambda: broken)
-    def batch(*args, **options):
-        assert not options.get('contextual'), 'Usable legacy recovery must not be recomputed'
-        return broken
-    monkeypatch.setattr(transcribe_lyrics.local_asr, 'cached_recognition', batch)
     monkeypatch.setattr('karaoke.transcribe_lyrics.cached_local_recognition', recognize)
     client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=remote)))
     result, recovery = transcribe(client, audio, 'en', '', output, original_audio=original, lead_audio=lead)

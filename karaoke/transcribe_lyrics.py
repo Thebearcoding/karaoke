@@ -5,6 +5,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import inspect
+from itertools import groupby
 import json
 import math
 import os
@@ -109,6 +110,19 @@ def repetition_loop(data):
     candidates = texts + ([''.join(texts)] if collapsed > len(segments)/2 else [])
     for text in candidates:
         if len(text) >= 40 and re.search(r'(.{1,32}?)\1{7,}', text):
+            return True
+    # Prompt feedback can repeat a whole phrase with positive segment spans
+    # while most of its word times collapse. Check the words across the run;
+    # normally timed refrains remain valid and no repeated text is deleted.
+    for text, indices in groupby(range(len(segments)), key=texts.__getitem__):
+        run = [segments[i] for i in indices]
+        if len(run) < 8 or len(text)*len(run) < 40:
+            continue
+        words = [w for s in run for w in s.get('words') or []]
+        if not words and all('start' in s and 'end' in s for s in run):
+            words = [w for w in data.get('words') or []
+                     if run[0]['start'] <= w['start'] <= w['end'] <= run[-1]['end']]
+        if words and sum(w['end']-w['start'] <= .001 for w in words) > len(words)/2:
             return True
     # A local burst can be much shorter than the rest of the song. Eight
     # repetitions in contiguous collapsed intervals are already unusable.
@@ -311,18 +325,16 @@ def repair_loop_window(data, audio, duration, recognize, output, local_recognize
         clip.unlink(missing_ok=True)
 
 
-def recover_audio(audio, language, duration, output, name, *, contextual=False):
+def recover_audio(audio, language, duration, output, name):
     """Recheck another track of the same recording after unusable vocal ASR."""
     import soundfile as sf
-    report = dict(source=str(audio), model='local-whisper-contextual' if contextual else 'local-large-v3-turbo',
-                  accepted=False)
+    report = dict(source=str(audio), model='local-large-v3-turbo', accepted=False)
     candidate = None
     try:
         if abs(sf.info(audio).duration-duration) > .05:
             raise ValueError('Recovery audio duration differs from the vocal recording')
         report['source_sha256'] = digest(audio)
-        candidate = (local_asr.cached_recognition(audio, language, output, contextual=True) if contextual else
-                     cached_local_recognition(audio, language, output))
+        candidate = cached_local_recognition(audio, language, output)
         if 'language_detection' in candidate:
             report['language_detection'] = candidate['language_detection']
         detected = song_language(candidate.get('language'))
@@ -391,14 +403,12 @@ def transcribe(client, audio, language, hint, output, *, allow_unresolved_text=F
                         'local-whisper-large-v3' if local_asr.offline() else 'whisper-1'), loop_repair=report)
     if repeated_tail(data) is not None and song_language(data.get('language')) is not None:
         raise ValueError('重复的结尾转录未通过局部核验，已保留诊断')
-    for contextual in ((False, True) if local_asr.offline() else (False,)):
-        for name, track in (('original', original_audio), ('lead', lead_audio)):
-            if track is not None:
-                name = ('contextual_' if contextual else '')+name
-                candidate, report = recover_audio(track, language, duration, output, name, contextual=contextual)
-                recovery[name+'_audio'] = report
-                if candidate is not None:
-                    return candidate, dict(recovery, triggered=True, text_model=report['model'])
+    for name, track in (('original', original_audio), ('lead', lead_audio)):
+        if track is not None:
+            candidate, report = recover_audio(track, language, duration, output, name)
+            recovery[name+'_audio'] = report
+            if candidate is not None:
+                return candidate, dict(recovery, triggered=True, text_model='local-large-v3-turbo')
     if local_asr.offline():
         (output/'recovery.json').write_text(json.dumps(recovery, ensure_ascii=False)+'\n')
         raise ValueError('本地 Whisper 转录及同源音轨恢复未通过校验，已保留诊断')
