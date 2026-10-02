@@ -1731,6 +1731,25 @@ def test_mixed_language_wrapping_does_not_split_a_word_at_punctuation():
             assert sum(word in line for line in lines) == 1
 
 
+@pytest.mark.parametrize('language,phrase,tail', [
+    ('Japanese', '別に大したことないよ 話すだけで十分だよ', 'よ'),
+    ('Chinese', 'You should know about it', 'it'),
+    ('English', 'One two three four five six seven eight nine ten eleven', 'eleven'),
+    ('Chinese', '甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申。', '申。'),
+])
+def test_asr_wrapping_keeps_a_singleton_tail_with_its_phrase(language, phrase, tail):
+    from copy import deepcopy
+    from karaoke.song_sources import transcript_lines
+    transcription = dict(segments=[dict(text=phrase, start=3., end=9.),
+                                   dict(text='短句', start=11., end=12.)])
+    original = deepcopy(transcription)
+    lines = transcript_lines(transcription, language)
+    assert len(lines) == 3 and tail not in lines
+    assert lines[-1] == '短句'  # Do not merge across independently observed phrases.
+    assert ''.join(''.join(lines[:-1]).split()) == ''.join(phrase.split())
+    assert transcription == original
+
+
 def test_local_preview_can_submit_cross_origin(tmp_path):
     with TestClient(create_app(tmp_path, worker_command=fake_worker, version='test')) as client:
         headers = {'Origin': 'http://127.0.0.1:8745', 'Access-Control-Request-Method': 'POST',

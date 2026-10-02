@@ -54,16 +54,33 @@ def transcript_lines(transcription, language):
                         stop += 1
                     tokens.append(phrase[cursor:stop])
                     cursor = stop
-            line, size = '', 0
-            for token in tokens:
-                weight = 1 if language == 'English' else len(token.strip())
-                if line and size+weight > (10 if language == 'English' else 18) and any(c.isalnum() for c in token):
-                    lines.append(line.strip())
-                    line, size = '', 0
-                line += token
+            chunks, size = [[]], 0
+            limit = 10 if language == 'English' else 18
+            weights = [1 if language == 'English' else len(token.strip()) for token in tokens]
+            for token, weight in zip(tokens, weights):
+                if chunks[-1] and size+weight > limit and any(c.isalnum() for c in token):
+                    chunks.append([])
+                    size = 0
+                chunks[-1].append(token)
                 size += weight
-            if line.strip():
-                lines.append(line.strip())
+            # A width boundary must not strand a sung suffix on its own.
+            # Rebalance only the final pair, retaining tokens and phrase bounds.
+            if len(chunks) > 1 and sum(any(c.isalnum() for c in t) for t in chunks[-1]) == 1:
+                pair = chunks[-2]+chunks[-1]
+                widths = weights[-len(pair):]
+                spoken = [any(c.isalnum() for c in t) for t in pair]
+                total, total_units = sum(widths), sum(spoken)
+                left, units, cuts = 0, 0, []
+                for i, width in enumerate(widths):
+                    if (spoken[i] and min(units, total_units-units) >= 2
+                            and max(left, total-left) <= limit):
+                        cuts.append((abs(total-2*left), not pair[i-1][-1].isspace(), i))
+                    left += width
+                    units += spoken[i]
+                if cuts:
+                    split = min(cuts)[-1]
+                    chunks[-2:] = [pair[:split], pair[split:]]
+            lines.extend(''.join(chunk).strip() for chunk in chunks if ''.join(chunk).strip())
     lines = join_punctuation_lines(lines)
     # Whitespace is layout; every other observed character must survive exactly.
     if ''.join(''.join(lines).split()) != ''.join(''.join(texts).split()):
