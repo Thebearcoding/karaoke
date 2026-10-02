@@ -687,9 +687,13 @@ def test_online_lyric_candidate_skips_asr_only_for_interactive_playback(tmp_path
         assert 'transcribe' not in stages
         assert json.loads((tmp_path/'anchors.json').read_text()) == []
         assert not (tmp_path/'asr').exists()
-    else:
+    elif audio_only:
         with pytest.raises(StageFailure, match='ASR reached'):
             pipeline.prepare_text({}, 30, lead)
+    else:
+        with pytest.raises(StageFailure, match='未找到可靠'):
+            pipeline.prepare_text({}, 30, lead)
+        assert 'transcribe' not in stages
 
 
 def test_lyrics_first_search_uses_metadata_duration_and_retains_review_status(tmp_path, monkeypatch):
@@ -704,6 +708,7 @@ def test_lyrics_first_search_uses_metadata_duration_and_retains_review_status(tm
         queries.append(url)
         return [] if len(queries) == 1 else [dict(row, artistName='Wrong singer'), dict(row, duration=80), row]
     monkeypatch.setattr(lyric_lookup, 'read_document', fetch)
+    monkeypatch.setattr(lyric_lookup, 'fetch_published_lyrics', lambda *a: (None, dict(status='unavailable')))
     monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', lambda *a: pytest.fail('Tagged recording needs no model'))
     result = lyric_lookup.prepare_online_lyrics(dict(url=URL), dict(track='晚風', artist='林林'),
                                                30, StageCache(tmp_path), 'unused', None)
@@ -715,6 +720,43 @@ def test_lyrics_first_search_uses_metadata_duration_and_retains_review_status(tm
     assert provenance['lyric_lookup']['status'] == 'candidate'
     assert provenance['lyric_lookup']['audio_word_coverage'] is None
     assert provenance['lyric_lookup']['text_sha256'] == hashlib.sha256(row['plainLyrics'].encode()).hexdigest()
+
+
+def test_published_lyrics_use_explicit_video_credits_without_a_text_model(tmp_path, monkeypatch):
+    from karaoke import lyric_lookup
+    from karaoke.stage_cache import StageCache
+    row = dict(trackId=123, trackTitle='晚風', artists=[dict(artistName='林林')],
+               album=dict(albumTitle='春天'), lyrics='歌名：晚風\n詞曲：林林\n\n微風裡慢慢歌唱\n星光下靜靜傾聽')
+    calls = []
+    def fetch(url, *, headers):
+        calls.append(url)
+        assert headers and '/api/search/' in url
+        return dict(response=dict(result=dict(tracks=[dict(row, artists=[dict(artistName='別人')]),
+            dict(row, album=dict(albumTitle='現場演唱會')), row])))
+    monkeypatch.setattr(lyric_lookup, 'read_document', fetch)
+    monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', lambda *a: pytest.fail('Explicit credits need no model'))
+    metadata = dict(title='林林 Lin Lin【晚風 Evening Wind】-Official Music Video', uploader='Unrelated channel')
+    for _ in range(2):
+        result = lyric_lookup.prepare_online_lyrics(dict(url=URL), metadata, 350,
+                                                   StageCache(tmp_path), 'unused', None)
+    assert len(calls) == 1
+    assert result['lines'] == ['微風裡慢慢歌唱', '星光下靜靜傾聽']
+    report = result['provenance']['lyric_lookup']
+    assert report['provider'] == 'line_music' and report['excluded_credit_lines'] == [1, 2]
+    assert report['url'].endswith('/123') and not report['provider_timestamps_used']
+    assert result['provenance']['independent_asr_coverage'] is None
+
+
+@pytest.mark.parametrize('change', [dict(trackTitle='別的歌'), dict(artists=[dict(artistName='別人')]),
+    dict(album=dict(albumTitle='Live')), dict(album=dict(albumTitle='Remix')), dict(artists=None),
+    dict(lyrics=None), dict(lyrics='歌名：晚風'), dict(trackId='../other')])
+def test_published_lyrics_reject_wrong_credits_versions_and_empty_text(change):
+    from karaoke.lyric_lookup import published_candidate
+    row = dict(trackId=123, trackTitle='晚風', artists=[dict(artistName='林林')],
+               album=dict(albumTitle='春天'), lyrics='微風裡慢慢歌唱')
+    song = dict(title='晚風', artist='林林')
+    assert published_candidate([row], song, 'Official Music Video')[0]
+    assert published_candidate([dict(row, **change)], song, 'Official Music Video')[0] is None
 
 
 @pytest.mark.parametrize('empty_anchor_file', [False, True])
@@ -1172,7 +1214,7 @@ def test_download_publishes_metadata_before_separation(tmp_path, monkeypatch, ca
 ])
 def test_asr_detects_language_unless_requested(tmp_path, monkeypatch, metadata, requested, display, expected):
     assert video_song_info(metadata).get('language') == display
-    pipeline = Pipeline(dict(url=URL, language=requested), tmp_path)
+    pipeline = Pipeline(dict(url=URL, language=requested), tmp_path, audio_only=True)
     calls = []
     class TranscriptionRequested(Exception):
         pass
@@ -1331,6 +1373,23 @@ def test_playback_fallback_preserves_other_lines_highlights(tmp_path, bad):
     assert quality['playback_fallback']['unhighlighted_lines'] == [1]
     assert quality['playback_fallback']['word_alignment_passed'] is False
     assert quality['onset_accuracy'] is None
+
+
+def test_playback_fallback_keeps_unverified_asr_draft_out_of_subtitles(tmp_path):
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    draft = dict(title='Example', artist='', language='Chinese', lines=['猜測的文字'],
+                 provenance=dict(kind='asr_draft', needs_review=True))
+    (tmp_path/'lyrics.json').write_text(json.dumps(draft))
+    cue = dict(text=draft['lines'][0], start=0, end=2, status='candidate', units=[])
+    pipeline.aligned_cues = [cue]
+    (tmp_path/'alignment').mkdir()
+    (tmp_path/'alignment/cues.json').write_text(json.dumps([cue]))
+    (tmp_path/'anchors.json').write_text(json.dumps([cue]))
+    pipeline.playback_fallback({}, 3, StageFailure('align_words', 'unresolved'))
+    assert json.loads((tmp_path/'cues.json').read_text()) == []
+    assert json.loads((tmp_path/'lyrics.json').read_text()) == draft
+    warning = json.loads((tmp_path/'playback-warning.json').read_text())
+    assert warning['subtitle_mode'] == 'unavailable' and warning['unverified_asr_text_omitted']
 
 
 def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv(tmp_path, monkeypatch):
@@ -4110,14 +4169,20 @@ def test_bilibili_verification_uses_certification_not_self_description(monkeypat
     asyncio.run(scenario())
 
 
-def test_official_search_keeps_only_a_few_releases_without_padding():
+def test_search_keeps_provider_order_when_original_has_no_channel_badge():
     from karaoke.video_search import search_results
     def item(index, **extra):
         return dict(url=f'https://www.youtube.com/watch?v={index:011d}', title=f'Cover {index}',
                     channel_is_official_artist=True, **extra)
     found = search_results('youtube', [item(i) for i in range(12)])
     assert [x['title'] for x in found] == ['Cover 0', 'Cover 1', 'Cover 2']
-    assert len(search_results('youtube', [item(0), {'url':URL,'title':'A fan upload'}])) == 1
+    original = dict(url=URL, title='The song (Official music video)', channel='A broadcaster',
+                    channel_is_verified=None, channel_is_official_artist=False)
+    cover = dict(item(1), title='The song (Cover)')
+    found = search_results('youtube', [original, cover, dict(item(2), title='Unrelated song')], 'The song')
+    assert [x['url'] for x in found] == [URL, cover['url']]
+    assert found[0]['official_evidence'] is None
+    assert found[1]['official_evidence'] == 'youtube_official_artist_channel'
 
 
 @pytest.mark.parametrize('query,title,channel,expected', [

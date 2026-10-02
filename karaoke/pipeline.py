@@ -458,12 +458,13 @@ class Pipeline:
         self.run('resample_vocals', ['ffmpeg', '-v', 'error', '-nostdin', '-i', self.vocals,
             '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', self.output/'vocals-16k.wav',
             '-ar', '16000', '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '64k', self.output/'vocals-asr.mp3'])
-        if not self.audio_only and not local_asr.offline():
+        if not self.audio_only:
             from .lyric_lookup import prepare_online_lyrics
             self.phase('prepare_lyrics', True)
             try:
-                lyrics = prepare_online_lyrics(self.request, metadata, duration, self.checkpoints,
-                                               self.text_model, self.catalog_root)
+                lyrics = (prepare_online_lyrics(self.request, metadata, duration, self.checkpoints,
+                                                self.text_model, self.catalog_root)
+                          if not local_asr.offline() or self.request.get('lyrics') else None)
                 if lyrics is not None:
                     write_json(self.output/'lyrics.json', lyrics)
                     # An empty anchor list selects direct acoustic alignment.
@@ -471,6 +472,7 @@ class Pipeline:
                     write_json(self.output/'anchors.json', [])
                     self.phase(song_info={key: lyrics[key] for key in ('title', 'artist', 'language')})
                     return lyrics
+                raise StageFailure('prepare_lyrics', '未找到可靠的已发表歌词；保留音轨，暂不生成猜测歌词')
             finally:
                 self.phase('prepare_lyrics', False)
         language = self.request.get('language') or 'auto'
@@ -820,7 +822,8 @@ class Pipeline:
         except (OSError, ValueError):
             pass
         cues, source = [], None
-        for name in ('final_alignment', 'alignment/cues.json', 'anchors.json'):
+        unverified_draft = lyrics.get('provenance', {}).get('kind') == 'asr_draft'
+        for name in (() if unverified_draft else ('final_alignment', 'alignment/cues.json', 'anchors.json')):
             path = self.output/name
             if name != 'final_alignment' and not path.is_file():
                 continue
@@ -856,6 +859,8 @@ class Pipeline:
                        subtitle_mode='partial_word' if units else 'line' if cues else 'unavailable',
                        phrase_timing_source=source, word_alignment_passed=False,
                        unhighlighted_lines=[i for i, c in enumerate(cues, 1) if not c['units']])
+        if unverified_draft:
+            warning['unverified_asr_text_omitted'] = True
         write_json(self.output/'playback-warning.json', warning)
         write_json(self.output/'cues.json', cues)
         write_json(self.output/'quality.json', dict(lines=len(cues), units=units,

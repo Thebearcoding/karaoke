@@ -32,9 +32,9 @@ def manual_track(metadata, language):
     return None
 
 
-def read_document(url):
+def read_document(url, *, headers=None):
     with httpx.stream('GET', url, timeout=20, follow_redirects=False,
-                      headers={'User-Agent': 'Mozilla/5.0'}) as response:
+                      headers={'User-Agent': 'Mozilla/5.0', **(headers or {})}) as response:
         response.raise_for_status()
         body = bytearray()
         for part in response.iter_bytes():

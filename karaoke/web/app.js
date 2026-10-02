@@ -131,7 +131,7 @@ function renderVideoResults(providers) {
   youtubePending = providers.youtube.loading;
   $('video-results').hidden = false;
   $('local-library').hidden = true;
-  $('search-status').innerHTML = Object.entries(providers).map(([name, info]) => `<span class="${info.error ? 'search-error' : ''}">${providerName(name)} · ${info.loading ? '搜索中…' : info.error ? escape(info.error) : info.results.length ? `${info.results.length} ${name === 'local' ? '首' : '个视频'}` : name === 'local' ? '未找到' : '未找到官方版本'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`).join('');
+  $('search-status').innerHTML = Object.entries(providers).map(([name, info]) => `<span class="${info.error ? 'search-error' : ''}">${providerName(name)} · ${info.loading ? '搜索中…' : info.error ? escape(info.error) : info.results.length ? `${info.results.length} ${name === 'local' ? '首' : '个视频'}` : name === 'local' ? '未找到' : '未找到匹配的视频'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`).join('');
   const songs = Object.values(providers).flatMap(info => info.results);
   const order = {local:0, youtube:1, bilibili:2};
   // Keep provider ranking independent of response order, without replacing cards.

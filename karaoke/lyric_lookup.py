@@ -134,6 +134,92 @@ def text_language(text):
     return None
 
 
+def published_candidate(rows, song, source_title):
+    """Select published text; recording onsets still come entirely from our audio."""
+    def versions(text):
+        text = OpenCC('tw2s').convert(text or '').casefold()
+        return {kind for kind, pattern in (
+            ('live', r'\blive\b|演唱会|现场'), ('remix', r'\bremix\b|混音'),
+            ('acoustic', r'\bacoustic\b'), ('instrumental', r'\binstrumental\b|纯音乐'),
+            ('karaoke', r'\bkaraoke\b|伴奏版')) if re.search(pattern, text)}
+
+    expected_versions = versions(source_title) | versions(song['title'])
+    for row in rows:
+        title = row.get('trackTitle')
+        if not isinstance(title, str) or not isinstance(row.get('artists'), list) or not isinstance(row.get('album'), dict):
+            continue
+        artists = [a.get('artistName') for a in row['artists'] if isinstance(a, dict)]
+        album = row['album'].get('albumTitle', '')
+        if not isinstance(album, str):
+            continue
+        if (not identity(song['title'], title=True) & identity(title, title=True) or
+                not any(identity(song['artist']) & identity(a) for a in artists) or
+                versions((title or '')+' '+album) != expected_versions):
+            continue
+        performance = live_performance(source_title)
+        if performance and performance not in (live_performance(title), live_performance(album)):
+            continue
+        text = row.get('lyrics')
+        if not isinstance(text, str) or not text.strip() or len(text) > 30000:
+            continue
+        lines, excluded = [], []
+        for number, line in enumerate(text.splitlines(), 1):
+            if not line.strip():
+                continue
+            if not lines and re.match(
+                    r'^\s*(?:歌名|詞曲|词曲|作詞|作词|作曲|編曲|编曲|演唱|專輯|专辑|發行日|发行日|'
+                    r'title|artist|album|composer|lyricist)\s*[：:]', line, re.I):
+                excluded.append(number)
+            else:
+                lines.append(line.strip())
+        language = song.get('language') or text_language('\n'.join(lines))
+        if not lines or language is None or any('[' in line or ']' in line for line in lines):
+            continue
+        lines = transcript_lines(dict(text='\n'.join(lines)), language)
+        track_id = str(row.get('trackId', ''))
+        if not track_id.isdigit() or len(lines) > 1000 or any(len(line) > 200 for line in lines):
+            continue
+        return lines, dict(status='candidate', provider='line_music', language=language,
+            url='https://music-tw.line.me/track/'+track_id, track=title, artists=artists, album=album,
+            text_sha256=hashlib.sha256(text.encode()).hexdigest(), excluded_credit_lines=excluded,
+            text_transform='leading_metadata_removed_then_whitespace_only', provider_timestamps_used=False)
+    return None, dict(status='no_matching_published_text', provider='line_music')
+
+
+def fetch_published_lyrics(song, source_title, cache):
+    if not song.get('title') or not song.get('artist'):
+        return None, dict(status='missing_identity', provider='line_music')
+    path, stage = cache.root/'published-lyrics.json', 'fetch_published_lyrics'
+    query = ' '.join((names(song['title'])[-1], names(song['artist'])[-1]))
+    try:
+        old = json.loads(path.read_text())
+        if old.get('retry_at') is not None and old['retry_at'] <= time.time():
+            (cache.directory/(stage+'.json')).unlink(missing_ok=True)
+    except (OSError, ValueError, TypeError):
+        pass
+    with cache.stage(stage, inputs=[Path(__file__)], outputs=[path], config=dict(song=song, source_title=source_title),
+                     code=[Path(__file__), Path(__file__).with_name('source_captions.py')]) as reused:
+        if not reused:
+            try:
+                response = read_document('https://music-tw.line.me/api/search/v4/track.json?'+urlencode(
+                    dict(query=query, start=1, display=30, sort='RELEVANCE')),
+                    headers={'CHANNEL-ID': '1581655766'})
+                rows = response['response']['result']['tracks']
+                if not isinstance(rows, list) or len(rows) > 30 or any(not isinstance(r, dict) for r in rows):
+                    raise ValueError('Invalid published lyric response')
+                lines, report = published_candidate(rows, song, source_title)
+                packet = dict(lines=lines, report=report)
+            except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
+                status = getattr(getattr(error, 'response', None), 'status_code', None)
+                transient = isinstance(error, httpx.TransportError) or status == 429 or (status or 0) >= 500
+                packet = dict(lines=None, report=dict(status='unavailable', provider='line_music',
+                    error=type(error).__name__, http_status=status),
+                    retry_at=time.time()+max(30, retry_after_seconds(error) or 0) if transient else None)
+            path.write_text(json.dumps(packet, ensure_ascii=False)+'\n')
+    packet = json.loads(path.read_text())
+    return packet['lines'], packet['report']
+
+
 def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_root):
     """Find supplied text before ASR; this is a candidate, not independent audio validation."""
     song = video_song_info(metadata)
@@ -150,7 +236,8 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
         evidence['description_lines'] = [dict(number=i+1, text=line) for i, line in enumerate(description_lines)]
         from openai import OpenAIError
         try:
-            packet = (dict(parsed=None) if metadata.get('track') and song['artist'] else
+            packet = (dict(parsed=None) if song['artist'] and (metadata.get('track') or
+                      song['title'] != metadata.get('title') or request.get('title') and request.get('artist')) else
                       extract_song_metadata(evidence, model, cache))
             parsed = SongText.model_validate(packet['parsed']) if packet['parsed'] is not None else None
         except (OpenAIError, ValueError):
@@ -164,13 +251,17 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 provenance = dict(kind='video_description', description_sha256=hashlib.sha256(description.encode()).hexdigest(),
                                   lyric_line_numbers=selected)
         if not lines:
-            packet = fetch_lyrics(song, cache.root/'download/source.info.json', cache)
-            lines, report = lyric_candidate(packet, song, None, duration, source_title=metadata.get('title'))
+            lines, report = fetch_published_lyrics(song, metadata.get('title'), cache)
+            if not lines:
+                packet = fetch_lyrics(song, cache.root/'download/source.info.json', cache)
+                lines, fallback_report = lyric_candidate(packet, song, None, duration, source_title=metadata.get('title'))
+                report = dict(fallback_report, published_lookup=report)
             (cache.root/'lyrics-first-lookup.json').write_text(json.dumps(report, ensure_ascii=False)+'\n')
             if not lines:
                 return None
             song['language'] = report['language']
-            provenance = dict(kind='online_lyric_text', lyric_lookup=report, text_transform='whitespace_only')
+            provenance = dict(kind='online_lyric_text', lyric_lookup=report,
+                              text_transform=report.get('text_transform', 'whitespace_only'))
     language = song.get('language') or text_language(''.join(lines))
     if not language or len(lines) > 1000 or any(not line.strip() or len(line) > 200 for line in lines):
         return None

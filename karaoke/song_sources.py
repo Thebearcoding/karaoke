@@ -250,6 +250,12 @@ def video_song_info(metadata):
     info = dict(title=metadata.get('track') or metadata.get('title') or '',
                 artist=metadata.get('artist') or ' · '.join(metadata.get('artists') or []),
                 duration_seconds=metadata.get('duration') or 0)
+    # Explicit credits in a video title are usable even when the metadata API is down.
+    credit = re.fullmatch(r'\s*([^【】]+?)\s*【([^【】]+)】\s*[-–—|]?\s*'
+                         r'(?:Official\s+(?:Music\s+)?Video|Official\s+MV|官方(?:完整版)?\s*MV)\s*',
+                         metadata.get('title') or '', re.I)
+    if credit and not metadata.get('track') and not info['artist']:
+        info.update(artist=credit[1].strip(), title=credit[2].strip())
     audio_languages = {song_language(f.get('language')) for f in (metadata.get('requested_formats') or [])
                        if f.get('acodec') not in (None, 'none')}
     audio_languages.discard(None)

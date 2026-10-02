@@ -51,7 +51,7 @@ def matches_query(query, item):
 
 
 def official_source(provider, item):
-    """Conservative discovery filter; a release title alone is never evidence."""
+    """Conservative provenance annotation; a release title alone is never evidence."""
     title = unescape(re.sub(r'<[^>]*>', '', str(item.get('title') or '')))
     if _UNOFFICIAL.search(title):
         return None
@@ -128,7 +128,9 @@ def search_results(provider, entries, query=''):
         if not isinstance(item, dict) or item.get('live_status') in ('is_live', 'is_upcoming'):
             continue
         evidence = official_source(provider, item)
-        if not evidence or not matches_query(query, item):
+        # YouTube omits badges from some search results, including official releases.
+        # Keep its relevance order; unknown provenance must not promote a cover over them.
+        if (provider == 'bilibili' and not evidence) or not matches_query(query, item):
             continue
         try:
             raw_url = (f"https://www.bilibili.com/video/{item['bvid']}" if provider == 'bilibili'
