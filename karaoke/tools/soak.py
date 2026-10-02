@@ -1,5 +1,6 @@
 """Reproducible whole-song acceptance runs through the room's song queue."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from datetime import datetime, timezone
 import fcntl
@@ -312,28 +313,60 @@ def wait_job(client, base, job_id):
     raise ConnectionError('Room event stream ended before completion')
 
 
-def run_probe(client, base, folder, command):
+def run_probe(client, base, folder, command, *, resume_preparation=None):
     """Run one registered job under the live service's shared cache budget."""
     health = client.get(base+'/health').raise_for_status().json()
     job = client.get(f'{base}/v1/jobs/{folder.name}').raise_for_status().json()
     if not health.get('preparation_paused') or health.get('running_job') or job['status'] != 'queued':
         raise ValueError('Pause preparation and register a queued job before a focused probe')
+    pause = folder.parent/'preparation.pause'
+    store = None
+    if resume_preparation is not None:
+        if pause.read_text() != resume_preparation:
+            raise ValueError('Only the owner of the preparation pause may resume it')
+        from karaoke.api import Store
+        store = Store(folder.parent)
+        store.on_change = lambda: client.post(base+'/v1/room/events').raise_for_status()
     with (folder.parent/'focused-probe.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         (folder/'error.json').unlink(missing_ok=True)
-        with (folder/'probe.log').open('ab') as log:
+        with (folder/'probe.log').open('ab') as log, ThreadPoolExecutor(max_workers=1) as reader:
             process = subprocess.Popen(command, cwd=folder.parent.parent.parent,
-                stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                stdout=subprocess.PIPE if store is not None else log,
+                stderr=subprocess.STDOUT, start_new_session=True,
+                env={**os.environ, 'KARAOKE_EVENTS_STDOUT': '1',
+                     'KARAOKE_STAGE_LOCK_DIR': str(folder.parent/'stage-locks')})
             try:
+                output = None
+                if store is not None:
+                    # Claim while dispatch is paused, so the ordinary worker cannot
+                    # launch this job a second time when other songs resume.
+                    store.update(folder.name, status='running', active_stages=[], error=None)
+                    if pause.read_text() != resume_preparation:
+                        raise ValueError('Preparation pause ownership changed')
+                    pause.unlink()
+                    def read_output():
+                        for line in process.stdout:
+                            log.write(line)
+                            log.flush()
+                            if line.startswith(b'KARAOKE_PROGRESS '):
+                                progress = json.loads(line[len(b'KARAOKE_PROGRESS '):])
+                                store.update(folder.name, **{key: progress[key] for key in
+                                    ('active_stages', 'stage_progress', 'timings', 'song_info') if key in progress})
+                    output = reader.submit(read_output)
                 while True:
                     storage = client.get(base+'/v1/storage').raise_for_status().json()
                     if storage['used_bytes'] > storage['limit_bytes'] or not storage['can_prepare']:
                         raise ValueError('Focused probe reached the shared cache or free-space limit')
                     health = client.get(base+'/health').raise_for_status().json()
-                    if not health.get('preparation_paused') or health.get('running_job'):
+                    if store is None and (not health.get('preparation_paused') or health.get('running_job')):
                         raise ValueError('Preparation resumed during the focused probe')
+                    if output is not None and output.done():
+                        output.result()
                     result = process.poll()
                     if result is not None:
+                        if output is not None:
+                            output.result()
                         return result
                     time.sleep(1)
             finally:

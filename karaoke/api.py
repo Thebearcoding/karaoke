@@ -449,6 +449,13 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
         return StreamingResponse(updates.events(room.snapshot), media_type='text/event-stream',
             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
+    @app.post('/v1/room/events', status_code=204)
+    async def notify_room_events():
+        # External repair workers write the same local store, then request a
+        # fresh snapshot. This endpoint cannot supply or approve job results.
+        updates.publish()
+        return Response(status_code=204)
+
     @app.post('/v1/jobs', status_code=202)
     async def submit(payload: JobRequest, request: Request, response: Response):
         doc, cached = store.create(payload, version)

@@ -1099,6 +1099,98 @@ while not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)
     assert not first.active and not second.active
 
 
+
+def test_interactive_probe_resumes_new_songs_and_shares_stage_locks(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path
+    from karaoke.tools.soak import run_probe
+    source = str(Path(__file__).resolve().parent.parent)
+    code = r"""import json,pathlib,sys,time
+sys.path.insert(0,sys.argv[2])
+from karaoke.pipeline import Pipeline
+p=pathlib.Path(sys.argv[1])
+request=json.loads((p/'request.json').read_text())
+stage='render' if request.get('title')=='render' else 'separate_music'
+pipeline=Pipeline(request,p)
+with pipeline.stage_slot(stage):
+    pipeline.phase(stage,True)
+    (p/'entered').touch()
+    while not (p.parent/'release-all').exists() and not (p/'release').exists(): time.sleep(.01)
+    pipeline.phase(stage,False)
+(p/'media').write_text('ok')
+(p/'result.json').write_text(json.dumps({'artifacts':{n:{'path':'media','bytes':2}
+    for n in ['mv','instrumental','backing_vocals','lead_vocals']}}))
+"""
+    command = lambda folder: [sys.executable, '-u', '-c', code, str(folder), source]
+    pause = tmp_path/'preparation.pause'
+    pause.write_text('interactive repair owns this pause')
+    app = create_app(tmp_path, worker_command=command, version='test', worker_concurrency=None)
+    def wait(check):
+        deadline = time.monotonic()+10
+        while not check() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert check()
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=1) as pool:
+        repair = client.post('/v1/room/entries', json={'url':URL, 'title':'render'}).json()['entries'][-1]['job_id']
+        folder = tmp_path/repair
+        future = pool.submit(run_probe, client, 'http://testserver', folder, command(folder),
+                             resume_preparation=pause.read_text())
+        try:
+            wait(lambda: (folder/'entered').exists() and not pause.exists())
+            wait(lambda: app.state.store.read(repair).get('active_stages') == ['render'])
+            new = client.post('/v1/room/entries', json={'url':URL, 'title':'separation'}).json()['entries'][-1]['job_id']
+            wait(lambda: (tmp_path/new/'entered').exists())
+            assert not future.done() and app.state.store.read(new)['status'] == 'running'
+            assert repair not in app.state.worker.processes  # no duplicate launch
+            other = client.post('/v1/room/entries', json={'url':URL, 'title':'render', 'force':True}).json()['entries'][-1]['job_id']
+            wait(lambda: app.state.store.read(other).get('stage_progress', {}).get('render', {}).get('waiting'))
+            assert not (tmp_path/other/'entered').exists()
+            (folder/'release').touch()
+            assert future.result(timeout=10) == 0
+            wait(lambda: (tmp_path/other/'entered').exists())
+        finally:
+            (tmp_path/'release-all').touch()
+            future.result(timeout=15)
+        assert finished(client, new)['status'] == 'completed'
+        assert finished(client, other)['status'] == 'completed'
+        assert not pause.exists()
+
+
+def test_interactive_probe_cannot_resume_another_owners_pause(tmp_path):
+    from karaoke.tools.soak import run_probe
+    pause = tmp_path/'preparation.pause'
+    pause.write_text('user pause')
+    app = create_app(tmp_path, worker_command=fake_worker, version='test')
+    with TestClient(app) as client:
+        job = client.post('/v1/room/entries', json={'url':URL}).json()['entries'][-1]['job_id']
+        with pytest.raises(ValueError, match='owner'):
+            run_probe(client, 'http://testserver', tmp_path/job, fake_worker(tmp_path/job),
+                      resume_preparation='repair pause')
+        assert pause.read_text() == 'user pause'
+        assert app.state.store.read(job)['status'] == 'queued'
+
+
+def test_external_repair_notifies_subscribers_without_approving_results(tmp_path):
+    from karaoke.api import Store
+    (tmp_path/'preparation.pause').touch()
+    app = create_app(tmp_path, worker_command=fake_worker, version='test')
+    with TestClient(app) as client:
+        job = client.post('/v1/room/entries', json={'url':URL}).json()['entries'][-1]['job_id']
+        events = app.state.room.updates.events(app.state.room.snapshot)
+        client.portal.call(anext, events)
+        Store(tmp_path).update(job, status='running', active_stages=['render'])
+        pending = client.portal.start_task_soon(anext, events)
+        try:
+            assert client.post('/v1/room/events', json={'status':'completed'}).status_code == 204
+            snapshot = json.loads(pending.result(timeout=2).split('data: ', 1)[1])
+            assert snapshot['entries'][0]['active_stages'] == ['render']
+            assert snapshot['entries'][0]['status'] == 'running'
+            assert app.state.store.read(job)['result'] is None
+        finally:
+            pending.cancel()
+            client.portal.call(events.aclose)
+
+
 def test_silent_subprocess_still_obeys_timeout(tmp_path):
     pipeline = Pipeline(dict(url=URL), tmp_path)
     with pytest.raises(StageFailure, match='超过允许的处理时间'):
