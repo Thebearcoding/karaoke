@@ -100,8 +100,12 @@ function renderLibrary() {
   $('submit-song').innerHTML = `${isURL ? '加入歌单' : '搜索'} ${icon('arrow')}`;
   const search = isURL ? '' : query.toLocaleLowerCase();
   const songs = library.filter(song => (!search || search.split(/\s+/).every(word => `${song.title} ${song.artist}`.toLocaleLowerCase().includes(word))) &&
-    (search || filter === 'all' || (filter === 'ready' ? song.status === 'completed' : song.language === filter)));
-  $('library-count').textContent = `${songs.length} 首${filter === 'ready' ? '已准备' : '歌曲'}`;
+    (search || filter === 'all' || (filter === 'ready' ? ['completed', 'video_evicted'].includes(song.status) : song.language === filter)));
+  const preparedView = filter === 'ready' && !search;
+  const missingVideo = songs.filter(song => song.status === 'video_evicted').length;
+  $('library-count').textContent = preparedView && missingVideo
+    ? `${songs.length-missingVideo} 首可播放 · ${missingVideo} 首待补视频`
+    : `${songs.length} 首${preparedView ? '已准备' : '歌曲'}`;
   $('library-heading').textContent = search ? '曲库里的歌' : '曲库';
   $('local-library').hidden = Boolean(searchQuery || (search && !songs.length));
   document.querySelector('#local-library .filters').hidden = Boolean(search);
