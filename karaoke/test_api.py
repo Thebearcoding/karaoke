@@ -2563,6 +2563,62 @@ def test_asr_request_cache_checks_input_parameters_and_response(tmp_path):
     assert cached_recognition(client, audio, dict(request, prompt='new context'), output)['call'] == 4
 
 
+@pytest.mark.parametrize('scenario', ['intro', 'disagreement', 'short', 'explicit'])
+def test_local_asr_language_uses_the_recording_instead_of_only_the_intro(tmp_path, monkeypatch, scenario):
+    import torch
+    import whisper
+    from karaoke.transcribe_lyrics import cached_local_recognition
+
+    audio, weights, output = tmp_path/'audio.wav', tmp_path/'model.pt', tmp_path/'asr'
+    audio.write_bytes(b'recording')
+    weights.write_bytes(b'model')
+    output.mkdir()
+    duration = 10 if scenario == 'short' else 180
+    samples = np.arange(duration*16000, dtype=np.float32)/16000
+    windows, decodes = [], []
+    def detect(mel):
+        start = float(mel[0])
+        windows.append(start)
+        code = 'en' if start < 30 else ('zh' if scenario != 'disagreement' or start < 60
+                                       else 'ja' if start < 100 else 'en')
+        return None, {code: .99, 'fr': .01}
+    def load(*args, **kwargs):
+        return SimpleNamespace(_buffers={'alignment_heads': None}, device='cpu',
+            dims=SimpleNamespace(n_mels=128), to=lambda *a: None,
+            register_buffer=lambda *a, **k: None, detect_language=detect)
+    def transcribe(model, path, *, language, **kwargs):
+        if language is None:
+            _, probabilities = model.detect_language(torch.tensor([0.]))
+            language = max(probabilities, key=probabilities.get)
+        decodes.append(language)
+        return dict(language=language, segments=[dict(words=[dict(word='song', start=1., end=2.)])])
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
+    monkeypatch.setattr(torch.backends.mps, 'is_available', lambda: False)
+    monkeypatch.setattr(whisper, 'load_model', load)
+    monkeypatch.setattr(whisper, 'load_audio', lambda path: samples)
+    monkeypatch.setattr(whisper, 'log_mel_spectrogram', lambda pcm, *a, **k: torch.tensor([float(pcm[0])]))
+    monkeypatch.setattr(whisper, 'transcribe', transcribe)
+    language = 'en' if scenario == 'explicit' else 'auto'
+    if scenario == 'disagreement':
+        result = cached_local_recognition(audio, language, output, weights=weights)
+        assert result['language'] is None and not result['words'] and not decodes
+        before = list(windows)
+        assert cached_local_recognition(audio, language, output, weights=weights) == result
+        assert windows == before
+    else:
+        result = cached_local_recognition(audio, language, output, weights=weights)
+        assert result['language'] == ('zh' if scenario == 'intro' else 'en')
+        if scenario == 'intro':
+            assert len(windows) == 3 and min(windows) >= 30
+        elif scenario == 'explicit':
+            assert not windows
+        else:
+            assert windows == [0.]
+        before = list(windows), list(decodes)
+        assert cached_local_recognition(audio, language, output, weights=weights) == result
+        assert (windows, decodes) == before
+
+
 @pytest.mark.parametrize('problem', [None, 'loop', 'collapsed', 'outside_audio',
                                      'wrong_language', 'unsupported_language', 'duration', 'missing_model'])
 @pytest.mark.parametrize('track', ['original', 'lead'])

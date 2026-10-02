@@ -35,6 +35,27 @@ def cached_recognition(client, audio, request, output):
     return json.loads(path.read_text())
 
 
+def recording_language(model, audio):
+    """Keep a long instrumental intro from choosing the whole song's language."""
+    import whisper
+    from whisper.audio import N_SAMPLES, SAMPLE_RATE
+    samples = whisper.load_audio(str(audio))
+    starts = [0] if len(samples) <= N_SAMPLES else sorted({
+        round(max(0, min(len(samples)-N_SAMPLES, len(samples)*fraction-N_SAMPLES/2)))
+        for fraction in (.25, .5, .75)})
+    windows = []
+    for start in starts:
+        clip = whisper.pad_or_trim(samples[start:start+N_SAMPLES])
+        mel = whisper.log_mel_spectrogram(clip, n_mels=model.dims.n_mels).to(model.device)
+        _, probabilities = model.detect_language(mel)
+        code = max(probabilities, key=probabilities.get)
+        windows.append(dict(start=start/SAMPLE_RATE, end=min(start+N_SAMPLES, len(samples))/SAMPLE_RATE,
+                            language=code, probability=probabilities[code]))
+    code, count = Counter(window['language'] for window in windows).most_common(1)[0]
+    selected = code if count > len(windows)/2 else None
+    return selected, dict(windows=windows, selected=selected)
+
+
 def cached_local_recognition(audio, language, output, *, weights=None):
     """Use the existing alignment model to check a short disputed ending."""
     from importlib.metadata import version
@@ -42,6 +63,7 @@ def cached_local_recognition(audio, language, output, *, weights=None):
     if not weights.is_file():
         raise ValueError('Local ASR repair requires the installed large-v3-turbo alignment model')
     config = dict(language=language, implementation=inspect.getsource(cached_local_recognition),
+                  language_detection=inspect.getsource(recording_language) if language == 'auto' else None,
                   packages={name: version(name) for name in ('openai-whisper', 'torch')})
     key = hashlib.sha256((digest(audio)+json.dumps(config, sort_keys=True)).encode()).hexdigest()[:16]
     path = output.parent/'asr-requests'/('local-'+key+'.json')
@@ -61,9 +83,16 @@ def cached_local_recognition(audio, language, output, *, weights=None):
             model.register_buffer('alignment_heads', heads, persistent=False)
             if device == 'mps':
                 timing.dtw = lambda matrix: timing.dtw_cpu(matrix.detach().cpu().double().numpy())
-            code = None if language == 'auto' else {'Chinese': 'zh', 'Japanese': 'ja', 'English': 'en'}[song_language(language)]
-            data = whisper.transcribe(model, str(audio), language=code, fp16=False,
+            detection = None
+            if language == 'auto':
+                code, detection = recording_language(model, audio)
+            else:
+                code = {'Chinese': 'zh', 'Japanese': 'ja', 'English': 'en'}[song_language(language)]
+            data = (whisper.transcribe(model, str(audio), language=code, fp16=False,
                 temperature=0, condition_on_previous_text=False, word_timestamps=True, verbose=False)
+                if code is not None else dict(language=None, text='', segments=[]))
+            if detection is not None:
+                data['language_detection'] = detection
             data['words'] = [word for segment in data['segments'] for word in segment['words']]
             path.write_text(json.dumps(data, ensure_ascii=False)+'\n')
     return json.loads(path.read_text())
@@ -289,6 +318,8 @@ def recover_audio(audio, language, duration, output, name):
             raise ValueError('Recovery audio duration differs from the vocal recording')
         report['source_sha256'] = digest(audio)
         candidate = cached_local_recognition(audio, language, output)
+        if 'language_detection' in candidate:
+            report['language_detection'] = candidate['language_detection']
         detected = song_language(candidate.get('language'))
         if detected is None or (language != 'auto' and detected != song_language(language)):
             raise ValueError('Recovery audio has an unsupported or conflicting language')
