@@ -441,8 +441,9 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     assert calls == ['transcribe']
 
 
-@pytest.mark.parametrize('formatting', ['lyrics', 'symbols', 'annotations'])
+@pytest.mark.parametrize('formatting', ['lyrics', 'symbols', 'annotations', 'unavailable'])
 def test_manual_source_captions_are_cached_and_replace_an_asr_draft(tmp_path, monkeypatch, formatting):
+    import httpx
     import soundfile as sf
     from karaoke import source_captions, pipeline as module
     pipeline = Pipeline(dict(url=URL), tmp_path)
@@ -460,6 +461,8 @@ def test_manual_source_captions_are_cached_and_replace_an_asr_draft(tmp_path, mo
     calls = []
     def fetch(url):
         calls.append(url)
+        if formatting == 'unavailable':
+            httpx.Response(404, request=httpx.Request('GET', url)).raise_for_status()
         return document
     monkeypatch.setattr(source_captions, 'read_document', fetch)
     path = source_captions.fetch_manual_captions(info, 'Chinese', pipeline.checkpoints)
@@ -479,18 +482,23 @@ def test_manual_source_captions_are_cached_and_replace_an_asr_draft(tmp_path, mo
     pipeline.prepare_lyrics(metadata, 14)
     result = json.loads((tmp_path/'lyrics.json').read_text())
     anchors = json.loads((tmp_path/'anchors.json').read_text())
-    assert result['provenance']['kind'] == ('asr_draft' if formatting == 'annotations' else 'source_manual_subtitles')
+    assert result['provenance']['kind'] == ('asr_draft' if formatting in ('annotations', 'unavailable')
+                                           else 'source_manual_subtitles')
     assert result['lines'] == expected
     if formatting == 'annotations':
         assert result['provenance']['source_captions']['status'] == 'unsupported_caption_annotations'
+    elif formatting == 'unavailable':
+        assert result['provenance']['source_captions'] == dict(status='unavailable',
+            error=dict(type='HTTPStatusError', status=404), retry_at=None)
     else:
         assert ''.join(expected) == ''.join(displayed)
     assert all(any(c.isalnum() for c in line) for line in result['lines'])
     assert [a['start'] for a in anchors] == [10,11,12]
     unrelated = dict(transcription, words=[dict(word='完全無關的內容',start=1,end=2)])
     candidate, report = source_captions.caption_candidate(json.loads(path.read_text()), unrelated, 'Chinese', 14)
-    assert candidate is None and report['status'] == ('unsupported_caption_annotations'
-        if formatting == 'annotations' else 'insufficient_audio_support')
+    assert candidate is None and report['status'] == {
+        'annotations': 'unsupported_caption_annotations', 'unavailable': 'unavailable'
+    }.get(formatting, 'insufficient_audio_support')
     # Never override explicit lyrics, even with a matching publisher track.
     draft['provenance']['kind'] = 'user_supplied'
     pipeline.prepare_lyrics(metadata, 14)
@@ -528,6 +536,9 @@ def test_manual_caption_failure_obeys_backoff_and_keeps_cached_diagnostics(tmp_p
     cache = StageCache(tmp_path)
     path = source_captions.fetch_manual_captions(info, 'English', cache)
     assert json.loads(path.read_text())['retry_at'] == 1900.
+    candidate, report = source_captions.caption_candidate(json.loads(path.read_text()), {}, 'English', 10)
+    assert candidate is None and report == dict(status='unavailable',
+        error=dict(type='HTTPStatusError', status=429), retry_at=1900.)
     assert path.name in retained_files(tmp_path)
     source_captions.fetch_manual_captions(info, 'English', cache)
     assert len(calls) == 1

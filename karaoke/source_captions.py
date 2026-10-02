@@ -79,7 +79,7 @@ def caption_candidate(packet, transcription, language, duration):
     from rapidfuzz.distance import Levenshtein
     from .song_sources import transcript_lines
     if packet.get('error'):
-        return None, dict(status='unavailable', **packet['error'], retry_at=packet.get('retry_at'))
+        return None, dict(status='unavailable', error=packet['error'], retry_at=packet.get('retry_at'))
     if song_language(packet.get('language')) != language:
         return None, dict(status='wrong_caption_language')
     texts = []
