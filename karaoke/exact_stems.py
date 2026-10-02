@@ -153,8 +153,10 @@ def encode_preview(source, output, gain, frames, channels):
     # spans two MP3 frames. FFmpeg's wrapper can truncate that count.
     with tempfile.TemporaryDirectory(prefix='.preview-', dir=Path(output).parent) as directory:
         scaled = Path(directory)/'scaled.wav'
+        # libsndfile-enabled LAME frontends peak-normalize floating WAV input.
+        # Integer PCM preserves the shared gain on both Linux and macOS.
         subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(source),
-            '-af', f'volume={gain:.17g}:precision=double', '-c:a', 'pcm_f32le', str(scaled)], check=True)
+            '-af', f'volume={gain:.17g}:precision=double', '-c:a', 'pcm_s24le', str(scaled)], check=True)
         subprocess.run(['lame', '--silent', '--noreplaygain', '-V', '2', str(scaled), str(output)], check=True)
     return validate_preview(output, frames, channels, info.samplerate)
 

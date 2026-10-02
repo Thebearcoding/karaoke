@@ -2334,6 +2334,8 @@ def test_preview_encoder_preserves_partial_final_frames(tmp_path, rate, frames, 
     assert report['decoded_length_delta_samples'] == 0
     assert report['padding_peak'] == 0
     assert .04 < report['decoded_peak'] < .06
+    quieter = encode_preview(source, tmp_path/'quieter.mp3', .25, frames, channels)
+    assert quieter['decoded_peak'] == pytest.approx(report['decoded_peak']*.5, rel=.05)
     assert sf.info(source).frames == frames and sf.info(source).subtype == 'DOUBLE'
 
 
