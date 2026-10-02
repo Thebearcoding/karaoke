@@ -33,6 +33,37 @@ def snr(reference, error):
                             (np.sum(error.astype(float)**2)+1e-20)))
 
 
+def demix_batched(instance, mix, batch_size):
+    """Batch single-target RoFormer windows without changing overlap or precision."""
+    import torch
+    from scipy.signal.windows import hamming
+    cfg = instance.model_data_cfgdict
+    if not instance.is_roformer or not cfg.training.target_instrument or instance.pitch_shift:
+        raise ValueError('Batched inference requires a single-target RoFormer without pitch shift')
+    chunk = int(cfg.model.stft_hop_length) * (int(cfg.inference.dim_t)-1)
+    step = min(int(instance.overlap * cfg.audio.sample_rate), chunk)
+    if batch_size < 1 or step < 1 or mix.shape[-1] < chunk:
+        raise ValueError('Invalid batch, overlap, or unpadded audio')
+    audio = torch.as_tensor(mix, dtype=torch.float32)
+    result, counter = torch.zeros_like(audio), torch.zeros_like(audio)
+    window = torch.tensor(hamming(chunk), dtype=torch.float32)
+    # Preserve the pinned runner's final repeated window and addition order.
+    starts = [min(i, audio.shape[-1]-chunk) for i in range(0, audio.shape[-1], step)]
+    device = next(instance.model_run.parameters()).device
+    for first in progress_items(range(0, len(starts), batch_size)):
+        positions = starts[first:first+batch_size]
+        inputs = torch.stack([audio[:, i:i+chunk] for i in positions]).to(device)
+        with torch.inference_mode():
+            outputs = instance.model_run(inputs).cpu()
+        if outputs.shape != inputs.shape:
+            raise ValueError('Unexpected single-target RoFormer output shape')
+        for i, output in zip(positions, outputs):
+            result[:, i:i+chunk] += output * window
+            counter[:, i:i+chunk] += window
+    primary = (result / counter.clamp(min=1e-10)).numpy()
+    return {cfg.training.target_instrument: primary, instance.secondary_stem_name: mix-primary}
+
+
 def run_cases(infer, output, metadata, cases_path=EXPERIMENT/'inputs.json'):
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f'Refusing to overwrite experiment output: {output}')
@@ -85,7 +116,10 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--inputs', type=Path, default=EXPERIMENT/'inputs.json')
     parser.add_argument('--device', choices=['auto', 'cpu', 'mps', 'cuda'], default='mps')
+    parser.add_argument('--batch-size', type=int, default=1, help='Audio windows per forward pass')
     args = parser.parse_args()
+    if args.batch_size < 1:
+        parser.error('--batch-size must be positive')
     os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
     os.environ.setdefault('NUMBA_CACHE_DIR', str(ROOT/'.cache/numba'))
     import torch
@@ -110,7 +144,7 @@ def main():
         output_dir=str(args.output), output_format='WAV', use_soundfile=True,
         normalization_threshold=1.0, amplification_threshold=0.0, use_autocast=False,
         mdxc_params={'segment_size': 256, 'override_model_segment_size': False,
-                     'batch_size': 1, 'overlap': 2, 'pitch_shift': 0})
+                     'batch_size': args.batch_size, 'overlap': 2, 'pitch_shift': 0})
     separator.torch_device = torch.device(device)
     separator.torch_device_mps = torch.device('mps') if device == 'mps' else None
     original_loader = separator.load_model_data_from_yaml
@@ -148,7 +182,9 @@ def main():
         # for inputs shorter than one window and protects the scored boundaries.
         padded = np.pad((x*gain).T, ((0, 0), (pad, pad)), mode='reflect')
         with torch.inference_mode():
-            stems = instance.demix(np.ascontiguousarray(padded))
+            samples = np.ascontiguousarray(padded)
+            stems = (instance.demix(samples) if args.batch_size == 1 else
+                     demix_batched(instance, samples, args.batch_size))
         report_progress(detail='整理音轨')
         vocals = np.asarray(stems[args.target_stem], dtype='float32').T[pad:pad+len(x)]/gain
         if args.export_stem:
@@ -160,7 +196,7 @@ def main():
         'output_semantics': {'vocals.wav': 'selected target stem', 'backing.wav': 'input minus selected target stem'},
         'model_sha256': sha(ROOT/'models/pretrained'/args.model),
         'audio_separator_version': version('audio-separator'), 'torch_version': torch.__version__,
-        'device': device, 'load_seconds_excluding_imports': load_seconds,
+        'device': device, 'batch_size': args.batch_size, 'load_seconds_excluding_imports': load_seconds,
         'chunk_samples': chunk, 'hop_samples': chunk//2, 'reflection_pad_samples_each_side': chunk//2,
         'input_gain': 'min(1, 0.7 / peak); restored for every stem',
         'export': 'Float WAV, no independent normalization or time alignment',

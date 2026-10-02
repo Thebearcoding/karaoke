@@ -272,6 +272,25 @@ MP3 试听使用 LAME 命令行写入完整的尾部填充信息，避免某些�
 
 ## 配置
 
+### 本机下载、GPU 机器处理
+
+`python -m karaoke.tools.soak audio-fetch --manifest 固定清单 --data-dir 数据目录 --keep-going`
+只下载音频并核对来源、哈希和全长解码，沿用普通点歌注册、单实例锁及共享缓存监控。
+它将结果写入 `download_attempts`，不会写成 `passed_audio` 或完整 MV 通过；任务继续处于待处理状态。
+支持同样的 `--case-url`、`--defer-url`，批量暂停文件为清单旁的 `download.pause`。
+登录验证或来源退避必须先解决；遇登录阻塞立即停止后续下载。
+
+迁移时在目标服务正常注册同一来源，再复制该任务的 `source.json`、`download/source.mkv`
+和 `download/source.info.json` 到目标任务目录。传输前后核对来源与哈希，保留固定清单和失败历史。
+目标服务设置 `KARAOKE_REQUIRE_CACHED_SOURCE=1` 后运行原有 `audio-run`；缓存缺失或损坏立即失败，
+不会重新访问媒体下载站点。远程仍需 ASR／文本服务访问和相同模型，音频产物继续逐首完整验证。
+
+`KARAOKE_SEPARATION_BATCH_SIZE` 控制 RoFormer 每次前向计算的音频窗口数，默认 1。
+大于 1 时使用批量窗口调用，保持原窗口长度、重叠、尾窗、float32 精度和相加顺序；
+没有打开自动混合精度。该设置参与流水线版本及阶段检查点。不同硬件或 batch 的通过数不能合并。
+`benchmark_neural.py --inputs` 也支持多条输入共用一次模型加载。ASR 和对齐仍走各自流程，
+不能把分离的 batch 设置称为整条流水线批处理；吞吐提升须在目标 GPU 上实测。
+
 | 环境变量 | 说明 |
 |---|---|
 | `OPENAI_API_KEY` | ASR 和自动歌词整理需要 |
@@ -284,6 +303,8 @@ MP3 试听使用 LAME 命令行写入完整的尾部填充信息，避免某些�
 | `KARAOKE_CORS_ORIGINS` | 允许调用接口的前端来源，逗号分隔；默认允许本地 8745 预览页 |
 | `KARAOKE_DEVICE` | 默认 `auto`：CUDA → MPS → CPU；也可显式指定 |
 | `KARAOKE_SEPARATOR_PYTHON` | 分离环境的 Python；本机默认复用已有 `audio/.venv-separator-local` |
+| `KARAOKE_SEPARATION_BATCH_SIZE` | 分离窗口批量大小，默认 `1`；按显存实测选择 |
+| `KARAOKE_REQUIRE_CACHED_SOURCE` | `1` 时只接受同源且哈希完整的媒体缓存，不重新下载媒体 |
 | `KARAOKE_MAX_DURATION_SECONDS` | 默认 `900` |
 | `KARAOKE_COOKIES_FILE` | 可选的 yt-dlp cookies 文件，用于需要登录的视频；不会自动读取浏览器 cookies |
 | `KARAOKE_FONT_FILE` | 可选的完整字体路径；Linux 可使用覆盖对应语言的 Noto Serif CJK 字体 |

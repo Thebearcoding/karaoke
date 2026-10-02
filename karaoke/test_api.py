@@ -1098,9 +1098,14 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
         words=[dict(word='Hello', start=.1, end=.8)], status='complete', expansions=[])))
     (folder/'quality.json').write_text(json.dumps(dict(english_context_scope=[[0, 1, 0, 1, 0., 1.]])))
     monkeypatch.setenv('OPENAI_API_KEY','unit-test-placeholder')
+    monkeypatch.setenv('KARAOKE_SEPARATION_BATCH_SIZE', '4')
     monkeypatch.setattr(pipeline, 'download', lambda: ({'format_id':'a1'},1))
     stages=[]
-    monkeypatch.setattr(pipeline, 'run', lambda name,*args,**kwargs: stages.append(name))
+    def run_stage(name, command, **kwargs):
+        stages.append(name)
+        if name.startswith('separate_'):
+            assert command[command.index('--batch-size')+1] == '4'
+    monkeypatch.setattr(pipeline, 'run', run_stage)
     monkeypatch.setattr(pipeline, 'prepare_text', lambda *args: dict(title='Example',artist='',language='English'))
     monkeypatch.setattr(pipeline, 'align', lambda *args: stages.append('align'))
     monkeypatch.setattr(pipeline, 'render_video', lambda *args: pytest.fail('Audio-only test rendered a video'))
@@ -1370,6 +1375,85 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
     soak.run_audio(manifest, data, 'http://test', keep_going=True)
     assert len(calls) == 10
     assert [e['id'] for e in room.read()['entries']] == [user_entry]
+
+    # Prefetch records only download evidence and leaves inference pending.
+    # A downloaded source cannot count as audio/MV acceptance or trigger models.
+    import soundfile as sf
+    before_fetch = json.loads(manifest.read_text())
+    before_fetch['provider_backoff'] = {}
+    manifest.write_text(json.dumps(before_fetch))
+    version = 'prefetch'
+    fetched = []
+    def download(client, base, folder, command):
+        assert '--download-only' in command and '--audio-only' not in command
+        fetched.append(folder.name)
+        (folder/'download').mkdir(exist_ok=True)
+        sf.write(folder/'download/source.mkv', np.zeros((800, 1)), 8000, format='WAV')
+        source = dict(url=store.read(folder.name)['input']['url'], duration=.1,
+                      sha256=file_hash(folder/'download/source.mkv'))
+        (folder/'source.json').write_text(json.dumps(source))
+        return 0
+    monkeypatch.setattr(soak, 'run_probe', download)
+    monkeypatch.setattr(soak, 'verify_outputs', lambda *a, **k: pytest.fail('Prefetch ran audio verification'))
+    soak.run_audio(manifest, data, 'http://test', keep_going=True, download_only=True)
+    after_fetch = json.loads(manifest.read_text())
+    assert len(fetched) == 3
+    assert [c.get('audio_attempts') for c in after_fetch['cases']] == [c.get('audio_attempts') for c in before_fetch['cases']]
+    assert all(c['attempts'] == [] and c['download_attempts'][-1]['status'] == 'downloaded_audio'
+               for c in after_fetch['cases'])
+    assert all(store.read(job_id)['status'] == 'queued' for job_id in fetched)
+    assert [e['id'] for e in room.read()['entries']] == [user_entry]
+    soak.run_audio(manifest, data, 'http://test', keep_going=True, download_only=True)
+    assert len(fetched) == 3
+
+
+@pytest.mark.parametrize('cache_state', ['valid', 'missing', 'corrupt', 'different_source'])
+def test_offline_pipeline_requires_verified_source_without_downloading(tmp_path, monkeypatch, cache_state):
+    monkeypatch.setenv('KARAOKE_REQUIRE_CACHED_SOURCE', '1')
+    pipeline = Pipeline(dict(url=URL), tmp_path, audio_only=True)
+    monkeypatch.setattr(pipeline, 'run', lambda *a, **k: pytest.fail('Offline run contacted provider'))
+    if cache_state != 'missing':
+        (tmp_path/'download').mkdir()
+        pipeline.source.write_bytes(b'cached source')
+        (tmp_path/'download/source.info.json').write_text('{}')
+        (tmp_path/'source.json').write_text(json.dumps(dict(
+            url=URL if cache_state != 'different_source' else 'https://www.youtube.com/watch?v=00000000000',
+            sha256=file_hash(pipeline.source) if cache_state != 'corrupt' else 'wrong',
+            duration=10, audio_only=True)))
+    if cache_state == 'valid':
+        assert pipeline.download() == ({}, 10)
+    else:
+        with pytest.raises(StageFailure, match='离线处理'):
+            pipeline.download()
+    if cache_state != 'missing':
+        assert pipeline.source.read_bytes() == b'cached source'
+
+
+def test_roformer_batches_preserve_window_boundaries_and_partial_tail():
+    import torch
+    from karaoke.benchmark_neural import demix_batched
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(.25))
+            self.batches = []
+        def forward(self, x):
+            self.batches.append(len(x))
+            # A context-dependent result exposes misplaced/omitted windows.
+            return x*self.weight + x.mean(dim=-1, keepdim=True)
+    cfg = SimpleNamespace(training=SimpleNamespace(target_instrument='vocals'),
+        model=SimpleNamespace(stft_hop_length=2), inference=SimpleNamespace(dim_t=9),
+        audio=SimpleNamespace(sample_rate=8))
+    instance = SimpleNamespace(model_data_cfgdict=cfg, model_run=Model(),
+        is_roformer=True, pitch_shift=0, overlap=1, secondary_stem_name='other')
+    audio = np.random.default_rng(7).normal(size=(2, 61)).astype('float32')
+    expected = demix_batched(instance, audio, 1)
+    instance.model_run.batches.clear()
+    actual = demix_batched(instance, audio, 3)
+    assert instance.model_run.batches == [3, 3, 2]
+    for stem in expected:
+        np.testing.assert_array_equal(actual[stem], expected[stem])
+    np.testing.assert_allclose(actual['vocals']+actual['other'], audio, atol=2e-7)
 
 
 @pytest.mark.parametrize('retry_at,old_repaired,keep_going,expected_index', [

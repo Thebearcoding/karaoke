@@ -311,6 +311,8 @@ class Pipeline:
                     create_poster(self.video, self.output/'poster.jpg', seconds=min(30, source['duration']*.1))
                 self.timings['reuse_download'] = round(time.perf_counter()-started, 3)
                 return metadata, source['duration']
+        if os.getenv('KARAOKE_REQUIRE_CACHED_SOURCE') == '1':
+            raise StageFailure('download', '离线处理需要同源、哈希有效的完整音频缓存')
         if (self.output/'download').exists():
             shutil.rmtree(self.output/'download')
         (self.output/'download').mkdir()
@@ -674,7 +676,8 @@ class Pipeline:
             '-map', '0:a:0', '-ar', '44100', '-ac', '2', '-c:a', 'pcm_f32le', audio])
         self.inputs(audio, 'mixture-inputs.json')
         duration = sf.info(audio).duration
-        common = [self.separator_python, '-u', ROOT/'benchmark_neural.py', '--device', self.device]
+        common = [self.separator_python, '-u', ROOT/'benchmark_neural.py', '--device', self.device,
+                  '--batch-size', os.getenv('KARAOKE_SEPARATION_BATCH_SIZE', '1')]
         self.run('separate_music', common + ['--model', 'vocals_mel_band_roformer.ckpt', '--config',
             ROOT/'models/pretrained/vocals_mel_band_roformer.yaml', '--inputs', self.output/'mixture-inputs.json',
             '--output', self.output/'music-separation'])
@@ -781,15 +784,19 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--restore-video', action='store_true')
     parser.add_argument('--audio-only', action='store_true', help='Test all audio/subtitle stages without downloading or rendering video')
+    parser.add_argument('--download-only', action='store_true', help='Cache the source audio without running inference')
     args = parser.parse_args()
     pipeline = Pipeline(json.loads(args.request.read_text()), args.output,
         separator_python=os.getenv('KARAOKE_SEPARATOR_PYTHON'), device=os.getenv('KARAOKE_DEVICE', 'auto'),
         text_model=os.getenv('KARAOKE_TEXT_MODEL', 'gpt-5-mini'),
         max_duration=int(os.getenv('KARAOKE_MAX_DURATION_SECONDS', '900')),
         catalog_root=None if os.getenv('KARAOKE_DISABLE_LYRIC_CATALOG') == '1' else ROOT,
-        cookies_file=os.getenv('KARAOKE_COOKIES_FILE'), audio_only=args.audio_only)
+        cookies_file=os.getenv('KARAOKE_COOKIES_FILE'), audio_only=args.audio_only or args.download_only)
     try:
-        pipeline.restore_video() if args.restore_video else pipeline.execute()
+        if args.download_only:
+            pipeline.download()
+        else:
+            pipeline.restore_video() if args.restore_video else pipeline.execute()
     except Exception as error:
         write_json(args.output/'error.json', processing_error(error, args.output))
         raise
