@@ -421,7 +421,7 @@ class SubtitleIntegrity(unittest.TestCase):
                 self.assertTrue(all(begin >= .4 for begin, _ in calls))
                 self.assertEqual(result[0], original[0])
                 if mode == 'valid':
-                    self.assertEqual([u['start'] for u in result[1]['units']], [1., 1.5, 2., 2.3])
+                    self.assertEqual([u['start'] for u in result[1]['units']], [1., 1.5, 2., 2.4])
                     self.assertEqual(result[1]['units'][0]['end'], 1.5)
                     self.assertFalse(highlight_coverage_errors(result[1:], 'Chinese'))
                     self.assertTrue(report[0]['accepted'])
@@ -440,7 +440,8 @@ class SubtitleIntegrity(unittest.TestCase):
                 dict(text='甲乙丙丁戊', aligned_start=3.1, aligned_end=4.5, units=[
                     dict(text=c, first=i, stop=i+1, start=s, end=e, timing_source='cross_model_ctc')
                     for i, (c, s, e) in enumerate(zip('甲乙丙丁戊', [3.1, 3.7, 3.9, 4.1, 4.3], [3.7, 3.9, 4.1, 4.3, 4.5]))])]
-        for mode in ('valid', 'unverified_reference', 'poor_match', 'divergent_paths',
+        for mode in ('valid', 'stale_neighbor', 'unverified_neighbor',
+                     'unverified_reference', 'poor_match', 'divergent_paths',
                      'divergent_witness', 'missing_witness', 'silent'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as folder:
                 original = Path(folder)/'original.wav'
@@ -449,12 +450,17 @@ class SubtitleIntegrity(unittest.TestCase):
                 before = copy.deepcopy(cues)
                 if mode == 'unverified_reference':
                     before[1]['units'][0]['timing_source'] = 'prior_word_fallback'
+                if mode in ('stale_neighbor', 'unverified_neighbor'):
+                    before[0]['units'][0]['end'] = before[0]['units'][1]['start'] = 1.71
+                if mode == 'unverified_neighbor':
+                    before[1]['units'][2]['timing_source'] = 'prior_word_fallback'
                 class Witness:
                     original_audio = original
 
                     def __call__(self, cue, audio):
+                        starts = [1.11, 1.71, 1.91, 2.11, 2.31]
                         values = [[dict(text=c, first=i, stop=i+1, start=s, end=s+.1)
-                                   for i, (c, s) in enumerate(zip('甲乙丙丁戊', [1.11, 1.71, 1.91, 2.11, 2.31]))]
+                                   for i, (c, s) in enumerate(zip('甲乙丙丁戊', starts))]
                                   for _ in range(2)]
                         if mode == 'divergent_witness':
                             values[1][0]['start'] += .3
@@ -468,11 +474,11 @@ class SubtitleIntegrity(unittest.TestCase):
                     shift = .8 if mode == 'divergent_paths' and len(calls) == 1 else 0.
                     return np.array([3., 4., 5.]), np.array([1., 2., 3.])+shift, .99 if mode == 'poor_match' else .01
 
-                with patch('align_repeated_lyrics.audio_features', return_value={'pitch': None, 'spectrum': None}), \
+                with patch('align_repeated_lyrics.audio_features', return_value={'pitch': np.ones((12, 600)), 'spectrum': None}), \
                      patch('align_repeated_lyrics.audio_path', side_effect=path):
                     result, reports = recover_repeated_groups(before, wave, Witness(), dict(maximum_spread_seconds=.08))
                 self.assertEqual(result[1], before[1])
-                if mode == 'valid':
+                if mode in ('valid', 'stale_neighbor'):
                     self.assertEqual(len(calls), 4)
                     self.assertTrue(reports[0]['accepted'])
                     self.assertEqual([u['start'] for u in result[0]['units']], [1.1, 1.7, 1.9, 2.1, 2.3])
@@ -480,6 +486,59 @@ class SubtitleIntegrity(unittest.TestCase):
                 else:
                     self.assertEqual(result, before)
                     self.assertFalse(any(r['accepted'] for r in reports))
+
+    def test_repeated_alignment_handles_a_key_change_without_moving_onsets(self):
+        from align_repeated_lyrics import audio_path, repeated_paths
+        # The same changing phrase returns three seconds later, two semitones
+        # higher. Timbral evidence is unchanged and supplies the key estimate.
+        rng = np.random.default_rng(53)
+        pitch = np.full((12, 300), .01)
+        for block, note in enumerate((0, 4, 7, 2, 5, 9, 0, 7, 4, 11)):
+            pitch[note, block*30:(block+1)*30] = 1.
+        pitch /= np.linalg.norm(pitch, axis=0)
+        spectrum = rng.normal(size=(12, 300))
+        features = dict(pitch=np.concatenate([pitch, np.roll(pitch, 2, axis=0)], axis=1),
+                        spectrum=np.concatenate([spectrum, spectrum], axis=1))
+        source = dict(aligned_start=1., aligned_end=2.)
+        target = dict(aligned_start=4., aligned_end=5.)
+        paths, shift = repeated_paths(features, source, target)
+        self.assertEqual(shift, 10)
+        self.assertGreater(audio_path(features['pitch'], source, target)[2], .35)
+        for _, (x, y, cost) in paths:
+            self.assertLess(cost, .01)
+            np.testing.assert_allclose(np.interp([1.1, 1.6, 1.9], x, y), [4.1, 4.6, 4.9], atol=.01)
+
+    def test_joint_recovery_can_use_one_line_when_neighboring_context_is_ambiguous(self):
+        from cjk_recovery import recover_context_groups
+        from phoneme_progress import spoken_units
+        times = {'前': (.1, .4), '甲': (1., 1.5), '乙': (1.5, 2.),
+                 '丙': (2., 2.3), '丁': (2.4, 3.), '后': (4., 4.5)}
+        def units(text):
+            return [dict(u, start=times[u['text']][0], end=times[u['text']][1])
+                    for u in spoken_units(text, 'Chinese')]
+        original = [dict(text=t, aligned_start=times[t[0]][0], aligned_end=times[t[-1]][1], units=units(t))
+                    for t in ('前', '甲乙丙丁', '后')]
+        original[1]['units'] = [dict(units('甲')[0], end=1.8),
+            dict(text='乙丙', first=1, stop=3, start=1.8, end=2.3), units('甲乙丙丁')[-1]]
+        for disagree in (False, True):
+            with self.subTest(disagree=disagree):
+                class Model:
+                    def infer(self, audio, begin, parsed, cue):
+                        values = units(cue['text'])
+                        if len(values) > 4 or disagree:
+                            values = [dict(u, start=u['start']+.2) for u in values]
+                        return dict(units=values)
+                result, reports = recover_context_groups(original, np.full(44100*6, .1), Model(),
+                    lambda cue, wave: [units(cue['text']), units(cue['text'])],
+                    dict(maximum_spread_seconds=.08, minimum_relative_rms=.03))
+                self.assertEqual(result[0], original[0])
+                self.assertEqual(result[2], original[2])
+                if disagree:
+                    self.assertEqual(result, original)
+                else:
+                    self.assertFalse(highlight_coverage_errors(result, 'Chinese'))
+                    self.assertTrue(reports[0]['accepted'])
+                    self.assertEqual(reports[0]['attempts'][-1]['context_radius'], 0)
 
     def test_alternate_witness_keeps_raw_invalid_timestamps_and_checks_word_identity(self):
         from types import SimpleNamespace

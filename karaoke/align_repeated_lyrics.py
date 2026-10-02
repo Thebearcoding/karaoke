@@ -61,16 +61,33 @@ def audio_features(audio, rate):
     return {'pitch': chroma, 'spectrum': mfcc}
 
 
-def audio_path(features, source, target):
+def audio_path(features, source, target, *, chroma_shift=0):
     import librosa
     windows = [(max(0, round((c['aligned_start']-1)*100)),
                 min(features.shape[1], round((c['aligned_end']+1)*100))) for c in (source, target)]
     (a, b), (c, d) = windows
-    distance, path = librosa.sequence.dtw(X=features[:, a:b], Y=features[:, c:d], metric='cosine',
+    target_features = np.roll(features[:, c:d], chroma_shift, axis=0) if chroma_shift else features[:, c:d]
+    distance, path = librosa.sequence.dtw(X=features[:, a:b], Y=target_features, metric='cosine',
         step_sizes_sigma=np.array([[1, 1], [1, 2], [2, 1]]), weights_add=np.array([0., .05, .05]),
         global_constraints=True, band_rad=.2)
     path = path[::-1]
     return (path[:, 0]+a)/100, (path[:, 1]+c)/100, float(distance[-1, -1]/len(path))
+
+
+def repeated_paths(features, source, target):
+    """Estimate a single key change from timbral alignment, before pitch DTW."""
+    spectrum = audio_path(features['spectrum'], source, target)
+    x, y, _ = spectrum
+    chroma = features['pitch']
+    ix = np.clip(np.rint(x*100).astype(int), 0, chroma.shape[1]-1)
+    iy = np.clip(np.rint(y*100).astype(int), 0, chroma.shape[1]-1)
+    correlations = [np.mean(np.sum(chroma[:, ix]*np.roll(chroma[:, iy], shift, axis=0), axis=0))
+                    for shift in range(12)]
+    if not np.isfinite(correlations).all():
+        raise ValueError('Invalid repeated pitch features')
+    shift = int(np.argmax(correlations))
+    pitch = audio_path(chroma, source, target, chroma_shift=shift) if shift else audio_path(chroma, source, target)
+    return [('pitch', pitch), ('spectrum', spectrum)], shift
 
 
 def reference_units(aligner, cues, index, samples, rate, language):
