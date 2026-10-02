@@ -2528,6 +2528,50 @@ def test_audio_only_failure_is_not_evicted_as_disposable_video(tmp_path):
     assert store.read(video['id'])['status'] == 'video_evicted'
 
 
+def test_offline_cache_keeps_sources_when_reclaiming_computed_audio(tmp_path, monkeypatch):
+    monkeypatch.setenv('KARAOKE_REQUIRE_CACHED_SOURCE', '1')
+    store = Store(tmp_path)
+    job, _ = store.create(JobRequest(url=URL), 'test')
+    folder = tmp_path/job['id']
+    (folder/'download').mkdir()
+    source = folder/'download/source.mkv'
+    source.write_bytes(b'cached source'*100)
+    source_sha = file_hash(source)
+    (folder/'download/source.info.json').write_text('{}')
+    (folder/'source.json').write_text(json.dumps(dict(
+        url=URL, sha256=source_sha, audio_only=True, duration=10)))
+    (folder/'alignment.json').write_text('{"reason":"unresolved"}')
+    (folder/'worker.log').write_bytes(b'x'*100000)
+    (folder/'working.wav').write_bytes(b'x'*(2*1024**2))
+    store.update(job['id'], status='failed', error=dict(code='align_words_failed'))
+    store.cache.limit = 128*1024
+    store.cache.acquire(job['id'])
+    assert not store.cache.enforce()
+    assert (folder/'working.wav').exists()  # Transfers keep the whole task protected.
+    store.cache.release(job['id'])
+    assert store.cache.enforce()
+    stats = store.cache.snapshot()
+    assert 0 < stats['used_bytes'] == stats['protected_bytes'] < store.cache.limit
+    assert stats['evictable_bytes'] == 0 and stats['can_prepare']
+    assert file_hash(source) == source_sha
+    assert not (folder/'working.wav').exists()
+    assert (folder/'alignment.json').read_text() == '{"reason":"unresolved"}'
+    assert (folder/'worker.log').stat().st_size == 65536
+    saved = store.read(job['id'])
+    assert saved['status'] == 'source_ready' and saved['error']['code'] == 'align_words_failed'
+    with pytest.raises(CacheFull):
+        store.cache.set_limit(stats['used_bytes']-1)
+    store.cache.limit = stats['used_bytes']-1
+    assert not store.cache.enforce() and not store.cache.snapshot()['can_prepare']
+    assert file_hash(source) == source_sha  # Lack of space never deletes an offline input.
+    store.cache.limit = 128*1024
+    retried, _ = store.create(JobRequest(url=URL), 'new-version')
+    assert retried['id'] == job['id'] and retried['status'] == 'queued'
+    pipeline = Pipeline(dict(url=URL), folder, audio_only=True)
+    monkeypatch.setattr(pipeline, 'run', lambda *a, **k: pytest.fail('Offline retry contacted provider'))
+    assert pipeline.download() == ({}, 10)
+
+
 def test_video_restore_reuses_job_and_recovers_from_failure(tmp_path):
     def failed_download(folder):
         assert app.state.store.read(folder.name)['restore_video']

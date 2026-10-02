@@ -90,7 +90,26 @@ class SongCache:
                 ids.update(e['job_id'] for e in state['entries'])
         return ids
 
-    def compact(self, job):
+    def source_files(self, job):
+        """Retain offline inputs and diagnostics; reuse still verifies the hash."""
+        if os.getenv('KARAOKE_REQUIRE_CACHED_SOURCE') != '1':
+            return set()
+        folder = self.folder(job['id'])
+        required = {'source.json', 'download/source.mkv', 'download/source.info.json'}
+        try:
+            source = json.loads((folder/'source.json').read_text())
+            if (not isinstance(source, dict) or source.get('audio_only') is not True or
+                    source.get('input_url', source.get('url')) != job['input']['url'] or
+                    not all((folder/p).is_file() and not (folder/p).is_symlink() for p in required)):
+                return set()
+            return required | {'request.json'} | {
+                p.relative_to(folder).as_posix() for p in folder.rglob('*') if p.is_file() and not p.is_symlink()
+                and (p.suffix == '.log' or (p.suffix == '.json' and p.stat().st_size <= 2*1024**2
+                                          and p.name not in ('result.json', 'audio-result.json')))}
+        except (OSError, ValueError, KeyError):
+            return set()
+
+    def compact(self, job, *, source_only=False):
         """Keep published outputs and bounded diagnostics; discard working audio."""
         folder = self.folder(job['id'])
         keep = {'request.json', 'result.json', 'error.json', 'worker.log'}
@@ -101,6 +120,10 @@ class SongCache:
                 keep.update({'source.json', 'download/source.mkv', 'download/source.info.json', 'poster.jpg'})
         keep.update(a['path'] for name, a in (job.get('result') or {}).get('artifacts', {}).items()
                     if name != 'mv' or not job.get('restore_video'))
+        if source_only:
+            keep = self.source_files(job)
+            if not keep:
+                raise ValueError('Cannot retain a missing offline source')
         if not folder.exists():
             return
         for path in sorted(folder.rglob('*'), key=lambda p: len(p.parts), reverse=True):
@@ -151,6 +174,11 @@ class SongCache:
         candidates = sorted((j for j in jobs if j['id'] not in protected and
                              j['status'] in ('completed', 'video_evicted', 'failed', 'evicted', 'audio_ready', 'source_ready')),
                             key=lambda j: (j.get('last_accessed_at', j['created_at']), j['id']))
+        retained = {}
+        for job in candidates:
+            folder = self.folder(job['id'])
+            retained[job['id']] = sum(min((folder/name).stat().st_size, 65536) if name.endswith('.log')
+                else (folder/name).stat().st_size for name in self.source_files(job) if (folder/name).is_file())
         # Exhaust cheap-to-rebuild video before discarding any computed audio/timings.
         for job in candidates:
             if used + reserve <= self.limit and free >= self.minimum_free + reserve:
@@ -181,18 +209,26 @@ class SongCache:
             if used + reserve <= self.limit and free >= self.minimum_free + reserve:
                 break
             size = sizes[job['id']]
-            if not size:
+            if size <= retained[job['id']]:
                 continue
             folder = self.folder(job['id'])
-            shutil.rmtree(folder)
-            used -= size
-            sizes[job['id']] = 0
+            if retained[job['id']]:
+                self.compact(job, source_only=True)
+                remaining = self.size(folder)
+                retained[job['id']] = remaining
+                self.store.update(job['id'], status='source_ready', result=None, audio_result=None,
+                                  restore_video=False, active_stages=[], evicted_at=time.time())
+            else:
+                shutil.rmtree(folder)
+                remaining = 0
+                self.store.update(job['id'], status='evicted' if job.get('result') else job['status'],
+                                  restore_video=False, active_stages=[], evicted_at=time.time())
+            used -= size-remaining
+            sizes[job['id']] = remaining
             free = shutil.disk_usage(self.store.root).free
-            self.store.update(job['id'], status='evicted' if job.get('result') else job['status'],
-                              restore_video=False, active_stages=[], evicted_at=time.time())
-        evictable = sum(sizes[j['id']] for j in candidates)
+        evictable = sum(max(0, sizes[j['id']]-retained[j['id']]) for j in candidates)
         stats = dict(used_bytes=used, limit_bytes=self.limit, evictable_bytes=evictable,
-                     protected_bytes=sum(sizes.get(i, 0) for i in protected),
+                     protected_bytes=sum(sizes.get(i, 0) for i in protected)+sum(retained.values()),
                      free_bytes=free, can_prepare=used-evictable+self.headroom <= self.limit and
                      free+evictable >= self.minimum_free+self.headroom)
         # Disk free-space changes from unrelated apps need not generate SSE traffic.
@@ -210,7 +246,7 @@ class SongCache:
     def set_limit(self, value):
         self.enforce()
         if value < self.stats['protected_bytes']:
-            raise CacheFull('上限小于正在处理、下载或待唱的歌曲占用；请先移除一些待唱歌曲')
+            raise CacheFull('上限小于正在处理、下载、待唱或离线源文件的占用')
         with self.store.connect() as db:
             db.execute('UPDATE cache_settings SET limit_bytes=? WHERE id=1', (value,))
         self.limit = value
