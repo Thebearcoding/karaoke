@@ -2176,7 +2176,8 @@ def test_local_asr_repair_keeps_surrounding_words_and_requires_matching_boundari
 
 
 @pytest.mark.parametrize('recoverable', [True, False])
-def test_truncated_recovery_text_cannot_drop_later_sung_words(tmp_path, recoverable):
+@pytest.mark.parametrize('independent_source', [None, 'description', 'user', 'unrelated'])
+def test_truncated_recovery_text_cannot_drop_later_sung_words(tmp_path, recoverable, independent_source):
     import soundfile as sf
     from karaoke.transcribe_lyrics import select_recovery_text
     greeting = "Hello, I'm here."
@@ -2205,11 +2206,45 @@ def test_truncated_recovery_text_cannot_drop_later_sung_words(tmp_path, recovera
         assert result['text'] == complete and result['segments'][0]['text'] == complete
         assert recovery['text_selection']['selected'] == 'initial_transcription'
         assert result['words'] == words
-    else:
+    elif independent_source is None:
         with pytest.raises(ValueError, match='遗漏了分段识别'):
             transcribe(client, audio, 'auto', '', output)
         assert json.loads((output/'recovery-words.json').read_text()) == words
         assert json.loads((output/'text-selection.json').read_text())['selected'] is None
+    else:
+        result, recovery = transcribe(client, audio, 'auto', '', output, allow_unresolved_text=True)
+        assert result['text'] == '' and result['segments'] == []
+        assert result['words'] == words
+        assert recovery['text_selection']['selected'] is None
+        # Usable word evidence must survive a rejected text draft. Only an
+        # independent source that passes the unchanged audio gate can use it.
+        request = dict(url=URL)
+        supplied = [greeting, *lines]
+        if independent_source == 'user':
+            request['lyrics'] = supplied
+        if independent_source == 'unrelated':
+            supplied = ['另外一个不相关的故事']
+        pipeline = Pipeline(request, tmp_path, catalog_root=None)
+        sf.write(tmp_path/'vocals-16k.wav', np.ones(30000)*.1, 1000)
+        (output/'transcription.json').write_text(json.dumps(result))
+        (output/'run.json').write_text(json.dumps(dict(recovery=recovery)))
+        parsed = SongText(title='Song', artist='Singer', lyric_line_numbers=list(range(1,len(supplied)+1)))
+        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))], model='test', usage=None)
+        with patch('karaoke.song_sources.OpenAI') as metadata_client:
+            metadata_client.return_value.beta.chat.completions.parse.return_value = response
+            if independent_source == 'unrelated':
+                with pytest.raises(StageFailure, match='匹配不足'):
+                    pipeline.prepare_lyrics(dict(description='\n'.join(supplied)), 30.)
+            else:
+                pipeline.prepare_lyrics(dict(description='\n'.join(supplied)), 30.)
+                lyrics = json.loads((tmp_path/'lyrics.json').read_text())
+                assert lyrics['lines'] == supplied
+                assert lyrics['provenance']['kind'] == ('user_supplied' if independent_source == 'user' else 'video_description')
+        with patch('karaoke.song_sources.OpenAI') as metadata_client:
+            response.choices[0].message.parsed = SongText(title='Song', artist='Singer', lyric_line_numbers=[])
+            metadata_client.return_value.beta.chat.completions.parse.return_value = response
+            with pytest.raises(ValueError, match='歌词为空'):
+                prepare_song_text(dict(url=URL), {}, result, 30., catalog_root=None, model='test')
     # A complete fallback remains preferred; words are evidence, not a source
     # of fabricated text or replacement timestamps.
     assert select_recovery_text(complete, initial, words, 'Chinese')[0] == complete

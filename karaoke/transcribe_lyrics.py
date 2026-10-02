@@ -279,7 +279,7 @@ def repair_loop_window(data, audio, duration, recognize, output, local_recognize
         clip.unlink(missing_ok=True)
 
 
-def transcribe(client, audio, language, hint, output):
+def transcribe(client, audio, language, hint, output, *, allow_unresolved_text=False):
     options = {} if language == 'auto' else {'language': language}
 
     def unusable(prediction):
@@ -392,8 +392,12 @@ def transcribe(client, audio, language, hint, output):
     (output/'text-selection.json').write_text(json.dumps(selection, ensure_ascii=False)+'\n')
     if text is None:
         (output/'recovery-words.json').write_text(json.dumps(words, ensure_ascii=False)+'\n')
-        raise ValueError('歌词文本遗漏了分段识别中的大量内容，无法生成完整歌词')
-    segments = [dict(start=0., end=duration, text=text, timing_source='recording_bounds')]
+        if not allow_unresolved_text:
+            raise ValueError('歌词文本遗漏了分段识别中的大量内容，无法生成完整歌词')
+        # Keep independently decoded word evidence for supplied/source lyrics.
+        # Neither rejected draft can become an ASR lyric fallback downstream.
+        text = ''
+    segments = [dict(start=0., end=duration, text=text, timing_source='recording_bounds')] if text else []
     data.update(duration=duration, text=text, segments=segments, words=words)
     return data, dict(recovery, triggered=True, text_model=fallback_model, language_evidence=dict(languages),
                       text_selection=selection, chunks=[record for _, record in parts])
@@ -427,6 +431,8 @@ def main():
     parser.add_argument('--audio', type=Path, required=True)
     parser.add_argument('--language', default='auto')
     parser.add_argument('--hint', default='')
+    parser.add_argument('--allow-unresolved-text', action='store_true',
+        help='Retain word evidence for independent lyrics when both full-text drafts are rejected')
     parser.add_argument('--source-offset', type=float, default=0.)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
@@ -437,7 +443,8 @@ def main():
     language = {'Chinese': 'zh', 'Japanese': 'ja', 'English': 'en'}.get(args.language, args.language)
     args.output.mkdir(parents=True)
     try:
-        data, recovery = transcribe(client, args.audio, language, args.hint, args.output)
+        data, recovery = transcribe(client, args.audio, language, args.hint, args.output,
+            allow_unresolved_text=args.allow_unresolved_text)
     except Exception as error:
         from job_schema import provider_error
         details = provider_error(error)

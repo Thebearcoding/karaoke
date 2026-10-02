@@ -404,7 +404,7 @@ class Pipeline:
             '-ar', '16000', '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '64k', self.output/'vocals-asr.mp3'])
         self.run('transcribe', [sys.executable, ROOT/'transcribe_lyrics.py', '--audio',
             self.output/'vocals-asr.mp3', '--language', self.request.get('language') or 'auto',
-            '--output', self.output/'asr'])
+            '--allow-unresolved-text', '--output', self.output/'asr'])
         self.phase('prepare_lyrics', True)
         started = time.perf_counter()
         try:
