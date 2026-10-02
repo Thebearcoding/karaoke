@@ -2325,7 +2325,7 @@ def test_preview_padding_never_hides_missing_or_non_silent_audio(tmp_path, extra
     (48000,57629,2), (48000,57646,2), (48000,57647,2), (44100,57629,1)])
 def test_preview_encoder_preserves_partial_final_frames(tmp_path, rate, frames, channels):
     import soundfile as sf
-    from karaoke.three_stems import encode_preview
+    from karaoke.exact_stems import encode_preview
 
     tone = .1*np.sin(2*np.pi*440*np.arange(frames)/rate)
     source, output = tmp_path/'master.wav', tmp_path/'preview.mp3'
@@ -2335,6 +2335,49 @@ def test_preview_encoder_preserves_partial_final_frames(tmp_path, rate, frames, 
     assert report['padding_peak'] == 0
     assert .04 < report['decoded_peak'] < .06
     assert sf.info(source).frames == frames and sf.info(source).subtype == 'DOUBLE'
+
+
+def test_preview_clipping_reports_measured_peak(tmp_path):
+    from karaoke.exact_stems import PreviewClippingError
+
+    with patch('karaoke.exact_stems.decode_source', return_value=(np.full((10000, 2), 1.02), 48000, {})):
+        with pytest.raises(PreviewClippingError) as error:
+            validate_preview(tmp_path/'clipped.mp3', 10000, 2, 48000)
+    assert error.value.peak == 1.02
+
+
+def test_preview_group_reencodes_every_track_with_the_same_gain(tmp_path):
+    from karaoke.exact_stems import encode_previews, PreviewClippingError
+
+    calls = []
+    def encode(source, output, gain, frames, channels):
+        peak = gain * (1.4 if source.name == 'backing.wav' else .5)
+        calls.append((source.name, gain))
+        if peak >= 1:
+            raise PreviewClippingError(output, peak)
+        return dict(decoded_peak=peak, encoded_gain=gain)
+
+    sources = {name: tmp_path/f'{name}.wav' for name in ('vocals', 'backing')}
+    with patch('karaoke.exact_stems.encode_preview', side_effect=encode):
+        gain, previews = encode_previews(sources, tmp_path, .9, 10000, 2)
+    assert gain < .9 and set(previews) == set(sources)
+    assert all(p['encoded_gain'] == gain and p['decoded_peak'] < 1 for p in previews.values())
+    assert {name for name, used_gain in calls if used_gain == gain} == {'vocals.wav', 'backing.wav'}
+    assert ('vocals.wav', .9) in calls
+
+
+def test_preview_group_keeps_format_failures_and_bounds_clipping_retries(tmp_path):
+    from karaoke.exact_stems import encode_previews, PreviewClippingError
+
+    sources = {'vocals': tmp_path/'vocals.wav'}
+    with patch('karaoke.exact_stems.encode_preview', side_effect=ValueError('Missing audio')) as encode:
+        with pytest.raises(ValueError, match='Missing audio'):
+            encode_previews(sources, tmp_path, .9, 10000, 2)
+        assert encode.call_count == 1
+    with patch('karaoke.exact_stems.encode_preview', side_effect=PreviewClippingError('vocals.mp3', 1.02)) as encode:
+        with pytest.raises(PreviewClippingError):
+            encode_previews(sources, tmp_path, .9, 10000, 2)
+        assert encode.call_count == 3
 
 
 def test_cross_line_refinement_falls_back_without_inventing_times():

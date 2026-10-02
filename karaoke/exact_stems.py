@@ -122,16 +122,24 @@ def read_masters(output, rate, shape):
     return waves
 
 
+class PreviewClippingError(ValueError):
+    def __init__(self, path, peak):
+        self.peak = peak
+        super().__init__(f'Clipped listening preview ({peak:g}): {path}')
+
+
 def validate_preview(path, frames, channels, sample_rate):
     """Accept codec tail padding, while rejecting missing, shifted-format or clipped audio."""
     decoded, rate, _ = decode_source(path)
     delta = len(decoded)-frames
     peak = float(np.max(np.abs(decoded)))
-    if rate != sample_rate or decoded.shape[1] != channels or not 0 <= delta <= 1152 or peak >= 1:
-        raise ValueError(f'Invalid length, format or clipped listening preview: {path}')
+    if rate != sample_rate or decoded.shape[1] != channels or not 0 <= delta <= 1152:
+        raise ValueError(f'Invalid length or format of listening preview: {path}')
     padding_peak = float(np.max(np.abs(decoded[frames:]), initial=0.))
     if padding_peak > 1e-7:
         raise ValueError(f'Extra preview samples are not silent codec padding: {path}')
+    if peak >= 1:
+        raise PreviewClippingError(path, peak)
     return dict(file=Path(path).name, sha256=sha(path), sample_rate=rate, frames=frames,
                 decoded_frames=len(decoded), decoded_length_delta_samples=delta,
                 decoded_peak=peak, padding_peak=padding_peak)
@@ -151,6 +159,22 @@ def encode_preview(source, output, gain, frames, channels):
     return validate_preview(output, frames, channels, info.samplerate)
 
 
+def encode_previews(sources, output, gain, frames, channels):
+    """Re-encode the whole group at one gain if lossy reconstruction overshoots."""
+    for _ in range(3):
+        previews, clipped = {}, []
+        for name, source in sources.items():
+            try:
+                previews[name] = encode_preview(source, Path(output)/f'{name}.mp3', gain, frames, channels)
+            except PreviewClippingError as error:
+                clipped.append(error)
+        if not clipped:
+            return gain, previews
+        worst = max(clipped, key=lambda error: error.peak)
+        gain *= .9/worst.peak
+    raise worst
+
+
 def build(source_path, estimate_path, output):
     source_path, estimate_path, output = (Path(p).resolve() for p in (source_path, estimate_path, output))
     if output.exists():
@@ -168,10 +192,8 @@ def build(source_path, estimate_path, output):
     if not check['bitwise_equal']:
         raise ArithmeticError('Serialized masters failed bitwise reconstruction')
     gain = min(1., .9/max(float(np.max(np.abs(a))) for a in (source, *written)))
-    previews = {}
-    for name in ('vocals', 'backing'):
-        path = output/f'{name}.mp3'
-        previews[name] = encode_preview(output/f'{name}.wav', path, gain, len(source), source.shape[1])
+    gain, previews = encode_previews({name: output/f'{name}.wav' for name in ('vocals', 'backing')},
+                                    output, gain, len(source), source.shape[1])
     manifest = {'schema_version': 1, 'source': {'path': str(source_path),
         'container_sha256': sha(source_path), 'decoder': decoder,
         'decoder_version': subprocess.check_output(['ffmpeg', '-version'], text=True).splitlines()[0],

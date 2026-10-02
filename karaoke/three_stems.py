@@ -10,7 +10,7 @@ import time
 import numpy as np
 import soundfile as sf
 
-from exact_stems import (decode_source, encode_preview, exact_split, native_vocals,
+from exact_stems import (decode_source, encode_previews, exact_split, native_vocals,
                          read_masters, reconstruction_report, sha)
 
 
@@ -62,12 +62,10 @@ def build(existing, estimate, output, video=None):
     karaoke = tracks['instrumental'] + tracks['backing-vocals']
     peak = max(float(np.max(np.abs(a))) for a in (*tracks.values(), source, karaoke))
     gain = min(1., .84/max(peak, 1e-12))
-    previews = {name: encode_preview(output/f'{name}.wav', output/f'{name}.mp3',
-        gain, len(source), source.shape[1]) for name in tracks}
     temporary_mix = output/'.karaoke-mix.wav'
     sf.write(temporary_mix, karaoke, rate, subtype='FLOAT')
-    previews['karaoke'] = encode_preview(temporary_mix, output/'karaoke.mp3',
-        gain, len(source), source.shape[1])
+    gain, previews = encode_previews({**{name: output/f'{name}.wav' for name in tracks},
+                                     'karaoke': temporary_mix}, output, gain, len(source), source.shape[1])
     video_record = None
     if video:
         video = Path(video).resolve()
