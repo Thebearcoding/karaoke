@@ -406,8 +406,9 @@ class Pipeline:
         self.run('resample_vocals', ['ffmpeg', '-v', 'error', '-nostdin', '-i', self.vocals,
             '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', self.output/'vocals-16k.wav',
             '-ar', '16000', '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '64k', self.output/'vocals-asr.mp3'])
+        language = self.request.get('language') or video_song_info(metadata).get('language', 'auto')
         self.run('transcribe', [sys.executable, ROOT/'transcribe_lyrics.py', '--audio',
-            self.output/'vocals-asr.mp3', '--language', self.request.get('language') or 'auto',
+            self.output/'vocals-asr.mp3', '--language', language,
             '--original-audio', self.output/'source-44100.wav',
             '--allow-unresolved-text', '--output', self.output/'asr'])
         self.phase('prepare_lyrics', True)

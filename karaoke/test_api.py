@@ -964,11 +964,29 @@ def test_download_publishes_metadata_before_separation(tmp_path, monkeypatch, ca
     assert not (tmp_path/'result.json').exists()
 
 
-def test_language_classification_uses_audio_metadata_not_subtitle_language():
-    metadata = dict(title='English song (日本語字幕)', subtitles={'ja': []})
-    assert 'language' not in video_song_info(metadata)
-    metadata['requested_formats'] = [dict(acodec='none', language='ja'), dict(acodec='opus', language='en-US')]
-    assert video_song_info(metadata)['language'] == 'English'
+@pytest.mark.parametrize('metadata,requested,expected', [
+    (dict(title='English song (日本語字幕)', subtitles={'ja': []}), None, 'auto'),
+    (dict(language='ja', acodec='opus'), None, 'Japanese'),
+    (dict(requested_formats=[dict(acodec='none', language='ja'),
+                             dict(acodec='opus', language='en-US')]), None, 'English'),
+    (dict(language='fr'), None, 'auto'),
+    (dict(language='ja'), 'Chinese', 'Chinese'),
+])
+def test_language_classification_and_asr_use_audio_metadata(tmp_path, monkeypatch, metadata, requested, expected):
+    if requested is None:
+        assert video_song_info(metadata).get('language', 'auto') == expected
+    pipeline = Pipeline(dict(url=URL, language=requested), tmp_path)
+    calls = []
+    class TranscriptionRequested(Exception):
+        pass
+    def capture(name, command, **kwargs):
+        if name == 'transcribe':
+            calls.append(command[command.index('--language')+1])
+            raise TranscriptionRequested
+    monkeypatch.setattr(pipeline, 'run', capture)
+    with pytest.raises(TranscriptionRequested):
+        pipeline.prepare_text(metadata, 10)
+    assert calls == [expected]
 
 
 @pytest.mark.parametrize('matching_video', [True, False])
