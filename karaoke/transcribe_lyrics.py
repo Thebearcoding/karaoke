@@ -311,16 +311,18 @@ def repair_loop_window(data, audio, duration, recognize, output, local_recognize
         clip.unlink(missing_ok=True)
 
 
-def recover_audio(audio, language, duration, output, name):
+def recover_audio(audio, language, duration, output, name, *, contextual=False):
     """Recheck another track of the same recording after unusable vocal ASR."""
     import soundfile as sf
-    report = dict(source=str(audio), model='local-large-v3-turbo', accepted=False)
+    report = dict(source=str(audio), model='local-whisper-contextual' if contextual else 'local-large-v3-turbo',
+                  accepted=False)
     candidate = None
     try:
         if abs(sf.info(audio).duration-duration) > .05:
             raise ValueError('Recovery audio duration differs from the vocal recording')
         report['source_sha256'] = digest(audio)
-        candidate = cached_local_recognition(audio, language, output)
+        candidate = (local_asr.cached_recognition(audio, language, output, contextual=True) if contextual else
+                     cached_local_recognition(audio, language, output))
         if 'language_detection' in candidate:
             report['language_detection'] = candidate['language_detection']
         detected = song_language(candidate.get('language'))
@@ -389,12 +391,14 @@ def transcribe(client, audio, language, hint, output, *, allow_unresolved_text=F
                         'local-whisper-large-v3' if local_asr.offline() else 'whisper-1'), loop_repair=report)
     if repeated_tail(data) is not None and song_language(data.get('language')) is not None:
         raise ValueError('重复的结尾转录未通过局部核验，已保留诊断')
-    for name, track in (('original', original_audio), ('lead', lead_audio)):
-        if track is not None:
-            candidate, report = recover_audio(track, language, duration, output, name)
-            recovery[name+'_audio'] = report
-            if candidate is not None:
-                return candidate, dict(recovery, triggered=True, text_model='local-large-v3-turbo')
+    for contextual in ((False, True) if local_asr.offline() else (False,)):
+        for name, track in (('original', original_audio), ('lead', lead_audio)):
+            if track is not None:
+                name = ('contextual_' if contextual else '')+name
+                candidate, report = recover_audio(track, language, duration, output, name, contextual=contextual)
+                recovery[name+'_audio'] = report
+                if candidate is not None:
+                    return candidate, dict(recovery, triggered=True, text_model=report['model'])
     if local_asr.offline():
         (output/'recovery.json').write_text(json.dumps(recovery, ensure_ascii=False)+'\n')
         raise ValueError('本地 Whisper 转录及同源音轨恢复未通过校验，已保留诊断')
