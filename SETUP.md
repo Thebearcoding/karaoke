@@ -72,6 +72,7 @@ cp karaoke/dependencies/english-alignment.json karaoke/research/word-onset-2026-
 | 日文音素对齐 | [SOFA Japanese](https://github.com/ariikamusic/SOFA_Models/releases/download/akm_ja_v001/akm_ja_v001.zip) | 解压到 `karaoke/models/alignment/sofa/japanese/`，保留压缩包子目录 |
 | 英文音素对齐 | 上一步的固定版本仓库 | `karaoke/research/word-onset-2026-09-18/lyrics-alignment-multilingual/checkpoints/checkpoint_Baseline` |
 | Whisper 粗对齐 | stable-whisper 自动下载 | `karaoke/models/alignment/whisper/` |
+| 可选本地批量 ASR | `Systran/faster-whisper-large-v3`（完整 CTranslate2 模型） | `KARAOKE_WHISPER_MODEL` |
 | 中文合并字组的独立声学复核（可选） | [MMS_FA](https://dl.fbaipublicfiles.com/mms/torchaudio/ctc_alignment_mling_uroman/model.pt) | `karaoke/models/alignment/mms/model.pt` |
 | 中文残余字组的后备复核（可选） | [Qwen3 ForcedAligner 0.6B](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B/tree/c7cbfc2048c462b0d63a45797104fc9db3ad62b7) | `karaoke/models/alignment/qwen3-forced-aligner-0.6b/` |
 
@@ -85,7 +86,13 @@ MMS_FA 的校验值见 [mms-alignment.json](karaoke/dependencies/mms-alignment.j
 
 ## 5. 运行配置
 
-通过环境注入 `OPENAI_API_KEY`，不要写进源代码、命令示例或提交 `.env`。当前在线调用用于 ASR 和歌词／元数据整理，文本模型默认 `gpt-5-mini`。
+通过环境注入 `OPENAI_API_KEY`，不要写进源代码、命令示例或提交 `.env`。默认在线调用用于 ASR 和歌词／元数据整理，文本模型默认 `gpt-5-mini`。
+
+可选本地识别：安装 `karaoke/requirements-local-asr.txt`，下载上述完整模型目录，
+设置 `KARAOKE_ASR_BACKEND=local`、`KARAOKE_WHISPER_MODEL=/绝对路径/模型目录`。
+本地模式无需 API key；支持 CUDA 或 CPU，CUDA 需要 CTranslate2 对应的 CUDA 12 cuBLAS 和 cuDNN 9。
+模型固定版本为 `edaa852ec7e145841d8ffdb056a99866b5f0a478`，下载后保存文件 SHA-256。
+`KARAOKE_WHISPER_BATCH_SIZE` 默认 8；先在目标硬件验证批次对照和完整歌曲，再用于回归验收。
 
 ```sh
 export KARAOKE_SEPARATOR_PYTHON="$PWD/.venv-separator/bin/python"

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from .job_schema import provider_error, song_language, video_url
 from .subtitles import highlight_spans
+from .local_asr import offline
 
 
 class SongText(BaseModel):
@@ -268,6 +269,8 @@ def find_verified_lyrics(url, duration, root):
 
 
 def extract_song_metadata(evidence, model, cache=None):
+    if offline():
+        return dict(parsed=None, model=None, usage=None)
     path = cache.root/'song-metadata.json' if cache else None
     stage = cache.stage('extract_song_metadata', inputs=[Path(__file__)], outputs=[path],
                         config=dict(evidence=evidence, model=model)) if cache else nullcontext(False)

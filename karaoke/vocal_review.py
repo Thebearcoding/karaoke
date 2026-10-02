@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 
 from .stage_cache import StageCache, digest
+from .local_asr import offline
 
 MODEL = 'gpt-audio-1.5'
 PROMPT = ('Classify the audible human vocal sounds in this audio clip. Singing includes sustained melodic vowels, '
@@ -48,6 +49,8 @@ def review_clip(path, start, end):
 def review_gaps(folder, gaps, words, *, client=None):
     """Cache both views; only review the actual uncovered words, at most 90 s."""
     from openai import OpenAI
+    if offline():
+        return []  # No local singing/speech classifier: keep the coverage gate.
     folder = Path(folder)
     cache, reviews = StageCache(folder), []
     if not all((folder/source).is_file() for source in SOURCES):

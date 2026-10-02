@@ -321,9 +321,11 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
     store = Store(data_dir or os.getenv('KARAOKE_DATA_DIR', str(ROOT/'service-data')), cache_limit_bytes)
     if version is None:
         from .pipeline import pipeline_fingerprint
+        from .local_asr import configuration
         settings = {key: os.getenv(key) for key in ('KARAOKE_TEXT_MODEL', 'KARAOKE_ASR_FALLBACK_MODEL', 'KARAOKE_DEVICE',
             'KARAOKE_DISABLE_LYRIC_CATALOG', 'KARAOKE_FONT_FILE', 'KARAOKE_SEPARATOR_PYTHON',
             'KARAOKE_SEPARATION_BATCH_SIZE')}
+        settings['asr'] = configuration()
         version = hashlib.sha256((pipeline_fingerprint()+json.dumps(settings, sort_keys=True)).encode()).hexdigest()
     worker = Worker(store, worker_command, version)
     updates = Updates()

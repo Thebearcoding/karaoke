@@ -17,6 +17,7 @@ from openai import OpenAI
 from job_schema import song_language
 from stage_progress import progress_items, report_progress
 from stage_cache import StageCache, digest
+import local_asr
 
 
 def cached_recognition(client, audio, request, output):
@@ -344,6 +345,8 @@ def transcribe(client, audio, language, hint, output, *, allow_unresolved_text=F
             song_language(prediction.get('language')) is None)
 
     def recognize(path, model='whisper-1', instruction=None):
+        if local_asr.offline():
+            return local_asr.cached_recognition(path, language, output)
         request = dict(model=model, **options, prompt=instruction if instruction is not None else hint,
             temperature=0, response_format='verbose_json' if model == 'whisper-1' else 'json',
             **({'timestamp_granularities': ['word', 'segment']} if model == 'whisper-1' else {}))
@@ -380,7 +383,8 @@ def transcribe(client, audio, language, hint, output, *, allow_unresolved_text=F
     if repaired is not None:
         data, report = repaired
         return data, dict(recovery, triggered=True,
-            text_model='local-large-v3-turbo' if report['right'] is None else 'whisper-1', loop_repair=report)
+            text_model=('local-large-v3-turbo' if report['right'] is None else
+                        'local-whisper-large-v3' if local_asr.offline() else 'whisper-1'), loop_repair=report)
     if repeated_tail(data) is not None and song_language(data.get('language')) is not None:
         raise ValueError('重复的结尾转录未通过局部核验，已保留诊断')
     for name, track in (('original', original_audio), ('lead', lead_audio)):
@@ -389,6 +393,9 @@ def transcribe(client, audio, language, hint, output, *, allow_unresolved_text=F
             recovery[name+'_audio'] = report
             if candidate is not None:
                 return candidate, dict(recovery, triggered=True, text_model='local-large-v3-turbo')
+    if local_asr.offline():
+        (output/'recovery.json').write_text(json.dumps(recovery, ensure_ascii=False)+'\n')
+        raise ValueError('本地 Whisper 转录及同源音轨恢复未通过校验，已保留诊断')
     fallback_model = os.getenv('KARAOKE_ASR_FALLBACK_MODEL', 'gpt-4o-transcribe')
     # Keep full recording context for text: independent chunks can omit a split
     # syllable or duplicate the opening of the next lyric. Chunks only locate words.
@@ -506,7 +513,7 @@ def main():
     if args.output.exists():
         raise FileExistsError(args.output)
     started = time.perf_counter()
-    client = OpenAI(timeout=240., max_retries=1)
+    client = None if local_asr.offline() else OpenAI(timeout=240., max_retries=1)
     language = {'Chinese': 'zh', 'Japanese': 'ja', 'English': 'en'}.get(args.language, args.language)
     args.output.mkdir(parents=True)
     try:
@@ -531,6 +538,9 @@ def main():
         'source_offset_seconds': args.source_offset,
         'recovery': recovery,
         'status': 'ASR draft; requires lyric verification and timing evaluation'}
+    if local_asr.offline():
+        metadata.update(service='local Whisper', model=local_asr.configuration(),
+                        input_audio=metadata.pop('uploaded_audio'))
     (args.output/'run.json').write_text(json.dumps(metadata, indent=2)+'\n')
     print(json.dumps(metadata), flush=True)
 

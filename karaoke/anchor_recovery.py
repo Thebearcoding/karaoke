@@ -8,6 +8,7 @@ from openai import OpenAI
 
 from job_schema import song_language
 from transcribe_lyrics import needs_recovery
+import local_asr
 
 
 def recover_anchor_words(client, audio, lines, words, language, output, cache, minimum_coverage, duration, fallback_audio=None):
@@ -52,26 +53,29 @@ def recover_anchor_words(client, audio, lines, words, language, output, cache, m
             break
         _, (begin, end), _, source = max(windows)
         attempted.add(((begin, end), source))
-        config = dict(begin=begin, end=end, language=language, model='whisper-1', audio=source)
+        config = dict(begin=begin, end=end, language=language, model='whisper-1', audio=source,
+                      asr=local_asr.configuration())
         key = 'anchor_asr_'+hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:12]
         response_path, clip = output.parent/(key+'.json'), output.parent/(key+'.mp3')
         attempt = dict(**config, response=response_path.name, accepted=False)
         report['attempts'].append(attempt)
         output.write_text(json.dumps(report, ensure_ascii=False, indent=2)+'\n')
         with cache.stage(key, inputs=[source], outputs=[response_path], config=config,
-                         code=[Path(__file__)]) as reused:
+                         code=[Path(__file__), Path(local_asr.__file__)]) as reused:
             if not reused:
                 try:
-                    if client is None:
-                        client = OpenAI(timeout=60, max_retries=0)
                     subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-y', '-ss', str(begin),
                         '-i', source, '-t', str(end-begin), '-ar', '16000', '-ac', '1',
                         '-c:a', 'libmp3lame', '-b:a', '64k', str(clip)], check=True)
-                    with clip.open('rb') as stream:
-                        data = client.audio.transcriptions.create(file=stream, model='whisper-1',
-                            language={'Chinese':'zh', 'Japanese':'ja', 'English':'en'}[language],
-                            temperature=0, response_format='verbose_json',
-                            timestamp_granularities=['word', 'segment']).model_dump()
+                    if local_asr.offline():
+                        data = local_asr.cached_recognition(clip, language, output)
+                    else:
+                        client = client or OpenAI(timeout=60, max_retries=0)
+                        with clip.open('rb') as stream:
+                            data = client.audio.transcriptions.create(file=stream, model='whisper-1',
+                                language={'Chinese':'zh', 'Japanese':'ja', 'English':'en'}[language],
+                                temperature=0, response_format='verbose_json',
+                                timestamp_granularities=['word', 'segment']).model_dump()
                     response_path.write_text(json.dumps(data, ensure_ascii=False)+'\n')
                 finally:
                     clip.unlink(missing_ok=True)

@@ -25,6 +25,7 @@ from .song_sources import (independent_transcript_support, lyric_coverage, missi
 from .stage_progress import parse_progress
 from .cache import can_restore_video
 from .stage_cache import StageCache
+from . import local_asr
 
 
 def write_json(path, value):
@@ -157,7 +158,7 @@ class Pipeline:
                                   ['two-stems'], [ROOT/'exact_stems.py']),
             'resample_vocals': (['music-separation/song/vocals.wav'], ['vocals-16k.wav', 'vocals-asr.mp3'], []),
             'transcribe': (['vocals-asr.mp3', 'source-44100.wav'], ['asr'], [ROOT/p for p in
-                ('transcribe_lyrics.py', 'anchors_from_asr.py', 'subtitles.py', 'job_schema.py')]),
+                ('transcribe_lyrics.py', 'local_asr.py', 'anchors_from_asr.py', 'subtitles.py', 'job_schema.py')]),
             'separate_lead': (['music-separation/song/vocals.wav'], ['lead-separation'], [ROOT/'benchmark_neural.py']),
             'package_three_stems': (['two-stems', 'lead-separation/song/vocals.wav'],
                                     ['stems'], [ROOT/'exact_stems.py', ROOT/'three_stems.py']),
@@ -198,6 +199,7 @@ class Pipeline:
             config['weights'] = [(str(p), p.stat().st_size, p.stat().st_mtime_ns)
                 for p in weights if p.is_file()]
         if name == 'transcribe':
+            config['asr'] = local_asr.configuration()
             if '--lead-audio' in command:
                 inputs = [*inputs, command[command.index('--lead-audio')+1]]
             config['fallback_model'] = os.getenv('KARAOKE_ASR_FALLBACK_MODEL', 'gpt-4o-transcribe')
@@ -426,7 +428,7 @@ class Pipeline:
         try:
             from .source_captions import fetch_manual_captions
             transcription = json.loads((self.output/'asr/transcription.json').read_text())
-            captions = None if self.request.get('lyrics') else fetch_manual_captions(
+            captions = None if self.request.get('lyrics') or local_asr.offline() else fetch_manual_captions(
                 self.output/'download/source.info.json', song_language(transcription.get('language')), self.checkpoints)
             catalog = list((self.catalog_root/'lyrics').glob('*.json')) if self.catalog_root else []
             with self.checkpoints.stage('prepare_lyrics',
@@ -437,9 +439,9 @@ class Pipeline:
                              self.output/'asr/anchor-recovery.json', self.output/'asr/lyric-repeats.json'],
                     config=dict(request=self.request,
                                 metadata={k: metadata.get(k) for k in ('title', 'track', 'artist', 'artists', 'uploader', 'description')},
-                                duration=duration, model=self.text_model,
+                                duration=duration, model=self.text_model, asr=local_asr.configuration(),
                                 implementation=inspect.getsource(type(self).prepare_lyrics)),
-                    code=[ROOT/p for p in ('song_sources.py', 'source_captions.py', 'lyric_lookup.py', 'anchors_from_asr.py', 'transcribe_lyrics.py', 'anchor_recovery.py',
+                    code=[ROOT/p for p in ('song_sources.py', 'source_captions.py', 'lyric_lookup.py', 'anchors_from_asr.py', 'transcribe_lyrics.py', 'local_asr.py', 'anchor_recovery.py',
                                            'subtitles.py', 'job_schema.py', 'vocal_review.py')] + catalog) as reused:
                 if not reused:
                     self.prepare_lyrics(metadata, duration)
@@ -488,7 +490,7 @@ class Pipeline:
                 lyrics['provenance']['source_captions'] = caption_report
                 if lines is not None:
                     lyrics.update(lines=lines, provenance=dict(lyrics['provenance'], kind='source_manual_subtitles'))
-        if lyrics['provenance']['kind'] == 'asr_draft':
+        if lyrics['provenance']['kind'] == 'asr_draft' and not local_asr.offline():
             from .lyric_lookup import fetch_lyrics, lyric_candidate
             packet = fetch_lyrics(lyrics, self.output/'download/source.info.json', self.checkpoints)
             lines, lookup_report = lyric_candidate(packet, lyrics, transcription, duration,
@@ -662,7 +664,7 @@ class Pipeline:
 
     def execute(self):
         started = time.perf_counter()
-        if not os.getenv('OPENAI_API_KEY'):
+        if not local_asr.offline() and not os.getenv('OPENAI_API_KEY'):
             raise StageFailure('configuration', '请在启动服务前设置 OPENAI_API_KEY，用于 ASR 和歌词整理')
         if not shutil.which(self.separator_python):
             raise StageFailure('configuration', '找不到分离环境的 Python，请设置 KARAOKE_SEPARATOR_PYTHON')
