@@ -423,7 +423,7 @@ class Pipeline:
                                 metadata={k: metadata.get(k) for k in ('title', 'track', 'artist', 'artists', 'uploader', 'description')},
                                 duration=duration, model=self.text_model,
                                 implementation=inspect.getsource(type(self).prepare_lyrics)),
-                    code=[ROOT/p for p in ('song_sources.py', 'source_captions.py', 'anchors_from_asr.py', 'transcribe_lyrics.py', 'anchor_recovery.py',
+                    code=[ROOT/p for p in ('song_sources.py', 'source_captions.py', 'lyric_lookup.py', 'anchors_from_asr.py', 'transcribe_lyrics.py', 'anchor_recovery.py',
                                            'subtitles.py', 'job_schema.py')] + catalog) as reused:
                 if not reused:
                     self.prepare_lyrics(metadata, duration)
@@ -472,6 +472,14 @@ class Pipeline:
                 lyrics['provenance']['source_captions'] = caption_report
                 if lines is not None:
                     lyrics.update(lines=lines, provenance=dict(lyrics['provenance'], kind='source_manual_subtitles'))
+        if lyrics['provenance']['kind'] == 'asr_draft':
+            from .lyric_lookup import fetch_lyrics, lyric_candidate
+            packet = fetch_lyrics(lyrics, self.output/'download/source.info.json', self.checkpoints)
+            lines, lookup_report = lyric_candidate(packet, lyrics, transcription, duration)
+            lyrics['provenance']['lyric_lookup'] = lookup_report
+            if lines is not None:
+                lyrics.update(lines=lines, provenance=dict(lyrics['provenance'], kind='online_lyric_text',
+                                                          text_transform='whitespace_only'))
         candidates = {'transcription': transcription.get('words') or []}
         if lyrics['provenance']['kind'] != 'asr_draft' and initial:
             # Recovery of one bad passage need not discard usable whole-song

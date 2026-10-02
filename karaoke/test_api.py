@@ -511,6 +511,90 @@ def test_manual_caption_failure_obeys_backoff_and_keeps_cached_diagnostics(tmp_p
     assert len(calls) == 2
 
 
+def test_online_lyrics_correct_asr_text_without_using_provider_times(tmp_path, monkeypatch):
+    import soundfile as sf
+    from urllib.parse import parse_qs, urlsplit
+    from karaoke import lyric_lookup, pipeline as module
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    (tmp_path/'download').mkdir()
+    info = tmp_path/'download/source.info.json'
+    info.write_text(json.dumps(dict(id='example')))
+    lines = ['微風裡慢慢歌唱', '星光下靜靜傾聽', '微風裡慢慢歌唱']
+    row = dict(id=1, trackName='晚風', artistName='林林', duration=15., instrumental=False,
+               plainLyrics='\n'.join(lines), syncedLyrics='[00:00.00]wrong times must be ignored')
+    calls = []
+    def fetch(url):
+        query = parse_qs(urlsplit(url).query)
+        calls.append(query)
+        return [row] if query['track_name'] == ['晚風'] else []
+    monkeypatch.setattr(lyric_lookup, 'read_document', fetch)
+    words = [dict(word=text, start=10+i, end=10.9+i) for i,text in enumerate(lines)]
+    transcription = dict(language='Chinese', text='\n'.join(lines), words=words)
+    (tmp_path/'asr').mkdir()
+    (tmp_path/'asr/transcription.json').write_text(json.dumps(transcription))
+    sf.write(tmp_path/'vocals-16k.wav', np.ones(16000*15)*.1, 16000)
+    draft = dict(title='晚風 Evening Wind', artist='林林 Lin Lin', language='Chinese',
+                 lines=['微風你慢慢歌場', '星光下盡盡請停', '微風你慢慢歌場'], provenance=dict(kind='asr_draft'))
+    monkeypatch.setattr(module, 'prepare_song_text', lambda *a, **k: json.loads(json.dumps(draft)))
+    pipeline.prepare_lyrics({}, 15)
+    result = json.loads((tmp_path/'lyrics.json').read_text())
+    assert result['lines'] == lines and result['provenance']['kind'] == 'online_lyric_text'
+    assert [a['start'] for a in json.loads((tmp_path/'anchors.json').read_text())] == [10,11,12]
+    assert len(calls) == 2
+    pipeline.prepare_lyrics({}, 15)
+    assert len(calls) == 2  # A retry keeps the fetched text, just like downloaded audio.
+    for kind in ('user_supplied', 'verified_catalog', 'video_description'):
+        draft.update(lines=lines, provenance=dict(kind=kind))
+        pipeline.prepare_lyrics({}, 15)
+        assert json.loads((tmp_path/'lyrics.json').read_text())['provenance']['kind'] == kind
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize('change', [
+    dict(artistName='另一個歌手'), dict(trackName='別的歌'), dict(trackName='晚風 Live'),
+    dict(duration=309), dict(duration=float('nan')), dict(instrumental=True),
+    dict(plainLyrics='毫不相干的文字'), dict(plainLyrics='[Music] 微風裡慢慢歌唱'),
+    dict(trackName=['malformed']), dict(plainLyrics=None),
+])
+def test_online_lyrics_reject_other_versions_and_unsupported_text(change):
+    from karaoke.lyric_lookup import lyric_candidate
+    song = dict(title='晚風 Evening Wind', artist='林林 Lin Lin', language='Chinese')
+    row = dict(id=1, trackName='晚风', artistName='林林', duration=266., instrumental=False,
+               plainLyrics='微風裡慢慢歌唱')
+    transcription = dict(words=[dict(word=row['plainLyrics'])])
+    candidate, report = lyric_candidate(dict(status='ok', results=[row]), song, transcription, 265.)
+    assert candidate and report['status'] == 'accepted'
+    candidate, report = lyric_candidate(dict(status='ok', results=[dict(row, **change)]), song, transcription, 265.)
+    assert candidate is None and report['status'] == 'no_supported_recording'
+
+
+def test_online_lyric_fetch_retries_after_backoff_and_invalidates_changed_source(tmp_path, monkeypatch):
+    import httpx
+    from karaoke import lyric_lookup
+    from karaoke.stage_cache import StageCache, retained_files
+    info = tmp_path/'source.info.json'
+    info.write_text('{"id":"one"}')
+    song = dict(title='A Song', artist='A Singer')
+    clock, calls = [1000.], []
+    monkeypatch.setattr(lyric_lookup.time, 'time', lambda:clock[0])
+    def unavailable(url):
+        calls.append(url)
+        response = httpx.Response(429, headers={'Retry-After':'900'}, request=httpx.Request('GET', url))
+        raise httpx.HTTPStatusError('rate limited', request=response.request, response=response)
+    monkeypatch.setattr(lyric_lookup, 'read_document', unavailable)
+    cache = StageCache(tmp_path)
+    packet = lyric_lookup.fetch_lyrics(song, info, cache)
+    assert packet['status'] == 'unavailable' and packet['retry_at'] == 1900.
+    assert 'lyric-lookup.json' in retained_files(tmp_path)
+    assert lyric_lookup.fetch_lyrics(song, info, cache) == packet and len(calls) == 1
+    clock[0] = 1901.
+    lyric_lookup.fetch_lyrics(song, info, cache)
+    assert len(calls) == 2
+    info.write_text('{"id":"two"}')
+    lyric_lookup.fetch_lyrics(song, info, cache)
+    assert len(calls) == 3
+
+
 def test_soak_retries_changed_code_not_unchanged_failures_or_finished_cases():
     from karaoke.tools.soak import eligible
     assert eligible({'attempts': []}, 'v1', 100)

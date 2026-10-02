@@ -1,0 +1,110 @@
+"""Optional independent lyric text; provider timestamps never become onsets."""
+import hashlib
+import json
+import math
+from pathlib import Path
+import re
+import time
+import unicodedata
+from urllib.parse import urlencode
+
+import httpx
+from opencc import OpenCC
+from rapidfuzz.distance import Levenshtein
+
+from .anchors_from_asr import text_units
+from .job_schema import retry_after_seconds
+from .song_sources import transcript_lines
+from .source_captions import read_document
+
+
+def names(value):
+    value = unicodedata.normalize('NFKC', value if isinstance(value, str) else '').strip()
+    result = [value] if value else []
+    # Music metadata often appends an English translation to a Chinese name.
+    # Version labels are not translations: never strip "Live", "Remix", etc.
+    match = re.fullmatch(r'([\u3400-\u9fff]+)\s+([A-Za-z][\x20-\x7e]*)', value)
+    if match and not re.search(r'\b(live|remix|acoustic|instrumental|karaoke|remaster\w*)\b',
+                               match[2], re.I):
+        result.append(match[1])
+    return result
+
+
+def identity(value):
+    converter = OpenCC('tw2s')
+    return {''.join(c for c in converter.convert(name).casefold() if c.isalnum())
+            for name in names(value)} - {''}
+
+
+def fetch_lyrics(song, metadata_path, cache):
+    titles, artists = names(song.get('title')), names(song.get('artist'))
+    if not titles or not artists or not metadata_path.is_file():
+        return dict(status='missing_identity')
+    queries = [dict(track_name=titles[0], artist_name=artists[0])]
+    native = dict(track_name=titles[-1], artist_name=artists[-1])
+    if native != queries[0]:
+        queries.append(native)
+    path, stage = cache.root/'lyric-lookup.json', 'fetch_lyric_text'
+    try:
+        old = json.loads(path.read_text())
+        if old.get('retry_at') is not None and old['retry_at'] <= time.time():
+            (cache.directory/(stage+'.json')).unlink(missing_ok=True)
+    except (OSError, ValueError, TypeError):
+        pass
+    with cache.stage(stage, inputs=[metadata_path], outputs=[path], config=queries,
+                     code=[Path(__file__), Path(__file__).with_name('source_captions.py')]) as reused:
+        if not reused:
+            packet = dict(status='ok', queries=queries, results=[])
+            try:
+                for query in queries:
+                    response = read_document('https://lrclib.net/api/search?'+urlencode(query))
+                    if not isinstance(response, list) or len(response) > 100:
+                        raise ValueError('Invalid lyric search response')
+                    packet['results'].extend({key: row.get(key) for key in (
+                        'id', 'trackName', 'artistName', 'albumName', 'duration', 'instrumental', 'plainLyrics')}
+                        for row in response if isinstance(row, dict))
+            except (httpx.HTTPError, ValueError) as error:
+                status = getattr(getattr(error, 'response', None), 'status_code', None)
+                transient = isinstance(error, httpx.TransportError) or status == 429 or (status or 0) >= 500
+                packet.update(status='unavailable', error=type(error).__name__, http_status=status,
+                              retry_at=time.time()+max(300, retry_after_seconds(error) or 0) if transient else None)
+            path.write_text(json.dumps(packet, ensure_ascii=False)+'\n')
+    return json.loads(path.read_text())
+
+
+def lyric_candidate(packet, song, transcription, duration):
+    report = {key: value for key, value in packet.items() if key != 'results'}
+    if packet.get('status') != 'ok':
+        return None, report
+    language = song['language']
+    observed = [u for w in transcription.get('words', []) for u in text_units(w['word'], language)]
+    candidates = []
+    for row in packet['results']:
+        # A text search can return covers, live cuts and unrelated recordings.
+        # Identity and duration must agree before using any audio-text score.
+        if (not identity(song['title']) & identity(row.get('trackName')) or
+                not identity(song['artist']) & identity(row.get('artistName')) or row.get('instrumental') is not False):
+            continue
+        try:
+            difference = abs(float(row['duration'])-duration)
+            if not math.isfinite(difference) or difference > max(3., min(10., duration*.02)):
+                continue
+            text = row['plainLyrics']
+            if not isinstance(text, str) or not text.strip() or len(text) > 30000 or re.search(r'\[[^\]\n]+\]', text):
+                continue
+            lines = transcript_lines(dict(text=text), language)
+            expected = text_units(''.join(lines), language)
+            matched = sum(b.src_end-b.src_start for b in Levenshtein.opcodes(expected, observed) if b.tag == 'equal')
+            support, coverage = matched/max(1, len(expected)), matched/max(1, len(observed))
+            if not lines or len(lines) > 1000 or any(len(line) > 200 for line in lines) or min(support, coverage) < .55:
+                continue
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        candidates.append((min(support, coverage), -difference, lines, dict(
+            id=row['id'], track=row['trackName'], artist=row['artistName'], album=row.get('albumName'),
+            duration=row['duration'], text_support=support, audio_word_coverage=coverage,
+            text_sha256=hashlib.sha256(text.encode()).hexdigest())))
+    if not candidates:
+        return None, dict(report, status='no_supported_recording')
+    best = max(candidates, key=lambda c: c[:2])
+    return best[2], dict(report, status='accepted', provider='lrclib', **best[3])
