@@ -1034,17 +1034,17 @@ def test_download_publishes_metadata_before_separation(tmp_path, monkeypatch, ca
     assert not (tmp_path/'result.json').exists()
 
 
-@pytest.mark.parametrize('metadata,requested,expected', [
-    (dict(title='English song (日本語字幕)', subtitles={'ja': []}), None, 'auto'),
-    (dict(language='ja', acodec='opus'), None, 'Japanese'),
+@pytest.mark.parametrize('metadata,requested,display,expected', [
+    (dict(title='English song (日本語字幕)', subtitles={'ja': []}), None, None, 'auto'),
+    (dict(language='ja', acodec='opus'), None, 'Japanese', 'auto'),
     (dict(requested_formats=[dict(acodec='none', language='ja'),
-                             dict(acodec='opus', language='en-US')]), None, 'English'),
-    (dict(language='fr'), None, 'auto'),
-    (dict(language='ja'), 'Chinese', 'Chinese'),
+                             dict(acodec='opus', language='en-US')]), None, 'English', 'auto'),
+    (dict(language='fr'), None, None, 'auto'),
+    (dict(language='ja'), 'Chinese', 'Japanese', 'Chinese'),
+    (dict(language='en'), None, 'English', 'auto'),
 ])
-def test_language_classification_and_asr_use_audio_metadata(tmp_path, monkeypatch, metadata, requested, expected):
-    if requested is None:
-        assert video_song_info(metadata).get('language', 'auto') == expected
+def test_asr_detects_language_unless_requested(tmp_path, monkeypatch, metadata, requested, display, expected):
+    assert video_song_info(metadata).get('language') == display
     pipeline = Pipeline(dict(url=URL, language=requested), tmp_path)
     calls = []
     class TranscriptionRequested(Exception):
