@@ -4,6 +4,7 @@ import argparse
 from array import array
 import json
 from pathlib import Path
+import re
 
 from Bio.Align import PairwiseAligner
 
@@ -21,14 +22,14 @@ def text_units(text, language):
     return list(value)
 
 
-def anchors_from_words(lines, words, language, allow_missing=False):
-    keys = [text_units(line, language) for line in lines]
+def _match_words(lines, words, units):
+    keys = [units(line) for line in lines]
     expected = [unit for key in keys for unit in key]
     observed, owners = [], []
     for i, word in enumerate(words):
-        units = text_units(word['word'], language)
-        observed.extend(units)
-        owners.extend([i]*len(units))
+        value = units(word['word'])
+        observed.extend(value)
+        owners.extend([i]*len(value))
     correspondence = {}
     if expected and observed:
         alphabet = {unit: i for i, unit in enumerate(dict.fromkeys(expected+observed))}
@@ -51,19 +52,53 @@ def anchors_from_words(lines, words, language, allow_missing=False):
         matched = [correspondence[i] for i in range(position, position+len(key)) if i in correspondence]
         coverage = len(matched)/len(key) if key else 0.
         if coverage < .5:
-            if not allow_missing:
-                raise ValueError(f'Insufficient ASR support for lyric line {len(cues)+1}: {coverage:.1%}')
             cues.append({'text': line, 'start': None, 'end': None,
                          'matched_fraction': coverage, 'status': 'unresolved_text'})
             position += len(key)
             continue
         start, end = words[min(matched)]['start'], words[max(matched)]['end']
-        if end <= start and not allow_missing:
-            raise ValueError(f'Collapsed ASR interval for lyric line {len(cues)+1}')
         cues.append({'text': line, 'start': round(start, 3), 'end': round(end, 3),
                      'matched_fraction': coverage, 'status': 'candidate' if end > start else 'unresolved_timing',
                      'source': 'asr_rough_anchor'})
         position += len(key)
+    return cues
+
+
+def japanese_reading_units(text):
+    if re.search(r'[\u3040-\u30ff\u3400-\u9fff]', text):
+        import pyopenjtalk
+        text = pyopenjtalk.g2p(text, kana=True)
+    return text_units(text, 'Japanese')
+
+
+def anchors_from_words(lines, words, language, allow_missing=False):
+    cues = _match_words(lines, words, lambda text: text_units(text, language))
+    if language == 'Japanese':
+        # Recover kana/kanji spelling differences only where written matching
+        # failed. Phonetic matches must not move existing anchors or absorb
+        # unlisted backing vocals into an otherwise resolved lyric line.
+        original, first = list(cues), 0
+        while first < len(cues):
+            if original[first]['status'] == 'candidate':
+                first += 1
+                continue
+            stop = first+1
+            while stop < len(cues) and original[stop]['status'] != 'candidate':
+                stop += 1
+            begin = original[first-1]['end'] if first else 0.
+            end = original[stop]['start'] if stop < len(cues) else max((w['end'] for w in words), default=0.)
+            inside = [w for w in words if begin-.001 <= w['start'] < w['end'] <= end+.001]
+            if inside and begin < end:
+                for offset, cue in enumerate(_match_words(lines[first:stop], inside, japanese_reading_units)):
+                    if cue['status'] == 'candidate':
+                        cues[first+offset] = dict(cue, match_basis='pronunciation_recovery')
+            first = stop
+    if not allow_missing:
+        for i, cue in enumerate(cues, 1):
+            if cue['status'] == 'unresolved_text':
+                raise ValueError(f"Insufficient ASR support for lyric line {i}: {cue['matched_fraction']:.1%}")
+            if cue['status'] == 'unresolved_timing':
+                raise ValueError(f'Collapsed ASR interval for lyric line {i}')
     return cues
 
 

@@ -790,6 +790,41 @@ class SubtitleIntegrity(unittest.TestCase):
         self.assertEqual([(c['start'], c['end']) for c in cues],
                          [(0., 3.), (3., 5.), (6., 9.), (9., 12.)])
 
+    def test_japanese_spelling_recovery_keeps_existing_anchors_and_missing_vocals(self):
+        from karaoke.song_sources import lyric_coverage
+        lines = ['赤い月', '駄目', '白い雲', '静かな朝']
+        words = [dict(word=text, start=start, end=start+1.) for text, start in
+                 [('赤い月', 1.), ('ダメ', 3.), ('白い雲', 5.), ('静かな朝', 16.)]]
+        words[3:3] = [dict(word='らららら', start=float(i), end=i+.5) for i in range(7, 15)]
+        cues = anchors_from_words(lines, words, 'Japanese')
+        self.assertEqual([c['text'] for c in cues], lines)
+        self.assertEqual([(c['start'], c['end']) for c in cues],
+                         [(1., 2.), (3., 4.), (5., 6.), (16., 17.)])
+        self.assertEqual(cues[1]['match_basis'], 'pronunciation_recovery')
+        self.assertTrue(all(cues[i]['matched_fraction'] == 1. for i in (0, 2, 3)))
+        coverage = lyric_coverage(cues, words, 'Japanese', 18.)
+        self.assertEqual(coverage['status'], 'incomplete')
+        self.assertEqual(coverage['uncovered_passages'],
+                         [dict(start=6., end=16., recognized_units=32)])
+
+    def test_japanese_spelling_recovery_cannot_borrow_words_across_resolved_lines(self):
+        words = [dict(word=text, start=float(i*2), end=float(i*2+1)) for i, text in
+                 enumerate(['ダメ', '赤い月', 'ねこ', '白い雲', 'ダメ'])]
+        cues = anchors_from_words(['赤い月', '駄目', '白い雲'], words, 'Japanese', allow_missing=True)
+        self.assertEqual([(c['start'], c['end']) for c in cues],
+                         [(2., 3.), (None, None), (6., 7.)])
+        self.assertEqual(cues[1]['status'], 'unresolved_text')
+        with self.assertRaisesRegex(ValueError, 'Insufficient ASR support for lyric line 2'):
+            anchors_from_words(['赤い月', '駄目', '白い雲'], words, 'Japanese')
+
+    def test_japanese_spelling_recovery_handles_recording_edges(self):
+        lines = ['駄目', '赤い月', '駄目']
+        words = [dict(word=text, start=float(i*2), end=float(i*2+1)) for i, text in
+                 enumerate(['ダメ', '赤い月', 'ダメ'])]
+        cues = anchors_from_words(lines, words, 'Japanese')
+        self.assertEqual([(c['start'], c['end']) for c in cues],
+                         [(0., 1.), (2., 3.), (4., 5.)])
+
     def test_lyric_anchors_do_not_collect_scattered_letters_from_dialogue(self):
         for prefix, suffix in [('axbxcxdxexfx', ''), ('', 'xaxbxcxdxexf'),
                                ('axbxcxdxexfx', 'xaxbxcxdxexf')]:
