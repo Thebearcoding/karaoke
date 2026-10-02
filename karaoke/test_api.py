@@ -1109,6 +1109,37 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
         soak.run_audio(manifest,data,'http://test',case_url=URL)
 
 
+@pytest.mark.parametrize('retry_at,expected_index', [(900, 1), (1100, 2)])
+def test_audio_regression_prioritizes_due_failures_then_unfinished_cases(tmp_path, monkeypatch, retry_at, expected_index):
+    import httpx
+    from karaoke.tools import soak
+    cases = [dict(url=f'https://www.youtube.com/watch?v={i:011d}', title=str(i),
+                  language='English', provider='youtube', attempts=[]) for i in range(3)]
+    cases[0]['audio_attempts'] = [dict(status='passed_audio', pipeline_version='old')]
+    cases[1]['attempts'] = [dict(status='external', pipeline_version='old', next_retry_at=retry_at)]
+    cases[2]['attempts'] = [dict(status='submitted', pipeline_version='old')]
+    selection = [dict(url=c['url'], language=c['language']) for c in cases]
+    manifest = tmp_path/'manifest.json'
+    manifest.write_text(json.dumps(dict(cases=cases, provider_backoff={},
+        selection_sha256=hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest())))
+    data = tmp_path/'jobs'
+    data.mkdir()
+    submitted = []
+    def respond(request):
+        if request.url.path == '/health':
+            return httpx.Response(200, json={'pipeline_version': 'current'})
+        if request.url.path == '/v1/room':
+            return httpx.Response(200, json={'entries': []})
+        submitted.append(json.loads(request.content)['url'])
+        raise RuntimeError('observed first submission')
+    client_type = httpx.Client
+    monkeypatch.setattr(soak.httpx, 'Client', lambda **kwargs: client_type(transport=httpx.MockTransport(respond)))
+    monkeypatch.setattr(soak.time, 'time', lambda: 1000)
+    with pytest.raises(RuntimeError, match='observed first submission'):
+        soak.run_audio(manifest, data, 'http://test')
+    assert submitted == [cases[expected_index]['url']]
+
+
 @pytest.mark.parametrize('delayed_ledger', ['attempts', 'audio_attempts', 'provider'])
 def test_focused_probe_respects_both_retry_ledgers(tmp_path, monkeypatch, delayed_ledger):
     import httpx
