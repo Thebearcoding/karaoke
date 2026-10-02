@@ -1392,6 +1392,7 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
         source = dict(url=store.read(folder.name)['input']['url'], duration=.1,
                       sha256=file_hash(folder/'download/source.mkv'))
         (folder/'source.json').write_text(json.dumps(source))
+        (folder/'download/source.info.json').write_text('{}')
         return 0
     monkeypatch.setattr(soak, 'run_probe', download)
     monkeypatch.setattr(soak, 'verify_outputs', lambda *a, **k: pytest.fail('Prefetch ran audio verification'))
@@ -1402,10 +1403,21 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
     assert all(c['attempts'] == [] for c in after_fetch['cases'])
     assert sum(bool(c.get('download_attempts')) and c['download_attempts'][-1]['status'] == 'downloaded_audio'
                for c in after_fetch['cases']) == 2
-    assert all(store.read(job_id)['status'] == 'queued' for job_id in fetched)
+    assert all(store.read(job_id)['status'] == 'source_ready' for job_id in fetched)
     assert [e['id'] for e in room.read()['entries']] == [user_entry]
     soak.run_audio(manifest, data, 'http://test', keep_going=True, download_only=True)
     assert len(fetched) == 2
+    first = fetched[0]
+    assert first not in store.cache.protected(store.list(-1))
+    assert room.describe(dict(id='test-entry', job_id=first))['status'] == 'unprepared'
+    resubmitted, cached = store.create(JobRequest.model_validate(store.read(first)['input']), version)
+    assert resubmitted['id'] == first and resubmitted['status'] == 'queued'
+    store.update(first, status='source_ready')
+    store.cache.limit = 1
+    store.cache.enforce()
+    assert not (data/first).exists()
+    recovered, _ = store.create(JobRequest.model_validate(resubmitted['input']), version)
+    assert recovered['id'] != first and recovered['status'] == 'queued'
 
 
 @pytest.mark.parametrize('cache_state', ['valid', 'missing', 'corrupt', 'different_source'])

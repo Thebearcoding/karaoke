@@ -95,7 +95,7 @@ class Store:
             if not payload.force:
                 rows = db.execute("""SELECT doc FROM jobs WHERE
                     (cache_key=? AND status IN ('queued','running','completed'))
-                    OR status IN ('queued','failed','audio_ready') OR json_extract(doc, '$.restore_video')=1 ORDER BY created_at DESC""", (key,)).fetchall()
+                    OR status IN ('queued','failed','audio_ready','source_ready') OR json_extract(doc, '$.restore_video')=1 ORDER BY created_at DESC""", (key,)).fetchall()
                 for row in rows:
                     doc = json.loads(row[0])
                     if doc['status'] == 'queued':
@@ -104,11 +104,13 @@ class Store:
                         # Pending work has not executed the old pipeline yet.
                         doc.update(pipeline_version=version, updated_at=now())
                         db.execute('UPDATE jobs SET cache_key=? WHERE id=?', (key, doc['id']))
-                    if doc['status'] in ('failed', 'audio_ready') and not doc.get('restore_video'):
+                    if doc['status'] in ('failed', 'audio_ready', 'source_ready') and not doc.get('restore_video'):
                         if {k: v for k, v in doc['input'].items() if k != 'force'} != key_payload:
                             continue
                         folder = self.root/doc['id']
-                        if not any((folder/'checkpoints').glob('*.json')):
+                        source_ready = doc['status'] == 'source_ready' and all((folder/name).is_file()
+                            for name in ('source.json', 'download/source.mkv', 'download/source.info.json'))
+                        if not source_ready and not any((folder/'checkpoints').glob('*.json')):
                             continue
                         doc.update(status='queued', active_stages=[], stage_progress={}, timings={},
                                    error=None, updated_at=now(), last_accessed_at=now(), pipeline_version=version,

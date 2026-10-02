@@ -276,7 +276,8 @@ MP3 试听使用 LAME 命令行写入完整的尾部填充信息，避免某些�
 
 `python -m karaoke.tools.soak audio-fetch --manifest 固定清单 --data-dir 数据目录 --keep-going`
 只下载音频并核对来源、哈希和全长解码，沿用普通点歌注册、单实例锁及共享缓存监控。
-它将结果写入 `download_attempts`，不会写成 `passed_audio` 或完整 MV 通过；任务继续处于待处理状态。
+它将结果写入 `download_attempts`，不会写成 `passed_audio` 或完整 MV 通过；任务记为 `source_ready`，
+页面显示尚未准备好，移除控制器自己的点歌项后可正常参与 LRU。再次提交复用来源文件，接着计算。
 支持同样的 `--case-url`、`--defer-url`，批量暂停文件为清单旁的 `download.pause`。
 登录验证或来源退避必须先解决；遇登录阻塞立即停止后续下载。
 

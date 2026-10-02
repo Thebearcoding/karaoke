@@ -116,7 +116,7 @@ class Room:
         return dict(**entry,
             title=inputs.get('title') or result.get('title') or song_info.get('title') or featured.get('title') or '新点的歌',
             artist=inputs.get('artist') or result.get('artist') or song_info.get('artist') or featured.get('artist', ''),
-            url=inputs['url'], status='unprepared' if job['status'] == 'audio_ready' else job['status'],
+            url=inputs['url'], status='unprepared' if job['status'] in ('audio_ready', 'source_ready') else job['status'],
             active_stages=job.get('active_stages', []),
             stage_progress=job.get('stage_progress', {}) if job['status'] == 'running' else {},
             language=inputs.get('language') or result.get('language') or song_info.get('language') or featured.get('language', ''),

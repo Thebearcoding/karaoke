@@ -94,7 +94,7 @@ class SongCache:
         """Keep published outputs and bounded diagnostics; discard working audio."""
         folder = self.folder(job['id'])
         keep = {'request.json', 'result.json', 'error.json', 'worker.log'}
-        if job['status'] in ('failed', 'audio_ready'):
+        if job['status'] in ('failed', 'audio_ready', 'source_ready'):
             keep.update(retained_files(folder))
             keep.update(p.relative_to(folder).as_posix() for p in folder.rglob('*.json'))
             if (folder/'source.json').is_file():
@@ -149,14 +149,14 @@ class SongCache:
         used = sum(sizes.values())
         free = shutil.disk_usage(self.store.root).free
         candidates = sorted((j for j in jobs if j['id'] not in protected and
-                             j['status'] in ('completed', 'video_evicted', 'failed', 'evicted', 'audio_ready')),
+                             j['status'] in ('completed', 'video_evicted', 'failed', 'evicted', 'audio_ready', 'source_ready')),
                             key=lambda j: (j.get('last_accessed_at', j['created_at']), j['id']))
         # Exhaust cheap-to-rebuild video before discarding any computed audio/timings.
         for job in candidates:
             if used + reserve <= self.limit and free >= self.minimum_free + reserve:
                 break
             folder = self.folder(job['id'])
-            if job['status'] in ('failed', 'audio_ready') and (folder/'download/source.mkv').is_file():
+            if job['status'] in ('failed', 'audio_ready', 'source_ready') and (folder/'download/source.mkv').is_file():
                 source_info = folder/'source.json'
                 try:
                     audio_only = json.loads(source_info.read_text()).get('audio_only')

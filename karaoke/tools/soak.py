@@ -358,6 +358,7 @@ def run_audio(path, data_dir, base, *, case_url=None, defer_urls=(), keep_going=
     ledger = 'download_attempts' if download_only else 'audio_attempts'
     prefix = 'download' if download_only else 'audio'
     passed = 'downloaded_audio' if download_only else 'passed_audio'
+    controller_version = digest(Path(__file__))
     if case_url is not None:
         case_url = video_url(case_url)
     deferred = {video_url(url) for url in defer_urls}
@@ -404,14 +405,16 @@ def run_audio(path, data_dir, base, *, case_url=None, defer_urls=(), keep_going=
                 attempts = case.get(ledger, [])
                 if attempts and attempts[-1]['status'] == passed and attempts[-1]['pipeline_version'] == version:
                     continue
-                if attempts and not eligible({'attempts': attempts}, version, time.time()):
+                fixed_downloader = download_only and attempts and attempts[-1]['status'] == 'failed' and (
+                    attempts[-1].get('controller_version') != controller_version)
+                if attempts and not fixed_downloader and not eligible({'attempts': attempts}, version, time.time()):
                     continue
                 previous = (case.get('attempts') or [{}])[-1]
                 deadline = retry_deadline(state, case)
                 if download_only:
                     deadline = state['provider_backoff'].get(case['provider'], 0)
                     previous = (case.get('audio_attempts') or [previous])[-1]
-                    if previous.get('error', {}).get('code') != 'download_failed':
+                    if (previous.get('error') or {}).get('code') != 'download_failed':
                         previous = {}
                 if time.time() < max(deadline, previous.get('next_retry_at') or 0):
                     continue
@@ -443,7 +446,8 @@ def run_audio(path, data_dir, base, *, case_url=None, defer_urls=(), keep_going=
             job = client.get(f'{base}/v1/jobs/{entry["job_id"]}').raise_for_status().json()
             attempts = case.setdefault(ledger, [])
             attempt = dict(job_id=job['id'], entry_id=entry['id'], pipeline_version=version,
-                status='running', submitted_at=stamp(), external_attempt=1+sum(a['status']=='external' for a in attempts))
+                controller_version=controller_version, status='running', submitted_at=stamp(),
+                external_attempt=1+sum(a['status']=='external' for a in attempts))
             attempts.append(attempt)
             save(path, state)
             folder = data_dir/job['id']
@@ -475,6 +479,8 @@ def run_audio(path, data_dir, base, *, case_url=None, defer_urls=(), keep_going=
                 save(folder/f'{prefix}-verification.json', evidence)
                 attempt.update(status=passed, finished_at=stamp(), evidence=evidence)
                 state[f'{prefix}_passed_current_version'] += 1
+                if download_only and not cached_full:
+                    store.update(job['id'], status='source_ready', active_stages=[], error=None)
                 if not download_only and not cached_full:
                     result = json.loads((folder/'audio-result.json').read_text())
                     store.update(job['id'], status='audio_ready', pipeline_version=version, audio_result=result,
