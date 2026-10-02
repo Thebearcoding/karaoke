@@ -1,18 +1,15 @@
-"""Bounded, metadata-only video search. Searching never creates a preparation job."""
+"""YouTube search metadata in provider order, without application ranking."""
 import asyncio
 from collections import OrderedDict
 from html import unescape
 import json
-from itertools import islice
 import math
 import re
 import sys
 import time
 import unicodedata
 from urllib.parse import urlsplit
-from uuid import uuid4
 
-import httpx
 from opencc import OpenCC
 
 from .job_schema import video_url
@@ -23,13 +20,7 @@ _UNOFFICIAL = re.compile(r'\b(?:fan[ -]?made|unofficial)\b|饭制|飯製|搬运|
 _PUBLISHER = re.compile(r'music|records?|recordings?|entertainment|vevo|音[乐樂]|唱片|娱[乐樂]|娛樂|演[艺藝]|[卫衛][视視]|[广廣]播|[电電][视視]', re.I)
 _FAN_CHANNEL = re.compile(r'\bfan\b|lyrics?|covers?|搬运|搬運|歌[词詞]|粉[丝絲]|后援|後援', re.I)
 _ARTIST = re.compile(r'歌手|唱作人|音[乐樂]人|音[乐樂]制作人|音樂製作人|[乐樂][队隊团團]|[组組]合|singer|songwriter|musician|band', re.I)
-_bilibili_identities = OrderedDict()
-_bilibili_retry_at = 0
 _simplified = OpenCC('t2s')
-
-
-class SourceVerificationUnavailable(RuntimeError):
-    pass
 
 
 def matches_query(query, item):
@@ -77,6 +68,11 @@ def youtube_entries(query):
     from yt_dlp.extractor.youtube import YoutubeSearchIE
 
     class ArtistSearch(YoutubeSearchIE):
+        def _extract_entries(self, renderer, continuation_list):
+            # Read the complete native page; do not fetch an unbounded search.
+            yield from super()._extract_entries(renderer, continuation_list)
+            continuation_list[:] = [None]
+
         def _extract_video(self, renderer):
             result = super()._extract_video(renderer)
             # yt-dlp folds artist badges into the generic verified flag; retain the distinction.
@@ -86,107 +82,38 @@ def youtube_entries(query):
             return result
 
     with YoutubeDL({'quiet': True, 'no_warnings': True, 'socket_timeout': 12, 'extractor_retries': 0}) as ydl:
-        return list(islice(ArtistSearch(ydl)._search_results(query), 20))
-
-
-async def bilibili_identity(client, mid, slots):
-    global _bilibili_retry_at
-    mid = str(mid)
-    if not mid.isdecimal():
-        return {}
-    cached = _bilibili_identities.get(mid)
-    if cached and time.monotonic()-cached[0] < 3600:
-        _bilibili_identities.move_to_end(mid)
-        return cached[1]
-    try:
-        async with slots:
-            if time.monotonic() < _bilibili_retry_at:
-                return None
-            response = await client.get('https://api.bilibili.com/x/web-interface/card', params={'mid': mid})
-            if response.status_code == 429:
-                _bilibili_retry_at = time.monotonic()+60
-            response.raise_for_status()
-            data = response.json()
-            if data.get('code') == -352:
-                _bilibili_retry_at = time.monotonic()+60
-        if data.get('code') != 0:
-            return None
-        identity = data['data']['card']['official_verify']
-        _bilibili_identities[mid] = time.monotonic(), identity
-        _bilibili_identities.move_to_end(mid)
-        while len(_bilibili_identities) > 256:
-            _bilibili_identities.popitem(last=False)
-        return identity
-    except (httpx.HTTPError, ValueError, KeyError, TypeError):
-        # Unknown provenance never falls back to a title or an uploader's self-description.
-        return None
+        return list(ArtistSearch(ydl)._search_results(query))
 
 
 def search_results(provider, entries, query=''):
-    results, seen = [], set()
+    results = []
     for item in entries:
-        if not isinstance(item, dict) or item.get('live_status') in ('is_live', 'is_upcoming'):
-            continue
-        evidence = official_source(provider, item)
-        # YouTube localizes titles (e.g. to romanized names). A second literal
-        # query filter can discard its top result while keeping fan edits.
-        if provider == 'bilibili' and (not evidence or not matches_query(query, item)):
+        if not isinstance(item, dict):
             continue
         try:
-            raw_url = (f"https://www.bilibili.com/video/{item['bvid']}" if provider == 'bilibili'
-                       else item.get('url') or item['webpage_url'])
-            url = video_url(raw_url)
-            expected_host = 'www.bilibili.com' if provider == 'bilibili' else 'www.youtube.com'
-            if urlsplit(url).hostname != expected_host or url in seen:
+            url = video_url(item.get('url') or item['webpage_url'])
+            if urlsplit(url).hostname != 'www.youtube.com':
                 continue
             title = str(item.get('title') or '').strip()
-            if provider == 'bilibili':
-                title = unescape(re.sub(r'<[^>]*>', '', title))
             if not title:
                 continue
-            duration = item.get('duration') or 0
-            if isinstance(duration, str) and ':' in duration:
-                duration = sum(float(n)*60**i for i, n in enumerate(reversed(duration.split(':'))))
-            duration = float(duration)
+            duration = float(item.get('duration') or 0)
             if not math.isfinite(duration) or duration < 0:
                 duration = 0
-            thumbnail = item.get('pic') or item.get('thumbnail')
-            if not thumbnail:
-                thumbnail = next((t.get('url') for t in reversed(item.get('thumbnails') or []) if t.get('url')), '')
-            thumbnail = 'https:' + thumbnail if thumbnail.startswith('//') else thumbnail
+            thumbnail = item.get('thumbnail') or next((t.get('url') for t in
+                reversed(item.get('thumbnails') or []) if t.get('url')), '')
             host = urlsplit(thumbnail).hostname or ''
-            if urlsplit(thumbnail).scheme != 'https' or not any(host == h or host.endswith('.'+h) for h in ('ytimg.com', 'hdslb.com')):
+            if urlsplit(thumbnail).scheme != 'https' or not (host == 'ytimg.com' or host.endswith('.ytimg.com')):
                 thumbnail = None
-            results.append(dict(url=url, title=title[:500], provider=provider, duration=duration,
-                                uploader=str(item.get('author') or item.get('uploader') or item.get('channel') or '')[:200],
-                                thumbnail=thumbnail, official_evidence=evidence))
-            seen.add(url)
+            results.append(dict(url=url, title=title, provider=provider, duration=duration,
+                                uploader=str(item.get('uploader') or item.get('channel') or ''),
+                                thumbnail=thumbnail))
         except (KeyError, TypeError, ValueError):
             continue
-    return results[:3]
+    return results
 
 
 async def fetch_results(provider, query):
-    if provider == 'bilibili':
-        async with httpx.AsyncClient(timeout=12, headers={
-                'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.bilibili.com/'},
-                cookies={'buvid3': f'{uuid4()}infoc'}) as client:
-            response = await client.get('https://api.bilibili.com/x/web-interface/search/type',
-                params={'search_type': 'video', 'keyword': query, 'page': 1})
-            response.raise_for_status()
-            data = response.json()
-            if data.get('code') != 0 or not isinstance(data.get('data'), dict):
-                raise RuntimeError('Bilibili search unavailable')
-            entries = (data['data'].get('result') or [])[:20]
-            mids = list(dict.fromkeys(str(item.get('mid')) for item in entries))
-            slots = asyncio.Semaphore(2)
-            identities = dict(zip(mids, await asyncio.gather(*(bilibili_identity(client, mid, slots) for mid in mids))))
-            for item in entries:
-                item['official_identity'] = identities.get(str(item.get('mid')), {})
-            results = search_results(provider, entries, query)
-            if not results and any(identity is None for identity in identities.values()):
-                raise SourceVerificationUnavailable()
-            return results
     process = await asyncio.create_subprocess_exec(sys.executable, '-m', 'karaoke.video_search', query,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     try:

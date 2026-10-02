@@ -4151,18 +4151,12 @@ def test_low_free_disk_blocks_processing_without_evicting_the_playlist(tmp_path)
 
 def test_video_search_normalizes_results_and_rejects_unplayable_links():
     from karaoke.video_search import search_results
-    bili = search_results('bilibili', [dict(bvid='BV1bK411W797', title='<em>歌曲</em> &amp; 现场',
-        duration='1:02:03', pic='//i0.hdslb.com/cover.jpg', author='Uploader',
-        official_identity={'type':0, 'desc':'歌手'})])
-    assert bili == [dict(url='https://www.bilibili.com/video/BV1bK411W797', title='歌曲 & 现场',
-        duration=3723, thumbnail='https://i0.hdslb.com/cover.jpg', uploader='Uploader', provider='bilibili',
-        official_evidence='bilibili_certified_artist')]
     item = dict(url=URL, title='Video title', duration=180, channel_is_official_artist=True,
                 thumbnails=[{'url':'https://i.ytimg.com/cover.jpg'}])
     results = search_results('youtube', [item, item, dict(item, live_status='is_live'),
         dict(item, url='http://127.0.0.1/private'), dict(item, url='https://youtube.com.attacker.test/'),
         dict(item, url='https://www.bilibili.com/video/BV1bK411W797')])
-    assert len(results) == 1 and results[0]['url'] == URL
+    assert len(results) == 3 and all(row['url'] == URL for row in results)
     assert results[0]['thumbnail'] == 'https://i.ytimg.com/cover.jpg'
     assert search_results('youtube', [dict(item, thumbnail='https://localhost/cover')])[0]['thumbnail'] is None
 
@@ -4170,7 +4164,7 @@ def test_video_search_normalizes_results_and_rejects_unplayable_links():
 def test_search_api_failure_is_distinct_from_empty_and_creates_no_jobs(tmp_path, monkeypatch):
     from karaoke import video_search
     async def fetch(provider, query):
-        if provider == 'bilibili':
+        if query == 'failure':
             raise RuntimeError('provider unavailable')
         return []
     monkeypatch.setattr(video_search, 'fetch_results', fetch)
@@ -4179,7 +4173,8 @@ def test_search_api_failure_is_distinct_from_empty_and_creates_no_jobs(tmp_path,
         found = client.get('/v1/search', params=dict(provider='youtube', q='  some song  '))
         assert found.status_code == 200 and found.json()['results'] == []
         assert found.json()['query'] == 'some song'
-        assert client.get('/v1/search', params=dict(provider='bilibili', q='some song')).status_code == 502
+        assert client.get('/v1/search', params=dict(provider='youtube', q='failure')).status_code == 502
+        assert client.get('/v1/search', params=dict(provider='bilibili', q='some song')).status_code == 422
         for params in [dict(provider='other', q='song'), dict(provider='youtube', q=' '), dict(provider='youtube', q='a'*161)]:
             assert client.get('/v1/search', params=params).status_code == 422
         assert client.get('/v1/room').json()['entries'] == []
@@ -4209,7 +4204,7 @@ def test_video_search_deduplicates_inflight_queries_and_bounds_load(monkeypatch)
         await asyncio.sleep(0)
         one.cancel()
         await asyncio.gather(one, return_exceptions=True)
-        others = [asyncio.create_task(service.search('bilibili', str(i))) for i in range(7)]
+        others = [asyncio.create_task(service.search('youtube', str(i))) for i in range(7)]
         await asyncio.sleep(0)
         with pytest.raises(OverflowError):
             await service.search('youtube', 'overflow')
@@ -4271,49 +4266,18 @@ def test_official_video_filter_requires_source_evidence(provider, item, allowed)
     assert bool(official_source(provider, item)) == allowed
 
 
-def test_bilibili_verification_uses_certification_not_self_description(monkeypatch):
-    import asyncio
-    import httpx
-    from karaoke import video_search
-    calls = []
-    def respond(request):
-        calls.append(request)
-        mid = request.url.params['mid']
-        if mid == '3':
-            return httpx.Response(503)
-        return httpx.Response(200, json={'code':0, 'data':{'card':{
-            'name':'Official Music', 'sign':'I am the official artist',
-            'official_verify':{'type':1, 'desc':'Example 唱片公司官方账号'} if mid == '1' else {'type':-1, 'desc':''}
-        }}})
-    async def scenario():
-        video_search._bilibili_identities.clear()
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            slots = asyncio.Semaphore(4)
-            verified = await video_search.bilibili_identity(client, '1', slots)
-            assert await video_search.bilibili_identity(client, '1', slots) == verified
-            unknown = await video_search.bilibili_identity(client, '2', slots)
-            assert video_search.official_source('bilibili', {'official_identity':verified})
-            assert not video_search.official_source('bilibili', {'official_identity':unknown})
-            assert await video_search.bilibili_identity(client, '3', slots) is None
-            assert len(calls) == 3
-        video_search._bilibili_identities.clear()
-    asyncio.run(scenario())
-
-
 def test_search_keeps_provider_order_when_original_has_no_channel_badge():
     from karaoke.video_search import search_results
     def item(index, **extra):
         return dict(url=f'https://www.youtube.com/watch?v={index:011d}', title=f'Cover {index}',
                     channel_is_official_artist=True, **extra)
     found = search_results('youtube', [item(i) for i in range(12)])
-    assert [x['title'] for x in found] == ['Cover 0', 'Cover 1', 'Cover 2']
+    assert [x['title'] for x in found] == [f'Cover {i}' for i in range(12)]
     original = dict(url=URL, title='The song (Official music video)', channel='A broadcaster',
                     channel_is_verified=None, channel_is_official_artist=False)
     cover = dict(item(1), title='The song (Cover)')
     found = search_results('youtube', [original, cover], 'The song')
     assert [x['url'] for x in found] == [URL, cover['url']]
-    assert found[0]['official_evidence'] is None
-    assert found[1]['official_evidence'] == 'youtube_official_artist_channel'
 
 
 @pytest.mark.parametrize('artist_badge', [True, False])
@@ -4341,20 +4305,22 @@ def test_search_matches_song_and_performer_without_related_song_padding(query, t
     assert matches_query(query, dict(title=title,channel=channel)) == expected
 
 
-def test_bilibili_identity_cools_down_after_rate_limit(monkeypatch):
-    import asyncio
-    import httpx
-    from karaoke import video_search
+
+
+def test_youtube_search_reads_entire_native_page_without_following_continuation(monkeypatch):
+    from karaoke.video_search import youtube_entries
+    from yt_dlp.extractor.youtube import YoutubeSearchIE
     calls = []
-    def limited(request):
-        calls.append(request)
-        return httpx.Response(200, json={'code':-352})
-    async def scenario():
-        monkeypatch.setattr(video_search, '_bilibili_retry_at', 0)
-        monkeypatch.setattr(video_search, '_bilibili_identities', {})
-        async with httpx.AsyncClient(transport=httpx.MockTransport(limited)) as client:
-            slots = asyncio.Semaphore(2)
-            results = await asyncio.gather(*(video_search.bilibili_identity(client, str(i), slots) for i in range(4)))
-            assert results == [None]*4
-            assert len(calls) == 1
-    asyncio.run(scenario())
+    def respond(self, **kwargs):
+        calls.append(kwargs)
+        assert len(calls) == 1
+        return {'contents': {'twoColumnSearchResultsRenderer': {'primaryContents': {
+            'sectionListRenderer': {'contents': [{'itemSectionRenderer': {'contents': [
+                {'videoRenderer': {'videoId': f'{i:011d}', 'title': {'simpleText': f'Video {i}'}}}
+                for i in range(35)]}}, {'continuationItemRenderer': {'continuationEndpoint': {
+                    'continuationCommand': {'token': 'another-page'}}}}]}}}}}
+    monkeypatch.setattr(YoutubeSearchIE, '_extract_response', respond)
+    monkeypatch.setattr(YoutubeSearchIE, '_download_ytcfg', lambda *a, **k: {})
+    found = youtube_entries('anything')
+    assert [row['title'] for row in found] == [f'Video {i}' for i in range(35)]
+    assert len(calls) == 1

@@ -10,36 +10,40 @@ function setup() {
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-test('a fast provider renders while the other is loading; errors retain usable results', async () => {
+test('search calls only YouTube and preserves every returned result in order', async () => {
   const {search, requests, snapshots} = setup();
   const pending = search.search('Some song & singer');
-  assert.equal(new URL(requests[0].url, 'http://localhost').searchParams.get('q'), 'Some song & singer');
-  requests[0].finish([{title:'A real result'}]);
-  await flush();
-  assert.equal(snapshots.at(-1).youtube.results[0].title, 'A real result');
-  assert.equal(snapshots.at(-1).bilibili.loading, true);
-  requests[1].finish([], false);
+  assert.equal(requests.length, 1);
+  const query = new URL(requests[0].url, 'http://localhost').searchParams;
+  assert.equal(query.get('q'), 'Some song & singer');
+  assert.equal(query.get('provider'), 'youtube');
+  const results = Array.from({length:35}, (_,i) => ({title:`Video ${i}`}));
+  requests[0].finish(results);
   await pending;
-  assert.equal(snapshots.at(-1).bilibili.error, 'Provider failed');
-  assert.equal(snapshots.at(-1).youtube.results.length, 1);
+  assert.deepEqual(snapshots.at(-1).youtube.results, results);
+  assert.equal(snapshots.at(-1).youtube.loading, false);
+  const failed = search.search('failure');
+  requests[1].finish([], false);
+  await failed;
+  assert.equal(snapshots.at(-1).youtube.error, 'Provider failed');
 });
 
 test('new queries and clearing the input discard stale responses even if abort is ignored', async () => {
   const {search, requests, snapshots} = setup();
   const old = search.search('old');
   const latest = search.search('new');
-  assert.ok(requests.slice(0,2).every(r => r.signal.aborted));
+  assert.ok(requests[0].signal.aborted);
   const before = snapshots.length;
-  requests[0].finish([{title:'stale'}]); requests[1].finish([]);
+  requests[0].finish([{title:'stale'}]);
   await old;
   assert.equal(snapshots.length, before);
-  requests[2].finish([{title:'current'}]); requests[3].finish([]);
+  requests[1].finish([{title:'current'}]);
   await latest;
   assert.equal(snapshots.at(-1).youtube.results[0].title, 'current');
   const cleared = search.search('cleared');
   search.cancel();
   const count = snapshots.length;
-  requests[4].finish([]); requests[5].finish([]);
+  requests[2].finish([]);
   await cleared;
   assert.equal(snapshots.length, count);
 });
@@ -74,13 +78,10 @@ test('local matches appear immediately and update while online providers are pen
   assert.equal(snapshots.length, count);
 });
 
-test('combined results prefer local, deduplicate sources, and keep source tabs usable', () => {
-  const songs = [{url:'b',provider:'bilibili'}, {url:'a',provider:'youtube'},
-    {url:'a',provider:'local'}, {url:'c',provider:'youtube'}, {url:'d',provider:'youtube'}];
-  assert.deepEqual(visibleResults(songs,'all',false).map(s => [s.url,s.provider]),
-    [['a','local'],['c','youtube'],['d','youtube']]);
-  assert.deepEqual(visibleResults(songs,'local',true), [songs[2]]);
-  assert.equal(visibleResults(songs,'youtube',false)[0],songs[1]);
-  assert.deepEqual(visibleResults([songs[0]],'all',true),[]);
-  assert.deepEqual(visibleResults([songs[0]],'bilibili',true),[songs[0]]);
+test('YouTube view keeps provider order and has no result count or local deduplication filter', () => {
+  const videos = Array.from({length:35}, (_,i) => ({url:`v${i}`,provider:'youtube'}));
+  const local = {url:'v0',provider:'local'};
+  const songs = [local,...videos];
+  assert.deepEqual(visibleResults(songs,'youtube'), videos);
+  assert.deepEqual(visibleResults(songs,'local'), [local]);
 });

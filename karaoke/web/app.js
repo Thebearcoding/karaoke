@@ -14,10 +14,9 @@ let pendingLevels = {}, sendingLevels = {}, levelTimer = null, levelsBusy = fals
 let levelRequest = Promise.resolve();
 let pitchRequest = Promise.resolve();
 let searchTimer, searchQuery = '', searchSongs = [], previewSong = null, skipping = false, composing = false;
-let videoSource = 'all';
-let youtubePending = false;
+let videoSource = 'youtube';
 const addingVideos = new Set();
-const providerName = provider => ({local:'本地', youtube:'YouTube', bilibili:'B站'})[provider];
+const providerName = provider => ({local:'本地', youtube:'YouTube'})[provider];
 const videoSearch = createVideoSearch(renderVideoResults, fetch, query => searchLibrary(library, query));
 const current = () => state.entries.find(e => e.id === state.current_id);
 const effectiveLevels = () => ({...state.levels, ...sendingLevels, ...pendingLevels});
@@ -128,12 +127,11 @@ function renderLibrary() {
 }
 
 function renderVideoResults(providers) {
-  youtubePending = providers.youtube.loading;
   $('video-results').hidden = false;
   $('local-library').hidden = true;
   $('search-status').innerHTML = Object.entries(providers).map(([name, info]) => `<span class="${info.error ? 'search-error' : ''}">${providerName(name)} · ${info.loading ? '搜索中…' : info.error ? escape(info.error) : info.results.length ? `${info.results.length} ${name === 'local' ? '首' : '个视频'}` : name === 'local' ? '未找到' : '未找到匹配的视频'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`).join('');
   const songs = Object.values(providers).flatMap(info => info.results);
-  const order = {local:0, youtube:1, bilibili:2};
+  const order = {local:0, youtube:1};
   // Keep provider ranking independent of response order, without replacing cards.
   for (const song of songs) {
     const existing = searchSongs.findIndex(old => old.url === song.url && old.provider === song.provider);
@@ -157,7 +155,7 @@ function renderVideoResults(providers) {
 
 function filterVideos() {
   const cards = [...document.querySelectorAll('[data-result]')];
-  const visible = visibleResults(cards.filter(card => card.dataset.active === 'true').map(card => searchSongs[card.dataset.result]), videoSource, youtubePending);
+  const visible = visibleResults(cards.filter(card => card.dataset.active === 'true').map(card => searchSongs[card.dataset.result]), videoSource);
   cards.forEach(card => {
     card.hidden = card.dataset.active !== 'true' || !visible.includes(searchSongs[card.dataset.result]);
   });

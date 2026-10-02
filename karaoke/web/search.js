@@ -1,4 +1,4 @@
-// Each provider can finish independently. Old queries may never repaint the UI.
+// Local results remain available while YouTube loads; stale responses cannot repaint.
 export function createVideoSearch(onChange, fetcher = fetch, getLocal = () => []) {
   let controller, generation = 0, active;
   function cancel() {
@@ -12,22 +12,20 @@ export function createVideoSearch(onChange, fetcher = fetch, getLocal = () => []
     controller = new AbortController();
     const {signal} = controller;
     const providers = {local:{loading:false, results:getLocal(query), error:''},
-      ...Object.fromEntries(['youtube', 'bilibili'].map(name => [name, {loading:true, results:[], error:''}]))};
+      youtube:{loading:true, results:[], error:''}};
     active = {query, providers};
     const notify = () => { if (current === generation) onChange(providers); };
     notify();
-    await Promise.all(['youtube', 'bilibili'].map(async provider => {
-      try {
-        const response = await fetcher(`/v1/search?${new URLSearchParams({q:query, provider})}`, {signal});
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || '搜索失败，请重试');
-        providers[provider] = {loading:false, results:data.results, error:''};
-      } catch (error) {
-        if (signal.aborted) return;
-        providers[provider] = {loading:false, results:[], error:error.message};
-      }
-      notify();
-    }));
+    try {
+      const response = await fetcher(`/v1/search?${new URLSearchParams({q:query, provider:'youtube'})}`, {signal});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || '搜索失败，请重试');
+      providers.youtube = {loading:false, results:data.results, error:''};
+    } catch (error) {
+      if (signal.aborted) return;
+      providers.youtube = {loading:false, results:[], error:error.message};
+    }
+    notify();
   }
   function refreshLocal() {
     if (!active) return;
@@ -47,11 +45,8 @@ export function searchLibrary(library, query) {
     .map(song => ({...song, provider:'local', thumbnail:song.poster, uploader:song.artist}));
 }
 
-export function visibleResults(songs, source, youtubePending, limit = 3) {
-  const order = {local:0, youtube:1, bilibili:2}, seen = new Set();
-  return songs.filter(song => source === 'all' ? !(youtubePending && song.provider === 'bilibili') : song.provider === source)
-    .sort((a,b) => order[a.provider]-order[b.provider])
-    .filter(song => { if (seen.has(song.url)) return false; seen.add(song.url); return true; }).slice(0,limit);
+export function visibleResults(songs, source) {
+  return songs.filter(song => song.provider === source);
 }
 
 export function previewURL(song, origin) {
