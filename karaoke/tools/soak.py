@@ -400,10 +400,12 @@ def run_audio(path, data_dir, base, *, case_url=None, defer_urls=()):
             if not candidates:
                 print('No eligible audio cases; inspect failures and retry deadlines', flush=True)
                 return
-            candidates.sort(key=lambda c: (
-                (c.get('audio_attempts') or c.get('attempts') or [{}])[-1].get('status') not in ('failed', 'blocked', 'external'),
-                (c.get('audio_attempts') or c.get('attempts') or [{}])[-1].get('status') in ('passed', 'passed_audio'),
-                not bool(c.get('audio_attempts'))))
+            def priority(case):
+                last = (case.get('audio_attempts') or case.get('attempts') or [{}])[-1]
+                status = last.get('status')
+                return (status not in ('failed', 'blocked', 'external'), status in ('passed', 'passed_audio'),
+                        (last.get('finished_at') or '') if status == 'external' else '', not bool(case.get('audio_attempts')))
+            candidates.sort(key=priority)
             case = candidates[0]
             room = client.get(base+'/v1/room').raise_for_status().json()
             existing = {e['id'] for e in room['entries']}

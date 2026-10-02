@@ -1114,10 +1114,13 @@ def test_audio_regression_prioritizes_due_failures_then_unfinished_cases(tmp_pat
     import httpx
     from karaoke.tools import soak
     cases = [dict(url=f'https://www.youtube.com/watch?v={i:011d}', title=str(i),
-                  language='English', provider='youtube', attempts=[]) for i in range(3)]
+                  language='English', provider='youtube', attempts=[]) for i in range(4)]
     cases[0]['audio_attempts'] = [dict(status='passed_audio', pipeline_version='old')]
-    cases[1]['attempts'] = [dict(status='external', pipeline_version='old', next_retry_at=retry_at)]
+    cases[1]['attempts'] = [dict(status='external', pipeline_version='old', next_retry_at=retry_at,
+                               finished_at='2026-10-01T01:00:00+00:00')]
     cases[2]['attempts'] = [dict(status='submitted', pipeline_version='old')]
+    cases[3]['audio_attempts'] = [dict(status='external', pipeline_version='current', next_retry_at=retry_at,
+                                     finished_at='2026-10-01T02:00:00+00:00')]
     selection = [dict(url=c['url'], language=c['language']) for c in cases]
     manifest = tmp_path/'manifest.json'
     manifest.write_text(json.dumps(dict(cases=cases, provider_backoff={},
