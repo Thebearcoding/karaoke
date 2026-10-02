@@ -162,16 +162,18 @@ def retry_fields(error, diagnostic, number, *, failed_at):
     if error['code'] != 'download_failed':
         return fields
     text = (str(error)+' '+diagnostic).lower()
-    if any(s in text for s in ('sign in', 'login', '登录', 'risk control', '-352', 'captcha',
-                                'video unavailable', 'private video', '无法访问')):
-        return dict(fields, status='blocked')
+    blocked = any(s in text for s in ('sign in', 'login', '登录', 'risk control', '-352', 'captcha',
+                                     'video unavailable', 'private video', '无法访问'))
     rate_limited = bool(re.search(r'(?:http error|error code:|http/\d(?:\.\d)?)\s*429\b', text))
+    if blocked and not rate_limited:
+        return dict(fields, status='blocked')
     forbidden = bool(re.search(r'(?:http error|error code:|http/\d(?:\.\d)?)\s*403\b', text))
     if rate_limited or forbidden or any(s in text for s in ('timed out', 'connection reset',
             'proxy', '代理', '超时', 'failed to resolve', 'temporary failure in name resolution',
             'nodename nor servname', 'name or service not known', 'dns')):
         delay = max(retry_after_seconds(diagnostic) or 0, min(1800, (300 if forbidden else 60)*exponent))
-        return dict(fields, status='external', provider_blocked=rate_limited, next_retry_at=failed_at+delay)
+        return dict(fields, status='blocked' if blocked else 'external',
+                    provider_blocked=rate_limited, next_retry_at=failed_at+delay)
     return fields
 
 
@@ -460,7 +462,7 @@ def run_audio(path, data_dir, base, *, case_url=None, defer_urls=(), keep_going=
                 job['error'] = json.loads(error_path.read_text()) if error_path.is_file() else dict(code='verification_failed', message=str(error))
                 record_failure(attempt, job, folder)
                 store.update(job['id'], status='failed', error=job['error'], active_stages=[])
-                if attempt['status'] == 'external' and attempt['provider_blocked']:
+                if attempt.get('provider_blocked') and attempt.get('next_retry_at') is not None:
                     provider = attempt.get('retry_provider', case['provider'])
                     state['provider_backoff'][provider] = max(state['provider_backoff'].get(provider, 0), attempt['next_retry_at'])
             save(path, state)
@@ -614,7 +616,7 @@ def run(path, data_dir, base):
                     attempt.update(status='cache_evicted', finished_at=stamp())
                 else:
                     record_failure(attempt, job, data_dir/job['id'])
-                if attempt['status'] == 'external' and attempt['provider_blocked']:
+                if attempt.get('provider_blocked') and attempt.get('next_retry_at') is not None:
                     provider = attempt.get('retry_provider', case['provider'])
                     state['provider_backoff'][provider] = max(
                         state['provider_backoff'].get(provider, 0), attempt['next_retry_at'])

@@ -180,12 +180,15 @@ def test_rate_limit_uses_server_hint_and_distinguishes_request_errors(message, h
     ('HTTP Error 429: Too Many Requests','external',True),
     ('Failed to resolve www.youtube.com','external',False),
     ('Sign in to confirm you are not a bot','blocked',False),
+    ('HTTP Error 429: Too Many Requests\nTry again in 120 seconds\nSign in to confirm you are not a bot','blocked',True),
 ])
 def test_video_retry_does_not_apply_one_resource_error_to_every_song(diagnostic,status,global_limit):
     from karaoke.tools.soak import retry_fields
     policy=retry_fields({'code':'download_failed'},diagnostic,1,failed_at=1000)
     assert policy['status']==status and policy['provider_blocked']==global_limit
-    assert policy['next_retry_at'] is None if status=='blocked' else 1000<policy['next_retry_at']<=1300
+    assert policy['next_retry_at'] is None if status=='blocked' and not global_limit else 1000<policy['next_retry_at']<=1300
+    if 'Try again in 120 seconds' in diagnostic:
+        assert policy['next_retry_at']==1120
 
 
 def test_asr_child_preserves_server_retry_header_for_parent(tmp_path, monkeypatch):
@@ -740,9 +743,9 @@ def test_soak_collects_retries_in_submission_order(tmp_path, monkeypatch):
     assert all(c['attempts'][-1]['pipeline_version'] == 'v2' for c in saved)
 
 
-@pytest.mark.parametrize('provider', ['youtube', 'openai'])
+@pytest.mark.parametrize('provider,login', [('youtube', False), ('youtube', True), ('openai', False)])
 @pytest.mark.parametrize('previous_delay', [3600, 14400])
-def test_soak_new_failure_never_shortens_provider_backoff(tmp_path, monkeypatch, provider, previous_delay):
+def test_soak_new_failure_never_shortens_provider_backoff(tmp_path, monkeypatch, provider, login, previous_delay):
     import hashlib
     import httpx
     from karaoke.tools import soak
@@ -757,7 +760,8 @@ def test_soak_new_failure_never_shortens_provider_backoff(tmp_path, monkeypatch,
         selection_sha256=hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest())))
     folder = tmp_path/'job'
     folder.mkdir()
-    (folder/'download.log').write_text('HTTP Error 429: Too Many Requests')
+    (folder/'download.log').write_text('HTTP Error 429: Too Many Requests'+(
+        '\nSign in to confirm you are not a bot' if login else ''))
     error = (dict(code='openai_rate_limit', provider='openai', retryable=True) if provider == 'openai'
              else dict(code='download_failed'))
     responses = {'/health': {'pipeline_version': 'v1'},
@@ -770,7 +774,7 @@ def test_soak_new_failure_never_shortens_provider_backoff(tmp_path, monkeypatch,
     soak.run(manifest, tmp_path, 'http://test')
     saved = json.loads(manifest.read_text())
     attempt = saved['cases'][0]['attempts'][-1]
-    assert attempt['status'] == 'external'
+    assert attempt['status'] == ('blocked' if login else 'external')
     assert saved['provider_backoff'][provider] >= attempt['next_retry_at']
     assert saved['provider_backoff'][provider] == max(previous_retry, attempt['next_retry_at'])
 
@@ -1328,6 +1332,27 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
     monkeypatch.setattr(soak, 'run_probe', interrupted_probe)
     soak.run_audio(manifest, data, 'http://test', keep_going=True)
     assert len(calls) == 9
+    assert [e['id'] for e in room.read()['entries']] == [user_entry]
+
+    # A final login prompt must not hide the earlier provider-wide HTTP 429.
+    # Retain this song's login hold and stop submitting other songs during backoff.
+    version = 'rate-limited-survey'
+    def rate_limited_probe(client, base, folder, command):
+        calls.append(folder.name)
+        (folder/'error.json').write_text(json.dumps(dict(code='download_failed', message='登录验证')))
+        (folder/'download.log').write_text('HTTP Error 429: Too Many Requests\nTry again in 120 seconds\n'
+                                          'Sign in to confirm you are not a bot')
+        return 1
+    monkeypatch.setattr(soak, 'run_probe', rate_limited_probe)
+    before = time.time()
+    soak.run_audio(manifest, data, 'http://test', keep_going=True)
+    saved = json.loads(manifest.read_text())
+    assert len(calls) == 10
+    assert saved['provider_backoff']['youtube'] >= before+120
+    attempted = [c['audio_attempts'][-1] for c in saved['cases'] if c['audio_attempts'][-1]['pipeline_version']==version]
+    assert len(attempted) == 1 and attempted[0]['status'] == 'blocked'
+    soak.run_audio(manifest, data, 'http://test', keep_going=True)
+    assert len(calls) == 10
     assert [e['id'] for e in room.read()['entries']] == [user_entry]
 
 
