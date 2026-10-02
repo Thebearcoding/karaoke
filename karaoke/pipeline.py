@@ -418,7 +418,7 @@ class Pipeline:
                 self.output/'download/source.info.json', song_language(transcription.get('language')), self.checkpoints)
             catalog = list((self.catalog_root/'lyrics').glob('*.json')) if self.catalog_root else []
             with self.checkpoints.stage('prepare_lyrics',
-                    inputs=[self.output/'asr/transcription.json', self.output/'vocals-16k.wav', self.output/'source-44100.wav',
+                    inputs=[self.output/'asr/transcription.json', self.output/'vocals-16k.wav', self.vocals, self.output/'source-44100.wav',
                             *sorted((self.output/'asr').glob('initial-transcription.json')),
                             *sorted((self.output/'asr').glob('run.json')), *([captions] if captions else [])],
                     outputs=[self.output/'lyrics.json', self.output/'anchors.json', self.output/'asr/filtered.json',
@@ -428,7 +428,7 @@ class Pipeline:
                                 duration=duration, model=self.text_model,
                                 implementation=inspect.getsource(type(self).prepare_lyrics)),
                     code=[ROOT/p for p in ('song_sources.py', 'source_captions.py', 'lyric_lookup.py', 'anchors_from_asr.py', 'transcribe_lyrics.py', 'anchor_recovery.py',
-                                           'subtitles.py', 'job_schema.py')] + catalog) as reused:
+                                           'subtitles.py', 'job_schema.py', 'vocal_review.py')] + catalog) as reused:
                 if not reused:
                     self.prepare_lyrics(metadata, duration)
             lyrics = json.loads((self.output/'lyrics.json').read_text())
@@ -520,6 +520,13 @@ class Pipeline:
                 covered = sum(c['matched_fraction']*len(c['text']) for c in anchors)/max(1, sum(map(len, lines)))
             coverage = lyric_coverage(anchors, candidates[selected], lyrics['language'], duration,
                                       other_words=transcription.get('words') or [])
+            if covered >= .55 and coverage['uncovered_passages']:
+                from .vocal_review import review_gaps, speech_intervals
+                reviews = review_gaps(self.output, coverage['uncovered_passages'],
+                                      [*candidates[selected], *(transcription.get('words') or [])])
+                repeats['non_singing_reviews'] = reviews
+                coverage = lyric_coverage(anchors, candidates[selected], lyrics['language'], duration,
+                    other_words=transcription.get('words') or [], speech_intervals=speech_intervals(self.output, reviews))
             if lyrics['provenance']['kind'] != 'video_description' or (covered >= .55 and coverage['status'] == 'complete'):
                 break
             # A description can quote a few perfectly matching lines while

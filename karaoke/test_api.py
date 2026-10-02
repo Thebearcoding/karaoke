@@ -1044,6 +1044,21 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
         dict(word='An entire later verse was omitted from the lyrics', start=.85, end=.99)])))
     with pytest.raises(ValueError, match='lyric passages'):
         verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
+    from karaoke.vocal_review import review_gaps
+    spoken = json.loads(repeat_path.read_text())
+    with patch('openai.OpenAI') as client:
+        client.return_value.chat.completions.create.return_value.model_dump.return_value = vocal_review_response()
+        spoken['non_singing_reviews'] = review_gaps(folder, [dict(start=.8, end=1.)], spoken['words'])
+    repeat_path.write_text(json.dumps(spoken))
+    assert verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)['subtitle_units'] == 1
+    spoken['non_singing_reviews'][0]['views'][0]['response'] = vocal_review_response(singing=True)
+    repeat_path.write_text(json.dumps(spoken))
+    with pytest.raises(ValueError, match='lyric passages'):
+        verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
+    spoken['non_singing_reviews'][0]['views'][0]['input_sha256'] = 'changed'
+    repeat_path.write_text(json.dumps(spoken))
+    with pytest.raises(ValueError, match='current input'):
+        verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
     repeat_path.write_text(json.dumps(dict(status='failed')))
     with pytest.raises(ValueError, match='repetitions'):
         verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
@@ -1610,6 +1625,98 @@ def test_lyric_coverage_detects_a_missing_verse_despite_high_overall_match():
     assert missing['status'] == 'incomplete' and len(missing['uncovered_passages']) == 1
     adlib = [*words, dict(word='hey', start=9., end=9.5)]
     assert lyric_coverage(cues, adlib, 'English', 10.)['status'] == 'complete'
+    # Even a speech review must not suppress text inside an actual lyric cue.
+    reviewed = lyric_coverage(cues, words, 'English', 10., speech_intervals=[(0., 10.)])
+    assert reviewed['excluded_speech_intervals'] == []
+    assert reviewed['recognized_units'] == lyric_coverage(cues, words, 'English', 10.)['recognized_units']
+
+
+def vocal_review_response(*, singing=False, speech=True, uncertain=False):
+    return dict(choices=[dict(finish_reason='stop', message=dict(content=json.dumps(dict(
+        singing_present=singing, speech_present=speech, uncertain_vocals=uncertain))))])
+
+
+@pytest.mark.parametrize('verdict', ['speech', 'singing', 'mixed', 'uncertain', 'instrumental', 'invalid'])
+def test_uncovered_dialogue_requires_two_complete_audio_reviews(tmp_path, monkeypatch, verdict):
+    import soundfile as sf
+    from karaoke.vocal_review import speech_intervals
+    lines = ['清风吹过树林', '晚霞染红天空']
+    speech = dict(word='Please come back tomorrow because the road is closed tonight', start=1., end=4.)
+    words = [speech, *[dict(word=t, start=6.+3*i, end=8.+3*i) for i, t in enumerate(lines)]]
+    pipeline = Pipeline(dict(url=URL), tmp_path/'job', catalog_root=None)
+    folder = pipeline.output/'asr'
+    folder.mkdir()
+    (folder/'transcription.json').write_text(json.dumps(dict(language='Chinese',
+        segments=[dict(text='\n'.join(lines), start=6., end=11.)], words=words)))
+    (folder/'run.json').write_text(json.dumps(dict(recovery=dict(triggered=False))))
+    for path in (pipeline.output/'vocals-16k.wav', pipeline.output/'source-44100.wav', pipeline.vocals):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        sf.write(path, np.full(12*16000, .1), 16000)
+    monkeypatch.setattr('karaoke.pipeline.prepare_song_text', lambda *a, **k:
+        dict(title='Example', artist='', language='Chinese', lines=lines, provenance=dict(kind='video_description')))
+    response = vocal_review_response(singing=verdict in ('singing', 'mixed'),
+        speech=verdict not in ('singing', 'instrumental'), uncertain=verdict == 'uncertain')
+    if verdict == 'invalid':
+        response['choices'][0]['message']['content'] = 'I will listen to it.'
+    with patch('openai.OpenAI') as client:
+        client.return_value.chat.completions.create.side_effect = [
+            SimpleNamespace(model_dump=lambda **k: vocal_review_response()),
+            SimpleNamespace(model_dump=lambda **k: response)]
+        if verdict == 'speech':
+            pipeline.prepare_lyrics({}, 12.)
+        else:
+            with pytest.raises(StageFailure, match='未覆盖完整演唱'):
+                pipeline.prepare_lyrics({}, 12.)
+        assert client.return_value.chat.completions.create.call_count == 2
+    result = json.loads((pipeline.output/'lyrics.json').read_text())
+    report = json.loads((folder/'lyric-repeats.json').read_text())
+    assert result['lines'] == lines and result['provenance']['kind'] == 'video_description'
+    assert report['words'] == words  # Raw recognition survives the coverage review.
+    intervals = speech_intervals(pipeline.output, report['non_singing_reviews'])
+    assert intervals == ([(.5, 4.5)] if verdict == 'speech' else [])
+    assert report['lyric_coverage']['status'] == ('complete' if verdict == 'speech' else 'incomplete')
+    # A retry reuses both positive and negative decisions rather than fishing
+    # for a different answer from the same model and audio.
+    with patch('openai.OpenAI') as client:
+        if verdict == 'speech':
+            pipeline.prepare_lyrics({}, 12.)
+        else:
+            with pytest.raises(StageFailure, match='未覆盖完整演唱'):
+                pipeline.prepare_lyrics({}, 12.)
+        client.assert_not_called()
+
+
+def test_audio_reviews_revalidate_sources_and_reuse_only_unchanged_inputs(tmp_path):
+    import soundfile as sf
+    from copy import deepcopy
+    from karaoke.vocal_review import SOURCES, review_gaps, speech_intervals
+    words = [dict(word='spoken dialogue', start=1., end=2.)]
+    for source in SOURCES:
+        path = tmp_path/source
+        path.parent.mkdir(parents=True, exist_ok=True)
+        sf.write(path, np.full(3*16000, .1), 16000)
+    with patch('openai.OpenAI') as client:
+        client.return_value.chat.completions.create.return_value.model_dump.return_value = vocal_review_response()
+        reviews = review_gaps(tmp_path, [dict(start=0., end=3.)], words)
+        assert speech_intervals(tmp_path, reviews) == [(.5, 2.5)]
+        for change in ('missing_view', 'input_hash', 'prompt', 'model', 'bounds'):
+            altered = deepcopy(reviews)
+            if change == 'missing_view':
+                altered[0]['views'].pop()
+            elif change == 'bounds':
+                altered[0]['end'] = 2.6
+            else:
+                altered[0]['views'][0][{'input_hash':'input_sha256'}.get(change, change)] = 'changed'
+            with pytest.raises(ValueError):
+                speech_intervals(tmp_path, altered)
+        sf.write(tmp_path/SOURCES[0], np.full(3*16000, .2), 16000)
+        with pytest.raises(ValueError, match='current input'):
+            speech_intervals(tmp_path, reviews)
+        refreshed = review_gaps(tmp_path, [dict(start=0., end=3.)], words)
+        assert client.return_value.chat.completions.create.call_count == 3
+        assert speech_intervals(tmp_path, refreshed) == [(.5, 2.5)]
+        (tmp_path/SOURCES[1]).unlink()
+        assert review_gaps(tmp_path, [dict(start=0., end=3.)], words) == []
 
 
 @pytest.mark.parametrize('supplied', [False, True])

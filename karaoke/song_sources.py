@@ -84,22 +84,25 @@ def independent_transcript_support(transcription, report, language):
     return min(matched/max(1, len(expected)), matched/max(1, len(observed)))
 
 
-def lyric_coverage(cues, words, language, duration, *, other_words=()):
+def lyric_coverage(cues, words, language, duration, *, other_words=(), speech_intervals=()):
     """Check omitted recognition, not just whether the chosen lyrics match."""
     from .anchors_from_asr import text_units
     from rapidfuzz.distance import Levenshtein
 
-    timed = [w for w in words if math.isfinite(w['start']) and math.isfinite(w['end'])
-             and 0 <= w['start'] < w['end'] <= duration+.05]
-    alternate = [w for w in other_words if math.isfinite(w['start']) and math.isfinite(w['end'])
-                 and 0 <= w['start'] < w['end'] <= duration+.05]
+    intervals = sorted((c['start'], c['end']) for c in cues
+                       if c.get('start') is not None and c.get('end') is not None
+                       and 0 <= c['start'] < c['end'] <= duration+.05)
+    speech = [(a, b) for a, b in speech_intervals if 0 <= a < b <= duration+.05
+              and not any(a < end and b > start for start, end in intervals)]
+    def singing_words(stream):
+        return [w for w in stream if math.isfinite(w['start']) and math.isfinite(w['end'])
+                and 0 <= w['start'] < w['end'] <= duration+.05
+                and not any(a <= w['start'] < w['end'] <= b for a, b in speech)]
+    timed, alternate = singing_words(words), singing_words(other_words)
     expected = text_units(' '.join(c['text'] for c in cues), language)
     observed = [u for w in timed for u in text_units(w['word'], language)]
     matched = sum(b.src_end-b.src_start for b in Levenshtein.opcodes(expected, observed) if b.tag == 'equal')
     fraction = matched/max(1, len(observed))
-    intervals = sorted((c['start'], c['end']) for c in cues
-                       if c.get('start') is not None and c.get('end') is not None
-                       and 0 <= c['start'] < c['end'] <= duration+.05)
     gaps, end = [], 0.
     for start, stop in [*intervals, (duration, duration)]:
         if start > end:
@@ -113,6 +116,7 @@ def lyric_coverage(cues, words, language, duration, *, other_words=()):
         end = max(end, stop)
     return dict(recognized_units=len(observed), matched_units=matched,
                 recognized_coverage=fraction, uncovered_passages=gaps,
+                excluded_speech_intervals=speech,
                 status='complete' if fraction >= .55 and not gaps else 'incomplete')
 
 
