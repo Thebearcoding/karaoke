@@ -261,13 +261,17 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False):
             raise ValueError('Word timing falls outside acoustic phrase context')
     from karaoke.song_sources import lyric_coverage, missing_repetitions
     from karaoke.vocal_review import speech_intervals
-    repeats = json.loads((folder/'asr/lyric-repeats.json').read_text())
+    repeats_raw = (folder/'asr/lyric-repeats.json').read_bytes()
+    repeats = json.loads(repeats_raw)
     if repeats['status'] != 'complete' or missing_repetitions(
             repeats['reference_lines'], cues, repeats['words'], result['language'], duration):
         raise ValueError('Subtitles omit recognized lyric repetitions')
-    if lyric_coverage(cues, repeats['words'], result['language'], duration,
-                      other_words=repeats.get('other_coverage_words', []),
-                      speech_intervals=speech_intervals(folder, repeats.get('non_singing_reviews', [])))['status'] != 'complete':
+    coverage = lyric_coverage(cues, repeats['words'], result['language'], duration,
+        other_words=repeats.get('other_coverage_words', []),
+        speech_intervals=speech_intervals(folder, repeats.get('non_singing_reviews', [])))
+    save(folder/'lyric-coverage-validation.json', dict(coverage, input_sha256=dict(
+        subtitles=hashes['subtitles'], recognition=hashlib.sha256(repeats_raw).hexdigest())))
+    if coverage['status'] != 'complete':
         raise ValueError('Subtitles omit recognized lyric passages')
     for name in ('mv', 'instrumental_preview', 'backing_vocals_preview', 'lead_vocals_preview'):
         if audio_only and name == 'mv':
@@ -544,7 +548,8 @@ def record_failure(attempt, job, folder):
     attempt['diagnostic_tail'] = '\n'.join(logs)
     for pattern in ('asr/*.json', 'asr-requests/*.json', 'alignment/*.json', 'phonemes/*.json', 'context/**/*.json',
                     'repeated-lyrics/*.json', 'english-onsets/*.json',
-                    'lyrics.json', 'anchors.json', 'word-cues.json', 'ordered-cues.json', 'quality.json',
+                    'lyrics.json', 'anchors.json', 'word-cues.json', 'ordered-cues.json', 'cues.json', 'quality.json',
+                    'audio-result.json', 'result.json', 'lyric-coverage-validation.json',
                     'lyric-repeat-validation.json', 'highlight-validation.json'):
         for path in folder.glob(pattern):
             try:

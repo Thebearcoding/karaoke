@@ -222,6 +222,14 @@ def test_soak_preserves_failed_stage_diagnostics_after_cache_eviction(tmp_path):
     (folder/'asr-requests/local-rejected.json').write_text(json.dumps(rejected))
     (folder/'repeated-lyrics').mkdir()
     (folder/'repeated-lyrics/run.json').write_text('{"attempts": []}')
+    final_validation = {
+        'cues.json': [dict(text='final cue', start=2., end=3.)],
+        'audio-result.json': dict(duration_seconds=4., artifacts={'subtitles': {'path': 'cues.json'}}),
+        'result.json': dict(duration_seconds=4., artifacts={'mv': {'path': 'mv.mp4'}}),
+        'lyric-coverage-validation.json': dict(status='incomplete', uncovered_passages=[dict(start=0., end=2.)]),
+    }
+    for name, value in final_validation.items():
+        (folder/name).write_text(json.dumps(value))
     (folder/'vocals.mp3').write_bytes(b'private audio')
     attempt = dict(external_attempt=1)
     error = dict(code='align_repeats_failed', message='Generic stage failure')
@@ -242,6 +250,7 @@ def test_soak_preserves_failed_stage_diagnostics_after_cache_eviction(tmp_path):
     assert saved['asr/transcription.json'] == {'language': 'chinese'}
     assert saved['asr-requests/local-rejected.json'] == rejected
     assert saved['repeated-lyrics/run.json'] == {'attempts': []}
+    assert {name: saved[name] for name in final_validation} == final_validation
     assert 'vocals.mp3' not in saved
     assert traceback in attempt['diagnostic_tail']
     assert attempt['status'] == 'failed' and attempt['error'] == error
@@ -1172,6 +1181,11 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
         dict(word='An entire later verse was omitted from the lyrics', start=.85, end=.99)])))
     with pytest.raises(ValueError, match='lyric passages'):
         verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
+    coverage_path = folder/'lyric-coverage-validation.json'
+    coverage = json.loads(coverage_path.read_text())
+    assert coverage['status'] == 'incomplete'
+    assert [(gap['start'], gap['end']) for gap in coverage['uncovered_passages']] == [(.8, 1.)]
+    assert coverage['input_sha256'] == dict(subtitles=file_hash(subtitle_path), recognition=file_hash(repeat_path))
     from karaoke.vocal_review import review_gaps
     spoken = json.loads(repeat_path.read_text())
     with patch('openai.OpenAI') as client:
@@ -1179,6 +1193,9 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
         spoken['non_singing_reviews'] = review_gaps(folder, [dict(start=.8, end=1.)], spoken['words'])
     repeat_path.write_text(json.dumps(spoken))
     assert verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)['subtitle_units'] == 1
+    coverage = json.loads(coverage_path.read_text())
+    assert coverage['status'] == 'complete'
+    assert coverage['input_sha256']['recognition'] == file_hash(repeat_path)
     spoken['non_singing_reviews'][0]['views'][0]['response'] = vocal_review_response(singing=True)
     repeat_path.write_text(json.dumps(spoken))
     with pytest.raises(ValueError, match='lyric passages'):
