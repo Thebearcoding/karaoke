@@ -156,7 +156,7 @@ class Pipeline:
             'package_two_stems': (['download/source.mkv', 'music-separation/song/vocals.wav'],
                                   ['two-stems'], [ROOT/'exact_stems.py']),
             'resample_vocals': (['music-separation/song/vocals.wav'], ['vocals-16k.wav', 'vocals-asr.mp3'], []),
-            'transcribe': (['vocals-asr.mp3'], ['asr'], [ROOT/p for p in
+            'transcribe': (['vocals-asr.mp3', 'source-44100.wav'], ['asr'], [ROOT/p for p in
                 ('transcribe_lyrics.py', 'anchors_from_asr.py', 'subtitles.py', 'job_schema.py')]),
             'separate_lead': (['music-separation/song/vocals.wav'], ['lead-separation'], [ROOT/'benchmark_neural.py']),
             'package_three_stems': (['two-stems', 'lead-separation/song/vocals.wav'],
@@ -408,6 +408,7 @@ class Pipeline:
             '-ar', '16000', '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '64k', self.output/'vocals-asr.mp3'])
         self.run('transcribe', [sys.executable, ROOT/'transcribe_lyrics.py', '--audio',
             self.output/'vocals-asr.mp3', '--language', self.request.get('language') or 'auto',
+            '--original-audio', self.output/'source-44100.wav',
             '--allow-unresolved-text', '--output', self.output/'asr'])
         self.phase('prepare_lyrics', True)
         started = time.perf_counter()

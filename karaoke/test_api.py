@@ -423,7 +423,7 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     calls.clear()
     (folder/'source-44100.wav').write_bytes(b'updated original audio')
     prepare()
-    assert calls == ['align_context']
+    assert calls == ['transcribe', 'align_context']
 
 
 @pytest.mark.parametrize('formatting', ['lyrics', 'symbols', 'annotations'])
@@ -2302,7 +2302,8 @@ def test_normal_choruses_do_not_trigger_asr_retry(tmp_path, language):
     output.mkdir()
     with patch('karaoke.transcribe_lyrics.OpenAI') as client:
         client.audio.transcriptions.create.return_value.model_dump.return_value = data
-        actual, recovery = transcribe(client, audio, language, '', output)
+        actual, recovery = transcribe(client, audio, language, '', output,
+                                      original_audio=tmp_path/'unused-original.wav')
         assert actual == data and not recovery['triggered']
         client.audio.transcriptions.create.assert_called_once()
 
@@ -2381,6 +2382,65 @@ def test_asr_request_cache_checks_input_parameters_and_response(tmp_path):
     audio.write_bytes(b'different audio')
     assert cached_recognition(client, audio, request, output)['call'] == 3
     assert cached_recognition(client, audio, dict(request, prompt='new context'), output)['call'] == 4
+
+
+@pytest.mark.parametrize('problem', [None, 'loop', 'collapsed', 'outside_audio',
+                                     'wrong_language', 'unsupported_language', 'duration', 'missing_model'])
+def test_unusable_vocal_asr_rechecks_original_audio_before_whole_song_retry(tmp_path, monkeypatch, problem):
+    from copy import deepcopy
+    import soundfile as sf
+
+    audio, original, output = tmp_path/'vocals.wav', tmp_path/'source.wav', tmp_path/'asr'
+    output.mkdir()
+    sf.write(audio, np.full(3000, .01), 1000)
+    sf.write(original, np.full(2000 if problem == 'duration' else 3000, .02), 1000)
+    initial = dict(language='nynorsk', text='1, '*100,
+        segments=[dict(start=.5, end=2.5, text='1, '*100)],
+        words=[dict(start=.5, end=2.5, word='1')])
+    candidate = dict(language='en', text='A quiet opening',
+        segments=[dict(start=.5, end=2.5, text='A quiet opening')],
+        words=[dict(start=.5, end=1., word='A'), dict(start=1., end=2., word='quiet'),
+               dict(start=2., end=2.5, word='opening')])
+    if problem == 'loop':
+        candidate['segments'][0]['text'] = 'repeated phrase '*10
+    elif problem == 'collapsed':
+        candidate['words'] = [dict(start=.5, end=.5, word='word') for _ in range(8)]
+    elif problem == 'outside_audio':
+        candidate['words'][-1]['end'] = 4.
+    elif problem == 'unsupported_language':
+        candidate['language'] = 'ru'
+    preserved, calls = deepcopy(candidate), []
+    language = 'zh' if problem == 'wrong_language' else 'auto'
+
+    def local(path, detected, target):
+        calls.append('local')
+        # A broken transcript's detected language must not constrain this decode.
+        assert (path, detected, target) == (original, language, output)
+        if problem == 'missing_model':
+            raise ValueError('model unavailable')
+        return candidate
+
+    def create(**request):
+        calls.append(request['model'])
+        if request['model'] != 'whisper-1':
+            raise RuntimeError('provider recovery still needed')
+        return SimpleNamespace(model_dump=lambda: initial)
+
+    monkeypatch.setattr('karaoke.transcribe_lyrics.cached_local_recognition', local)
+    client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create)))
+    if problem is None:
+        data, recovery = transcribe(client, audio, language, '', output, original_audio=original)
+        assert data == candidate and recovery['original_audio']['accepted']
+        assert recovery['text_model'] == 'local-large-v3-turbo'
+        assert calls == ['whisper-1', 'local']
+    else:
+        with pytest.raises(RuntimeError, match='provider recovery still needed'):
+            transcribe(client, audio, language, '', output, original_audio=original)
+        report = json.loads((output/'original-recovery.json').read_text())
+        assert not report['accepted'] and report['reason']
+        assert calls == ['whisper-1'] + ([] if problem == 'duration' else ['local']) + ['gpt-4o-transcribe']
+    assert candidate == preserved
+    assert json.loads((output/'initial-transcription.json').read_text()) == initial
 
 
 @pytest.mark.parametrize('problem', [None, 'padding', 'missing_boundary', 'wrong_language', 'overlap', 'loop'])
