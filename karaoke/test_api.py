@@ -2570,7 +2570,9 @@ def test_audio_only_failure_is_not_evicted_as_disposable_video(tmp_path):
     assert store.read(video['id'])['status'] == 'video_evicted'
 
 
-def test_offline_cache_keeps_sources_when_reclaiming_computed_audio(tmp_path, monkeypatch):
+@pytest.mark.parametrize('audio_only', [True, False])
+@pytest.mark.parametrize('status', ['failed', 'audio_ready'])
+def test_offline_cache_keeps_sources_when_reclaiming_computed_audio(tmp_path, monkeypatch, audio_only, status):
     monkeypatch.setenv('KARAOKE_REQUIRE_CACHED_SOURCE', '1')
     store = Store(tmp_path)
     job, _ = store.create(JobRequest(url=URL), 'test')
@@ -2581,11 +2583,12 @@ def test_offline_cache_keeps_sources_when_reclaiming_computed_audio(tmp_path, mo
     source_sha = file_hash(source)
     (folder/'download/source.info.json').write_text('{}')
     (folder/'source.json').write_text(json.dumps(dict(
-        url=URL, sha256=source_sha, audio_only=True, duration=10)))
+        url=URL, sha256=source_sha, audio_only=audio_only, duration=10)))
     (folder/'alignment.json').write_text('{"reason":"unresolved"}')
     (folder/'worker.log').write_bytes(b'x'*100000)
     (folder/'working.wav').write_bytes(b'x'*(2*1024**2))
-    store.update(job['id'], status='failed', error=dict(code='align_words_failed'))
+    error = dict(code='align_words_failed') if status == 'failed' else None
+    store.update(job['id'], status=status, error=error)
     store.cache.limit = 128*1024
     store.cache.acquire(job['id'])
     assert not store.cache.enforce()
@@ -2600,7 +2603,7 @@ def test_offline_cache_keeps_sources_when_reclaiming_computed_audio(tmp_path, mo
     assert (folder/'alignment.json').read_text() == '{"reason":"unresolved"}'
     assert (folder/'worker.log').stat().st_size == 65536
     saved = store.read(job['id'])
-    assert saved['status'] == 'source_ready' and saved['error']['code'] == 'align_words_failed'
+    assert saved['status'] == 'source_ready' and saved['error'] == error
     with pytest.raises(CacheFull):
         store.cache.set_limit(stats['used_bytes']-1)
     store.cache.limit = stats['used_bytes']-1

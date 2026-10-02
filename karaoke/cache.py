@@ -98,7 +98,7 @@ class SongCache:
         required = {'source.json', 'download/source.mkv', 'download/source.info.json'}
         try:
             source = json.loads((folder/'source.json').read_text())
-            if (not isinstance(source, dict) or source.get('audio_only') is not True or
+            if (not isinstance(source, dict) or
                     source.get('input_url', source.get('url')) != job['input']['url'] or
                     not all((folder/p).is_file() and not (folder/p).is_symlink() for p in required)):
                 return set()
@@ -190,8 +190,8 @@ class SongCache:
                     audio_only = json.loads(source_info.read_text()).get('audio_only')
                 except (OSError, ValueError):
                     audio_only = False
-                if audio_only:
-                    continue  # A tested audio download is not cheap video-only cache.
+                if audio_only or retained[job['id']]:
+                    continue  # Keep pure audio and every required offline input.
                 video = folder/'download/source.mkv'
             elif job['status'] == 'completed' and can_restore_video(folder, job.get('result')):
                 video = folder/job['result']['artifacts']['mv']['path']
