@@ -982,6 +982,7 @@ def test_soak_checks_actual_stem_samples_not_only_pipeline_claim(tmp_path):
     ('HTTP Error 429: Too Many Requests', '限流（429）'),
     ("HTTP Error 429: Too Many Requests\nSign in to confirm you're not a bot", '限流（429），并要求登录验证'),
     ('ERROR: Video unavailable', '无法访问'),
+    ('ERROR: unable to download video data: HTTP Error 403: Forbidden', '拒绝下载（403）'),
     ('ERROR: connection timed out', '超时'),
     ("Failed to resolve 'www.youtube.com' ([Errno 8] nodename nor servname provided, or not known)", 'DNS'),
     ('Temporary failure in name resolution', 'DNS'),
@@ -1377,7 +1378,7 @@ def test_audio_download_promotes_to_video_without_replacing_tested_audio(tmp_pat
 @pytest.mark.parametrize('mode,expected', [('full', '720+audio'), ('promote', '720'), ('audio', 'audio')])
 @pytest.mark.parametrize('custom_cookies', [False, True])
 def test_download_selects_720p_without_reducing_audio_quality(tmp_path, monkeypatch, mode, expected, custom_cookies):
-    from yt_dlp import YoutubeDL
+    from yt_dlp import YoutubeDL, parse_options
     cookie_file = tmp_path/('configured/session.txt' if custom_cookies else 'private/youtube-cookies.txt')
     pipeline = Pipeline(dict(url=URL), tmp_path/'job', audio_only=mode == 'audio',
                         cookies_file=str(cookie_file) if custom_cookies else None)
@@ -1412,9 +1413,11 @@ def test_download_selects_720p_without_reducing_audio_quality(tmp_path, monkeypa
                     height=height, vcodec='avc1', acodec='none') for height in (360, 720, 1080, 2160)]
     formats += [dict(format_id=name, url=f'https://media.example/{name}.webm', ext='webm',
                      vcodec='none', acodec='opus', abr=rate) for name, rate in [('small-audio', 64), ('audio', 160)]]
-    selector = commands[0][commands[0].index('-f')+1]
-    with YoutubeDL(dict(format=selector, quiet=True, no_warnings=True)) as downloader:
-        result = downloader.process_ie_result(dict(id='sample', title='sample', formats=formats), download=False)
+    options = parse_options([str(arg) for arg in commands[0][3:]]).ydl_opts
+    with YoutubeDL(dict(options, quiet=True, no_warnings=True)) as downloader:
+        assert 'node' in downloader.params['js_runtimes']
+        result = downloader.process_ie_result(dict(id='sample', title='sample', duration=120,
+            is_live=False, formats=formats), download=False)
     assert result['format_id'] == expected
 
 

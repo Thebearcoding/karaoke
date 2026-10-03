@@ -106,6 +106,8 @@ def download_failure(log):
         return '视频站点要求登录验证，请配置下载登录信息后重试'
     if any(text in diagnostic for text in ('video unavailable', 'private video', 'video is unavailable')):
         return '视频当前无法访问，请换一个可公开播放的链接'
+    if re.search(r'(?:http error|error code:|http/\d(?:\.\d)?)\s*403\b', diagnostic):
+        return '视频站点拒绝下载（403）；请检查下载器与登录信息后重试'
     if any(text in diagnostic for text in ('failed to resolve', 'temporary failure in name resolution',
                                            'nodename nor servname', 'name or service not known')):
         return '无法解析视频站点地址，请检查网络或 DNS 后重试'
@@ -384,7 +386,7 @@ class Pipeline:
                 url = video_url(urljoin(url, response.headers['location']))
             if url.startswith('https://b23.tv/'):
                 raise StageFailure('download', '无法解析 b23.tv 短链，请使用完整 Bilibili 视频链接')
-        command = [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--no-playlist',
+        command = [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--js-runtimes', 'node', '--no-playlist',
             '--newline', '--progress', '--progress-delta', '.5', '--progress-template',
             'download:KARAOKE_STAGE_PROGRESS {"completed":%(progress.downloaded_bytes)j,'
             '"total":%(progress.total_bytes)j,"unit":"bytes","vcodec":%(info.vcodec)j}',
@@ -428,7 +430,7 @@ class Pipeline:
                 config=dict(url=self.request['url'], format='bv[height<=720]/b[height<=720]')) as reused:
             if not reused:
                 folder.mkdir(exist_ok=True)
-                command = [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--no-playlist',
+                command = [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--js-runtimes', 'node', '--no-playlist',
                     '--write-info-json', '--no-overwrites', '--retries', '2', '--fragment-retries', '2',
                     '--socket-timeout', '25', '--max-filesize', '2G', '--match-filter',
                     f'!is_live & duration <= {self.max_duration}', '-f', 'bv[height<=720]/b[height<=720]',
