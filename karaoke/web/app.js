@@ -142,16 +142,17 @@ function renderVideoResults(providers) {
   $('search-order-label').hidden = artists || info.loading || !info.results.length;
   $('search-heading').textContent = catalogue ? '热门歌曲' : artists ? '找一位歌手' : '搜索结果';
   $('search-order-note').textContent = artists ? '选一位歌手，看看有哪些歌想唱' :
-    searchOrder === 'popular' ? '当前结果按播放量排序 · YouTube 提供' : searchOrder === 'ready' ? '已准备歌曲排在前面' :
-    searchOrder === 'title' ? '按歌名排序' : catalogue ? 'YouTube Music 热门歌曲顺序' :
+    searchOrder === 'popular' ? '已加载结果按播放量排序 · YouTube 提供' : searchOrder === 'ready' ? '已加载结果中，已准备歌曲排在前面' :
+    searchOrder === 'title' ? '已加载结果按歌名排序' : catalogue ? 'YouTube Music 热门歌曲顺序' :
     videoSource === 'songs' ? 'YouTube Music 歌曲搜索顺序' : videoSource === 'youtube' ? 'YouTube 原始搜索顺序' : '本地曲库';
-  $('search-status').innerHTML = `<span class="${info.error ? 'search-error' : ''}">${info.loading ? '正在查找…' : info.error ? escape(info.error) : info.results.length ? `${info.results.length} ${artists ? '位歌手' : videoSource === 'youtube' ? '个视频' : '首'}${catalogue && info.metadata?.complete === false ? ' · 歌手页精选' : ''}` : '没有找到，试试另一个关键词或搜索类型'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`;
+  $('search-status').innerHTML = `<span class="${info.error ? 'search-error' : ''}">${info.loading ? '正在查找…' : info.error ? escape(info.error) : info.results.length ? `${videoSource === 'local' ? '' : '已加载 '}${info.results.length} ${artists ? '位歌手' : videoSource === 'youtube' ? '个视频' : '首'}${catalogue && info.metadata?.complete === false ? ' · 歌手页精选' : ''}` : '没有找到，试试另一个关键词或搜索类型'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`;
   $('artist-summary').hidden = !catalogue;
   if (catalogue) $('artist-summary').innerHTML = `${metadata.thumbnail ? `<img src="${escape(metadata.thumbnail)}" alt="" referrerpolicy="no-referrer">` : ''}<div><p>歌手</p><h3>${escape(metadata.title)}</h3>${metadata.monthly_listeners ? `<p>${escape(metadata.monthly_listeners)} 月度听众 · YouTube Music</p>` : ''}<button class="text-button" data-artist-back>返回歌手搜索</button></div>`;
+  renderSearchMore(info);
   searchSongs = orderResults(info.results.map(song => ({...song,
     status:library.find(item => item.url === song.url)?.status || song.status})), searchOrder);
   $('video-grid').className = artists ? 'artist-grid' : videoSource === 'youtube' ? 'video-grid' : 'music-list';
-  $('video-grid').innerHTML = searchSongs.map((song, index) => {
+  const rows = searchSongs.map((song, index) => {
     const thumbnail = song.thumbnail ? `<img src="${escape(song.thumbnail)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<span class="music-initial">${escape(song.title.slice(0,1))}</span>`;
     if (artists) return `<button class="artist-card" data-artist-result="${index}">${thumbnail}<strong>${escape(song.title)}</strong><span>热门歌曲 ${icon('arrow')}</span></button>`;
     if (videoSource === 'youtube') return `<article class="video-card" data-result="${index}">
@@ -164,13 +165,60 @@ function renderVideoResults(providers) {
       <div class="music-title"><h3>${escape(song.title)}</h3><p class="music-credits">${credits}</p><p class="music-meta">${escape(song.version || '本地歌曲')}${song.album ? ` · ${escape(song.album)}` : ''}<span class="music-availability"></span></p></div>
       <div class="music-stats">${playCount(song.views) !== null ? `<span>${formatPlays(song.views)}<small>播放</small></span>` : ''}<span>${song.duration ? time(song.duration) : ''}</span></div>
       <div class="music-actions"><button class="music-add" data-add-video="${index}" aria-label="加入歌单：${escape(song.title)}">${icon('plus')}<span>加入歌单</span></button>${song.provider === 'youtube_music' ? `<button class="find-mv" data-find-mv="${index}">找 MV</button>` : ''}</div></article>`;
-  }).join('');
+  });
+  updateSearchRows(rows);
   document.querySelectorAll('[data-video-source]').forEach(button => {
     const selected = button.dataset.videoSource === (catalogue ? 'artists' : videoSource);
     button.classList.toggle('selected', selected);
     button.setAttribute('aria-pressed', String(selected));
   });
   updateVideoButtons();
+}
+
+function updateSearchRows(rows) {
+  const grid = $('video-grid');
+  const existing = new Map([...grid.children].map(node => [node.dataset.searchKey, node]));
+  const occurrences = new Map();
+  searchSongs.forEach((song, index) => {
+    const source = song.browse_id || song.url;
+    const occurrence = occurrences.get(source) || 0;
+    occurrences.set(source, occurrence+1);
+    const key = `${source}:${occurrence}`;
+    const content = JSON.stringify([song.title, song.thumbnail, song.uploader, song.artists, song.version, song.album, song.views, song.duration]);
+    let node = existing.get(key);
+    existing.delete(key);
+    if (node && node.searchContent !== content) { node.remove(); node = null; }
+    if (!node) {
+      const template = document.createElement('template');
+      template.innerHTML = rows[index];
+      node = template.content.firstElementChild;
+      node.dataset.searchKey = key;
+      node.searchContent = content;
+    }
+    // Keep existing cards, images and focused buttons alive when appending a page.
+    for (const attribute of ['data-result', 'data-artist-result', 'data-preview', 'data-add-video', 'data-find-mv']) {
+      if (node.hasAttribute(attribute)) node.setAttribute(attribute, index);
+      node.querySelectorAll(`[${attribute}]`).forEach(button => button.setAttribute(attribute, index));
+    }
+    const rank = node.querySelector('.music-rank');
+    if (rank) rank.textContent = String(index+1).padStart(2,'0');
+    if (grid.children[index] !== node) grid.insertBefore(node, grid.children[index] || null);
+  });
+  existing.forEach(node => node.remove());
+}
+
+function renderSearchMore(info) {
+  const more = $('search-more'), button = $('search-more-button');
+  more.hidden = videoSource === 'local' || info.loading || !!info.error || (!info.results.length && !info.nextCursor);
+  $('search-more-status').textContent = info.loadingMore ? '正在加载更多…' : info.moreError ||
+    (info.nextCursor ? '下拉继续看' : '已经到底了');
+  $('search-more-status').classList.toggle('search-error', !!info.moreError);
+  button.hidden = !info.nextCursor;
+  button.disabled = !!info.loadingMore;
+  button.textContent = info.expired ? '重新搜索' : info.moreError ? '重试加载' : '加载更多';
+  // Reobserve after a page arrives, including when it was too short to fill the screen.
+  searchObserver?.unobserve(more);
+  if (!more.hidden && info.nextCursor && !info.loadingMore && !info.moreError && !info.autoBlocked) searchObserver?.observe(more);
 }
 
 function formatPlays(value) {
@@ -216,6 +264,8 @@ function clearVideoSearch() {
   searchSnapshot = null;
   $('library-view').classList.remove('searching');
   $('video-results').hidden = true;
+  searchObserver?.unobserve($('search-more'));
+  $('search-more').hidden = true;
   $('video-grid').replaceChildren();
   $('search-status').replaceChildren();
 }
@@ -450,6 +500,14 @@ $('artist-summary').onclick = event => { if (event.target.closest('[data-artist-
 $('song-input').oncompositionstart = () => { composing = true; clearVideoSearch(); };
 $('song-input').oncompositionend = () => { composing = false; editSearch(); };
 $('clear-search').onclick = () => { $('song-input').value = ''; editSearch(); $('song-input').focus(); };
+const searchObserver = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+  const info = searchSnapshot?.[videoSource];
+  if (entries.some(entry => entry.isIntersecting) && view === 'library' && info && !info.moreError && !info.autoBlocked) videoSearch.loadMore();
+}, {rootMargin:'0px 0px 320px 0px'}) : null;
+$('search-more-button').onclick = () => {
+  if (searchSnapshot?.[videoSource]?.expired) searchVideos(true);
+  else videoSearch.loadMore();
+};
 $('search-status').onclick = event => { if (event.target.closest('[data-search-retry]')) searchVideos(true); };
 $('video-grid').onclick = event => {
   const artist = event.target.closest('[data-artist-result], [data-artist-id]');

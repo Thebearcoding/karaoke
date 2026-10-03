@@ -8,26 +8,53 @@ export function createVideoSearch(onChange, fetcher = fetch, getLocal = () => []
   }
   async function search(query, mode = 'youtube') {
     cancel();
-    const current = generation;
     controller = new AbortController();
-    const {signal} = controller;
     const providers = {local:{loading:false, results:getLocal(query), error:''}};
     if (mode !== 'local') providers[mode] = {loading:true, results:[], error:''};
-    active = {query, providers};
-    const notify = () => { if (current === generation) onChange(providers); };
-    notify();
-    if (mode === 'local') return;
+    active = {query, mode, providers, generation, signal:controller.signal};
+    onChange(providers);
+    if (mode !== 'local') await loadPage(active, false);
+  }
+  async function loadMore() {
+    const info = active?.providers[active.mode];
+    if (!info?.nextCursor || info.loading || info.loadingMore) return;
+    await loadPage(active, true);
+  }
+  async function loadPage(request, append) {
+    const {query, mode, providers, signal} = request;
+    const info = providers[mode];
+    const cursor = append ? info.nextCursor : null;
+    const notify = () => { if (request.generation === generation) onChange(providers); };
+    if (append) {
+      info.loadingMore = true; info.moreError = ''; info.expired = false;
+      notify();
+    }
     try {
-      const url = mode === 'youtube' ? `/v1/search?${new URLSearchParams({q:query, provider:'youtube'})}`
-        : mode === 'artist' ? `/v1/music/artists/${encodeURIComponent(query)}`
-        : `/v1/music/search?${new URLSearchParams({q:query, kind:mode})}`;
+      const params = new URLSearchParams(mode === 'youtube' ? {q:query, provider:'youtube'} : {q:query, kind:mode});
+      if (cursor) params.set('cursor', cursor);
+      const url = mode === 'artist' ? `/v1/music/artists/${encodeURIComponent(query)}${cursor ? '?'+new URLSearchParams({cursor}) : ''}`
+        : `${mode === 'youtube' ? '/v1/search' : '/v1/music/search'}?${params}`;
       const response = await fetcher(url, {signal});
       const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || '搜索失败，请重试');
-      providers[mode] = {loading:false, results:data.results, error:'', metadata:data};
+      if (!response.ok) throw Object.assign(new Error(data.detail || '搜索失败，请重试'), {expired:response.status === 410});
+      if (!Array.isArray(data.results)) throw new Error('搜索结果暂不可用，请重试');
+      if (signal.aborted || request.generation !== generation) return;
+      // Suppress only overlap with earlier pages, keeping distinct source versions.
+      const seen = new Set(append ? info.results.map(song => song.browse_id || song.url).filter(Boolean) : []);
+      const added = data.results.filter(song => !seen.has(song.browse_id || song.url));
+      info.results = append ? [...info.results, ...added] : added;
+      info.metadata = {...info.metadata, ...data};
+      info.nextCursor = data.next_cursor && data.next_cursor !== cursor ? data.next_cursor : null;
+      info.autoBlocked = append && added.length === 0;
+      info.loading = false; info.loadingMore = false;
+      info.error = ''; info.moreError = '';
     } catch (error) {
-      if (signal.aborted) return;
-      providers[mode] = {loading:false, results:[], error:error.message};
+      if (signal.aborted || request.generation !== generation) return;
+      if (append) {
+        info.loadingMore = false; info.moreError = error.message; info.expired = !!error.expired;
+      } else {
+        info.loading = false; info.error = error.message;
+      }
     }
     notify();
   }
@@ -38,7 +65,7 @@ export function createVideoSearch(onChange, fetcher = fetch, getLocal = () => []
     active.providers.local = {loading:false, results, error:''};
     onChange(active.providers);
   }
-  return {search, cancel, refreshLocal};
+  return {search, loadMore, cancel, refreshLocal};
 }
 
 export function searchLibrary(library, query) {

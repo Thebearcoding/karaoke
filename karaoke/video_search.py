@@ -5,6 +5,7 @@ from html import unescape
 import json
 import math
 import re
+import secrets
 import sys
 import time
 import unicodedata
@@ -63,15 +64,27 @@ def official_source(provider, item):
     return None
 
 
-def youtube_entries(query):
+def youtube_entries(query, continuation=None):
     from yt_dlp import YoutubeDL
     from yt_dlp.extractor.youtube import YoutubeSearchIE
 
     class ArtistSearch(YoutubeSearchIE):
+        next_page = None
+        visitor_data = None
+
+        def _extract_response(self, **kwargs):
+            if continuation:
+                kwargs['query'].update(continuation['query'])
+                kwargs['headers'] = self.generate_api_headers(ytcfg=kwargs['ytcfg'],
+                    visitor_data=continuation.get('visitor_data'), default_client=kwargs['default_client'])
+            response = super()._extract_response(**kwargs)
+            self.visitor_data = self._extract_visitor_data(response)
+            return response
+
         def _extract_entries(self, renderer, continuation_list):
-            # Read the complete native page; do not fetch an unbounded search.
             yield from super()._extract_entries(renderer, continuation_list)
-            continuation_list[:] = [None]
+            self.next_page = continuation_list[0]
+            continuation_list[:] = [None]  # One native page per request.
 
         def _extract_video(self, renderer):
             result = super()._extract_video(renderer)
@@ -82,7 +95,10 @@ def youtube_entries(query):
             return result
 
     with YoutubeDL({'quiet': True, 'no_warnings': True, 'socket_timeout': 12, 'extractor_retries': 0}) as ydl:
-        return list(ArtistSearch(ydl)._search_results(query))
+        extractor = ArtistSearch(ydl)
+        entries = list(extractor._search_results(query))
+        return dict(results=search_results('youtube', entries), continuation=(
+            dict(query=extractor.next_page, visitor_data=extractor.visitor_data) if extractor.next_page else None))
 
 
 def search_results(provider, entries, query=''):
@@ -154,46 +170,101 @@ def music_results(entries, kind):
     return results
 
 
-def music_entries(kind, query):
+def _renderer(value, name):
+    """Find the provider shelf while leaving parsing to the pinned provider library."""
+    if isinstance(value, dict):
+        if name in value:
+            return value[name]
+        value = value.values()
+    elif not isinstance(value, list):
+        return None
+    for child in value:
+        found = _renderer(child, name)
+        if found is not None:
+            return found
+    return None
+
+
+def music_entries(kind, query, continuation=None):
     from ytmusicapi import YTMusic
-    music = YTMusic(language='en')
+    from ytmusicapi.continuations import get_continuation_token, get_continuation_params
+    from ytmusicapi.parsers.search import get_search_params, parse_search_results
+    from ytmusicapi.parsers.playlists import parse_playlist_items
+
+    class PagedMusic(YTMusic):
+        response = {}
+
+        def _send_request(self, *args, **kwargs):
+            self.response = super()._send_request(*args, **kwargs)
+            return self.response
+
+    music = PagedMusic(language='en')
+    metadata = {}
     if kind in ('songs', 'artists'):
-        # This library always returns the entire first page. Zero only prevents
-        # continuation requests; it does not truncate the native page.
-        return music_results(music.search(query, filter=kind, limit=0), kind)
-    if kind != 'artist' or not re.fullmatch(r'UC[\w-]{22}', query):
+        if continuation:
+            music._send_request('search', dict(query=query, params=get_search_params(kind, None, False)),
+                                continuation['params'])
+            shelf = music.response['continuationContents']['musicShelfContinuation']
+            entries = parse_search_results(shelf.get('contents', []), kind[:-1])
+        else:
+            # Zero suppresses automatic continuation, not results on this native page.
+            entries = music.search(query, filter=kind, limit=0)
+            shelf = _renderer(music.response, 'musicShelfRenderer') or {}
+        next_page = dict(params=get_continuation_params(shelf)) if shelf.get('continuations') else None
+    elif kind == 'artist' and re.fullmatch(r'UC[\w-]{22}', query):
+        if continuation:
+            music._send_request('browse', dict(continuation=continuation['token']))
+            contents = music.response['onResponseReceivedActions'][0]['appendContinuationItemsAction']['continuationItems']
+            entries = parse_playlist_items(contents)
+        else:
+            artist = music.get_artist(query)
+            shelf = artist.get('songs') or {}
+            playlist_id = shelf.get('browseId')
+            metadata = dict(title=artist['name'], browse_id=query, thumbnail=music_thumbnail(artist),
+                url='https://music.youtube.com/channel/'+query, monthly_listeners=artist.get('monthlyListeners'),
+                order='youtube_music_top_songs', complete=bool(playlist_id))
+            entries = (music.get_playlist(playlist_id, limit=0, related=False, suggestions_limit=0)['tracks']
+                       if playlist_id else shelf.get('results', []))
+            contents = (_renderer(music.response, 'musicPlaylistShelfRenderer') or {}).get('contents', []) if playlist_id else []
+        token = get_continuation_token(contents) if contents else None
+        next_page = dict(token=token) if token else None
+    else:
         raise ValueError('Invalid music catalogue request')
-    artist = music.get_artist(query)
-    shelf = artist.get('songs') or {}
-    playlist_id = shelf.get('browseId')
-    entries = (music.get_playlist(playlist_id, limit=None)['tracks'] if playlist_id else shelf.get('results', []))
-    return dict(title=artist['name'], browse_id=query, thumbnail=music_thumbnail(artist),
-        url='https://music.youtube.com/channel/'+query, monthly_listeners=artist.get('monthlyListeners'),
-        order='youtube_music_top_songs', complete=bool(playlist_id), results=music_results(entries, 'songs'))
+    return dict(metadata, results=music_results(entries, 'songs' if kind == 'artist' else kind), continuation=next_page)
 
 
-async def fetch_results(provider, query):
+async def fetch_results(provider, query, continuation=None):
     process = await asyncio.create_subprocess_exec(sys.executable, '-m', 'karaoke.video_search', query, provider,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     try:
-        output, _ = await process.communicate()
+        output, _ = await process.communicate(json.dumps(continuation).encode())
         if process.returncode:
             raise RuntimeError('YouTube search unavailable')
-        data = json.loads(output)
-        return search_results(provider, data, query) if provider == 'youtube' else data
+        return json.loads(output)
     finally:
         if process.returncode is None:
             process.kill()
             await process.wait()
 
 
+class SearchCursorExpired(ValueError):
+    pass
+
+
 class VideoSearch:
     def __init__(self):
-        self.cache, self.pending = OrderedDict(), {}
+        self.cache, self.pending, self.cursors = OrderedDict(), {}, OrderedDict()
         self.slots = asyncio.Semaphore(2)
 
-    async def search(self, provider, query):
-        key = provider, query
+    async def search(self, provider, query, cursor=None):
+        continuation, offset = None, 0
+        if cursor:
+            saved = self.cursors.get(cursor)
+            if not saved or saved[1:3] != (provider, query) or time.monotonic()-saved[0] >= 1800:
+                raise SearchCursorExpired('Search cursor expired or does not match this query')
+            _, _, _, continuation, offset = saved
+            self.cursors.move_to_end(cursor)
+        key = provider, query, cursor
         cached = self.cache.get(key)
         if cached and time.monotonic()-cached[0] < 120:
             self.cache.move_to_end(key)
@@ -201,16 +272,26 @@ class VideoSearch:
         if key not in self.pending:
             if len(self.pending) >= 8:
                 raise OverflowError('Too many pending searches')
-            self.pending[key] = asyncio.create_task(self._load(key))
+            self.pending[key] = asyncio.create_task(self._load(key, continuation, offset))
             self.pending[key].add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
         # A browser disconnect must not cancel another client's identical query.
         return await asyncio.shield(self.pending[key])
 
-    async def _load(self, key):
+    async def _load(self, key, continuation, offset):
         try:
             async with asyncio.timeout(25):
                 async with self.slots:
-                    result = await fetch_results(*key)
+                    result = await fetch_results(*key[:2], continuation)
+            next_page = result.pop('continuation', None)
+            result['next_cursor'] = None
+            for index, row in enumerate(result['results'], offset+1):
+                row['rank'] = index
+            if next_page and next_page != continuation:
+                cursor = secrets.token_urlsafe(24)
+                self.cursors[cursor] = (time.monotonic(), *key[:2], next_page, offset+len(result['results']))
+                while len(self.cursors) > 256:
+                    self.cursors.popitem(last=False)
+                result['next_cursor'] = cursor
             self.cache[key] = time.monotonic(), result
             self.cache.move_to_end(key)
             while len(self.cache) > 32:
@@ -228,5 +309,6 @@ class VideoSearch:
 
 if __name__ == '__main__':
     provider = sys.argv[2] if len(sys.argv) > 2 else 'youtube'
-    print(json.dumps(youtube_entries(sys.argv[1]) if provider == 'youtube' else
-                     music_entries(provider, sys.argv[1]), ensure_ascii=False))
+    continuation = json.loads(sys.stdin.read() or 'null')
+    print(json.dumps(youtube_entries(sys.argv[1], continuation) if provider == 'youtube' else
+                     music_entries(provider, sys.argv[1], continuation), ensure_ascii=False))

@@ -4193,28 +4193,41 @@ def test_music_catalogue_keeps_provider_order_versions_and_distinct_artist_ids(m
         album=dict(name='An album'), thumbnails=[dict(url='https://lh3.googleusercontent.com/cover')]) for i in range(35)]
     calls = []
     class Music:
+        def __init__(self, **kwargs):
+            pass
+        def _send_request(self, endpoint, body):
+            if endpoint == 'search':
+                return dict(contents=dict(musicShelfRenderer=dict(contents=[],
+                    continuations=[dict(nextContinuationData=dict(continuation='search-next'))])))
+            return dict(contents=dict(musicPlaylistShelfRenderer=dict(contents=[dict(continuationItemRenderer=dict(
+                continuationEndpoint=dict(continuationCommand=dict(token='playlist-next'))))])))
         def search(self, query, filter, limit):
             calls.append(('search', query, filter))
+            self._send_request('search', dict(query=query))
             if filter == 'artists':
                 return [dict(artist='SINGER', browseId=namesake_id), dict(artist='Singer', browseId=artist_id)]
             return rows
         def get_artist(self, identifier):
             calls.append(('artist', identifier))
             return dict(name='Singer', songs=dict(browseId='VLpopular', results=rows[:5]), monthlyListeners='8M')
-        def get_playlist(self, identifier, limit):
-            assert identifier == 'VLpopular' and limit is None
+        def get_playlist(self, identifier, limit, **kwargs):
+            assert identifier == 'VLpopular' and limit == 0
+            self._send_request('browse', dict(browseId=identifier))
             return dict(tracks=rows)
-    monkeypatch.setattr('ytmusicapi.YTMusic', lambda **kwargs: Music())
-    songs = music_entries('songs', 'Evening')
+    monkeypatch.setattr('ytmusicapi.YTMusic', Music)
+    page = music_entries('songs', 'Evening')
+    assert page['continuation'] == dict(params='&ctoken=search-next&continuation=search-next')
+    songs = page['results']
     assert len(songs) == 35 and [s['title'] for s in songs] == [r['title'] for r in rows]
     assert songs[0]['version'] == '专辑音频' and songs[0]['views'] == '2.5M' and songs[1]['views'] is None
     assert songs[0]['artists'] == [dict(name='Singer', id=artist_id)]
-    artists = music_entries('artists', 'Singer')
+    artists = music_entries('artists', 'Singer')['results']
     assert [a['browse_id'] for a in artists] == [namesake_id, artist_id]
     catalogue = music_entries('artist', artists[1]['browse_id'])
     assert calls[-1] == ('artist', artist_id)
     assert catalogue['complete'] and catalogue['order'] == 'youtube_music_top_songs'
     assert catalogue['results'] == songs
+    assert catalogue['continuation'] == dict(token='playlist-next')
 
 
 def test_music_metadata_does_not_expose_arbitrary_links_or_invent_missing_counts():
@@ -4232,10 +4245,10 @@ def test_music_metadata_does_not_expose_arbitrary_links_or_invent_missing_counts
 
 def test_search_api_failure_is_distinct_from_empty_and_creates_no_jobs(tmp_path, monkeypatch):
     from karaoke import video_search
-    async def fetch(provider, query):
+    async def fetch(provider, query, continuation=None):
         if query == 'failure':
             raise RuntimeError('provider unavailable')
-        return []
+        return dict(results=[], continuation=None)
     monkeypatch.setattr(video_search, 'fetch_results', fetch)
     app = create_app(tmp_path, version='test')
     with TestClient(app) as client:
@@ -4265,13 +4278,13 @@ def test_video_search_deduplicates_inflight_queries_and_bounds_load(monkeypatch)
         service = video_search.VideoSearch()
         release, started = asyncio.Event(), asyncio.Event()
         calls, active, peak = [], 0, 0
-        async def fetch(provider, query):
+        async def fetch(provider, query, continuation=None):
             nonlocal active, peak
             calls.append((provider, query)); active += 1; peak = max(peak, active)
             started.set()
             try:
                 await release.wait()
-                return [query]
+                return dict(results=[dict(title=query)], continuation=None)
             finally:
                 active -= 1
         monkeypatch.setattr(video_search, 'fetch_results', fetch)
@@ -4286,14 +4299,14 @@ def test_video_search_deduplicates_inflight_queries_and_bounds_load(monkeypatch)
         with pytest.raises(OverflowError):
             await service.search('youtube', 'overflow')
         release.set()
-        assert await two == ['same']
+        assert (await two)['results'] == [dict(title='same', rank=1)]
         await asyncio.gather(*others)
         assert peak <= 2 and calls.count(('youtube', 'same')) == 1
-        assert await service.search('youtube', 'same') == ['same']
+        assert (await service.search('youtube', 'same'))['results'] == [dict(title='same', rank=1)]
         assert len(calls) == 8 and not service.pending
         # Expired entries refresh, and the metadata cache has a fixed size.
-        service.cache[('youtube', 'same')] = (0, ['stale'])
-        assert await service.search('youtube', 'same') == ['same']
+        service.cache[('youtube', 'same', None)] = (0, dict(results=[]))
+        assert (await service.search('youtube', 'same'))['results'] == [dict(title='same', rank=1)]
         for i in range(40):
             await service.search('youtube', str(i))
         assert len(service.cache) == 32
@@ -4384,13 +4397,18 @@ def test_search_matches_song_and_performer_without_related_song_padding(query, t
 
 
 
-def test_youtube_search_reads_entire_native_page_without_following_continuation(monkeypatch):
+def test_youtube_search_fetches_one_native_page_and_resumes_its_continuation(monkeypatch):
     from karaoke.video_search import youtube_entries
     from yt_dlp.extractor.youtube import YoutubeSearchIE
     calls = []
     def respond(self, **kwargs):
         calls.append(kwargs)
-        assert len(calls) == 1
+        if len(calls) == 2:
+            assert kwargs['query']['continuation'] == 'another-page'
+            assert kwargs['query']['query'] == 'anything'
+            return {'onResponseReceivedCommands': [{'appendContinuationItemsAction': {'continuationItems': [
+                {'itemSectionRenderer': {'contents': [
+                    {'videoRenderer': {'videoId': '99999999999', 'title': {'simpleText': 'Last video'}}}]}}]}}]}
         return {'contents': {'twoColumnSearchResultsRenderer': {'primaryContents': {
             'sectionListRenderer': {'contents': [{'itemSectionRenderer': {'contents': [
                 {'videoRenderer': {'videoId': f'{i:011d}', 'title': {'simpleText': f'Video {i}'}}}
@@ -4399,5 +4417,78 @@ def test_youtube_search_reads_entire_native_page_without_following_continuation(
     monkeypatch.setattr(YoutubeSearchIE, '_extract_response', respond)
     monkeypatch.setattr(YoutubeSearchIE, '_download_ytcfg', lambda *a, **k: {})
     found = youtube_entries('anything')
-    assert [row['title'] for row in found] == [f'Video {i}' for i in range(35)]
-    assert len(calls) == 1
+    assert [row['title'] for row in found['results']] == [f'Video {i}' for i in range(35)]
+    assert len(calls) == 1 and found['continuation']
+    second = youtube_entries('anything', found['continuation'])
+    assert [row['title'] for row in second['results']] == ['Last video']
+    assert len(calls) == 2 and second['continuation'] is None
+
+
+@pytest.mark.parametrize('kind', ['songs', 'artists', 'artist'])
+def test_music_continuations_parse_provider_rows_without_refetching_first_page(monkeypatch, kind):
+    from ytmusicapi import YTMusic
+    from karaoke.video_search import music_entries
+    artist_id = 'UC'+'a'*22
+    title_run = dict(text='Next song', navigationEndpoint=dict(watchEndpoint=dict(videoId='abcdefghijk')))
+    artist_run = dict(text='Singer', navigationEndpoint=dict(browseEndpoint=dict(browseId=artist_id,
+        browseEndpointContextSupportedConfigs=dict(browseEndpointContextMusicConfig=dict(pageType='MUSIC_PAGE_TYPE_ARTIST')))))
+    row = dict(musicResponsiveListItemRenderer=dict(
+        navigationEndpoint=dict(browseEndpoint=dict(browseId=artist_id)),
+        flexColumns=[dict(musicResponsiveListItemFlexColumnRenderer=dict(text=dict(runs=[title_run if kind != 'artists' else artist_run]))),
+                     dict(musicResponsiveListItemFlexColumnRenderer=dict(text=dict(runs=[artist_run])))],
+        overlay=dict(musicItemThumbnailOverlayRenderer=dict(content=dict(musicPlayButtonRenderer=dict(
+            playNavigationEndpoint=dict(watchEndpoint=dict(videoId='abcdefghijk'))))))))
+    calls = []
+    def send(self, endpoint, body, *params):
+        calls.append((endpoint, body, params))
+        if kind == 'artist':
+            assert endpoint == 'browse' and body == dict(continuation='second-page')
+            return dict(onResponseReceivedActions=[dict(appendContinuationItemsAction=dict(continuationItems=[row]))])
+        assert endpoint == 'search' and body['query'] == 'Singer' and body['params']
+        assert params == ('&ctoken=second-page&continuation=second-page',)
+        return dict(continuationContents=dict(musicShelfContinuation=dict(contents=[row])))
+    monkeypatch.setattr(YTMusic, '_send_request', send)
+    continuation = dict(token='second-page') if kind == 'artist' else dict(params='&ctoken=second-page&continuation=second-page')
+    page = music_entries(kind, artist_id if kind == 'artist' else 'Singer', continuation)
+    assert len(calls) == 1 and page['continuation'] is None
+    assert len(page['results']) == 1
+    assert page['results'][0]['title'] == ('Singer' if kind == 'artists' else 'Next song')
+
+
+def test_search_pages_bind_cursors_deduplicate_retries_and_reject_expiry(tmp_path, monkeypatch):
+    from karaoke import video_search
+    calls = []
+    fail = True
+    async def fetch(provider, query, continuation=None):
+        nonlocal fail
+        calls.append((provider, query, continuation))
+        if continuation and fail:
+            fail = False
+            raise RuntimeError('temporary provider failure')
+        return dict(results=[dict(title='second' if continuation else 'first')],
+                    continuation=None if continuation else dict(token='native-next-page'))
+    monkeypatch.setattr(video_search, 'fetch_results', fetch)
+    app = create_app(tmp_path, version='test')
+    with TestClient(app) as client:
+        for path, params in [('/v1/search', dict(provider='youtube', q='Singer')),
+                             ('/v1/music/search', dict(kind='songs', q='Singer')),
+                             ('/v1/music/artists/UC'+'a'*22, {})]:
+            first = client.get(path, params=params).json()
+            cursor = first['next_cursor']
+            assert cursor and 'continuation' not in first and 'native-next-page' not in cursor
+            assert client.get(path, params=params).json() == first
+            assert client.get('/v1/music/search', params=dict(kind='artists', q='Singer', cursor=cursor)).status_code == 410
+            fail = True
+            request = dict(params, cursor=cursor)
+            assert client.get(path, params=request).status_code == 502
+            second = client.get(path, params=request).json()
+            assert second['results'] == [dict(title='second', rank=2)] and second['next_cursor'] is None
+            assert client.get(path, params=request).json() == second
+            assert client.get(path, params=dict(params, cursor='forged')).status_code == 410
+            # Each cursor has an expiry independent of the much shorter page cache.
+            from types import SimpleNamespace
+            with monkeypatch.context() as clock_patch:
+                clock_patch.setattr(video_search, 'time', SimpleNamespace(monotonic=lambda: 1e20))
+                assert client.get(path, params=request).status_code == 410
+        assert app.state.store.list() == []
+        assert len(calls) == 9  # first page, failed continuation, successful retry for each mode

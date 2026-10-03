@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from .cache import CacheFull, GIB, SongCache, can_restore_video
 from .job_schema import JobRequest
 from .room import AddSong, Room, RoomCommand, Updates
-from .video_search import VideoSearch
+from .video_search import SearchCursorExpired, VideoSearch
 
 
 ROOT = Path(__file__).resolve().parent
@@ -404,12 +404,14 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
     async def library():
         return dict(songs=room.library())
 
-    async def search_metadata(provider, q):
+    async def search_metadata(provider, q, cursor):
         query = ' '.join(q.split())
         if not query:
             raise HTTPException(422, '请输入歌名或歌手')
         try:
-            return await video_search.search(provider, query)
+            return await video_search.search(provider, query, cursor)
+        except SearchCursorExpired as error:
+            raise HTTPException(410, '搜索已过期，请重新搜索') from error
         except OverflowError as error:
             raise HTTPException(429, '搜索较多，请稍后重试') from error
         except Exception as error:
@@ -417,18 +419,20 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
             raise HTTPException(502, 'YouTube暂时搜不到，请重试') from error
 
     @app.get('/v1/search')
-    async def search_videos(provider: Literal['youtube'], q: str = Query(min_length=1, max_length=160)):
-        return dict(query=' '.join(q.split()), provider=provider, results=await search_metadata(provider, q))
+    async def search_videos(provider: Literal['youtube'], q: str = Query(min_length=1, max_length=160),
+                            cursor: str | None = Query(default=None, min_length=1, max_length=128)):
+        return dict(query=' '.join(q.split()), provider=provider, **await search_metadata(provider, q, cursor))
 
     @app.get('/v1/music/search')
-    async def search_music(kind: Literal['songs', 'artists'] = 'songs', q: str = Query(min_length=1, max_length=160)):
-        return dict(query=' '.join(q.split()), provider='youtube_music', results=await search_metadata(kind, q))
+    async def search_music(kind: Literal['songs', 'artists'] = 'songs', q: str = Query(min_length=1, max_length=160),
+                           cursor: str | None = Query(default=None, min_length=1, max_length=128)):
+        return dict(query=' '.join(q.split()), provider='youtube_music', **await search_metadata(kind, q, cursor))
 
     @app.get('/v1/music/artists/{browse_id}')
-    async def artist_songs(browse_id: str):
+    async def artist_songs(browse_id: str, cursor: str | None = Query(default=None, min_length=1, max_length=128)):
         if not re.fullmatch(r'UC[\w-]{22}', browse_id):
             raise HTTPException(422, '无效的歌手链接')
-        return await search_metadata('artist', browse_id)
+        return await search_metadata('artist', browse_id, cursor)
 
     @app.get('/v1/storage')
     async def storage():

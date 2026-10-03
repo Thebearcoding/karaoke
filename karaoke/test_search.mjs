@@ -5,7 +5,7 @@ import {createVideoSearch, previewURL, searchLibrary, visibleResults, playCount,
 function setup() {
   const requests = [], snapshots = [];
   const search = createVideoSearch(state => snapshots.push(structuredClone(state)), (url, {signal}) =>
-    new Promise(resolve => requests.push({url, signal, finish: (results, ok = true) => resolve({ok, json:async () => ok ? {results} : {detail:'Provider failed'}})})));
+    new Promise(resolve => requests.push({url, signal, finish: (results, ok = true, next_cursor = null) => resolve({ok, json:async () => ok ? {results, next_cursor} : {detail:'Provider failed'}})})));
   return {search, requests, snapshots};
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -118,4 +118,79 @@ test('popularity uses reported counts, keeps unknowns last and never mutates pro
   assert.equal(playCount('0'), 0);
   assert.equal(playCount('1.2B'), 1.2e9);
   assert.ok(previewURL({provider:'youtube_music',url:'https://www.youtube.com/watch?v=abcdefghijk'},'http://localhost').includes('/embed/abcdefghijk'));
+});
+
+
+test('pages append once, retain distinct versions, preserve rows on failure and stop at the end', async () => {
+  const {search, requests, snapshots} = setup();
+  const first = search.search('Singer', 'songs');
+  const rows = [{url:'studio',title:'Song'}, {url:'live',title:'Song (Live)'}];
+  requests[0].finish(rows, true, 'page-2');
+  await first;
+  const more = search.loadMore();
+  await search.loadMore();
+  assert.equal(requests.length, 2);
+  assert.equal(new URL(requests[1].url, 'http://localhost').searchParams.get('cursor'), 'page-2');
+  assert.deepEqual(snapshots.at(-1).songs.results, rows);
+  requests[1].finish([], false);
+  await more;
+  assert.deepEqual(snapshots.at(-1).songs.results, rows);
+  assert.equal(snapshots.at(-1).songs.moreError, 'Provider failed');
+  const retry = search.loadMore();
+  assert.equal(requests[2].url, requests[1].url);
+  requests[2].finish([rows[1], {url:'cover',title:'Song'}], true, 'page-3');
+  await retry;
+  assert.deepEqual(snapshots.at(-1).songs.results.map(row=>row.url), ['studio','live','cover']);
+  assert.equal(snapshots.at(-1).songs.moreError, '');
+  const last = search.loadMore();
+  requests[3].finish([{url:'last',title:'Last song'}]);
+  await last;
+  await search.loadMore();
+  assert.equal(requests.length, 4);
+  assert.equal(snapshots.at(-1).songs.results.length, 4);
+  assert.equal(snapshots.at(-1).songs.nextCursor, null);
+});
+
+test('changing query or mode cancels pending pagination and an empty page never loops automatically', async () => {
+  const {search, requests, snapshots} = setup();
+  const first = search.search('Singer', 'songs');
+  requests[0].finish([{url:'first'}], true, 'page-2');
+  await first;
+  const more = search.loadMore();
+  const artists = search.search('Singer', 'artists');
+  assert.ok(requests[1].signal.aborted);
+  const count = snapshots.length;
+  requests[1].finish([{url:'stale song'}], true, 'page-3');
+  await more;
+  assert.equal(snapshots.length, count);
+  requests[2].finish([{browse_id:'artist-one'}], true, 'artist-next');
+  await artists;
+  const empty = search.loadMore();
+  requests[3].finish([], true, 'artist-next-again');
+  await empty;
+  assert.equal(snapshots.at(-1).artists.autoBlocked, true);
+  assert.equal(snapshots.at(-1).artists.nextCursor, 'artist-next-again');
+  assert.equal(requests.length, 4);
+  const manual = search.loadMore();
+  requests[4].finish([{browse_id:'artist-two'}]);
+  await manual;
+  assert.equal(snapshots.at(-1).artists.results.length, 2);
+  await search.search('local', 'local');
+  await search.loadMore();
+  assert.equal(requests.length, 5);
+});
+
+test('artist pages keep their metadata and expired cursors leave existing songs available', async () => {
+  const requests = [], snapshots = [];
+  const search = createVideoSearch(value => snapshots.push(structuredClone(value)), (url) => new Promise(resolve => requests.push({url,resolve})));
+  const initial = search.search('UC'+'a'.repeat(22), 'artist');
+  requests[0].resolve({ok:true,json:async () => ({title:'Singer',results:[{url:'song'}],next_cursor:'next'})});
+  await initial;
+  const more = search.loadMore();
+  assert.ok(requests[1].url.endsWith('?cursor=next'));
+  requests[1].resolve({ok:false,status:410,json:async () => ({detail:'搜索已过期，请重新搜索'})});
+  await more;
+  assert.equal(snapshots.at(-1).artist.expired, true);
+  assert.equal(snapshots.at(-1).artist.metadata.title, 'Singer');
+  assert.equal(snapshots.at(-1).artist.results[0].url, 'song');
 });
