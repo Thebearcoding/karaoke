@@ -92,7 +92,7 @@ curl -sS http://127.0.0.1:8746/v1/jobs/任务UUID
 
 普通点歌与严格音频验收区分处理。普通点歌先查已发表的歌词文本，核对歌名、歌手与版本，再做声学对齐；该路径的 `validation_scope=playback_lyrics_first`，不声称完成独立 ASR 覆盖率验证。优先使用视频中明确发布的歌词或 LINE MUSIC 歌词，再查询歌词库；歌词库候选另做时长检查。找不到合适的文本时保留无字幕音轨，不回退到 ASR 猜测歌词。文本或对齐失败可返回 `completed` 的可唱版本，`validation_scope=playback_with_lyrics_review`，`quality.playback_fallback` 保留错误与字幕模式，`lyrics_provenance.needs_review=true`。已发表文本的有效逐字时间予以保留；其余只有完整合法唱句时间时显示白字，不制造逐字起点。历史 ASR 草稿仅作诊断，不作为回退字幕。音轨分离、文件和音频重组失败仍然阻止发布。`--audio-only` 固定回归继续执行原有完整验收，任何这类回退都不能计为通过。
 
-多首交错处理时，普通 worker 使用数据目录中的 `stage-locks/` 协调分离、识别／对齐、编码三个独立阶段；同阶段单任务，不同阶段可并行。`stage_progress.<阶段>.waiting=true` 表示尚未获得执行机会，等待不计入模型运行超时。任务结束或进程退出会释放阶段锁；共享缓存预算保持不变。
+多首交错处理时，普通 worker 使用数据目录中的 `stage-locks/` 协调下载、分离、识别／对齐、编码四个独立阶段；同阶段单任务，不同阶段可并行。首次下载和补视频共用下载阶段，避免突发请求和同时改写登录文件。`stage_progress.<阶段>.waiting=true` 表示尚未获得执行机会，等待不计入模型运行超时。任务结束或进程退出会释放阶段锁；共享缓存预算保持不变。
 
 外部语音／歌词服务错误还包含 `error.provider` 和 `error.retryable`：超时、连接或限流可以退避后重试；内容拒绝、认证或权限失败需要人工处理。错误码分别为 `openai_timeout`、`openai_connection`、`openai_rate_limit`、`openai_content_rejected`、`openai_authentication` 和 `openai_permission`。对外只返回固定说明，不暴露原始响应、请求头或密钥；已完成阶段仍按检查点规则保留。
 
@@ -348,7 +348,7 @@ ASR 固定宽度断行若留下孤立的单字或单词，会在同一短句内�
 | `KARAOKE_SEPARATION_BATCH_SIZE` | 分离窗口批量大小，默认 `1`；按显存实测选择 |
 | `KARAOKE_REQUIRE_CACHED_SOURCE` | `1` 时只接受同源且哈希完整的媒体缓存，不重新下载媒体 |
 | `KARAOKE_MAX_DURATION_SECONDS` | 默认 `900` |
-| `KARAOKE_COOKIES_FILE` | 可选的 yt-dlp cookies 文件，用于需要登录的视频；不会自动读取浏览器 cookies |
+| `KARAOKE_COOKIES_FILE` | 可选的 yt-dlp cookies 文件路径；未指定时读取数据目录的 `private/youtube-cookies.txt`。每次下载检查文件，存在则使用，缺失则默认下载；登录失败不会自动退回匿名重试。导出浏览器 cookies 需用户授权，服务本身不读取浏览器；私有目录权限 0700、文件 0600，不提交或上传 |
 | `KARAOKE_FONT_FILE` | 可选的完整字体路径；Linux 可使用覆盖对应语言的 Noto Serif CJK 字体 |
 | `KARAOKE_DISABLE_LYRIC_CATALOG` | 设为 `1` 时强制走自动歌词，用于测试新歌流程 |
 

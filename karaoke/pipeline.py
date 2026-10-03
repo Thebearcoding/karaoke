@@ -9,6 +9,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import selectors
 import subprocess
 import shutil
@@ -95,7 +96,13 @@ def download_failure(log):
     diagnostic = log.lower()
     if any(text in diagnostic for text in ('unable to connect to proxy', 'proxyerror', 'tunnel connection failed')):
         return '下载被网络代理拒绝，请检查服务的代理设置后重试'
-    if any(text in diagnostic for text in ('sign in', 'login required', 'login_required')):
+    rate_limited = bool(re.search(r'(?:http error|error code:|http/\d(?:\.\d)?)\s*429\b', diagnostic))
+    login_required = any(text in diagnostic for text in ('sign in', 'login required', 'login_required'))
+    if rate_limited and login_required:
+        return '视频站点正在限流（429），并要求登录验证；请检查下载登录信息后再重试'
+    if rate_limited:
+        return '视频站点正在限流（429），请稍后重试'
+    if login_required:
         return '视频站点要求登录验证，请配置下载登录信息后重试'
     if any(text in diagnostic for text in ('video unavailable', 'private video', 'video is unavailable')):
         return '视频当前无法访问，请换一个可公开播放的链接'
@@ -138,7 +145,8 @@ class Pipeline:
         default_separator = ROOT.parent.parent/'audio/.venv-separator-local/bin/python'
         self.separator_python = separator_python or (str(default_separator) if default_separator.exists() else sys.executable)
         self.device, self.text_model = device, text_model
-        self.max_duration, self.catalog_root, self.cookies_file = max_duration, catalog_root, cookies_file
+        self.max_duration, self.catalog_root = max_duration, catalog_root
+        self.cookies_file = Path(cookies_file).expanduser() if cookies_file else self.output.parent/'private/youtube-cookies.txt'
         self.audio_only = audio_only
         self.active, self.timings, self.lock = set(), {}, threading.Lock()
         self.stage_progress = {}
@@ -264,7 +272,8 @@ class Pipeline:
         directory = os.getenv('KARAOKE_STAGE_LOCK_DIR')
         lane = ('separation' if name.startswith('separate_') else
                 'alignment' if name == 'transcribe' or name.startswith('align_') else
-                'render' if name == 'render' else None)
+                'render' if name == 'render' else
+                'download' if name in ('download', 'download_video') else None)
         if not directory or lane is None:
             yield
             return
@@ -386,7 +395,7 @@ class Pipeline:
                 'ba' if self.audio_only else 'bv[height<=720]+ba/b[height<=720]'),
             '--merge-output-format', 'mkv', '--remux-video', 'mkv',
             '-o', self.output/'download/source.%(ext)s']
-        if self.cookies_file:
+        if self.cookies_file.is_file():
             command.extend(['--cookies', self.cookies_file])
         command.append(url)
         self.run('download', command, timeout=900)
@@ -424,7 +433,7 @@ class Pipeline:
                     '--socket-timeout', '25', '--max-filesize', '2G', '--match-filter',
                     f'!is_live & duration <= {self.max_duration}', '-f', 'bv[height<=720]/b[height<=720]',
                     '--remux-video', 'mkv', '-o', folder/'source.%(ext)s']
-                if self.cookies_file:
+                if self.cookies_file.is_file():
                     command.extend(['--cookies', self.cookies_file])
                 self.run('download_video', command+[self.request['url']], timeout=900)
         added = json.loads(info.read_text())

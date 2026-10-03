@@ -979,6 +979,8 @@ def test_soak_checks_actual_stem_samples_not_only_pipeline_claim(tmp_path):
 @pytest.mark.parametrize('diagnostic,reason', [
     ("Unable to connect to proxy: Tunnel connection failed: 403 Forbidden", '网络代理'),
     ("Sign in to confirm you're not a bot", '登录验证'),
+    ('HTTP Error 429: Too Many Requests', '限流（429）'),
+    ("HTTP Error 429: Too Many Requests\nSign in to confirm you're not a bot", '限流（429），并要求登录验证'),
     ('ERROR: Video unavailable', '无法访问'),
     ('ERROR: connection timed out', '超时'),
     ("Failed to resolve 'www.youtube.com' ([Errno 8] nodename nor servname provided, or not known)", 'DNS'),
@@ -1111,7 +1113,8 @@ while not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)
 
 
 
-def test_interactive_probe_resumes_new_songs_and_shares_stage_locks(tmp_path):
+@pytest.mark.parametrize('stage,next_stage', [('render', 'render'), ('download', 'download_video')])
+def test_interactive_probe_resumes_new_songs_and_shares_stage_locks(tmp_path, stage, next_stage):
     from concurrent.futures import ThreadPoolExecutor
     from pathlib import Path
     from karaoke.tools.soak import run_probe
@@ -1121,7 +1124,7 @@ sys.path.insert(0,sys.argv[2])
 from karaoke.pipeline import Pipeline
 p=pathlib.Path(sys.argv[1])
 request=json.loads((p/'request.json').read_text())
-stage='render' if request.get('title')=='render' else 'separate_music'
+stage=request['title'] if request.get('title') in ('render','download','download_video') else 'separate_music'
 pipeline=Pipeline(request,p)
 with pipeline.stage_slot(stage):
     pipeline.phase(stage,True)
@@ -1142,19 +1145,19 @@ with pipeline.stage_slot(stage):
             time.sleep(.01)
         assert check()
     with TestClient(app) as client, ThreadPoolExecutor(max_workers=1) as pool:
-        repair = client.post('/v1/room/entries', json={'url':URL, 'title':'render'}).json()['entries'][-1]['job_id']
+        repair = client.post('/v1/room/entries', json={'url':URL, 'title':stage}).json()['entries'][-1]['job_id']
         folder = tmp_path/repair
         future = pool.submit(run_probe, client, 'http://testserver', folder, command(folder),
                              resume_preparation=pause.read_text())
         try:
             wait(lambda: (folder/'entered').exists() and not pause.exists())
-            wait(lambda: app.state.store.read(repair).get('active_stages') == ['render'])
+            wait(lambda: app.state.store.read(repair).get('active_stages') == [stage])
             new = client.post('/v1/room/entries', json={'url':URL, 'title':'separation'}).json()['entries'][-1]['job_id']
             wait(lambda: (tmp_path/new/'entered').exists())
             assert not future.done() and app.state.store.read(new)['status'] == 'running'
             assert repair not in app.state.worker.processes  # no duplicate launch
-            other = client.post('/v1/room/entries', json={'url':URL, 'title':'render', 'force':True}).json()['entries'][-1]['job_id']
-            wait(lambda: app.state.store.read(other).get('stage_progress', {}).get('render', {}).get('waiting'))
+            other = client.post('/v1/room/entries', json={'url':URL, 'title':next_stage, 'force':True}).json()['entries'][-1]['job_id']
+            wait(lambda: app.state.store.read(other).get('stage_progress', {}).get(next_stage, {}).get('waiting'))
             assert not (tmp_path/other/'entered').exists()
             (folder/'release').touch()
             assert future.result(timeout=10) == 0
@@ -1372,9 +1375,12 @@ def test_audio_download_promotes_to_video_without_replacing_tested_audio(tmp_pat
 
 
 @pytest.mark.parametrize('mode,expected', [('full', '720+audio'), ('promote', '720'), ('audio', 'audio')])
-def test_download_selects_720p_without_reducing_audio_quality(tmp_path, monkeypatch, mode, expected):
+@pytest.mark.parametrize('custom_cookies', [False, True])
+def test_download_selects_720p_without_reducing_audio_quality(tmp_path, monkeypatch, mode, expected, custom_cookies):
     from yt_dlp import YoutubeDL
-    pipeline = Pipeline(dict(url=URL), tmp_path, audio_only=mode == 'audio')
+    cookie_file = tmp_path/('configured/session.txt' if custom_cookies else 'private/youtube-cookies.txt')
+    pipeline = Pipeline(dict(url=URL), tmp_path/'job', audio_only=mode == 'audio',
+                        cookies_file=str(cookie_file) if custom_cookies else None)
     commands = []
     class DownloadSelected(Exception):
         pass
@@ -1382,13 +1388,26 @@ def test_download_selects_720p_without_reducing_audio_quality(tmp_path, monkeypa
         commands.append(command)
         raise DownloadSelected
     monkeypatch.setattr(pipeline, 'run', capture)
-    with pytest.raises(DownloadSelected):
-        if mode == 'promote':
-            pipeline.source.parent.mkdir()
-            pipeline.source.write_bytes(b'cached audio')
-            pipeline.promote_video({}, {})
+    if mode == 'promote':
+        pipeline.source.parent.mkdir()
+        pipeline.source.write_bytes(b'cached audio')
+    # Each invocation rechecks the private file; missing files use anonymous
+    # download, including when an exported session is removed between requests.
+    for present in (False, True, False):
+        if present:
+            cookie_file.parent.mkdir()
+            cookie_file.write_text('# Netscape HTTP Cookie File\n')
         else:
-            pipeline.download(artwork=False)
+            cookie_file.unlink(missing_ok=True)
+        with pytest.raises(DownloadSelected):
+            if mode == 'promote':
+                pipeline.promote_video({}, {})
+            else:
+                pipeline.download(artwork=False)
+        command = commands[-1]
+        assert ('--cookies' in command) is present
+        if present:
+            assert str(command[command.index('--cookies')+1]) == str(cookie_file)
     formats = [dict(format_id=str(height), url=f'https://media.example/{height}.mp4', ext='mp4',
                     height=height, vcodec='avc1', acodec='none') for height in (360, 720, 1080, 2160)]
     formats += [dict(format_id=name, url=f'https://media.example/{name}.webm', ext='webm',
