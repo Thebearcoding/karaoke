@@ -4183,6 +4183,53 @@ def test_video_search_normalizes_results_and_rejects_unplayable_links():
     assert search_results('youtube', [dict(item, thumbnail='https://localhost/cover')])[0]['thumbnail'] is None
 
 
+def test_music_catalogue_keeps_provider_order_versions_and_distinct_artist_ids(monkeypatch):
+    from karaoke.video_search import music_entries
+    artist_id = 'UC'+'a'*22
+    namesake_id = 'UC'+'b'*22
+    rows = [dict(title='Evening' if i % 2 else 'Evening (Live)', videoId=f'{i:011d}',
+        artists=[dict(name='Singer', id=artist_id)], duration_seconds=180,
+        views='2.5M' if i == 0 else None, videoType='MUSIC_VIDEO_TYPE_ATV',
+        album=dict(name='An album'), thumbnails=[dict(url='https://lh3.googleusercontent.com/cover')]) for i in range(35)]
+    calls = []
+    class Music:
+        def search(self, query, filter, limit):
+            calls.append(('search', query, filter))
+            if filter == 'artists':
+                return [dict(artist='SINGER', browseId=namesake_id), dict(artist='Singer', browseId=artist_id)]
+            return rows
+        def get_artist(self, identifier):
+            calls.append(('artist', identifier))
+            return dict(name='Singer', songs=dict(browseId='VLpopular', results=rows[:5]), monthlyListeners='8M')
+        def get_playlist(self, identifier, limit):
+            assert identifier == 'VLpopular' and limit is None
+            return dict(tracks=rows)
+    monkeypatch.setattr('ytmusicapi.YTMusic', lambda **kwargs: Music())
+    songs = music_entries('songs', 'Evening')
+    assert len(songs) == 35 and [s['title'] for s in songs] == [r['title'] for r in rows]
+    assert songs[0]['version'] == '专辑音频' and songs[0]['views'] == '2.5M' and songs[1]['views'] is None
+    assert songs[0]['artists'] == [dict(name='Singer', id=artist_id)]
+    artists = music_entries('artists', 'Singer')
+    assert [a['browse_id'] for a in artists] == [namesake_id, artist_id]
+    catalogue = music_entries('artist', artists[1]['browse_id'])
+    assert calls[-1] == ('artist', artist_id)
+    assert catalogue['complete'] and catalogue['order'] == 'youtube_music_top_songs'
+    assert catalogue['results'] == songs
+
+
+def test_music_metadata_does_not_expose_arbitrary_links_or_invent_missing_counts():
+    from karaoke.video_search import music_results
+    row = dict(title='Evening', videoId='abcdefghijk', artists=[dict(name='Singer', id='not-a-channel')],
+               thumbnails=[dict(url='https://googleusercontent.com.attacker.test/image')], duration_seconds=float('nan'))
+    songs = music_results([row, dict(row, videoId='../../private')], 'songs')
+    assert len(songs) == 1 and songs[0]['url'] == 'https://www.youtube.com/watch?v=abcdefghijk'
+    assert songs[0]['thumbnail'] is None and songs[0]['duration'] == 0 and songs[0]['views'] is None
+    assert songs[0]['artists'][0]['id'] is None
+    assert music_results([dict(artist='Singer', browseId='../../private')], 'artists') == []
+    unavailable = music_results([dict(row, isAvailable=False)], 'songs')
+    assert len(unavailable) == 1 and unavailable[0]['available'] is False
+
+
 def test_search_api_failure_is_distinct_from_empty_and_creates_no_jobs(tmp_path, monkeypatch):
     from karaoke import video_search
     async def fetch(provider, query):
@@ -4197,6 +4244,14 @@ def test_search_api_failure_is_distinct_from_empty_and_creates_no_jobs(tmp_path,
         assert found.json()['query'] == 'some song'
         assert client.get('/v1/search', params=dict(provider='youtube', q='failure')).status_code == 502
         assert client.get('/v1/search', params=dict(provider='bilibili', q='some song')).status_code == 422
+        assert client.get('/v1/music/search', params=dict(q='song')).json()['results'] == []
+        for kind in ('songs', 'artists'):
+            assert client.get('/v1/music/search', params=dict(kind=kind, q='song')).json()['results'] == []
+            assert client.get('/v1/music/search', params=dict(kind=kind, q='failure')).status_code == 502
+            assert client.get('/v1/music/search', params=dict(kind=kind, q=' ')).status_code == 422
+        assert client.get('/v1/music/search', params=dict(kind='other', q='song')).status_code == 422
+        assert client.get('/v1/music/artists/not-an-artist').status_code == 422
+        assert client.get('/v1/music/artists/UC'+'a'*22).status_code == 200
         for params in [dict(provider='other', q='song'), dict(provider='youtube', q=' '), dict(provider='youtube', q='a'*161)]:
             assert client.get('/v1/search', params=params).status_code == 422
         assert client.get('/v1/room').json()['entries'] == []

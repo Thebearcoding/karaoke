@@ -38,12 +38,14 @@
     <section class="main-panel" id="library-view" aria-label="点歌台">
       <div class="intro"><h1>今晚，唱点什么<span>。</span></h1></div>
       <form id="add-form" class="search-form">
-        <div class="search-box"><svg class="icon"><use href="#i-search"/></svg><input id="song-input" type="text" autocomplete="off" maxlength="2048" enterkeyhint="search" aria-label="搜索歌曲或粘贴视频链接" placeholder="歌名、歌手，或视频链接"><button class="primary" id="submit-song" type="submit">搜索 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
+        <div class="search-box"><svg class="icon"><use href="#i-search"/></svg><input id="song-input" type="text" autocomplete="off" maxlength="2048" enterkeyhint="search" aria-label="搜索歌名、歌手或粘贴视频链接" placeholder="搜歌名，或找一位喜欢的歌手"><button class="primary" id="submit-song" type="submit">搜索 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
         <label class="optional-title" id="title-row" hidden>歌名 <input id="title-input" maxlength="200" placeholder="可选"></label>
       </form>
-      <section id="video-results" class="video-results" aria-label="视频搜索结果" hidden>
-        <div class="section-heading"><h2>搜索结果</h2><button class="text-button" id="clear-search">返回曲库</button></div>
-        <div class="filters video-sources" role="group" aria-label="搜索来源"><button data-video-source="youtube" class="selected">YouTube</button><button data-video-source="local">本地</button></div>
+      <section id="video-results" class="video-results" aria-label="选歌结果" hidden>
+        <div class="section-heading"><h2 id="search-heading">搜索结果</h2><button class="text-button" id="clear-search">返回曲库</button></div>
+        <div class="filters video-sources" role="group" aria-label="搜索类型"><button data-video-source="songs" class="selected">歌曲</button><button data-video-source="artists">歌手</button><button data-video-source="youtube">YouTube 视频</button><button data-video-source="local">本地</button></div>
+        <div id="artist-summary" class="artist-summary" hidden></div>
+        <div class="search-toolbar"><p id="search-order-note"></p><label id="search-order-label">排序 <select id="search-order" aria-label="搜索结果排序"><option value="relevance">相关度</option><option value="popular">播放量</option><option value="ready">已准备优先</option><option value="title">歌名</option></select></label></div>
         <div id="search-status" class="search-status" role="status"></div>
         <div id="video-grid" class="video-grid"></div>
       </section>

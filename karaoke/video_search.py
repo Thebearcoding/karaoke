@@ -1,4 +1,4 @@
-"""YouTube search metadata in provider order, without application ranking."""
+"""YouTube video search and YouTube Music catalogues in provider order."""
 import asyncio
 from collections import OrderedDict
 from html import unescape
@@ -107,20 +107,80 @@ def search_results(provider, entries, query=''):
                 thumbnail = None
             results.append(dict(url=url, title=title, provider=provider, duration=duration,
                                 uploader=str(item.get('uploader') or item.get('channel') or ''),
-                                thumbnail=thumbnail))
+                                thumbnail=thumbnail, views=item.get('view_count')))
         except (KeyError, TypeError, ValueError):
             continue
     return results
 
 
+def music_thumbnail(item):
+    for thumb in reversed(item.get('thumbnails') or []):
+        url = thumb.get('url', '')
+        parsed = urlsplit(url)
+        if parsed.scheme == 'https' and any(parsed.hostname == host or
+                (parsed.hostname or '').endswith('.'+host) for host in ('ytimg.com', 'googleusercontent.com')):
+            return url
+    return None
+
+
+def music_results(entries, kind):
+    results = []
+    for rank, item in enumerate(entries, 1):
+        if not isinstance(item, dict):
+            continue
+        title = item.get('artist') if kind == 'artists' else item.get('title')
+        if not isinstance(title, str) or not title.strip():
+            continue
+        common = dict(title=title, provider='youtube_music', thumbnail=music_thumbnail(item), rank=rank)
+        if kind == 'artists':
+            browse_id = item.get('browseId') or ''
+            if re.fullmatch(r'UC[\w-]{22}', browse_id):
+                results.append(dict(common, kind='artist', browse_id=browse_id,
+                    url='https://music.youtube.com/channel/'+browse_id))
+            continue
+        video_id = item.get('videoId') or ''
+        if not re.fullmatch(r'[\w-]{11}', video_id):
+            continue
+        artists = [dict(name=a['name'], id=a.get('id') if re.fullmatch(r'UC[\w-]{22}', a.get('id') or '') else None)
+                   for a in (item.get('artists') or []) if isinstance(a, dict) and isinstance(a.get('name'), str)]
+        duration = item.get('duration_seconds')
+        if not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration < 0:
+            duration = 0
+        results.append(dict(common, kind='song', url='https://www.youtube.com/watch?v='+video_id,
+            artists=artists, uploader=' · '.join(a['name'] for a in artists), duration=duration,
+            album=(item.get('album') or {}).get('name'), views=item.get('views'),
+            version={'MUSIC_VIDEO_TYPE_ATV': '专辑音频', 'MUSIC_VIDEO_TYPE_OMV': 'MV'}.get(item.get('videoType'), '歌曲'),
+            available=item.get('isAvailable') is not False))
+    return results
+
+
+def music_entries(kind, query):
+    from ytmusicapi import YTMusic
+    music = YTMusic(language='en')
+    if kind in ('songs', 'artists'):
+        # This library always returns the entire first page. Zero only prevents
+        # continuation requests; it does not truncate the native page.
+        return music_results(music.search(query, filter=kind, limit=0), kind)
+    if kind != 'artist' or not re.fullmatch(r'UC[\w-]{22}', query):
+        raise ValueError('Invalid music catalogue request')
+    artist = music.get_artist(query)
+    shelf = artist.get('songs') or {}
+    playlist_id = shelf.get('browseId')
+    entries = (music.get_playlist(playlist_id, limit=None)['tracks'] if playlist_id else shelf.get('results', []))
+    return dict(title=artist['name'], browse_id=query, thumbnail=music_thumbnail(artist),
+        url='https://music.youtube.com/channel/'+query, monthly_listeners=artist.get('monthlyListeners'),
+        order='youtube_music_top_songs', complete=bool(playlist_id), results=music_results(entries, 'songs'))
+
+
 async def fetch_results(provider, query):
-    process = await asyncio.create_subprocess_exec(sys.executable, '-m', 'karaoke.video_search', query,
+    process = await asyncio.create_subprocess_exec(sys.executable, '-m', 'karaoke.video_search', query, provider,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     try:
         output, _ = await process.communicate()
         if process.returncode:
             raise RuntimeError('YouTube search unavailable')
-        return search_results(provider, json.loads(output), query)
+        data = json.loads(output)
+        return search_results(provider, data, query) if provider == 'youtube' else data
     finally:
         if process.returncode is None:
             process.kill()
@@ -167,4 +227,6 @@ class VideoSearch:
 
 
 if __name__ == '__main__':
-    print(json.dumps(youtube_entries(sys.argv[1]), ensure_ascii=False))
+    provider = sys.argv[2] if len(sys.argv) > 2 else 'youtube'
+    print(json.dumps(youtube_entries(sys.argv[1]) if provider == 'youtube' else
+                     music_entries(provider, sys.argv[1]), ensure_ascii=False))

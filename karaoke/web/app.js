@@ -1,5 +1,5 @@
 import { Player } from './player.js';
-import { createVideoSearch, previewURL, searchLibrary, visibleResults } from './search.js';
+import { createVideoSearch, previewURL, searchLibrary, playCount, orderResults } from './search.js';
 
 const $ = id => document.getElementById(id);
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -14,9 +14,8 @@ let pendingLevels = {}, sendingLevels = {}, levelTimer = null, levelsBusy = fals
 let levelRequest = Promise.resolve();
 let pitchRequest = Promise.resolve();
 let searchTimer, searchQuery = '', searchSongs = [], previewSong = null, skipping = false, composing = false;
-let videoSource = 'youtube';
+let videoSource = 'songs', searchOrder = 'relevance', searchSnapshot = null, artistSelection = null;
 const addingVideos = new Set();
-const providerName = provider => ({local:'本地', youtube:'YouTube'})[provider];
 const videoSearch = createVideoSearch(renderVideoResults, fetch, query => searchLibrary(library, query));
 const current = () => state.entries.find(e => e.id === state.current_id);
 const effectiveLevels = () => ({...state.levels, ...sendingLevels, ...pendingLevels});
@@ -127,42 +126,69 @@ function renderLibrary() {
 }
 
 function renderVideoResults(providers) {
+  searchSnapshot = providers;
+  $('library-view').classList.add('searching');
   $('video-results').hidden = false;
   $('local-library').hidden = true;
-  $('search-status').innerHTML = Object.entries(providers).map(([name, info]) => `<span class="${info.error ? 'search-error' : ''}">${providerName(name)} · ${info.loading ? '搜索中…' : info.error ? escape(info.error) : info.results.length ? `${info.results.length} ${name === 'local' ? '首' : '个视频'}` : name === 'local' ? '未找到' : '未找到匹配的视频'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`).join('');
-  const songs = Object.values(providers).flatMap(info => info.results);
-  const order = {local:0, youtube:1};
-  // Keep provider ranking independent of response order, without replacing cards.
-  for (const song of songs) {
-    const existing = searchSongs.findIndex(old => old.url === song.url && old.provider === song.provider);
-    if (existing >= 0) { searchSongs[existing] = song; continue; }
-    const index = searchSongs.push(song)-1;
-    const before = [...$('video-grid').children].find(card => order[card.dataset.provider] > order[song.provider]);
-    (before || $('video-grid')).insertAdjacentHTML(before ? 'beforebegin' : 'beforeend', `<article class="video-card" data-provider="${song.provider}" data-result="${index}">
-      <button class="video-thumbnail" data-preview="${index}" aria-label="预览：${escape(song.title)}">${song.thumbnail ? `<img src="${escape(song.thumbnail)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ''}<span class="preview-label">${icon('play')}预览</span>${song.duration ? `<span class="poster-duration">${time(song.duration)}</span>` : ''}</button>
-      <h3 title="${escape(song.title)}">${escape(song.title)}</h3><p class="video-uploader">${escape(song.uploader)}${song.provider === 'local' ? ' · <span class="local-status"></span>' : ''}</p>
-      <div class="video-actions"><button data-add-video="${index}">${icon('plus')}<span>加入歌单</span></button><a href="${escape(song.url)}" target="_blank" rel="noopener noreferrer">${song.provider === 'local' ? '原站' : providerName(song.provider)} ↗</a></div>
-    </article>`);
-  }
-  document.querySelectorAll('[data-result]').forEach(card => {
-    const song = searchSongs[card.dataset.result];
-    card.dataset.active = String(songs.some(item => item.url === song.url && item.provider === song.provider));
-    if (song.provider === 'local') card.querySelector('.local-status').textContent = song.status === 'completed' ? '已准备' : song.status === 'running' ? '准备中' : song.status === 'queued' ? '等待准备' : '需准备';
+  const info = providers[videoSource];
+  if (!info) return;
+  const artists = videoSource === 'artists', catalogue = videoSource === 'artist';
+  const metadata = info.metadata || artistSelection || {};
+  const popularityAvailable = info.results.some(song => playCount(song.views) !== null);
+  if (searchOrder === 'popular' && !popularityAvailable) searchOrder = 'relevance';
+  $('search-order').value = searchOrder;
+  $('search-order').querySelector('[value="popular"]').disabled = !popularityAvailable;
+  $('search-order').querySelector('[value="relevance"]').textContent = catalogue ? '热门顺序' : '相关度';
+  $('search-order-label').hidden = artists || info.loading || !info.results.length;
+  $('search-heading').textContent = catalogue ? '热门歌曲' : artists ? '找一位歌手' : '搜索结果';
+  $('search-order-note').textContent = artists ? '选一位歌手，看看有哪些歌想唱' :
+    searchOrder === 'popular' ? '当前结果按播放量排序 · YouTube 提供' : searchOrder === 'ready' ? '已准备歌曲排在前面' :
+    searchOrder === 'title' ? '按歌名排序' : catalogue ? 'YouTube Music 热门歌曲顺序' :
+    videoSource === 'songs' ? 'YouTube Music 歌曲搜索顺序' : videoSource === 'youtube' ? 'YouTube 原始搜索顺序' : '本地曲库';
+  $('search-status').innerHTML = `<span class="${info.error ? 'search-error' : ''}">${info.loading ? '正在查找…' : info.error ? escape(info.error) : info.results.length ? `${info.results.length} ${artists ? '位歌手' : videoSource === 'youtube' ? '个视频' : '首'}${catalogue && info.metadata?.complete === false ? ' · 歌手页精选' : ''}` : '没有找到，试试另一个关键词或搜索类型'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`;
+  $('artist-summary').hidden = !catalogue;
+  if (catalogue) $('artist-summary').innerHTML = `${metadata.thumbnail ? `<img src="${escape(metadata.thumbnail)}" alt="" referrerpolicy="no-referrer">` : ''}<div><p>歌手</p><h3>${escape(metadata.title)}</h3>${metadata.monthly_listeners ? `<p>${escape(metadata.monthly_listeners)} 月度听众 · YouTube Music</p>` : ''}<button class="text-button" data-artist-back>返回歌手搜索</button></div>`;
+  searchSongs = orderResults(info.results.map(song => ({...song,
+    status:library.find(item => item.url === song.url)?.status || song.status})), searchOrder);
+  $('video-grid').className = artists ? 'artist-grid' : videoSource === 'youtube' ? 'video-grid' : 'music-list';
+  $('video-grid').innerHTML = searchSongs.map((song, index) => {
+    const thumbnail = song.thumbnail ? `<img src="${escape(song.thumbnail)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<span class="music-initial">${escape(song.title.slice(0,1))}</span>`;
+    if (artists) return `<button class="artist-card" data-artist-result="${index}">${thumbnail}<strong>${escape(song.title)}</strong><span>热门歌曲 ${icon('arrow')}</span></button>`;
+    if (videoSource === 'youtube') return `<article class="video-card" data-result="${index}">
+      <button class="video-thumbnail" data-preview="${index}" aria-label="预览：${escape(song.title)}">${thumbnail}<span class="preview-label">${icon('play')}预览</span>${song.duration ? `<span class="poster-duration">${time(song.duration)}</span>` : ''}</button>
+      <h3 title="${escape(song.title)}">${escape(song.title)}</h3><p class="video-uploader">${escape(song.uploader)}${playCount(song.views) !== null ? ` · ${formatPlays(song.views)}播放` : ''}</p>
+      <div class="video-actions"><button data-add-video="${index}">${icon('plus')}<span>加入歌单</span></button><a href="${escape(song.url)}" target="_blank" rel="noopener noreferrer">YouTube ↗</a></div></article>`;
+    const credits = song.artists?.length ? song.artists.map(a => a.id ? `<button data-artist-id="${escape(a.id)}" data-artist-name="${escape(a.name)}">${escape(a.name)}</button>` : escape(a.name)).join(' · ') : escape(song.uploader);
+    return `<article class="music-row" data-result="${index}"><span class="music-rank">${String(index+1).padStart(2,'0')}</span>
+      <button class="music-cover" data-preview="${index}" aria-label="预览：${escape(song.title)}">${thumbnail}<span>${icon('play')}</span></button>
+      <div class="music-title"><h3>${escape(song.title)}</h3><p class="music-credits">${credits}</p><p class="music-meta">${escape(song.version || '本地歌曲')}${song.album ? ` · ${escape(song.album)}` : ''}<span class="music-availability"></span></p></div>
+      <div class="music-stats">${playCount(song.views) !== null ? `<span>${formatPlays(song.views)}<small>播放</small></span>` : ''}<span>${song.duration ? time(song.duration) : ''}</span></div>
+      <div class="music-actions"><button class="music-add" data-add-video="${index}" aria-label="加入歌单：${escape(song.title)}">${icon('plus')}<span>加入歌单</span></button>${song.provider === 'youtube_music' ? `<button class="find-mv" data-find-mv="${index}">找 MV</button>` : ''}</div></article>`;
+  }).join('');
+  document.querySelectorAll('[data-video-source]').forEach(button => {
+    const selected = button.dataset.videoSource === (catalogue ? 'artists' : videoSource);
+    button.classList.toggle('selected', selected);
+    button.setAttribute('aria-pressed', String(selected));
   });
-  filterVideos();
   updateVideoButtons();
 }
 
-function filterVideos() {
-  const cards = [...document.querySelectorAll('[data-result]')];
-  const visible = visibleResults(cards.filter(card => card.dataset.active === 'true').map(card => searchSongs[card.dataset.result]), videoSource);
-  cards.forEach(card => {
-    card.hidden = card.dataset.active !== 'true' || !visible.includes(searchSongs[card.dataset.result]);
-  });
-  document.querySelectorAll('[data-video-source]').forEach(button => {
-    button.classList.toggle('selected', button.dataset.videoSource === videoSource);
-    button.setAttribute('aria-pressed', String(button.dataset.videoSource === videoSource));
-  });
+function formatPlays(value) {
+  return new Intl.NumberFormat('zh-CN', {notation:'compact', maximumFractionDigits:1}).format(playCount(value));
+}
+
+function openArtist(artist) {
+  const query = $('song-input').value.trim();
+  clearVideoSearch();
+  artistSelection = artist;
+  videoSource = 'artist'; searchOrder = 'relevance';
+  searchQuery = query;
+  videoSearch.search(artist.browse_id, 'artist');
+}
+
+function changeSearchMode(mode) {
+  videoSource = mode; searchOrder = 'relevance'; artistSelection = null;
+  searchVideos(true);
 }
 
 function updateVideoButtons() {
@@ -171,9 +197,14 @@ function updateVideoButtons() {
     if (!song) return;
     const queued = state.entries.some(entry => entry.url === song.url);
     const adding = addingVideos.has(song.url);
-    button.disabled = queued || adding;
+    button.disabled = queued || adding || song.available === false;
     const label = button.querySelector('span') || button;
-    label.textContent = queued ? '已在歌单 ✓' : adding ? '加入中…' : '加入歌单';
+    label.textContent = queued ? '已在歌单 ✓' : adding ? '加入中…' : song.available === false ? '暂不可用' : '加入歌单';
+  });
+  document.querySelectorAll('.music-availability').forEach(label => {
+    const song = searchSongs[label.closest('[data-result]').dataset.result];
+    const cached = library.find(item => item.url === song.url);
+    label.textContent = cached?.status === 'completed' ? ' · 已准备' : cached?.status === 'running' ? ' · 准备中' : cached?.status === 'queued' ? ' · 等待准备' : cached?.status === 'video_evicted' ? ' · 待补视频' : '';
   });
 }
 
@@ -182,6 +213,8 @@ function clearVideoSearch() {
   videoSearch.cancel();
   searchQuery = '';
   searchSongs = [];
+  searchSnapshot = null;
+  $('library-view').classList.remove('searching');
   $('video-results').hidden = true;
   $('video-grid').replaceChildren();
   $('search-status').replaceChildren();
@@ -194,10 +227,11 @@ function searchVideos(force = false) {
   clearVideoSearch();
   searchQuery = query;
   if (query.length > 160) { toast('搜索关键词请控制在 160 字以内'); return; }
-  videoSearch.search(query);
+  videoSearch.search(videoSource === 'artist' ? artistSelection.browse_id : query, videoSource);
 }
 
 function editSearch() {
+  if (videoSource === 'artist') { videoSource = 'artists'; artistSelection = null; }
   clearVideoSearch();
   renderLibrary();
   if (!composing) searchTimer = setTimeout(searchVideos, 700);
@@ -225,9 +259,10 @@ function previewVideo(song) {
   $('preview-source').href = song.url;
   $('preview-source').textContent = `在 ${song.url.includes('youtube.com') ? 'YouTube' : 'B站'} 观看 ↗`;
   $('preview-error').hidden = true;
-  if (song.provider === 'local' && song.status === 'completed' && song.job_id) {
+  const cached = library.find(item => item.url === song.url && item.status === 'completed' && item.job_id);
+  if (cached) {
     const video = document.createElement('video');
-    video.src = `/v1/jobs/${song.job_id}/artifacts/mv`;
+    video.src = `/v1/jobs/${cached.job_id}/artifacts/mv`;
     video.controls = true;
     video.preload = 'metadata';
     $('preview-player').replaceChildren(video);
@@ -409,12 +444,18 @@ document.querySelectorAll('[data-filter]').forEach(button => button.onclick = ()
   renderLibrary();
 });
 $('song-input').oninput = editSearch;
-document.querySelectorAll('[data-video-source]').forEach(button => button.onclick = () => { videoSource = button.dataset.videoSource; filterVideos(); });
+document.querySelectorAll('[data-video-source]').forEach(button => button.onclick = () => changeSearchMode(button.dataset.videoSource));
+$('search-order').onchange = () => { searchOrder = $('search-order').value; if (searchSnapshot) renderVideoResults(searchSnapshot); };
+$('artist-summary').onclick = event => { if (event.target.closest('[data-artist-back]')) changeSearchMode('artists'); };
 $('song-input').oncompositionstart = () => { composing = true; clearVideoSearch(); };
 $('song-input').oncompositionend = () => { composing = false; editSearch(); };
 $('clear-search').onclick = () => { $('song-input').value = ''; editSearch(); $('song-input').focus(); };
 $('search-status').onclick = event => { if (event.target.closest('[data-search-retry]')) searchVideos(true); };
 $('video-grid').onclick = event => {
+  const artist = event.target.closest('[data-artist-result], [data-artist-id]');
+  if (artist) { openArtist(artist.dataset.artistId ? {browse_id:artist.dataset.artistId, title:artist.dataset.artistName} : searchSongs[artist.dataset.artistResult]); return; }
+  const mv = event.target.closest('[data-find-mv]');
+  if (mv) { const song = searchSongs[mv.dataset.findMv]; $('song-input').value = `${song.uploader} ${song.title}`; changeSearchMode('youtube'); return; }
   const preview = event.target.closest('[data-preview]');
   const add = event.target.closest('[data-add-video]');
   if (preview) previewVideo(searchSongs[preview.dataset.preview]);
@@ -522,7 +563,7 @@ document.addEventListener('fullscreenchange', () => {
 });
 document.addEventListener('keydown', event => {
   if ($('video-preview').open) return;
-  if (['INPUT','TEXTAREA','BUTTON'].includes(event.target.tagName) || event.ctrlKey || event.metaKey || event.altKey) return;
+  if (['INPUT','TEXTAREA','BUTTON','SELECT'].includes(event.target.tagName) || event.ctrlKey || event.metaKey || event.altKey) return;
   if (event.code === 'Space') { event.preventDefault(); togglePlay(); }
   if (event.key.toLowerCase() === 'n') nextSong();
   if (event.key.toLowerCase() === 'f') fullscreen();

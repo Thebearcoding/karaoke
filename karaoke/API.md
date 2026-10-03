@@ -367,10 +367,14 @@ ASR 固定宽度断行若留下孤立的单字或单词，会在同一短句内�
 
 两次均通过 HTTP 提交真实 URL，下载、处理、渲染完整跑通；八个输出文件均通过完整下载哈希和首尾 Range 校验。三轨重组均与解码后的原始 PCM 逐样本一致。当时 68 项行为测试通过；这不是歌词听辨或切字准确率的测量。历史验证记录与媒体保留在原开发工作区，未随源码上传。
 
-## 视频搜索
+## 音乐与视频搜索
 
-`GET /v1/search?q=歌名或歌手&provider=youtube`。只支持 YouTube；B站搜索返回 422。返回平台第一页的全部可用单视频链接，字段为 `url`、`title`、`uploader`、`thumbnail`、`duration`（秒）、`provider`。查询限 1–160 字。搜索不创建任务，也不读写歌曲缓存。
+`GET /v1/search?q=歌名或歌手&provider=youtube`。只支持 YouTube；B站搜索返回 422。返回平台第一页的全部可用单视频链接，字段为 `url`、`title`、`uploader`、`thumbnail`、`duration`（秒）、`views`、`provider`。查询限 1–160 字。搜索不创建任务，也不读写歌曲缓存。
 
-前后端保留 YouTube 的结果顺序和数量，没有 3 条截断，不按字面关键词、认证、直播状态额外过滤。仅校验单视频 URL 和封面地址。前端默认 YouTube 视图，本地曲库在独立标签查看。服务端相同查询合并请求，元数据缓存 120 秒、最多 32 项；最多并行 2 个查询、待处理最多 8 个，每次含等待最多 25 秒。超量返回 429，平台错误返回 502，成功无结果返回空数组。复用 yt-dlp 解析一个完整原生搜索页，不无限抓取后续页面，无需额外 API key。
+前后端保留 YouTube 的结果顺序和数量，没有 3 条截断，不按字面关键词、认证、直播状态额外过滤。仅校验单视频 URL 和封面地址。前端在「YouTube 视频」标签展示，本地曲库在独立标签查看。服务端相同查询合并请求，元数据缓存 120 秒、最多 32 项；最多并行 2 个查询、待处理最多 8 个，每次含等待最多 25 秒。超量返回 429，平台错误返回 502，成功无结果返回空数组。复用 yt-dlp 解析一个完整原生搜索页，不无限抓取后续页面，无需额外 API key。
+
+`GET /v1/music/search?q=关键词&kind=songs|artists` 用 ytmusicapi 读取 YouTube Music 完整第一页，默认 songs。歌曲包含标准 YouTube `url`、`title`、`artists`（名称与可用的频道 ID）、`album`、`version`、`duration`、平台提供的 `views`、`available`、`thumbnail` 和原始 `rank`。歌手返回 `title`、`browse_id`、频道 `url`、`thumbnail`、`rank`；`provider=youtube_music`。不自动选择同名歌手或删改版本。
+
+`GET /v1/music/artists/{browse_id}` 只接受 YouTube 频道 ID，读取歌手页及其完整热门歌单，返回歌手元数据、`results`、`order=youtube_music_top_songs`、`complete`。没有歌单链接时保留页面精选并标 `complete=false`。平台未提供播放量时保留空值。前端默认平台顺序；播放量排序仅作用于当前返回的、计数可知的结果，未知计数排后。这两组接口复用视频搜索的限流、超时、缓存与去重，不下载音视频或创建准备任务。
 
 从结果点歌使用 `POST /v1/room/entries`，例如 `{"url":"视频链接","source_title":"搜索返回的视频标题"}`。`source_title` 只给新任务提供临时展示标题（最多 500 字），不参与缓存键，不覆盖后续元数据；用户显式传入的 `title` 仍是优先标题。处理中的 `song_info` 按字段合并，空对象、空字符串或 `null` 不清除已知信息；下载进度、语言识别等更新不能把已有歌名变回占位文字。已有准备任务优先用 `job_id` 加入。

@@ -9,6 +9,7 @@ import logging
 import mimetypes
 import os
 from pathlib import Path
+import re
 import signal
 import sqlite3
 import sys
@@ -403,18 +404,31 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
     async def library():
         return dict(songs=room.library())
 
-    @app.get('/v1/search')
-    async def search_videos(provider: Literal['youtube'], q: str = Query(min_length=1, max_length=160)):
+    async def search_metadata(provider, q):
         query = ' '.join(q.split())
         if not query:
             raise HTTPException(422, '请输入歌名或歌手')
         try:
-            return dict(query=query, provider=provider, results=await video_search.search(provider, query))
+            return await video_search.search(provider, query)
         except OverflowError as error:
             raise HTTPException(429, '搜索较多，请稍后重试') from error
         except Exception as error:
             logging.getLogger(__name__).warning('%s search failed: %s', provider, type(error).__name__)
             raise HTTPException(502, 'YouTube暂时搜不到，请重试') from error
+
+    @app.get('/v1/search')
+    async def search_videos(provider: Literal['youtube'], q: str = Query(min_length=1, max_length=160)):
+        return dict(query=' '.join(q.split()), provider=provider, results=await search_metadata(provider, q))
+
+    @app.get('/v1/music/search')
+    async def search_music(kind: Literal['songs', 'artists'] = 'songs', q: str = Query(min_length=1, max_length=160)):
+        return dict(query=' '.join(q.split()), provider='youtube_music', results=await search_metadata(kind, q))
+
+    @app.get('/v1/music/artists/{browse_id}')
+    async def artist_songs(browse_id: str):
+        if not re.fullmatch(r'UC[\w-]{22}', browse_id):
+            raise HTTPException(422, '无效的歌手链接')
+        return await search_metadata('artist', browse_id)
 
     @app.get('/v1/storage')
     async def storage():

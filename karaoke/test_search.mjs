@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createVideoSearch, previewURL, searchLibrary, visibleResults} from './web/search.js';
+import {createVideoSearch, previewURL, searchLibrary, visibleResults, playCount, orderResults} from './web/search.js';
 
 function setup() {
   const requests = [], snapshots = [];
@@ -84,4 +84,38 @@ test('YouTube view keeps provider order and has no result count or local dedupli
   const songs = [local,...videos];
   assert.deepEqual(visibleResults(songs,'youtube'), videos);
   assert.deepEqual(visibleResults(songs,'local'), [local]);
+});
+
+test('song, artist and catalogue searches stay separate and discard stale mode responses', async () => {
+  const {search, requests, snapshots} = setup();
+  const song = search.search('Singer', 'songs');
+  assert.equal(new URL(requests[0].url, 'http://localhost').searchParams.get('kind'), 'songs');
+  const artist = search.search('Singer', 'artists');
+  assert.ok(requests[0].signal.aborted);
+  requests[1].finish([{title:'Singer',browse_id:'UC'+'a'.repeat(22)}]);
+  await artist;
+  const count = snapshots.length;
+  requests[0].finish([{title:'stale song'}]);
+  await song;
+  assert.equal(snapshots.length, count);
+  const catalogue = search.search('UC'+'a'.repeat(22), 'artist');
+  assert.equal(requests[2].url, '/v1/music/artists/UC'+'a'.repeat(22));
+  requests[2].finish(Array.from({length:150}, (_,i) => ({title:`Song ${i}`})));
+  await catalogue;
+  assert.equal(snapshots.at(-1).artist.results.length, 150);
+  await search.search('Singer', 'local');
+  assert.equal(requests.length, 3);
+});
+
+test('popularity uses reported counts, keeps unknowns last and never mutates provider order', () => {
+  const songs = [{title:'A',views:null},{title:'B',views:'21K'},{title:'C',views:'1.2M'},
+    {title:'D',views:'1,300',status:'completed'},{title:'E',views:'21K'}];
+  assert.deepEqual(orderResults(songs,'relevance'), songs);
+  assert.deepEqual(orderResults(songs,'popular').map(s=>s.title), ['C','B','E','D','A']);
+  assert.deepEqual(orderResults(songs,'ready').map(s=>s.title), ['D','A','B','C','E']);
+  assert.deepEqual(songs.map(s=>s.title), ['A','B','C','D','E']);
+  for (const value of [null, undefined, '', 'unknown', -1, Infinity]) assert.equal(playCount(value), null);
+  assert.equal(playCount('0'), 0);
+  assert.equal(playCount('1.2B'), 1.2e9);
+  assert.ok(previewURL({provider:'youtube_music',url:'https://www.youtube.com/watch?v=abcdefghijk'},'http://localhost').includes('/embed/abcdefghijk'));
 });
