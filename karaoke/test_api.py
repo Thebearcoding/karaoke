@@ -2186,7 +2186,8 @@ def test_playback_fallback_retains_raw_aligned_lines_when_whole_block_text_check
 
 
 @pytest.mark.parametrize('contradicted', [False, True])
-def test_playback_fallback_prefers_existing_word_times_to_coarse_lines(tmp_path, contradicted):
+@pytest.mark.parametrize('earlier_result', [False, True])
+def test_playback_fallback_prefers_existing_word_times_to_coarse_lines(tmp_path, contradicted, earlier_result):
     pipeline = Pipeline(dict(url=URL), tmp_path)
     lines = ['First phrase', 'Last phrase']
     (tmp_path/'lyrics.json').write_text(json.dumps(dict(language='English', lines=lines, provenance={})))
@@ -2199,6 +2200,10 @@ def test_playback_fallback_prefers_existing_word_times_to_coarse_lines(tmp_path,
     raw[0]['asr_localizations'] = [dict(source_range=[10,15], accepted_lines=[] if contradicted else [2],
                                       contradicted_lines=[2],
                                       recognition=dict(segments=[]))]
+    if earlier_result:
+        raw[0]['asr_localizations'].insert(0, dict(source_range=[10,15],
+            accepted_lines=[2] if contradicted else [], contradicted_lines=[2],
+            recognition=dict(segments=[])))
     (tmp_path/'alignment/raw.json').write_text(json.dumps(raw))
     pipeline.alignment_outputs.add(tmp_path/'alignment')
     if contradicted:
