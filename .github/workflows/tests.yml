@@ -1,0 +1,115 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python / API, queue and algorithms
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+      PYTHONPATH: karaoke
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-*.txt
+            karaoke/requirements*.txt
+            .github/workflows/tests.yml
+      - name: Install audio tools and Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg lame libsndfile1
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.11.0 torchaudio==2.11.0
+          python -m pip install -r requirements-dev.txt
+          python -m pip check
+      - name: Check out the pinned pronunciation dictionary
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: qiuqiao/SOFA
+          ref: 9549c6a86d16019c817eefe4bb8183405da524cc
+          path: karaoke/research/subtitles-2026-09-18/sofa
+          persist-credentials: false
+      - name: Prepare the Japanese pronunciation dictionary
+        run: python -c 'import pyopenjtalk; pyopenjtalk.run_frontend("こんにちは")'
+      - name: Check startup with an empty library
+        env:
+          KARAOKE_DATA_DIR: ${{ runner.temp }}/karaoke-empty
+          KARAOKE_PORT: "8746"
+        run: |
+          mkdir -p test-results
+          python -m karaoke.api >test-results/startup.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid"; wait "$server_pid" || true' EXIT
+          python - <<'PY'
+          import json
+          import time
+          from urllib.error import URLError
+          from urllib.request import urlopen
+
+          def get(path):
+              with urlopen("http://127.0.0.1:8746" + path, timeout=2) as response:
+                  return response.read()
+
+          for attempt in range(30):
+              try:
+                  health = json.loads(get("/health"))
+                  break
+              except URLError:
+                  time.sleep(1)
+          else:
+              raise RuntimeError("Server did not start within 30 seconds")
+          assert health["queued"] == 0 and health["running_job"] is None
+          assert json.loads(get("/v1/library"))["songs"] == []
+          assert json.loads(get("/v1/room"))["entries"] == []
+          assert b"<html" in get("/")
+          PY
+      - name: Run all Python tests
+        run: python -m pytest -q karaoke/test_api.py karaoke/test_room.py karaoke/test_algorithms.py --junitxml=test-results/python.xml
+      - name: Save Python test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-test-results
+          path: test-results/
+          retention-days: 14
+
+  javascript:
+    name: JavaScript / player, pitch and search
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - name: Run all JavaScript tests
+        run: |
+          mkdir -p test-results
+          node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=test-results/javascript.xml karaoke/test_player.mjs karaoke/test_pitch.mjs karaoke/test_search.mjs
+      - name: Save JavaScript test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: javascript-test-results
+          path: test-results/
+          retention-days: 14

@@ -57,6 +57,8 @@ karaoke/
 
 ## 验证
 
+[GitHub Actions](https://github.com/Trinkle23897/karaoke/actions/workflows/tests.yml) 在每次 push 和 PR 时运行全部 Python 与 JavaScript 行为测试，并检查空数据目录启动。测试报告保留 14 天，也可从 Actions 页面手动运行。
+
 准备完整 Python 环境并按 [安装说明](SETUP.md) 拉取 SOFA 源码后：
 
 ```sh

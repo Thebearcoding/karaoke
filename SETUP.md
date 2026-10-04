@@ -134,4 +134,6 @@ node --test karaoke/test_player.mjs karaoke/test_pitch.mjs karaoke/test_search.m
 
 这些行为测试不发起在线模型调用，不要求歌曲库或模型权重。真正验证下载、分离、对齐和渲染，仍需完成以上资源准备并提交一个真实视频链接。首次模型／字典下载耗时与后续单曲处理耗时应分别记录。
 
+仓库的 [Tests workflow](.github/workflows/tests.yml) 在 push、PR 和手动触发时分别运行 Python 3.12 与 Node.js 22 测试。Python 任务使用 Ubuntu 24.04、CPU 版 PyTorch／torchaudio 2.11.0、现有开发依赖和上述固定版本的 SOFA 字典；先准备日文发音字典，再检查空库启动及全部行为测试。两组 JUnit 测试报告和启动日志保留 14 天。CI 不需要配置密钥；真实歌曲的分离质量和逐字起音验收仍单独进行。
+
 `benchmark_*.py`、OCR 对照脚本及历史实验说明属于研究工具；它们可能引用本机实验素材或可选模型，不是空仓库一键可运行的演示。正式入口是 `python -m karaoke.api`。
