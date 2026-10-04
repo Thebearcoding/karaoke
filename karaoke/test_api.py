@@ -1154,7 +1154,7 @@ def test_direct_alignment_defers_unanchored_or_oversized_repairs(far_neighbour):
         'requires_coarse_localization' if far_neighbour else 'no_measured_neighbour')
 
 
-@pytest.mark.parametrize('failure', [None, 'wrong_words', 'outside_window', 'no_speech'])
+@pytest.mark.parametrize('failure', [None, 'wrong_words', 'outside_window', 'no_speech', 'boundary_overlap'])
 def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neighbours(failure):
     from copy import deepcopy
     from karaoke.align_lyrics_whisper import recover_with_local_asr
@@ -1162,6 +1162,8 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
     segments = [dict(text=text, start=t, end=t+.8, words=[dict(word=text,start=t,end=t+.8)])
                 for text,t in zip(lines,starts)]
     segments[1]['words'][0]['end'] = 4.
+    if failure == 'boundary_overlap':
+        segments[2]['words'][0]['start'] = 3.8
     block = dict(range=[0,3],context=[0,3],source_range=[0.,12.],result=dict(segments=segments))
     original = deepcopy(block)
     def recognize(begin,end):
@@ -1178,10 +1180,13 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
     result = recover_with_local_asr(block,lines,np.zeros(12*16000),'English',recognize,align)
     assert block == original
     assert result['result']['segments'][0] == segments[0]
-    assert result['result']['segments'][2] == segments[2]
-    assert result['asr_localizations'][0]['accepted_lines'] == ([2] if failure is None else [])
-    if failure is None:
+    if failure != 'boundary_overlap':
+        assert result['result']['segments'][2] == segments[2]
+    assert result['asr_localizations'][0]['accepted_lines'] == (
+        [2,3] if failure == 'boundary_overlap' else [2] if failure is None else [])
+    if failure in (None, 'boundary_overlap'):
         assert result['result']['segments'][1]['words'] == [dict(word='bravo',start=4.,end=4.8)]
+        assert result['result']['segments'][2]['words'] == [dict(word='charlie',start=8.,end=8.8)]
     else:
         assert result['result'] == block['result']
     good = dict(block,result=dict(segments=[dict(text=t,words=[dict(word=t,start=s,end=s+.8)])
@@ -1191,11 +1196,12 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
 
 
 @pytest.mark.parametrize('partly_timed', [False, True])
-@pytest.mark.parametrize('asr_gap', ['none', 'long_intro', 'missing_middle'])
+@pytest.mark.parametrize('asr_gap', ['none', 'long_intro', 'missing_middle', 'boundary_overlap'])
 def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(partly_timed, asr_gap):
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines = ['alpha','bravo','charlie','delta','echo','foxtrot','golf','hotel']
     starts = {line:30.+i*6 for i,line in enumerate(lines)}
+    ends = {line:start+1 for line,start in starts.items()}
     block = dict(range=[0,8],context=[0,8],source_range=[0.,90.],result=dict(segments=[
         dict(text=t,words=[dict(word=t,start=float(i),end=float(i if i<5 else i+1))])
         for i,t in enumerate(lines)]))
@@ -1203,21 +1209,29 @@ def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(part
         for i,s in enumerate(block['result']['segments'][:5]):
             tokens = [*s['text'][:3],s['text'][3:]]
             s['words'] = [dict(word=t,start=float(i),end=i+(.05 if j==3 else 0)) for j,t in enumerate(tokens)]
+    if asr_gap == 'boundary_overlap':
+        ends['echo'] = 59.
+        for i in range(5,8):
+            start = starts[lines[i]]-(2 if i==5 else 0)
+            block['result']['segments'][i] = dict(text=lines[i],words=[dict(word=lines[i],start=start,end=ends[lines[i]])])
     calls=[]
     def recognize(begin,end):
         calls.append((begin,end))
-        words = [dict(word=t,start=starts[t],end=starts[t]+1) for t in lines
+        words = [dict(word=t,start=starts[t],end=ends[t]) for t in lines
                  if not (asr_gap == 'missing_middle' and t == 'golf')]
         if asr_gap == 'long_intro':words[0]['start'] = 0.
         return dict(segments=[dict(words=words)])
     def align(begin,end,text,**kwargs):
         assert end-begin <= 45
-        return dict(segments=[dict(text=t,words=[dict(word=t,start=starts[t]-begin,end=starts[t]+1-begin)])
+        return dict(segments=[dict(text=t,words=[dict(word=t,start=starts[t]-begin,end=ends[t]-begin)])
                               for t in text.splitlines()])
     result = recover_with_local_asr(block,lines,np.zeros(90*16000),'English',recognize,align)
     assert calls == [(0.,90.)]
-    assert result['asr_localizations'][0]['accepted_lines'] == list(range(1,9))
+    assert result['asr_localizations'][0]['accepted_lines'] == list(range(1,7 if asr_gap=='boundary_overlap' else 9))
     assert [s['words'][0]['start'] for s in result['result']['segments']] == list(starts.values())
+    if asr_gap == 'boundary_overlap':
+        assert result['result']['segments'][6:] == block['result']['segments'][6:]
+        assert result['asr_localizations'][0]['boundary_reconciliations']
 
 
 @pytest.mark.parametrize('padding', ['zero', 'quiet', 'other_channel', 'all_silent', 'nonfinite', 'wrong_duration'])
@@ -2094,7 +2108,8 @@ def test_playback_fallback_retains_raw_aligned_lines_when_whole_block_text_check
     assert not warning['word_alignment_passed']
 
 
-def test_playback_fallback_prefers_existing_word_times_to_coarse_lines(tmp_path):
+@pytest.mark.parametrize('contradicted', [False, True])
+def test_playback_fallback_prefers_existing_word_times_to_coarse_lines(tmp_path, contradicted):
     pipeline = Pipeline(dict(url=URL), tmp_path)
     lines = ['First phrase', 'Last phrase']
     (tmp_path/'lyrics.json').write_text(json.dumps(dict(language='English', lines=lines, provenance={})))
@@ -2104,18 +2119,25 @@ def test_playback_fallback_prefers_existing_word_times_to_coarse_lines(tmp_path)
     raw = [dict(range=[0, 2], context=[0, 2], source_range=[10, 15], result=dict(segments=[
         dict(words=[dict(word=w, start=i*2+j*.4, end=i*2+j*.4+.3)
                     for j,w in enumerate(text.split())]) for i,text in enumerate(lines)]))]
-    raw[0]['asr_localizations'] = [dict(source_range=[10,15], accepted_lines=[2],
+    raw[0]['asr_localizations'] = [dict(source_range=[10,15], accepted_lines=[] if contradicted else [2],
+                                      contradicted_lines=[2],
                                       recognition=dict(segments=[]))]
     (tmp_path/'alignment/raw.json').write_text(json.dumps(raw))
     pipeline.alignment_outputs.add(tmp_path/'alignment')
-    pipeline.playback_fallback({}, 20, StageFailure('align_words', 'unresolved'))
+    if contradicted:
+        with pytest.raises(StageFailure, match='1 行歌词未能定位'):
+            pipeline.playback_fallback({}, 20, StageFailure('align_words', 'unresolved'))
+    else:
+        pipeline.playback_fallback({}, 20, StageFailure('align_words', 'unresolved'))
     cues = json.loads((tmp_path/'cues.json').read_text())
-    assert [u['start'] for c in cues for u in c['units']] == [10., 10.4, 12., 12.4]
+    assert [u['start'] for c in cues for u in c['units']] == ([10., 10.4] if contradicted else [10., 10.4, 12., 12.4])
     warning = json.loads((tmp_path/'playback-warning.json').read_text())
-    assert warning['estimated_spans'] == [] and warning['omitted_lines'] == []
-    assert not warning['requires_review']
+    assert warning['estimated_spans'] == [] and warning['omitted_lines'] == ([2] if contradicted else [])
+    assert warning['requires_review'] == contradicted
     quality = json.loads((tmp_path/'quality.json').read_text())
-    assert quality['asr_localization_windows'] == 1 and quality['recovered_alignment_lines'] == [2]
+    assert quality['asr_localization_windows'] == 1
+    assert quality['recovered_alignment_lines'] == ([] if contradicted else [2])
+    assert quality['unresolved_localization_lines'] == ([2] if contradicted else [])
     from karaoke.tools.playback_sweep import soft_failures
     events = soft_failures(dict(quality=quality),{})
     assert next(e for e in events if e['code']=='alignment_localized_with_asr')['windows'] == 1

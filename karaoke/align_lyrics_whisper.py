@@ -225,10 +225,11 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align):
             report['reason'] = 'insufficient_recognition_support'
             continue
         targets = bad.intersection(range(left, right))
+        mislocalized = set()
         if global_recovery:
             # A several-second contradiction from independently recognized
             # words is evidence that a superficially valid old line also drifted.
-            targets.update(i+left for i, a in enumerate(anchors) if a['status'] == 'candidate'
+            mislocalized.update(i+left for i, a in enumerate(anchors) if a['status'] == 'candidate'
                 and cues[i+left]['status'] == 'candidate' and (
                     abs(cues[i+left]['start']-a['start']) > 4 or
                     cues[i+left]['end'] < a['start'] or cues[i+left]['start'] > a['end']))
@@ -239,7 +240,9 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align):
                 after = [a for a in anchors[i+1:] if a['status'] == 'candidate']
                 if before and after and (cues[i+left]['start'] < before[-1]['start']-2 or
                                          cues[i+left]['end'] > after[0]['end']+2):
-                    targets.add(i+left)
+                    mislocalized.add(i+left)
+            targets.update(mislocalized)
+        report['contradicted_lines'] = sorted(i+1 for i in mislocalized)
         proposed, replaced = deepcopy(result), []
         try:
             blocks = alignment_blocks(anchors, audio)
@@ -293,17 +296,49 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align):
                 segment.update(start=segment['words'][0]['start'], end=segment['words'][-1]['end'])
                 proposed['result']['segments'][i-first] = segment
                 replaced.append(i)
-        fresh = partial_alignment_cues(lines, [proposed], duration, language)
-        usable = [c for c in fresh if c['status'] == 'candidate']
-        try:
-            presentation_cues(usable, duration, lead=0, tail=0, bridge_gap=0)
-            units = [w for c in usable for w in c['units']]
-            if any(a['start'] >= b['start'] for a, b in zip(units, units[1:])):
-                raise ValueError('word_order_conflict')
-        except ValueError:
+        def ordered(candidate):
+            fresh = partial_alignment_cues(lines, [candidate], duration, language)
+            usable = [c for c in fresh if c['status'] == 'candidate']
+            try:
+                presentation_cues(usable, duration, lead=0, tail=0, bridge_gap=0)
+                units = [w for c in usable for w in c['units']]
+                if any(a['start'] >= b['start'] for a, b in zip(units, units[1:])):
+                    return None
+            except ValueError:
+                return None
+            return fresh
+
+        fresh = ordered(proposed)
+        if fresh is None:
+            def reconcile(begin, end, text, **options):
+                nonlocal budget
+                if budget <= 0:
+                    return None
+                budget -= 1
+                return align(begin, end, text, **options)
+            try:
+                _, selected, repairs = stitch_blocks(lines, [proposed], duration, language, reconcile)
+                report['boundary_reconciliations'] = repairs
+                for selected_block in selected:
+                    for i in range(*selected_block['range']):
+                        segment = deepcopy(selected_block['result']['segments'][i-selected_block['context'][0]])
+                        if not segment['words']:
+                            continue
+                        offset = selected_block['source_range'][0]-block['source_range'][0]
+                        for word in segment['words']:
+                            for key in ('start', 'end'):
+                                word[key] = round(word[key]+offset, 3)
+                        segment.update(start=segment['words'][0]['start'], end=segment['words'][-1]['end'])
+                        if segment['words'] != proposed['result']['segments'][i-first]['words']:
+                            proposed['result']['segments'][i-first] = segment
+                            replaced.append(i)
+                fresh = ordered(proposed)
+            except ValueError as error:
+                report['boundary_error'] = str(error)
+        if fresh is None:
             report['reason'] = 'conflicts_with_preserved_neighbours'
             continue
-        report.update(accepted_lines=[i+1 for i in replaced],
+        report.update(accepted_lines=sorted({i+1 for i in replaced}),
                       original_segments={i+1: result['result']['segments'][i-first] for i in replaced})
         result, cues = proposed, fresh
         bad.difference_update(replaced)

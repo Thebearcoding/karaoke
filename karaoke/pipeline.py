@@ -144,6 +144,8 @@ def alignment_recovery_summary(raw):
         {i for block in raw for report in block.get('line_recoveries', []) if report['accepted']
          for i in range(report['lines'][0], report['lines'][1]+1)} |
         {i for report in localized for i in report['accepted_lines']}),
+        unresolved_localization_lines=sorted({i for r in localized for i in r.get('contradicted_lines', [])
+                                              if i not in r['accepted_lines']}),
         asr_localization_windows=len({tuple(r['source_range']) for r in localized if r.get('recognition')}))
 
 
@@ -682,6 +684,8 @@ class Pipeline:
         self.run('align_words', [sys.executable, ROOT/'align_lyrics_whisper.py', '--jobs',
             output/'alignment-jobs.json', '--device', self.device])
         raw = json.loads((output/'alignment/raw.json').read_text())
+        if alignment_recovery_summary(raw)['unresolved_localization_lines']:
+            raise StageFailure('align_words', '部分唱句仍与识别位置冲突；定位诊断已保留')
         coarse, _ = presentation_cues(json.loads((output/'alignment/cues.json').read_text()),
                                      duration, lead=0, tail=0, bridge_gap=0)
         words, mapping = build(coarse, raw, language)
@@ -894,6 +898,9 @@ class Pipeline:
             except (OSError, ValueError, KeyError, TypeError):
                 pass
         for line, text in enumerate(lyrics['lines']):
+            if line+1 in recovery.get('unresolved_localization_lines', []):
+                omitted.append(line+1)
+                continue
             for name, candidate in candidates:
                 cue = candidate[line]
                 try:
