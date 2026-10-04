@@ -216,7 +216,7 @@ def verify_stems(paths, duration):
 
 
 def verify_outputs(client, base, data_dir, job, *, audio_only=False, playback_policy=False):
-    from karaoke.subtitles import normalized, highlight_coverage_errors
+    from karaoke.subtitles import normalized, highlight_coverage_errors, collapsed_phrase
     folder = (data_dir/job['id']).resolve()
     result = json.loads((folder/('audio-result.json' if audio_only else 'result.json')).read_text())
     required = REQUIRED-{'mv'} if audio_only else REQUIRED
@@ -256,6 +256,8 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False, playback_po
         raise ValueError('Non-monotonic word onsets')
     if any(normalized(''.join(u['text'] for u in c['units'])) != normalized(c['text']) for c in cues):
         raise ValueError('Subtitle units omit lyric text')
+    if any(collapsed_phrase(c, result['language']) for c in cues):
+        raise ValueError('Collapsed lyric phrase timing')
     if not playback_policy and highlight_coverage_errors(cues, result['language']):
         raise ValueError('Subtitle words or characters lack independent highlights')
     if not playback_policy and result.get('language') == 'English':

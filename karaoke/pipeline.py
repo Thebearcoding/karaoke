@@ -682,7 +682,7 @@ class Pipeline:
 
     def align(self, lyrics, duration):
         from lyric_progress import build
-        from subtitles import presentation_cues, countdown_events, normalized, highlight_coverage_errors
+        from subtitles import presentation_cues, countdown_events, normalized, highlight_coverage_errors, collapsed_phrase
         language = lyrics['language']
         output = self.output
         write_json(output/'alignment-jobs.json', [dict(audio=str(output/'vocals-16k.wav'),
@@ -751,6 +751,8 @@ class Pipeline:
         for cue in cues:
             if normalized(''.join(u['text'] for u in cue['units'])) != normalized(cue['text']):
                 raise StageFailure('align_words', '逐字时间轴遗漏了歌词')
+            if collapsed_phrase(cue, language):
+                raise StageFailure('align_words', '部分唱句时长异常压缩；局部对齐诊断已保留')
         highlight_errors = highlight_coverage_errors(cues, language)
         write_json(output/'highlight-validation.json', dict(errors=highlight_errors))
         if highlight_errors:
@@ -860,7 +862,7 @@ class Pipeline:
 
     def playback_fallback(self, metadata, duration, error):
         """Keep singing available without presenting unverified word times as valid."""
-        from subtitles import playback_units
+        from subtitles import playback_units, presentation_cues
         lyrics_path = self.output/'lyrics.json'
         lyrics = dict(
             title=self.request.get('title') or metadata.get('track') or metadata.get('title') or 'Untitled',
@@ -912,10 +914,13 @@ class Pipeline:
                 try:
                     if (cue['text'] != text or cue['status'] != 'candidate' or
                             not all(isinstance(cue[k], (int, float)) and math.isfinite(cue[k]) for k in ('start', 'end')) or
-                            not 0 <= cue['start'] < cue['end'] <= duration+.001 or
-                            cues and cues[-1]['end'] > cue['start']):
+                            not 0 <= cue['start'] < cue['end'] <= duration+.001):
                         continue
                     units = playback_units(cue, lyrics['language'])
+                    if cues:
+                        presentation_cues([cues[-1], cue], duration, lead=0, tail=0, bridge_gap=0)
+                        if cues[-1]['units'][-1]['start'] >= units[0]['start']:
+                            continue
                 except (AttributeError, KeyError, TypeError, ValueError):
                     continue
                 cues.append(dict(cue, units=units))
@@ -924,11 +929,17 @@ class Pipeline:
                 break
             else:
                 omitted.append(line+1)
+        # Reuse normal display-boundary handling. Acoustic word onsets stay
+        # untouched; a small overlapping tail must not delete a whole phrase.
+        display, boundaries = presentation_cues(cues, duration, lead=0, tail=0, bridge_gap=0)
+        if boundaries['overlap_adjustments']:
+            cues = display
         units = sum(len(c['units']) for c in cues)
         warning = dict(error=processing_error(error, self.output),
                        subtitle_mode='estimated_word' if estimated else 'partial_word' if units else 'line' if cues else 'unavailable',
                        phrase_timing_sources=sources, word_alignment_passed=False,
                        estimated_spans=estimated, omitted_lines=omitted, requires_review=bool(omitted),
+                       overlap_adjustments=boundaries['overlap_adjustments'],
                        unhighlighted_lines=[i for i, c in enumerate(cues, 1) if not c['units']])
         if unverified_draft:
             warning['unverified_asr_text_omitted'] = True

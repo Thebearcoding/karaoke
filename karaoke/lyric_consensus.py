@@ -168,14 +168,17 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None):
     lines, review = compare_lyrics(candidates)
     review['unavailable_sources'] = [report for text, report in results if not text]
     if candidates:
-        # Agreement outranks provider preference. Without it, retain one
-        # published source and its disagreements for acoustic alignment.
+        # A majority from another performance must not outrank text attached
+        # to this recording. Compare agreement within the eligible versions.
         preferred = ('line_music', 'youtube_music', 'netease', 'video_description', 'lrclib')
-        index = min(range(len(candidates)), key=lambda i:
-            (bool(candidates[i][1].get('recording_mismatches')), preferred.index(candidates[i][1]['provider'])))
+        eligible = {i for i, (_, r) in enumerate(candidates) if not r.get('recording_mismatches')}
+        eligible = eligible or set(range(len(candidates)))
+        review['eligible_sources'] = sorted(eligible)
+        index = min(eligible, key=lambda i: preferred.index(candidates[i][1]['provider']))
         selection = 'published_source'
-        if lines:
-            index, selection = review['agreeing_sources'][0], 'agreement'
+        agreeing = eligible.intersection(review['agreeing_sources'])
+        if agreeing:
+            index, selection = min(agreeing, key=lambda i: preferred.index(candidates[i][1]['provider'])), 'agreement'
         else:
             # Three close, independently published texts outweigh an outlier.
             # Similarity only selects a whole candidate; differences stay soft
@@ -186,14 +189,16 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None):
                     a, b = comparison['sources']
                     support[a].add(b)
                     support[b].add(a)
-            votes = [len({candidates[i][1].get('publisher') or candidates[i][1]['provider'] for i in group})
+            votes = [len({candidates[i][1].get('publisher') or candidates[i][1]['provider'] for i in group & eligible})
                      for group in support]
-            if max(votes) >= 3:
-                index = min(range(len(candidates)), key=lambda i: (-votes[i],
-                    bool(candidates[i][1].get('recording_mismatches')), preferred.index(candidates[i][1]['provider'])))
-                review['supporting_sources'] = sorted(support[index])
+            if max(votes[i] for i in eligible) >= 3:
+                index = min(eligible, key=lambda i: (-votes[i], preferred.index(candidates[i][1]['provider'])))
+                review['supporting_sources'] = sorted(support[index] & eligible)
                 selection = 'similarity_support'
         lines, selected = candidates[index]
+        if review['status'] == 'corroborated' and index not in review['agreeing_sources']:
+            review.update(status='conflicting', unselected_agreeing_sources=review['agreeing_sources'],
+                          agreeing_sources=[], independent_sources=0)
         review['selected_source'] = index
         review['selection'] = selection
         report = dict(selected, crosscheck=review)

@@ -71,7 +71,7 @@ def map_words(cue, words, offset, language):
 
 def partial_alignment_cues(lines, raw_blocks, duration, language):
     """Keep independently usable lines when a different line prevents stitching."""
-    from subtitles import lyric_cues
+    from subtitles import lyric_cues, collapsed_phrase
     cues = [dict(text=text, status='unresolved_timing') for text in lines]
     for block in raw_blocks:
         first, stop = block['context']
@@ -89,6 +89,8 @@ def partial_alignment_cues(lines, raw_blocks, duration, language):
                 if cue['status'] != 'candidate':
                     continue
                 cue['units'] = map_words(cue, words, offset, language)
+                if collapsed_phrase(cue, language):
+                    cue['status'] = 'collapsed_timing'
                 cues[index] = cue
             except (ValueError, KeyError, IndexError, TypeError):
                 continue

@@ -66,8 +66,30 @@ def highlight_coverage_errors(cues, language):
     return errors
 
 
+def collapsed_phrase(cue, language):
+    """Detect gross phrase compression, not normal variation in singing speed."""
+    atoms = list(highlight_spans(cue['text'], language))
+    spans = [dict(first=0, stop=len(cue['text']),
+                  start=cue.get('aligned_start', cue.get('start')),
+                  end=cue.get('aligned_end', cue.get('end'))), *(cue.get('units') or [])]
+    for span in spans:
+        if not isinstance(span, dict):
+            continue
+        first, stop, start, end = (span.get(k) for k in ('first', 'stop', 'start', 'end'))
+        if not all(isinstance(t, (int, float)) and math.isfinite(t) for t in (first, stop, start, end)):
+            continue
+        count = sum(first <= a and b <= stop for a, b in atoms)
+        # More than 25 complete words/characters per second is a collapsed
+        # alignment, even if a tiny positive interval survived token merging.
+        if count >= 3 and end-start < .04*count:
+            return True
+    return False
+
+
 def playback_units(cue, language):
     """Preserve usable onsets and sweep only unresolved spans between known bounds."""
+    if collapsed_phrase(cue, language):
+        raise ValueError('Collapsed lyric phrase timing')
     text = cue['text']
     begin, end = cue.get('aligned_start', cue['start']), cue.get('aligned_end', cue['end'])
     if not all(isinstance(t, (int, float)) and math.isfinite(t) for t in (begin, end)) or not (

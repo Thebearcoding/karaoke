@@ -878,7 +878,8 @@ def test_source_disagreements_keep_published_text_and_full_diagnostics(tmp_path,
 
 
 @pytest.mark.parametrize('independent', [True, False])
-def test_three_similar_lyric_sources_outweigh_an_outlier_without_claiming_exact_agreement(tmp_path, monkeypatch, independent):
+@pytest.mark.parametrize('other_performance', [False, True])
+def test_three_similar_lyric_sources_respect_recording_identity(tmp_path, monkeypatch, independent, other_performance):
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
     outlier = ['A different lyric in another language']
@@ -889,13 +890,31 @@ def test_three_similar_lyric_sources_outweigh_an_outlier_without_claiming_exact_
     monkeypatch.setattr(module.lookup, 'fetch_lyrics', lambda *a: dict(status='unavailable'))
     monkeypatch.setattr(module, 'fetch_additional_lyrics', lambda provider, *a:
         ([variants[0 if provider == 'netease' else 1]], dict(provider=provider, language='English',
+            recording_mismatches=['live_performance'] if other_performance else [],
             publisher=provider if independent else 'shared')))
     lines, report = module.fetch_lyric_consensus(dict(title='Evening', artist='Singer'), {}, 30, StageCache(tmp_path),
-        ([variants[2]], dict(provider='video_description', language='English', publisher='youtube')))
+        ([variants[2]], dict(provider='video_description', language='English', publisher='youtube',
+                            recording_mismatches=['live_performance'] if other_performance else [])))
     review = report['crosscheck']
     assert review['status'] == 'conflicting' and not review['agreeing_sources']
-    assert lines == ([variants[0]] if independent else outlier)
-    assert review['selection'] == ('similarity_support' if independent else 'published_source')
+    assert lines == ([variants[0]] if independent and not other_performance else outlier)
+    assert review['selection'] == ('similarity_support' if independent and not other_performance else 'published_source')
+
+
+def test_exact_lyric_agreement_from_other_performances_does_not_override_current_recording(tmp_path, monkeypatch):
+    from karaoke import lyric_consensus as module
+    from karaoke.stage_cache import StageCache
+    other, current = ['An extra verse at another show'], ['A shorter verse tonight']
+    monkeypatch.setattr(module.lookup, 'fetch_published_lyrics', lambda *a:
+        (other, dict(provider='line_music', language='English', recording_mismatches=['live_performance'])))
+    monkeypatch.setattr(module.lookup, 'fetch_lyrics', lambda *a: dict(status='unavailable'))
+    monkeypatch.setattr(module, 'fetch_additional_lyrics', lambda provider, *a:
+        (current if provider == 'youtube_music' else other, dict(provider=provider, language='English',
+         recording_mismatches=[] if provider == 'youtube_music' else ['live_performance'])))
+    lines, report = module.fetch_lyric_consensus(dict(title='Evening',artist='Singer'), {}, 30, StageCache(tmp_path))
+    assert lines == current and report['provider'] == 'youtube_music'
+    assert report['crosscheck']['status'] == 'conflicting'
+    assert report['crosscheck']['unselected_agreeing_sources'] == [0, 1]
 
 
 def test_netease_lyrics_reject_other_recordings_and_strip_lrc_metadata(tmp_path, monkeypatch):
@@ -1199,11 +1218,12 @@ def test_direct_alignment_defers_unanchored_or_oversized_repairs(far_neighbour):
         'requires_coarse_localization' if far_neighbour else 'no_measured_neighbour')
 
 
-@pytest.mark.parametrize('failure', [None, 'wrong_words', 'outside_window', 'no_speech', 'boundary_overlap'])
+@pytest.mark.parametrize('failure', [None, 'wrong_words', 'outside_window', 'no_speech', 'boundary_overlap', 'collapsed'])
 def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neighbours(failure):
     from copy import deepcopy
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines, starts = ['alpha', 'bravo', 'charlie'], [1., 4., 8.]
+    if failure == 'collapsed':lines[1] = 'bravo delta echo foxtrot'
     segments = [dict(text=text, start=t, end=t+.8, words=[dict(word=text,start=t,end=t+.8)])
                 for text,t in zip(lines,starts)]
     segments[1]['words'][0]['end'] = 4.
@@ -1221,6 +1241,7 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
                   for line,t in zip(lines,starts)]
         if failure == 'wrong_words':result[1]['words'][0]['word'] = 'invented'
         if failure == 'outside_window':result[1]['words'][0]['end'] = end-begin+10
+        if failure == 'collapsed':result[1]['words'][0]['end'] = result[1]['words'][0]['start']+.06
         return dict(segments=result)
     result = recover_with_local_asr(block,lines,np.zeros(12*16000),'English',recognize,align)
     assert block == original
@@ -2071,6 +2092,45 @@ def test_prepared_lyrics_preserve_provenance_and_reject_different_inputs(tmp_pat
             assert json.loads((pipeline.output/'anchors.json').read_text()) == []
 
 
+@pytest.mark.parametrize('overlap', [.02, .1, .16, .32])
+def test_playback_fallback_keeps_overlapping_word_tails_without_moving_onsets(tmp_path, overlap):
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    lines = ['First phrase', 'Next phrase']
+    (tmp_path/'lyrics.json').write_text(json.dumps(dict(language='English',lines=lines,provenance={})))
+    cues = [dict(text=text,start=start,end=end,status='candidate',units=[
+        dict(text=text,first=0,stop=len(text),start=start,end=end)])
+        for text,start,end in [(lines[0],1.,2.),(lines[1],2.-overlap,3.)]]
+    (tmp_path/'word-cues.json').write_text(json.dumps(cues))
+    pipeline.alignment_outputs.add(tmp_path/'word-cues.json')
+    pipeline.playback_fallback({},4,StageFailure('align_words','fixture'))
+    result = json.loads((tmp_path/'cues.json').read_text())
+    assert [c['text'] for c in result] == lines
+    assert [c['units'][0]['start'] for c in result] == [1.,2.-overlap]
+    assert result[0]['end'] == result[1]['start']
+    assert [c['aligned_start'] for c in result] == [1.,2.-overlap]
+    warning = json.loads((tmp_path/'playback-warning.json').read_text())
+    assert warning['omitted_lines'] == [] and len(warning['overlap_adjustments']) == 1
+
+
+@pytest.mark.parametrize('seconds', [.06, .8])
+def test_playback_fallback_rejects_collapsed_phrase_without_rejecting_fast_lyrics(tmp_path, seconds):
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    lines = ['First phrase', 'I want to sing with you now', 'Last phrase']
+    (tmp_path/'lyrics.json').write_text(json.dumps(dict(language='English',lines=lines,provenance={})))
+    cues = [dict(text=text,start=float(i*2),end=float(i*2)+(seconds if i==1 else 1.),status='candidate')
+            for i,text in enumerate(lines)]
+    (tmp_path/'alignment').mkdir()
+    (tmp_path/'alignment/cues.json').write_text(json.dumps(cues))
+    pipeline.alignment_outputs.add(tmp_path/'alignment')
+    if seconds == .06:
+        with pytest.raises(StageFailure,match='1 行歌词未能定位'):
+            pipeline.playback_fallback({},6,StageFailure('align_words','fixture'))
+    else:
+        pipeline.playback_fallback({},6,StageFailure('align_words','fixture'))
+    result=json.loads((tmp_path/'cues.json').read_text())
+    assert [c['text'] for c in result] == ([lines[0],lines[2]] if seconds==.06 else lines)
+
+
 @pytest.mark.parametrize('bad', ['text', 'overlap', 'missing', 'nan'])
 def test_playback_fallback_omits_only_phrases_without_usable_times(tmp_path, bad):
     pipeline = Pipeline(dict(url=URL), tmp_path)
@@ -2080,7 +2140,7 @@ def test_playback_fallback_omits_only_phrases_without_usable_times(tmp_path, bad
     cues = [dict(text=text, start=start, end=end, status='candidate')
             for text, start, end in [('First line', 0, 1), ('Next line', 2, 3)]]
     if bad == 'text': cues[0]['text'] = 'Wrong lyric'
-    if bad == 'overlap': cues[1]['start'] = .5
+    if bad == 'overlap': cues[1]['start'] = .4
     if bad == 'missing': cues[0]['start'] = None
     if bad == 'nan': cues[0]['start'] = float('nan')
     (tmp_path/'alignment/cues.json').write_text(json.dumps(cues))
@@ -2373,6 +2433,13 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
     (folder/'audio-result.json').write_text(json.dumps(result))
     with pytest.raises(ValueError, match='independent highlights'):
         verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
+    subtitle_path.write_text(json.dumps([dict(text='We can sing together', start=.1, end=.16,
+        units=[dict(text='We can sing together', first=0, stop=20, start=.1, end=.16)])]))
+    result['artifacts']['subtitles'].update(bytes=subtitle_path.stat().st_size, sha256=file_hash(subtitle_path))
+    (folder/'audio-result.json').write_text(json.dumps(result))
+    for policy in (True, False):
+        with pytest.raises(ValueError, match='Collapsed lyric phrase'):
+            verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True,playback_policy=policy)
     subtitle_path.write_text(original)
     result['artifacts']['subtitles'].update(bytes=subtitle_path.stat().st_size, sha256=file_hash(subtitle_path))
     (folder/'audio-result.json').write_text(json.dumps(result))
