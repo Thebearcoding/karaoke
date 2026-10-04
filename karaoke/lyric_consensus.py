@@ -178,7 +178,7 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None):
         selection = 'published_source'
         agreeing = eligible.intersection(review['agreeing_sources'])
         if agreeing:
-            index, selection = min(agreeing, key=lambda i: preferred.index(candidates[i][1]['provider'])), 'agreement'
+            index, selection = min(agreeing), 'agreement'
         else:
             # Three close, independently published texts outweigh an outlier.
             # Similarity only selects a whole candidate; differences stay soft
