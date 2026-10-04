@@ -39,6 +39,13 @@ def names(value):
 def identity(value, *, title=False):
     converter = OpenCC('tw2s')
     aliases = [converter.convert(name).casefold() for name in names(value)]
+    if not title:
+        if aliases and re.search(r'[&,/×+]|\b(?:feat\.?|featuring|ft\.?|with)\s', aliases[0]):
+            aliases = aliases[:1]  # A collaborator is not an alias for the whole credit.
+        joined = re.fullmatch(r"([a-z][a-z.'-]*)([\u3040-\u30ff\u3400-\u9fff]{2,})(?:\s+[a-z][a-z .'-]*)?",
+                              aliases[0] if aliases else '')
+        if joined and not version_tags(joined[1]):
+            aliases.append(joined[2])
     if title:
         for name in list(aliases):
             # A soundtrack credit describes its use, not another performance.
@@ -245,7 +252,8 @@ def fetch_published_lyrics(song, source_title, cache):
     if not song.get('title') or not song.get('artist'):
         return None, dict(status='missing_identity', provider='line_music')
     path, stage = cache.root/'published-lyrics.json', 'fetch_published_lyrics'
-    query = ' '.join((names(song['title'])[-1], names(song['artist'])[-1]))
+    title = names(song['title'])[-1]
+    queries = list(dict.fromkeys([' '.join((title, names(song['artist'])[-1])), title]))
     try:
         old = json.loads(path.read_text())
         if old.get('retry_at') is not None and old['retry_at'] <= time.time():
@@ -256,14 +264,19 @@ def fetch_published_lyrics(song, source_title, cache):
                      code=[Path(__file__), Path(__file__).with_name('source_captions.py')]) as reused:
         if not reused:
             try:
-                response = read_document('https://music-tw.line.me/api/search/v4/track.json?'+urlencode(
-                    dict(query=query, start=1, display=30, sort='RELEVANCE')),
-                    headers={'CHANNEL-ID': '1581655766'})
-                rows = response['response']['result']['tracks']
-                if not isinstance(rows, list) or len(rows) > 30 or any(not isinstance(r, dict) for r in rows):
-                    raise ValueError('Invalid published lyric response')
-                lines, report = published_candidate(rows, song, source_title, allow_recording_mismatch=True)
-                packet = dict(lines=lines, report=report)
+                attempted = []
+                for query in queries:
+                    response = read_document('https://music-tw.line.me/api/search/v4/track.json?'+urlencode(
+                        dict(query=query, start=1, display=30, sort='RELEVANCE')),
+                        headers={'CHANNEL-ID': '1581655766'})
+                    rows = response['response']['result']['tracks']
+                    if not isinstance(rows, list) or len(rows) > 30 or any(not isinstance(r, dict) for r in rows):
+                        raise ValueError('Invalid published lyric response')
+                    attempted.append(dict(query=query, results=rows))
+                    lines, report = published_candidate(rows, song, source_title, allow_recording_mismatch=True)
+                    if lines:
+                        break
+                packet = dict(lines=lines, report=report, query_results=attempted)
             except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
                 status = getattr(getattr(error, 'response', None), 'status_code', None)
                 transient = isinstance(error, httpx.TransportError) or status == 429 or (status or 0) >= 500

@@ -1058,6 +1058,51 @@ def test_published_text_prefers_same_performance_before_studio_fallback():
     assert report['url'].endswith('/124') and not report['recording_mismatches']
 
 
+def test_published_lyrics_match_joined_artist_scripts_without_matching_collaborators():
+    from karaoke.lyric_lookup import published_candidate
+    song = dict(title='晚風', artist='林林 Lin Lin')
+    row = dict(trackId=123, trackTitle='晚風', album=dict(albumTitle='春天'), lyrics='微風裡慢慢歌唱')
+    for name in ('ALPHA林林', 'ALPHA林林 Lin Lin'):
+        assert published_candidate([dict(row, artists=[dict(artistName=name)])], song, '')[0]
+    for name in ('ALPHA林楠', 'ALPHA & 林林', 'LIVE林林', '林林 Remix'):
+        assert published_candidate([dict(row, artists=[dict(artistName=name)])], song, '')[0] is None
+
+
+@pytest.mark.parametrize('first_hit', [False, True])
+def test_published_lyric_search_uses_a_bounded_title_query_only_after_no_match(tmp_path, monkeypatch, first_hit):
+    from urllib.parse import parse_qs, urlparse
+    from karaoke import lyric_lookup
+    from karaoke.stage_cache import StageCache
+    calls = []
+    row = dict(trackId=123, trackTitle='晚風', artists=[dict(artistName='ALPHA林林')],
+               album=dict(albumTitle='春天'), lyrics='微風裡慢慢歌唱')
+    def read(url, **kwargs):
+        query = parse_qs(urlparse(url).query)['query'][0]
+        calls.append(query)
+        selected = row if first_hit or query == '晚風' else dict(row, trackTitle='無關歌曲')
+        return dict(response=dict(result=dict(tracks=[selected])))
+    monkeypatch.setattr(lyric_lookup, 'read_document', read)
+    song = dict(title='晚風', artist='林林')
+    for _ in range(2):
+        lines, report = lyric_lookup.fetch_published_lyrics(song, '', StageCache(tmp_path))
+        assert lines == [row['lyrics']] and report['url'].endswith('/123')
+    assert calls == (['晚風 林林'] if first_hit else ['晚風 林林', '晚風'])
+
+
+def test_published_lyric_search_does_not_issue_another_query_after_rate_limit(tmp_path, monkeypatch):
+    import httpx
+    from karaoke import lyric_lookup
+    from karaoke.stage_cache import StageCache
+    calls = []
+    def limited(url, **kwargs):
+        calls.append(url)
+        response = httpx.Response(429, request=httpx.Request('GET', url))
+        response.raise_for_status()
+    monkeypatch.setattr(lyric_lookup, 'read_document', limited)
+    lines, report = lyric_lookup.fetch_published_lyrics(dict(title='晚風',artist='林林'), '', StageCache(tmp_path))
+    assert lines is None and report['http_status'] == 429 and len(calls) == 1
+
+
 @pytest.mark.parametrize('empty_anchor_file', [False, True])
 def test_direct_lyrics_reach_acoustic_aligner_without_asr_anchors(tmp_path, monkeypatch, empty_anchor_file):
     import soundfile as sf
