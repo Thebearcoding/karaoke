@@ -1147,7 +1147,7 @@ def test_direct_lyrics_reach_acoustic_aligner_without_asr_anchors(tmp_path, monk
         aligner.main()
 
 
-@pytest.mark.parametrize('failure', [None, 'changed_text', 'collapsed', 'outside', 'crossing', 'raised'])
+@pytest.mark.parametrize('failure', [None, 'changed_text', 'collapsed', 'outside', 'crossing', 'raised', 'empty_attention', 'oom'])
 def test_direct_alignment_repairs_only_bad_lines_with_acoustic_results(failure):
     from copy import deepcopy
     from karaoke.align_lyrics_whisper import recover_unresolved_lines
@@ -1166,6 +1166,8 @@ def test_direct_alignment_repairs_only_bad_lines_with_acoustic_results(failure):
         assert end-begin < 10 and options['dynamic_heads']
         if failure == 'raised':
             raise ValueError('No usable acoustic alignment')
+        if failure in ('empty_attention', 'oom'):
+            raise RuntimeError('selected index k out of range' if failure == 'empty_attention' else 'CUDA out of memory')
         candidate = [segment(line, start-begin) for line,start in zip(lines, [1.1,4.,8.1])]
         word = candidate[1]['words'][0]
         if failure == 'changed_text': word['word'] = 'Unrelated'
@@ -1173,6 +1175,10 @@ def test_direct_alignment_repairs_only_bad_lines_with_acoustic_results(failure):
         if failure == 'outside': word['end'] = end+10
         if failure == 'crossing': word['start'] = 0
         return dict(segments=candidate)
+    if failure == 'oom':
+        with pytest.raises(RuntimeError, match='CUDA out of memory'):
+            recover_unresolved_lines(original,lines,300.,'English',align)
+        return
     result = recover_unresolved_lines(original,lines,300.,'English',align)
     assert original == saved and len(calls) == 1
     assert result['line_recoveries'][0]['accepted'] == (failure is None)
@@ -1182,6 +1188,8 @@ def test_direct_alignment_repairs_only_bad_lines_with_acoustic_results(failure):
         assert actual[1] == segment(lines[1],4.)
     else:
         assert actual == segments
+    if failure == 'empty_attention':
+        assert 'selected index k out of range' in result['line_recoveries'][0]['error']
 
 
 def test_direct_alignment_has_a_shared_local_retry_budget():
@@ -1218,7 +1226,7 @@ def test_direct_alignment_defers_unanchored_or_oversized_repairs(far_neighbour):
         'requires_coarse_localization' if far_neighbour else 'no_measured_neighbour')
 
 
-@pytest.mark.parametrize('failure', [None, 'wrong_words', 'outside_window', 'no_speech', 'boundary_overlap', 'collapsed'])
+@pytest.mark.parametrize('failure', [None, 'wrong_words', 'outside_window', 'no_speech', 'boundary_overlap', 'collapsed', 'empty_attention', 'oom'])
 def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neighbours(failure):
     from copy import deepcopy
     from karaoke.align_lyrics_whisper import recover_with_local_asr
@@ -1235,7 +1243,13 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
         assert end-begin <= 12
         return dict(segments=[dict(no_speech_prob=1 if failure=='no_speech' else 0,
             words=[dict(word=text,start=t-begin,end=t+.8-begin) for text,t in zip(lines,starts)])])
+    attempts = []
     def align(begin,end,text,**kwargs):
+        attempts.append((begin,end))
+        if failure == 'oom':
+            raise RuntimeError('CUDA out of memory')
+        if failure == 'empty_attention' and len(attempts) == 1:
+            raise RuntimeError('selected index k out of range')
         assert text.splitlines() == lines
         result = [dict(text=line,words=[dict(word=line,start=t-begin,end=t+.8-begin)])
                   for line,t in zip(lines,starts)]
@@ -1243,6 +1257,10 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
         if failure == 'outside_window':result[1]['words'][0]['end'] = end-begin+10
         if failure == 'collapsed':result[1]['words'][0]['end'] = result[1]['words'][0]['start']+.06
         return dict(segments=result)
+    if failure == 'oom':
+        with pytest.raises(RuntimeError, match='CUDA out of memory'):
+            recover_with_local_asr(block,lines,np.zeros(12*16000),'English',recognize,align)
+        return
     result = recover_with_local_asr(block,lines,np.zeros(12*16000),'English',recognize,align)
     assert block == original
     assert result['result']['segments'][0] == segments[0]
@@ -1250,11 +1268,14 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
         assert result['result']['segments'][2] == segments[2]
     assert result['asr_localizations'][0]['accepted_lines'] == (
         [2,3] if failure == 'boundary_overlap' else [2] if failure is None else [])
-    if failure in (None, 'boundary_overlap'):
+    if failure in (None, 'boundary_overlap', 'empty_attention'):
         assert result['result']['segments'][1]['words'] == [dict(word='bravo',start=4.,end=4.8)]
         assert result['result']['segments'][2]['words'] == [dict(word='charlie',start=8.,end=8.8)]
     else:
         assert result['result'] == block['result']
+    if failure == 'empty_attention':
+        assert 'selected index k out of range' in result['asr_localizations'][0]['attempts'][0]['error']
+        assert result['asr_localizations'][-1]['accepted_lines'] == [2]
     good = dict(block,result=dict(segments=[dict(text=t,words=[dict(word=t,start=s,end=s+.8)])
         for t,s in zip(lines,starts)]))
     assert recover_with_local_asr(good,lines,np.zeros(12*16000),'English',

@@ -34,6 +34,16 @@ def json_number(value):
     raise TypeError(f'Cannot serialize {type(value).__name__}')
 
 
+def align_candidate(align, *args, **kwargs):
+    """Treat stable-ts's empty attention window as an unusable candidate."""
+    try:
+        return align(*args, **kwargs)
+    except RuntimeError as error:
+        if str(error) != 'selected index k out of range':
+            raise  # Resource failures and unexpected model errors stay fatal.
+        raise ValueError(f'Unusable alignment window: {error}') from error
+
+
 def valid_recovery(candidate, lines, duration):
     if candidate is None or [normalized(''.join(w['word'] for w in s['words']))
             for s in candidate['segments']] != [normalized(line) for line in lines]:
@@ -131,7 +141,7 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
             continue
         attempts += 1
         try:
-            candidate = align(begin, end, '\n'.join(lines[left:right]),
+            candidate = align_candidate(align, begin, end, '\n'.join(lines[left:right]),
                               gap_padding=None, dynamic_heads=True,
                               max_word_dur=None, word_dur_factor=None)
         except ValueError as error:
@@ -273,7 +283,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             attempt = dict(lines=[start+left+1, stop_line+left], source_range=[ab, ae])
             report['attempts'].append(attempt)
             try:
-                candidate = align(ab, ae, '\n'.join(lines[cf+left:cs+left]), gap_padding=None,
+                candidate = align_candidate(align, ab, ae, '\n'.join(lines[cf+left:cs+left]), gap_padding=None,
                                   dynamic_heads=True, max_word_dur=None, word_dur_factor=None)
             except ValueError as error:
                 attempt['error'] = str(error)
@@ -574,8 +584,14 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
                 end = min(duration, max(c['end'] for c in context)+.6)
                 if not 0 < end-begin <= 45:
                     continue
-                result = align(begin, end, '\n'.join(lines[first:stop]),
-                               gap_padding=None, dynamic_heads=True, max_word_dur=None, word_dur_factor=None)
+                try:
+                    result = align_candidate(align, begin, end, '\n'.join(lines[first:stop]),
+                        gap_padding=None, dynamic_heads=True, max_word_dur=None, word_dur_factor=None)
+                except ValueError as error:
+                    repairs.append(dict(method='joint_context_retry', accepted=False,
+                        range=[index-1, index+1], context=[first, stop],
+                        source_range=[begin, end], error=str(error)))
+                    continue
                 block = dict(range=[index-1, index+1], context=[first, stop],
                              source_range=[begin, end], result=result)
                 report = dict(method='joint_context_retry', accepted=False, **block)

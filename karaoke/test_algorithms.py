@@ -1626,7 +1626,7 @@ class AlignmentIntegrity(unittest.TestCase):
                     result=dict(segments=[s])) for i, s in enumerate(result(old_times)['segments'])]
         original = deepcopy(raw)
         new_times = [(1.1, 1.6), (2.2, 2.7), (3.2, 4.8), (4.9, 6.2), (7.1, 7.6), (8.1, 8.6)]
-        for failure in (None, 'text', 'crossing', 'neighbour', 'outside_audio', 'missing'):
+        for failure in (None, 'text', 'crossing', 'neighbour', 'outside_audio', 'missing', 'empty_attention', 'oom'):
             with self.subTest(failure=failure):
                 candidate = result(new_times, .4)
                 if failure == 'text': candidate['segments'][2]['words'][0]['word'] = 'changed'
@@ -1635,12 +1635,21 @@ class AlignmentIntegrity(unittest.TestCase):
                 if failure == 'outside_audio': candidate['segments'][-1]['words'][0]['end'] = 9.
                 if failure == 'missing': candidate = None
                 align = Mock(return_value=candidate)
+                if failure in ('empty_attention', 'oom'):
+                    align.side_effect = RuntimeError('selected index k out of range' if failure == 'empty_attention' else 'CUDA out of memory')
+                if failure == 'oom':
+                    with self.assertRaisesRegex(RuntimeError, 'CUDA out of memory'):
+                        stitch_blocks(lines, raw, 10., 'English', align)
+                    continue
                 cues, stitched, repairs = stitch_blocks(lines, raw, 10., 'English', align)
                 align.assert_called_once()
                 self.assertEqual(align.call_args.args, (.4, 9.1, '\n'.join(lines)))
                 self.assertEqual(raw, original)
                 self.assertEqual(repairs[-1]['accepted'], failure is None)
-                self.assertEqual(repairs[-1]['result'], candidate)
+                if failure == 'empty_attention':
+                    self.assertIn('selected index k out of range', repairs[-1]['error'])
+                else:
+                    self.assertEqual(repairs[-1]['result'], candidate)
                 if failure is None:
                     expected = old_times[:2]+new_times[2:4]+old_times[4:]
                     self.assertEqual([(c['start'], c['end']) for c in cues], expected)
