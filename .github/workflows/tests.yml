@@ -20,6 +20,7 @@ jobs:
     env:
       PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
       PYTHONPATH: karaoke
+      KARAOKE_FONT_FILE: /usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -35,7 +36,7 @@ jobs:
       - name: Install audio tools and Python dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends ffmpeg lame libsndfile1
+          sudo apt-get install --yes --no-install-recommends ffmpeg lame libsndfile1 fonts-noto-cjk
           python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.11.0 torchaudio==2.11.0
           python -m pip install -r requirements-dev.txt
           python -m pip check
@@ -81,13 +82,15 @@ jobs:
           assert b"<html" in get("/")
           PY
       - name: Run all Python tests
-        run: python -m pytest -q karaoke/test_api.py karaoke/test_room.py karaoke/test_algorithms.py --junitxml=test-results/python.xml
+        run: python -m pytest -q karaoke/test_api.py karaoke/test_room.py karaoke/test_algorithms.py --junitxml=test-results/python.xml --basetemp="${{ runner.temp }}/karaoke-tests"
       - name: Save Python test results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: python-test-results
-          path: test-results/
+          path: |
+            test-results/
+            ${{ runner.temp }}/karaoke-tests/**/*.log
           retention-days: 14
 
   javascript:
