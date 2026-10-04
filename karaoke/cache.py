@@ -146,8 +146,9 @@ class SongCache:
 
     def reuse_download(self, folder, url):
         """A retry can reuse a verified local download even if the website is unavailable."""
-        for job in reversed(self.store.list(-1, 'failed')):
-            if job['input']['url'] != url:
+        for job in reversed(self.store.list(-1)):
+            if job['input']['url'] != url or job['status'] not in (
+                    'failed', 'source_ready', 'audio_ready', 'completed', 'video_evicted'):
                 continue
             source = self.folder(job['id'])
             try:

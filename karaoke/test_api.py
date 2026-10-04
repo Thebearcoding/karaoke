@@ -1426,11 +1426,13 @@ def test_download_selects_720p_without_reducing_audio_quality(tmp_path, monkeypa
     assert result['format_id'] == expected
 
 
-@pytest.mark.parametrize('audio_only', [False, True])
+@pytest.mark.parametrize('mode', ['full', 'audio', 'playback_audio'])
 @pytest.mark.parametrize('failure', ['transcribe', 'prepare_lyrics', 'align_words', 'align_phonemes', 'separate_lead', 'package_three_stems', 'overlap', 'dependency_overlap'])
-def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(tmp_path, monkeypatch, audio_only, failure):
+def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(tmp_path, monkeypatch, mode, failure):
     import soundfile as sf
-    pipeline = Pipeline(dict(url=URL), tmp_path, audio_only=audio_only, device='cpu')
+    audio_only, strict = mode != 'full', mode == 'audio'
+    pipeline = Pipeline(dict(url=URL), tmp_path, audio_only=audio_only, device='cpu',
+                        playback_policy=mode == 'playback_audio')
     sf.write(tmp_path/'source-44100.wav', np.zeros(44100), 44100)
     pipeline.vocals.parent.mkdir(parents=True)
     sf.write(pipeline.vocals, np.zeros(44100), 44100)
@@ -1454,7 +1456,7 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
         if stage == 'separate_lead' and failure == 'overlap':
             assert alignment_started.wait(10), 'Alignment waited for independent lead separation'
         if failure == 'dependency_overlap':
-            if stage == 'separate_music' and not audio_only:
+            if stage == 'separate_music' and not strict:
                 assert lyrics_started.wait(5), 'Lyric lookup waited for separation'
             elif stage == 'package_two_stems':
                 assert resampled.wait(5), 'Resampling waited for independent stem packaging'
@@ -1492,8 +1494,8 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
         assert result['validation_scope'] == ('audio_and_lyrics' if audio_only else 'full_mv')
         if failure == 'dependency_overlap':
             assert sf.info(tmp_path/'vocals-16k.wav').samplerate == 16000
-            assert (tmp_path/'vocals-asr.mp3').exists() == audio_only
-    elif audio_only or failure in ('separate_lead', 'package_three_stems'):
+            assert (tmp_path/'vocals-asr.mp3').exists() == strict
+    elif strict or failure in ('separate_lead', 'package_three_stems'):
         with pytest.raises(StageFailure, match='fixture failure'):
             pipeline.execute()
         assert not (tmp_path/'result.json').exists()
@@ -1506,8 +1508,40 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
         fallback = json.loads((tmp_path/'cues.json').read_text())
         assert fallback[0]['units'] == [dict(text='A little song', first=0, stop=13, start=.1, end=.9,
                                            timing_source='linear_fallback', bounds_source='neighbor_or_phrase')]
-        assert 'mv' in result['artifacts'] and result['shared_preview_gain'] == .8
-        assert not (tmp_path/'audio-result.json').exists()
+        assert ('mv' in result['artifacts']) == (not audio_only)
+        assert result['shared_preview_gain'] == .8
+        assert (tmp_path/'audio-result.json').exists() == audio_only
+
+
+@pytest.mark.parametrize('change', [None, 'url', 'metadata', 'code', 'lyrics_source'])
+def test_prepared_lyrics_preserve_provenance_and_reject_different_inputs(tmp_path, monkeypatch, change):
+    from karaoke.lyric_lookup import prepared_lyrics_identity
+    metadata = dict(title='Example', artist='Singer')
+    lyrics = dict(title='Example', artist='Singer', language='English', lines=['A little song'],
+                  source_url=URL, provenance=dict(route='lyrics_first', kind='online_lyric_text',
+                  lyric_lookup=dict(provider='line_music', url='https://music-tw.line.me/track/123')))
+    packet = dict(identity=prepared_lyrics_identity(URL, metadata), lyrics=lyrics)
+    if change == 'url':
+        packet['identity']['url'] = 'https://www.youtube.com/watch?v=abcdefghijk'
+    elif change == 'metadata':
+        metadata['title'] = 'Another song'
+    elif change == 'code':
+        packet['identity']['code_sha256']['lyric_lookup.py'] = 'old implementation'
+    elif change == 'lyrics_source':
+        packet['lyrics']['source_url'] = 'https://www.youtube.com/watch?v=abcdefghijk'
+    prepared = tmp_path/'prepared.json'
+    prepared.write_text(json.dumps(packet))
+    pipeline = Pipeline(dict(url=URL), tmp_path/'job', audio_only=True, playback_policy=True,
+                        prepared_lyrics=prepared)
+    monkeypatch.setenv('KARAOKE_ASR_BACKEND', 'local')
+    with patch('karaoke.lyric_lookup.prepare_online_lyrics', side_effect=AssertionError('Repeated network lookup')):
+        if change:
+            with pytest.raises(RuntimeError, match='Prepared'):
+                pipeline.prepare_text(metadata, 10)
+        else:
+            assert pipeline.prepare_text(metadata, 10) == lyrics
+            assert json.loads((pipeline.output/'lyrics.json').read_text()) == lyrics
+            assert json.loads((pipeline.output/'anchors.json').read_text()) == []
 
 
 @pytest.mark.parametrize('bad', ['text', 'overlap', 'missing', 'nan'])
@@ -1690,10 +1724,15 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
     evidence=verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
     assert evidence['validation_scope']=='audio_and_lyrics' and len(evidence['artifact_sha256'])==7
     assert evidence['audio_format'] == dict(sample_rate=sample_rate, channels=1, frames=len(tone))
+    (folder/'lyrics.json').write_text(json.dumps(dict(lines=['Hello'])))
+    playback = verify_outputs(None, '', tmp_path, {'id':'job'}, audio_only=True, playback_policy=True)
+    assert playback['validation_scope'] == 'playback_audio'
     original_master = (artifacts/'lead.wav').read_bytes()
     (artifacts/'lead.wav').write_bytes(original_master[:-1] + bytes([original_master[-1] ^ 1]))
     with pytest.raises(ValueError, match='checksum mismatch'):
         verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
+    with pytest.raises(ValueError, match='checksum mismatch'):
+        verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True,playback_policy=True)
     (artifacts/'lead.wav').write_bytes(original_master)
     # The long-lived controller never imports Pipeline; its clean interpreter
     # must verify results without the research scripts added to sys.path.
@@ -4183,6 +4222,24 @@ def test_failed_job_reuses_only_verified_downloads_on_retry(tmp_path, corrupt):
     assert not (tmp_path/forced['id']/'download').exists()
 
 
+@pytest.mark.parametrize('status', ['source_ready', 'audio_ready', 'completed', 'video_evicted'])
+def test_new_survey_reuses_verified_ready_sources(tmp_path, status):
+    store = Store(tmp_path)
+    original, _ = store.create(JobRequest(url=URL), 'old')
+    source = tmp_path/original['id']
+    (source/'download').mkdir()
+    media = source/'download/source.mkv'
+    media.write_bytes(b'reusable original audio')
+    (source/'source.json').write_text(json.dumps(dict(url=URL, sha256=file_hash(media))))
+    (source/'download/source.info.json').write_text(json.dumps(dict(id='n5sjpCQhTDk')))
+    store.update(original['id'], status=status)
+    new, _ = store.create(JobRequest(url=URL, force=True), 'new')
+    target = tmp_path/new['id']
+    store.cache.reuse_download(target, URL)
+    assert (target/'download/source.mkv').read_bytes() == media.read_bytes()
+    assert json.loads((target/'source.json').read_text())['input_url'] == URL
+
+
 def test_lru_uses_real_access_persists_and_evicted_song_can_be_requested_again(tmp_path):
     app = create_app(tmp_path, worker_command=fake_worker, version='test')
     store = app.state.store
@@ -4652,3 +4709,65 @@ def test_search_pages_bind_cursors_deduplicate_retries_and_reject_expiry(tmp_pat
                 assert client.get(path, params=request).status_code == 410
         assert app.state.store.list() == []
         assert len(calls) == 9  # first page, failed continuation, successful retry for each mode
+
+
+def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from karaoke.tools import playback_sweep as sweep
+    data = tmp_path/'data'
+    data.mkdir()
+    (data/'preparation.pause').write_text('test survey')
+    app = create_app(data, version='one-version')
+    cases = [dict(url='https://www.youtube.com/watch?v='+key, language='English', title=key)
+             for key in ['aaaaaaaaaaa','bbbbbbbbbbb','ccccccccccc']]
+    selection = [dict(url=c['url'], language=c['language']) for c in cases]
+    manifest = tmp_path/'manifest.json'
+    manifest.write_text(json.dumps(dict(cases=cases, selection_sha256=hashlib.sha256(
+        json.dumps(selection,sort_keys=True).encode()).hexdigest())))
+    original_manifest = manifest.read_bytes()
+    prepared = tmp_path/'prepared'
+    prepared.mkdir()
+    for case in cases:
+        job, _ = app.state.store.create(JobRequest(url=case['url']), 'old')
+        folder = data/job['id']
+        (folder/'download').mkdir()
+        media = folder/'download/source.mkv'
+        media.write_bytes(case['url'].encode())
+        (folder/'source.json').write_text(json.dumps(dict(url=case['url'], sha256=file_hash(media))))
+        (folder/'download/source.info.json').write_text('{}')
+        app.state.store.update(job['id'], status='source_ready')
+        (prepared/(hashlib.sha256(case['url'].encode()).hexdigest()+'.json')).write_text(json.dumps(
+            dict(seconds=1, source_sha256=file_hash(media))))
+    calls = []
+    def process(client, base, folder, command):
+        calls.append(folder.name)
+        if len(calls) == 2:
+            (folder/'error.json').write_text(json.dumps(dict(code='separate_music_failed', message='test')))
+            return 1
+        quality = dict(playback_fallback=dict(error=dict(code='align_words_failed', message='test'),
+            subtitle_mode='estimated_word', estimated_spans=[{}])) if len(calls) == 3 else {}
+        (folder/'audio-result.json').write_text(json.dumps(dict(title='Song', artist='Singer',
+            language='English', duration_seconds=10, quality=quality)))
+        return 0
+    monkeypatch.setattr(sweep, 'run_probe', process)
+    monkeypatch.setattr(sweep, 'verify_outputs', lambda *a,**k:dict(validation_scope='playback_audio'))
+    monkeypatch.setattr(sweep, 'record_failure', lambda *a:None)
+    report = tmp_path/'report.json'
+    with TestClient(app) as api:
+        user_queue = api.post('/v1/room/entries',json=dict(url=URL)).json()['entries']
+        monkeypatch.setattr(sweep.httpx,'Client',lambda **k:nullcontext(api))
+        sweep.run_once(manifest,data,report,prepared,'http://testserver')
+        sweep.run_once(manifest,data,report,prepared,'http://testserver')
+        assert len(calls) == 3
+        assert [e['id'] for e in api.get('/v1/room').json()['entries']] == [e['id'] for e in user_queue]
+        result = json.loads(report.read_text())
+        assert result['summary']['outcomes'] == dict(clean=1,hard_fail=1,soft_fail=1)
+        assert result['summary']['hard_failures'] == dict(separate_music_failed=1)
+        assert result['summary']['soft_failures'] == dict(align_words_failed=1)
+        assert all(len(c['audio_attempts']) == 1 for c in result['cases'])
+        result['cases'][0]['audio_attempts'][0]['outcome']='running'
+        report.write_text(json.dumps(result))
+        with pytest.raises(ValueError,match='Reconcile'):
+            sweep.run_once(manifest,data,report,prepared,'http://testserver')
+        assert len(calls) == 3
+    assert manifest.read_bytes() == original_manifest

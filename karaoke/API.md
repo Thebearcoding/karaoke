@@ -244,6 +244,21 @@ with httpx.Client(timeout=30) as client:
 
 另外反向检查整首识别结果是否被歌词覆盖，防止简介只引用结尾几句却因匹配率高而通过。先完成有证据的副歌增补，再检查至少 55% 的识别单元能按序匹配，且字幕前、后、句间没有整段未覆盖的识别内容（沿用至少 24 单元的唱段门槛）。检查使用完整恢复词流，不因选择了另一套粗定位而丢掉已识别的唱段。简介摘录仅在完整 ASR 文本获得独立词流支持时回退；用户歌词不改写。诊断保存在 `lyric-repeats.json` 的 `lyric_coverage`，最终产物验收会重新计算，不相信先前的通过标志。这是漏段检查，短即兴词、未识别出的歌词和毫秒起音精度仍不由它证明。
 
+### 当前播放策略的一次性回归
+
+`karaoke.pipeline --playback-audio` 只导出音轨与字幕，但使用普通点歌的可信歌词查询、并行阶段和局部字幕回退，不运行旧 `--audio-only` 的独立 ASR 验收。文件哈希、格式、完整解码和字幕时间范围仍需通过。字幕降级可完成音频产物，但不算严格逐字准确率通过。
+
+跨机器执行时，可用 `--prepared-lyrics FILE` 读取由同一 `prepare_online_lyrics` 查询生成的结果；包中须保存 `prepared_lyrics_identity(url, metadata)`、查询结果 `lyrics` 和来源信息。源元数据、查询代码或歌词来源不符会拒绝使用，不在 GPU 机器重新查询。凭据不属于该文件。
+
+`python -m karaoke.tools.playback_sweep --manifest MANIFEST --data-dir DATA --report REPORT --prepared-dir INPUTS` 对固定清单每首只提交一次，使用 `run_probe` 的锁和共享缓存监控。普通 worker 必须暂停；控制器使用已有来源缓存，保留用户歌单。每首结果写入独立报告的 `audio_attempts`，不会改写原固定清单或历史严格音频／MV 账本。
+
+- `clean`：音轨、字幕产物通过本轮检查，没有记录到回退。
+- `soft_fail`：产物可用，但歌词查询、字幕对齐或高亮采用了回退；保留原因、缺失行与局部回退数量。
+- `hard_fail`：处理终止或产物完整性检查失败。
+- 同一首可在硬失败前出现软失败，因此软失败事件数与歌曲数分别报告。
+
+恢复控制器时跳过所有已有尝试；未结束的尝试必须先核对，不自动重跑。`REPORT` 同名的 `.pause` 文件在歌曲之间暂停。每首歌词文件以 URL 的 SHA-256 命名；未到达时等待，因此本机查询和 GPU 处理可以重叠进行。此回归不验证 MV 渲染、播放器或独立人工起音精度。
+
 ### 先验证音频
 
 定位失败歌曲时，可在同一个任务目录运行 `python -m karaoke.pipeline --request REQUEST.json --output JOB_DIR --audio-only`。该模式只请求音频流，执行同一套解码、两次分离、精确封装、转录、歌词及逐字对齐，输出 `audio-result.json` 和七项音频／字幕产物，不生成 `result.json` 或 MV，也不能计为整曲 MV 回归通过。用 `karaoke.tools.soak.verify_outputs(..., audio_only=True)` 校验母版重组、文件哈希、全部 MP3 解码和字幕完整性。

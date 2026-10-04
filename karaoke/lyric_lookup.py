@@ -225,6 +225,7 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
     song = video_song_info(metadata)
     song.update({key: request[key] for key in ('title', 'artist', 'language') if request.get(key)})
     lines, provenance = request.get('lyrics'), dict(kind='user_supplied')
+    metadata_error = None
     if not lines:
         catalog = find_verified_lyrics(request['url'], duration, catalog_root)
         if catalog:
@@ -240,7 +241,8 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                       song['title'] != metadata.get('title') or request.get('title') and request.get('artist')) else
                       extract_song_metadata(evidence, model, cache))
             parsed = SongText.model_validate(packet['parsed']) if packet['parsed'] is not None else None
-        except (OpenAIError, ValueError):
+        except (OpenAIError, ValueError) as error:
+            metadata_error = type(error).__name__
             parsed = None
         if parsed is not None:
             song.update(title=request.get('title') or metadata.get('track') or parsed.title or song['title'],
@@ -256,6 +258,8 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 packet = fetch_lyrics(song, cache.root/'download/source.info.json', cache)
                 lines, fallback_report = lyric_candidate(packet, song, None, duration, source_title=metadata.get('title'))
                 report = dict(fallback_report, published_lookup=report)
+            if metadata_error:
+                report = dict(report, metadata_error=metadata_error)
             (cache.root/'lyrics-first-lookup.json').write_text(json.dumps(report, ensure_ascii=False)+'\n')
             if not lines:
                 return None
@@ -266,7 +270,26 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
     if not language or len(lines) > 1000 or any(not line.strip() or len(line) > 200 for line in lines):
         return None
     return dict(song, id='song', source_url=request['url'], language=language, lines=lines,
-                provenance=dict(provenance, needs_review=True, route='lyrics_first', independent_asr_coverage=None))
+                provenance=dict(provenance, needs_review=True, route='lyrics_first', independent_asr_coverage=None,
+                                **({'metadata_error': metadata_error} if metadata_error else {})))
+
+
+def prepared_lyrics_identity(url, metadata):
+    """Bind split-host lookup to the same media metadata and lookup implementation."""
+    root = Path(__file__).parent
+    return dict(url=url, metadata_sha256=hashlib.sha256(json.dumps(metadata, sort_keys=True).encode()).hexdigest(),
+                code_sha256={name: hashlib.sha256((root/name).read_bytes()).hexdigest()
+                             for name in ('lyric_lookup.py', 'song_sources.py', 'source_captions.py')})
+
+
+def read_prepared_lyrics(path, url, metadata):
+    packet = json.loads(Path(path).read_text())
+    if packet['identity'] != prepared_lyrics_identity(url, metadata):
+        raise RuntimeError('Prepared lyric lookup does not match this source or implementation')
+    lyrics = packet['lyrics']
+    if lyrics is not None and (lyrics['source_url'] != url or lyrics['provenance'].get('route') != 'lyrics_first'):
+        raise RuntimeError('Prepared lyrics have the wrong source or route')
+    return lyrics
 
 
 def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, source_title=None):

@@ -140,7 +140,8 @@ def create_poster(source, output, *, thumbnail=None, seconds=30):
 
 class Pipeline:
     def __init__(self, request, output, *, separator_python=None, device='auto', text_model='gpt-5-mini',
-                 max_duration=900, catalog_root=ROOT, cookies_file=None, audio_only=False):
+                 max_duration=900, catalog_root=ROOT, cookies_file=None, audio_only=False,
+                 playback_policy=False, prepared_lyrics=None):
         self.request = JobRequest.model_validate(request).model_dump()
         self.output = Path(output).resolve()
         self.output.mkdir(parents=True, exist_ok=True)
@@ -150,6 +151,8 @@ class Pipeline:
         self.max_duration, self.catalog_root = max_duration, catalog_root
         self.cookies_file = Path(cookies_file).expanduser() if cookies_file else self.output.parent/'private/youtube-cookies.txt'
         self.audio_only = audio_only
+        self.strict_audio = audio_only and not playback_policy
+        self.prepared_lyrics = Path(prepared_lyrics) if prepared_lyrics else None
         self.active, self.timings, self.lock = set(), {}, threading.Lock()
         self.stage_progress = {}
         self.song_info = {}
@@ -174,7 +177,7 @@ class Pipeline:
             'package_two_stems': (['download/source.mkv', 'music-separation/song/vocals.wav'],
                                   ['two-stems'], [ROOT/'exact_stems.py']),
             'resample_vocals': (['music-separation/song/vocals.wav'],
-                                ['vocals-16k.wav'] + (['vocals-asr.mp3'] if self.audio_only else []), []),
+                                ['vocals-16k.wav'] + (['vocals-asr.mp3'] if self.strict_audio else []), []),
             'transcribe': (['vocals-asr.mp3', 'source-44100.wav'], ['asr'], [ROOT/p for p in
                 ('transcribe_lyrics.py', 'local_asr.py', 'anchors_from_asr.py', 'subtitles.py', 'job_schema.py')]),
             'separate_lead': (['music-separation/song/vocals.wav'], ['lead-separation'], [ROOT/'benchmark_neural.py']),
@@ -468,14 +471,20 @@ class Pipeline:
         return dict(metadata, format_id=added['format_id']+'+'+metadata['format_id'])
 
     def prepare_text(self, metadata, duration, lead_task=None):
-        if not self.audio_only:
-            from .lyric_lookup import prepare_online_lyrics
+        if not self.strict_audio:
+            from .lyric_lookup import prepare_online_lyrics, read_prepared_lyrics
             self.phase('prepare_lyrics', True)
             started = time.perf_counter()
             try:
-                lyrics = (prepare_online_lyrics(self.request, metadata, duration, self.checkpoints,
-                                                self.text_model, self.catalog_root)
-                          if not local_asr.offline() or self.request.get('lyrics') else None)
+                if self.prepared_lyrics:
+                    error = json.loads(self.prepared_lyrics.read_text()).get('error')
+                    if error:
+                        raise RuntimeError('Prepared lyric lookup failed: '+error['type'])
+                    lyrics = read_prepared_lyrics(self.prepared_lyrics, self.request['url'], metadata)
+                else:
+                    lyrics = (prepare_online_lyrics(self.request, metadata, duration, self.checkpoints,
+                                                    self.text_model, self.catalog_root)
+                              if not local_asr.offline() or self.request.get('lyrics') else None)
                 if lyrics is not None:
                     write_json(self.output/'lyrics.json', lyrics)
                     # An empty anchor list selects direct acoustic alignment.
@@ -745,7 +754,7 @@ class Pipeline:
 
     def execute(self):
         started = time.perf_counter()
-        if self.audio_only and not local_asr.offline() and not os.getenv('OPENAI_API_KEY'):
+        if self.strict_audio and not local_asr.offline() and not os.getenv('OPENAI_API_KEY'):
             raise StageFailure('configuration', '请在启动服务前设置 OPENAI_API_KEY，用于 ASR 和歌词整理')
         if not shutil.which(self.separator_python):
             raise StageFailure('configuration', '找不到分离环境的 Python，请设置 KARAOKE_SEPARATOR_PYTHON')
@@ -757,7 +766,7 @@ class Pipeline:
         text_error = None
         with ThreadPoolExecutor(max_workers=3) as pool:
             # Published text needs only source metadata and duration, not separated audio.
-            text = None if self.audio_only else pool.submit(self.prepare_text, metadata, source_duration)
+            text = None if self.strict_audio else pool.submit(self.prepare_text, metadata, source_duration)
             audio = self.output/'source-44100.wav'
             self.run('decode_audio', ['ffmpeg', '-v', 'error', '-nostdin', '-i', self.source,
                 '-map', '0:a:0', '-ar', '44100', '-ac', '2', '-c:a', 'pcm_f32le', audio])
@@ -775,7 +784,7 @@ class Pipeline:
             def package_stems():
                 self.run('package_two_stems', [sys.executable, ROOT/'exact_stems.py', 'build',
                     '--source', self.source, '--vocals-estimate', self.vocals,
-                    '--output', self.output/'two-stems', *([] if self.audio_only else ['--no-previews'])])
+                    '--output', self.output/'two-stems', *([] if self.strict_audio else ['--no-previews'])])
                 lead.result()
                 self.run('package_three_stems', [sys.executable, ROOT/'three_stems.py',
                     'build', '--existing', self.output/'two-stems', '--lead-estimate',
@@ -784,11 +793,11 @@ class Pipeline:
             self.run('resample_vocals', ['ffmpeg', '-v', 'error', '-nostdin', '-i', self.vocals,
                 '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', self.output/'vocals-16k.wav',
                 *(['-ar', '16000', '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '64k',
-                   self.output/'vocals-asr.mp3'] if self.audio_only else [])])
+                   self.output/'vocals-asr.mp3'] if self.strict_audio else [])])
             try:
                 lyrics = self.prepare_text(metadata, source_duration, lead) if text is None else text.result()
             except (StageFailure, ValueError) as error:
-                if self.audio_only or (isinstance(error, StageFailure) and error.stage not in ('transcribe', 'prepare_lyrics')):
+                if self.strict_audio or (isinstance(error, StageFailure) and error.stage not in ('transcribe', 'prepare_lyrics')):
                     raise
                 text_error = error
                 lyrics = None
@@ -796,7 +805,7 @@ class Pipeline:
                 try:
                     self.align(lyrics, duration)
                 except (StageFailure, ValueError) as error:
-                    if self.audio_only:
+                    if self.strict_audio:
                         raise
                     text_error = error
             if text_error is not None:
@@ -958,14 +967,19 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--restore-video', action='store_true')
     parser.add_argument('--audio-only', action='store_true', help='Test all audio/subtitle stages without downloading or rendering video')
+    parser.add_argument('--playback-audio', action='store_true', help='Use normal lyric lookup and playback fallbacks, exporting audio and subtitles only')
+    parser.add_argument('--prepared-lyrics', type=Path, help='Source-bound lyric lookup result prepared on another host')
     parser.add_argument('--download-only', action='store_true', help='Cache the source audio without running inference')
     args = parser.parse_args()
+    if args.prepared_lyrics and not args.playback_audio:
+        parser.error('--prepared-lyrics requires --playback-audio')
     pipeline = Pipeline(json.loads(args.request.read_text()), args.output,
         separator_python=os.getenv('KARAOKE_SEPARATOR_PYTHON'), device=os.getenv('KARAOKE_DEVICE', 'auto'),
         text_model=os.getenv('KARAOKE_TEXT_MODEL', 'gpt-5-mini'),
         max_duration=int(os.getenv('KARAOKE_MAX_DURATION_SECONDS', '900')),
         catalog_root=None if os.getenv('KARAOKE_DISABLE_LYRIC_CATALOG') == '1' else ROOT,
-        cookies_file=os.getenv('KARAOKE_COOKIES_FILE'), audio_only=args.audio_only or args.download_only)
+        cookies_file=os.getenv('KARAOKE_COOKIES_FILE'), audio_only=args.audio_only or args.download_only or args.playback_audio,
+        playback_policy=args.playback_audio, prepared_lyrics=args.prepared_lyrics)
     try:
         if args.download_only:
             pipeline.download()

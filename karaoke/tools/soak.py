@@ -215,7 +215,7 @@ def verify_stems(paths, duration):
     return dict(sample_rate=rate, channels=channels, frames=frames)
 
 
-def verify_outputs(client, base, data_dir, job, *, audio_only=False):
+def verify_outputs(client, base, data_dir, job, *, audio_only=False, playback_policy=False):
     from karaoke.subtitles import normalized, highlight_coverage_errors
     folder = (data_dir/job['id']).resolve()
     result = json.loads((folder/('audio-result.json' if audio_only else 'result.json')).read_text())
@@ -246,32 +246,41 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False):
     cues = json.loads(paths['subtitles'].read_text())
     units = [u for cue in cues for u in cue['units']]
     duration = result['duration_seconds']
-    if not units or any(not 0 <= u['start'] < u['end'] <= duration+.05 for u in units):
+    if any(not 0 <= c['start'] < c['end'] <= duration+.05 for c in cues):
+        raise ValueError('Invalid subtitle phrase intervals')
+    if (not units and not playback_policy) or any(not 0 <= u['start'] < u['end'] <= duration+.05 for u in units):
         raise ValueError('Invalid or empty subtitle intervals')
     if any(a['start'] >= b['start'] for a, b in zip(units, units[1:])):
         raise ValueError('Non-monotonic word onsets')
     if any(normalized(''.join(u['text'] for u in c['units'])) != normalized(c['text']) for c in cues):
         raise ValueError('Subtitle units omit lyric text')
-    if highlight_coverage_errors(cues, result['language']):
+    if not playback_policy and highlight_coverage_errors(cues, result['language']):
         raise ValueError('Subtitle words or characters lack independent highlights')
-    if result.get('language') == 'English':
+    if not playback_policy and result.get('language') == 'English':
         from karaoke.onset_consensus import context_scope_violations
         if context_scope_violations(cues, result['quality'].get('english_context_scope')):
             raise ValueError('Word timing falls outside acoustic phrase context')
-    from karaoke.song_sources import lyric_coverage, missing_repetitions
-    from karaoke.vocal_review import speech_intervals
-    repeats_raw = (folder/'asr/lyric-repeats.json').read_bytes()
-    repeats = json.loads(repeats_raw)
-    if repeats['status'] != 'complete' or missing_repetitions(
-            repeats['reference_lines'], cues, repeats['words'], result['language'], duration):
-        raise ValueError('Subtitles omit recognized lyric repetitions')
-    coverage = lyric_coverage(cues, repeats['words'], result['language'], duration,
-        other_words=repeats.get('other_coverage_words', []),
-        speech_intervals=speech_intervals(folder, repeats.get('non_singing_reviews', [])))
-    save(folder/'lyric-coverage-validation.json', dict(coverage, input_sha256=dict(
-        subtitles=hashes['subtitles'], recognition=hashlib.sha256(repeats_raw).hexdigest())))
-    if coverage['status'] != 'complete':
-        raise ValueError('Subtitles omit recognized lyric passages')
+    if playback_policy:
+        fallback = result['quality'].get('playback_fallback')
+        if not fallback:
+            lyrics = json.loads((folder/'lyrics.json').read_text())
+            if not units or [c['text'] for c in cues] != lyrics['lines']:
+                raise ValueError('Subtitles omit supplied lyric text without a recorded fallback')
+    else:
+        from karaoke.song_sources import lyric_coverage, missing_repetitions
+        from karaoke.vocal_review import speech_intervals
+        repeats_raw = (folder/'asr/lyric-repeats.json').read_bytes()
+        repeats = json.loads(repeats_raw)
+        if repeats['status'] != 'complete' or missing_repetitions(
+                repeats['reference_lines'], cues, repeats['words'], result['language'], duration):
+            raise ValueError('Subtitles omit recognized lyric repetitions')
+        coverage = lyric_coverage(cues, repeats['words'], result['language'], duration,
+            other_words=repeats.get('other_coverage_words', []),
+            speech_intervals=speech_intervals(folder, repeats.get('non_singing_reviews', [])))
+        save(folder/'lyric-coverage-validation.json', dict(coverage, input_sha256=dict(
+            subtitles=hashes['subtitles'], recognition=hashlib.sha256(repeats_raw).hexdigest())))
+        if coverage['status'] != 'complete':
+            raise ValueError('Subtitles omit recognized lyric passages')
     for name in ('mv', 'instrumental_preview', 'backing_vocals_preview', 'lead_vocals_preview'):
         if audio_only and name == 'mv':
             continue
@@ -285,7 +294,8 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False):
         command = ['ffmpeg', '-nostdin', '-v', 'error', '-xerror', '-i', str(paths[name])]
         command += ['-map', '0:v:0', '-map', '0:a:0'] if name == 'mv' else ['-map', '0:a:0']
         subprocess.run(command+['-f', 'null', '-'], check=True, capture_output=True, timeout=300)
-    return dict(validation_scope='audio_and_lyrics' if audio_only else 'full_mv',
+    return dict(validation_scope=('playback_audio' if playback_policy and audio_only else
+                                  'audio_and_lyrics' if audio_only else 'full_mv'),
                 artifact_sha256=hashes, audio_format=audio_format,
                 subtitle_lines=len(cues), subtitle_units=len(units),
                 processing_seconds=result['processing_seconds'], timings=result['timings'],
@@ -580,6 +590,8 @@ def record_failure(attempt, job, folder):
     for pattern in ('asr/*.json', 'asr-requests/*.json', 'alignment/*.json', 'phonemes/*.json', 'context/**/*.json',
                     'repeated-lyrics/*.json', 'english-onsets/*.json',
                     'lyrics.json', 'anchors.json', 'word-cues.json', 'ordered-cues.json', 'cues.json', 'quality.json',
+                    'prepared-lyrics.json', 'playback-warning.json', 'lyrics-first-lookup.json',
+                    'published-lyrics.json', 'lyric-lookup.json', 'song-metadata.json',
                     'audio-result.json', 'result.json', 'lyric-coverage-validation.json',
                     'lyric-repeat-validation.json', 'highlight-validation.json'):
         for path in folder.glob(pattern):
