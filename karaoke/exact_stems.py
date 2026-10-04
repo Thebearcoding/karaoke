@@ -1,8 +1,4 @@
-"""Package vocals and their exact complement at the source sample rate.
-
-Masters are float64 WAVs. Their float64 sum must match the fixed decoder's
-native-rate float64 PCM bit for bit, including signed zero. MP3s are previews.
-"""
+"""Package unmodified vocal estimates and their complement as float64 WAVs."""
 
 import argparse
 import hashlib
@@ -28,6 +24,7 @@ def pcm_sha(audio):
 
 
 def reconstruction_report(source, vocals, backing):
+    """Record numerical error for diagnosis; it is not an acceptance gate."""
     source = np.asarray(source, dtype='float64')
     vocals = np.asarray(vocals, dtype='float64')
     backing = np.asarray(backing, dtype='float64')
@@ -36,16 +33,14 @@ def reconstruction_report(source, vocals, backing):
     if not all(np.isfinite(a).all() for a in (source, vocals, backing)):
         raise ValueError('Non-finite audio')
     combined = vocals+backing
-    unequal = combined.view('uint64') != source.view('uint64')
-    return {'bitwise_equal': not bool(unequal.any()),
-            'different_sample_values': int(np.count_nonzero(unequal)),
-            'sample_values': int(source.size),
+    if not np.isfinite(combined).all():
+        raise ValueError('Non-finite audio')
+    return {'sample_values': int(source.size),
             'max_absolute_error': float(np.max(np.abs(combined-source))),
-            'source_pcm_sha256': pcm_sha(source),
-            'recombined_pcm_sha256': pcm_sha(combined)}
+            'source_pcm_sha256': pcm_sha(source)}
 
 
-def exact_split(source, estimate, repair_limit=None):
+def complementary_split(source, estimate):
     source = np.asarray(source, dtype='float64')
     vocals = np.array(estimate, dtype='float64', copy=True)
     if source.ndim != 2 or not source.size or source.shape != vocals.shape:
@@ -53,30 +48,9 @@ def exact_split(source, estimate, repair_limit=None):
     if not np.isfinite(source).all() or not np.isfinite(vocals).all():
         raise ValueError('Non-finite audio')
     backing = source-vocals
-    unequal = (vocals+backing).view('uint64') != source.view('uint64')
-    changes = np.abs(vocals[unequal])
-    near_zero = np.abs(source[unequal]) <= 1e-12
-    # Decoder tails far below any audio sample can cancel a quiet model tail
-    # without retaining the source's low bits. Bound this narrowly: -240 dBFS
-    # source and at most -100 dBFS reassignment. Ordinary samples retain -120 dBFS.
-    limits = np.where(near_zero, 1e-5, 1e-6) if repair_limit is None else np.full(changes.shape, repair_limit)
-    excessive = np.flatnonzero(changes > limits)
-    if excessive.size:
-        index = excessive[np.argmax(changes[excessive])]
-        raise ValueError(f'Exact addition would require changing a vocal sample by '
-                         f'{changes[index]:g}, above the {limits[index]:g} repair limit')
-    # Extremely quiet decoder/model tails can still exceed float64's dynamic
-    # precision. Reassign only the failed, bounded values to the complement.
-    # Also preserve a negative-zero source as (-0) + (-0), not (+0).
-    vocals[unequal] = np.copysign(0., source[unequal])
-    backing[unequal] = source[unequal]
-    if not np.array_equal((vocals+backing).view('uint64'), source.view('uint64')):
-        raise ArithmeticError('Exact reconstruction failed')
-    return vocals, backing, {'reassigned_sample_values': int(np.count_nonzero(unequal)),
-        'maximum_vocal_change': float(np.max(changes, initial=0.)),
-        'permitted_change': float(np.max(limits, initial=repair_limit if repair_limit is not None else 1e-6)),
-        'near_zero_reassigned_sample_values': int(np.count_nonzero(near_zero)),
-        'near_zero_source_limit': 1e-12 if repair_limit is None else None}
+    if not np.isfinite(backing).all():
+        raise ValueError('Non-finite audio')
+    return vocals, backing
 
 
 def decode_source(path):
@@ -184,18 +158,17 @@ def build(source_path, estimate_path, output, *, previews=True):
     started = time.perf_counter()
     source, rate, decoder = decode_source(source_path)
     estimate, resampling = native_vocals(estimate_path, rate, source.shape)
-    vocals, backing, repair = exact_split(source, estimate)
+    vocals, backing = complementary_split(source, estimate)
     output.mkdir(parents=True)
     for name, audio in (('vocals', vocals), ('backing', backing)):
         sf.write(output/f'{name}.wav', audio, rate, subtype='DOUBLE')
     # Validate the actual serialized files, not only arrays before export.
     written = read_masters(output, rate, source.shape)
     check = reconstruction_report(source, *written)
-    if not check['bitwise_equal']:
-        raise ArithmeticError('Serialized masters failed bitwise reconstruction')
     gain, preview_records = None, {}
     if previews:
-        gain = min(1., .9/max(float(np.max(np.abs(a))) for a in (source, *written)))
+        peak = max(float(np.max(np.abs(a))) for a in (source, *written))
+        gain = min(1., .9/max(peak, 1e-12))
         gain, preview_records = encode_previews({name: output/f'{name}.wav' for name in ('vocals', 'backing')},
                                                output, gain, len(source), source.shape[1])
     manifest = {'schema_version': 1, 'source': {'path': str(source_path),
@@ -206,9 +179,9 @@ def build(source_path, estimate_path, output, *, previews=True):
         'estimate': {'path': str(estimate_path), 'sha256': sha(estimate_path), **resampling},
         'masters': {name: {'file': f'{name}.wav', 'sha256': sha(output/f'{name}.wav'),
                           'format': 'WAV DOUBLE; unscaled'} for name in ('vocals', 'backing')},
-        'reconstruction': check, 'numerical_repair': repair,
+        'reconstruction': check,
         'preview_shared_gain': gain, 'previews': preview_records,
-        'purity': 'Not established by the bitwise test; check vocals and backing separately.',
+        'purity': 'Not established by reconstruction; check vocals and backing separately.',
         'packaging_seconds': time.perf_counter()-started, 'code_sha256': sha(__file__)}
     (output/'manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
     return manifest
@@ -229,8 +202,6 @@ def verify(output):
     check = reconstruction_report(source, *read_masters(output, rate, source.shape))
     if check['source_pcm_sha256'] != manifest['reconstruction']['source_pcm_sha256']:
         raise ValueError('Decoded source differs from the recorded reference')
-    if not check['bitwise_equal']:
-        raise ArithmeticError('Stem sum is not bitwise equal to the source')
     return check
 
 

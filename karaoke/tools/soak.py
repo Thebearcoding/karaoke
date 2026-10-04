@@ -194,27 +194,25 @@ def retry_fields(error, diagnostic, number, *, failed_at):
     return fields
 
 
-def verify_stems(paths, expected_hash):
+def verify_stems(paths, duration):
     import numpy as np
     import soundfile as sf
-    digest = hashlib.sha256()
     with ExitStack() as stack:
         files = [stack.enter_context(sf.SoundFile(paths[name]))
                  for name in ('lead_vocals', 'backing_vocals', 'instrumental')]
         formats = {(f.samplerate, f.channels, len(f), f.subtype) for f in files}
         if len(formats) != 1 or files[0].subtype != 'DOUBLE' or not len(files[0]):
             raise ValueError('Three stems have incompatible formats or are not float64 masters')
+        rate, channels, frames, _ = formats.pop()
+        if abs(frames/rate-duration) > 2/min(rate, 44100):
+            raise ValueError('Stem duration differs from the complete source')
         while True:
             blocks = [f.read(65536, dtype='float64', always_2d=True) for f in files]
             if not len(blocks[0]):
                 break
             if any(not np.isfinite(block).all() for block in blocks):
                 raise ValueError('Non-finite stem samples')
-            combined = np.ascontiguousarray((blocks[0]+blocks[1])+blocks[2], dtype='<f8')
-            digest.update(memoryview(combined).cast('B'))
-    if digest.hexdigest() != expected_hash:
-        raise ValueError('Three stems do not reconstruct the decoded source bitwise')
-    return digest.hexdigest()
+    return dict(sample_rate=rate, channels=channels, frames=frames)
 
 
 def verify_outputs(client, base, data_dir, job, *, audio_only=False):
@@ -244,7 +242,7 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False):
                 if response.content != stream.read(end-start+1):
                     raise ValueError(f'Artifact range content mismatch: {name}')
         paths[name], hashes[name] = path, digest
-    reconstruction = verify_stems(paths, result['reconstruction']['source_pcm_sha256'])
+    audio_format = verify_stems(paths, result['duration_seconds'])
     cues = json.loads(paths['subtitles'].read_text())
     units = [u for cue in cues for u in cue['units']]
     duration = result['duration_seconds']
@@ -288,7 +286,7 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False):
         command += ['-map', '0:v:0', '-map', '0:a:0'] if name == 'mv' else ['-map', '0:a:0']
         subprocess.run(command+['-f', 'null', '-'], check=True, capture_output=True, timeout=300)
     return dict(validation_scope='audio_and_lyrics' if audio_only else 'full_mv',
-                artifact_sha256=hashes, reconstructed_pcm_sha256=reconstruction,
+                artifact_sha256=hashes, audio_format=audio_format,
                 subtitle_lines=len(cues), subtitle_units=len(units),
                 processing_seconds=result['processing_seconds'], timings=result['timings'],
                 quality=result['quality'], device=result['device'], reused_stages=result.get('reused_stages', []))

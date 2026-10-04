@@ -962,18 +962,23 @@ def test_soak_new_failure_never_shortens_provider_backoff(tmp_path, monkeypatch,
     assert saved['provider_backoff'][provider] == max(previous_retry, attempt['next_retry_at'])
 
 
-def test_soak_checks_actual_stem_samples_not_only_pipeline_claim(tmp_path):
+@pytest.mark.parametrize('damage', ['nonfinite', 'length', 'channels', 'rate', 'subtype', 'empty', 'truncated'])
+def test_soak_checks_actual_stem_integrity_without_exact_sum(tmp_path, damage):
     import soundfile as sf
-    from karaoke.exact_stems import pcm_sha
     from karaoke.tools.soak import verify_stems
-    original = np.array([[.125, -.25], [.5, -.5]], dtype=np.float64)
+    original = np.full((100, 2), 1e-30)
+    lead = np.full_like(original, .000288816)
     paths = {name: tmp_path/(name+'.wav') for name in ('lead_vocals','backing_vocals','instrumental')}
-    for (name, path), gain in zip(paths.items(), (.25, .25, .5)):
-        sf.write(path, original*gain, 8000, subtype='DOUBLE')
-    assert verify_stems(paths, pcm_sha(original)) == pcm_sha(original)
-    sf.write(paths['lead_vocals'], original*.5, 8000, subtype='DOUBLE')
-    with pytest.raises(ValueError, match='bitwise'):
-        verify_stems(paths, pcm_sha(original))
+    for path, audio in zip(paths.values(), (lead, original-lead, np.zeros_like(original))):
+        sf.write(path, audio, 8000, subtype='DOUBLE')
+    assert verify_stems(paths, 100/8000) == dict(sample_rate=8000, channels=2, frames=100)
+    audio = {'nonfinite': np.full_like(lead, np.nan), 'length': lead[:-10],
+             'channels': lead[:, :1], 'empty': lead[:0]}.get(damage, lead)
+    for path in (paths.values() if damage == 'truncated' else [paths['lead_vocals']]):
+        sf.write(path, lead[:10] if damage == 'truncated' else audio,
+                 16000 if damage == 'rate' else 8000, subtype='FLOAT' if damage == 'subtype' else 'DOUBLE')
+    with pytest.raises(ValueError, match='Non-finite|incompatible|duration'):
+        verify_stems(paths, 100/8000)
 
 
 @pytest.mark.parametrize('diagnostic,reason', [
@@ -1649,7 +1654,10 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
     artifacts = folder/'stems'
     artifacts.mkdir()
     for name, scale in [('lead', .25), ('backing-vocals', .25), ('instrumental', .5)]:
-        sf.write(artifacts/f'{name}.wav', tone*scale, sample_rate, subtype='DOUBLE')
+        track = (tone*scale).astype('float64')
+        if name == 'lead':
+            track[-1] += 1e-16  # A harmless rounding difference must not block acceptance.
+        sf.write(artifacts/f'{name}.wav', track, sample_rate, subtype='DOUBLE')
         encode_preview(artifacts/f'{name}.wav', artifacts/f'{name}.mp3', 1, len(tone), 1)
     (artifacts/'manifest.json').write_text(json.dumps(dict(preview_shared_gain=1,
         reconstruction=dict(vocal_first=dict(source_pcm_sha256=pcm_sha(tone.astype('float64')))))))
@@ -1681,6 +1689,12 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
     assert not (folder/'result.json').exists()
     evidence=verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
     assert evidence['validation_scope']=='audio_and_lyrics' and len(evidence['artifact_sha256'])==7
+    assert evidence['audio_format'] == dict(sample_rate=sample_rate, channels=1, frames=len(tone))
+    original_master = (artifacts/'lead.wav').read_bytes()
+    (artifacts/'lead.wav').write_bytes(original_master[:-1] + bytes([original_master[-1] ^ 1]))
+    with pytest.raises(ValueError, match='checksum mismatch'):
+        verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)
+    (artifacts/'lead.wav').write_bytes(original_master)
     # The long-lived controller never imports Pipeline; its clean interpreter
     # must verify results without the research scripts added to sys.path.
     import os
@@ -3069,7 +3083,8 @@ def test_preview_encoder_preserves_partial_final_frames(tmp_path, rate, frames, 
 
 
 @pytest.mark.parametrize('previews', [False, True])
-def test_master_only_package_still_builds_verified_three_stem_previews(tmp_path, previews):
+@pytest.mark.parametrize('silent', [False, True])
+def test_master_only_package_still_builds_verified_three_stem_previews(tmp_path, previews, silent):
     import soundfile as sf
     from karaoke import exact_stems
     from karaoke.three_stems import build, verify
@@ -3079,19 +3094,38 @@ def test_master_only_package_still_builds_verified_three_stem_previews(tmp_path,
     audio = np.column_stack([tone, -tone])
     source, vocals, lead = (tmp_path/f'{name}.wav' for name in ('source', 'vocals', 'lead'))
     for path, scale in ((source, 1), (vocals, .5), (lead, .25)):
-        sf.write(path, audio*scale, rate, subtype='DOUBLE')
+        track = audio*scale
+        # Reproduce quiet-source cancellation in both levels of the split.
+        track[-3:] = (1e-30 if path == source else
+                      np.array([[.000288816], [9.1246e-5], [.000112535]]) if path == vocals else .1)
+        if path == vocals:
+            track[-4] = 1e-30
+        if silent:
+            track[:] = 0
+        sf.write(path, track, rate, subtype='DOUBLE')
     two, three = tmp_path/'two', tmp_path/'three'
     subprocess.run([sys.executable, exact_stems.__file__, 'build', '--source', str(source),
         '--vocals-estimate', str(vocals), '--output', str(two), *([] if previews else ['--no-previews'])],
         check=True, capture_output=True)
     assert {p.name for p in two.glob('*.mp3')} == ({'vocals.mp3', 'backing.mp3'} if previews else set())
-    assert exact_stems.verify(two)['bitwise_equal']
+    assert (exact_stems.verify(two)['max_absolute_error'] > 0) is not silent
+    np.testing.assert_array_equal(sf.read(two/'vocals.wav')[0], sf.read(vocals)[0])
     result = build(two, lead, three)
-    assert result['reconstruction']['vocal_first']['bitwise_equal']
-    assert verify(three)['vocal_first']['bitwise_equal']
+    assert (result['reconstruction']['vocal_first']['max_absolute_error'] > 0) is not silent
+    assert verify(three) == result['reconstruction']
+    np.testing.assert_array_equal(sf.read(three/'lead.wav')[0], sf.read(lead)[0])
+    assert exact_stems.sha(three/'instrumental.wav') == exact_stems.sha(two/'backing.wav')
     assert set(result['previews']) == {'lead', 'backing-vocals', 'instrumental', 'karaoke'}
     for name in result['previews']:
         assert validate_preview(three/f'{name}.mp3', frames, 2, rate)['decoded_length_delta_samples'] == 0
+    with (three/'lead.wav').open('ab') as stream:
+        stream.write(b'corrupt')
+    with pytest.raises(ValueError, match='Master changed'):
+        verify(three)
+    with (two/'vocals.wav').open('ab') as stream:
+        stream.write(b'corrupt')
+    with pytest.raises(ValueError, match='Master file has changed'):
+        exact_stems.verify(two)
 
 
 def test_preview_clipping_reports_measured_peak(tmp_path):

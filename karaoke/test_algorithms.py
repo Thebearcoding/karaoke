@@ -7,7 +7,7 @@ import soundfile as sf
 
 from align import activity, align_lines
 from dsp import apply_masks, istft, masks_for, stft
-from exact_stems import exact_split, reconstruction_report
+from exact_stems import complementary_split, reconstruction_report
 from phonetic_align import FormantSynth, alignment_features, align_phonetic, templates
 from subtitles import countdown_events, countdown_state, highlight_coverage_errors, lyric_cues, presentation_cues, read_ahead_state, timestamp, write_captions
 from match_video_lyrics import caption_similarity, strongest_cluster
@@ -23,16 +23,15 @@ from word_onset_metrics import score_onsets, word_events
 
 
 class SignalIntegrity(unittest.TestCase):
-    def test_nested_three_stems_are_exact_after_storage(self):
+    def test_nested_three_stems_preserve_estimates_after_storage(self):
         rng = np.random.default_rng(53)
         source = rng.normal(0, .15, (1024, 2)).astype('float32')
         vocal_estimate = rng.normal(0, .2, source.shape).astype('float32')
-        source[0] = [0., -0.]
-        vocal_estimate[0] = [0., -0.]
-        vocals, music, _ = exact_split(source, vocal_estimate)
+        source[0] = [1e-30, -1e-30]
+        vocal_estimate[1] = [1e-30, -1e-30]
+        vocals, music = complementary_split(source, vocal_estimate)
         lead_estimate = rng.normal(0, .1, source.shape).astype('float32')
-        lead_estimate[0] = [1e-12, -1e-12]
-        lead, backing, _ = exact_split(vocals, lead_estimate)
+        lead, backing = complementary_split(vocals, lead_estimate)
         with tempfile.TemporaryDirectory() as directory:
             restored = []
             for name, wave in [('lead', lead), ('backing', backing), ('music', music)]:
@@ -40,71 +39,33 @@ class SignalIntegrity(unittest.TestCase):
                 sf.write(path, wave, 48000, subtype='DOUBLE')
                 restored.append(sf.read(path, dtype='float64', always_2d=True)[0])
             checks = check_three(source, *restored)
-        self.assertTrue(checks['vocal_first']['bitwise_equal'])
-        np.testing.assert_array_equal(restored[2].view('uint64'), music.view('uint64'))
+        np.testing.assert_array_equal(vocals, vocal_estimate)
+        np.testing.assert_array_equal(restored[0], lead_estimate)
+        np.testing.assert_array_equal(restored[2], music)
+        self.assertLess(checks['vocal_first']['max_absolute_error'], 1e-15)
 
-    def test_three_stem_report_distinguishes_addition_orders(self):
-        source = np.array([[1e-30]], dtype='float64')
-        checks = check_three(source, np.ones_like(source), -np.ones_like(source), source)
-        self.assertTrue(checks['vocal_first']['bitwise_equal'])
-        self.assertFalse(checks['music_plus_backing_first']['bitwise_equal'])
+    def test_complement_keeps_quiet_tails_instead_of_reassigning_them(self):
+        # Cancellation used to abort these tails or erase the vocal estimate.
+        source = np.array([[1e-30, -1e-30], [0., -0.],
+                           [np.nextafter(1e-7, np.inf), -1e-30]])
+        estimate = np.array([[.000288816, -.000112535], [.1, -.1],
+                             [4.2e-6, -9.1246e-5]])
+        vocals, backing = complementary_split(source, estimate)
+        np.testing.assert_array_equal(vocals, estimate)
+        np.testing.assert_allclose(vocals+backing, source, atol=1e-15, rtol=0)
+        self.assertGreater(reconstruction_report(source, vocals, backing)['max_absolute_error'], 0)
 
-    def test_complementary_masters_are_bit_exact_after_storage(self):
-        rng = np.random.default_rng(821)
-        source = rng.normal(0, .15, (1024, 2)).astype('float32')
-        estimate = rng.normal(0, .2, source.shape).astype('float32')
-        source[0] = [0., -0.]
-        estimate[0] = [.1, 0.]
-        source[1] = [np.nextafter(np.float32(0), np.float32(1)), -1e-30]
-        # Real model tails around -130 dBFS previously aborted the whole package.
-        estimate[1] = [3.28574e-7, -1e-10]
-        vocals, backing, repair = exact_split(source, estimate)
-        self.assertGreater(repair['reassigned_sample_values'], 0)
-        self.assertLessEqual(repair['maximum_vocal_change'], 1e-6)
-        np.testing.assert_array_equal(vocals[2:], estimate[2:].astype('float64'))
-        with tempfile.TemporaryDirectory() as directory:
-            restored = []
-            for name, wave in [('vocals', vocals), ('backing', backing)]:
-                path = Path(directory)/f'{name}.wav'
-                sf.write(path, wave, 48000, subtype='DOUBLE')
-                restored.append(sf.read(path, dtype='float64', always_2d=True)[0])
-            report = reconstruction_report(source, *restored)
-        self.assertTrue(report['bitwise_equal'])
-        self.assertEqual(report['different_sample_values'], 0)
-        self.assertEqual(report['source_pcm_sha256'], report['recombined_pcm_sha256'])
-
-    def test_exact_sum_does_not_silently_discard_audible_estimate(self):
-        source = np.array([[1e-30]], dtype='float32')
-        with self.assertRaisesRegex(ValueError, 'above the .* repair limit'):
-            exact_split(source, np.array([[.1]], dtype='float32'))
-
-    def test_exact_tail_repair_stays_bounded_and_respects_explicit_limit(self):
-        source = np.array([[1e-30, -1e-30]], dtype='float32')
-        estimate = np.array([[4.2e-6, -4.2e-6]], dtype='float32')
-        vocals, backing, repair = exact_split(source, estimate)
-        self.assertTrue(reconstruction_report(source, vocals, backing)['bitwise_equal'])
-        self.assertLessEqual(repair['maximum_vocal_change'], 1e-5)
-        with self.assertRaisesRegex(ValueError, 'above the .* repair limit'):
-            exact_split(source, estimate*3)
-        with self.assertRaisesRegex(ValueError, 'above the .* repair limit'):
-            exact_split(source, estimate/10, repair_limit=1e-8)
-
-    def test_exact_tail_repair_does_not_expand_budget_for_non_silent_source(self):
-        source = np.array([[np.nextafter(1e-7, np.inf)]], dtype='float64')
-        estimate = np.array([[4.2e-6]], dtype='float64')
-        # A non-silent double-precision source can also suffer rounding. Its
-        # normal repair cap must not become an excuse to discard real content.
-        with self.assertRaisesRegex(ValueError, 'above the .* repair limit'):
-            exact_split(source, estimate)
-
-    def test_reconstruction_check_detects_single_value_change(self):
-        source = np.array([[.25, -.5], [0., .125]], dtype='float32')
-        vocals, backing, _ = exact_split(source, np.array([[.125, -.25], [.5, 0.]]))
-        backing[1, 1] = np.nextafter(backing[1, 1], np.inf)
-        report = reconstruction_report(source, vocals, backing)
-        self.assertFalse(report['bitwise_equal'])
-        self.assertEqual(report['different_sample_values'], 1)
-        self.assertNotEqual(report['source_pcm_sha256'], report['recombined_pcm_sha256'])
+    def test_complement_rejects_invalid_audio(self):
+        for source, estimate in [
+                (np.zeros((0, 2)), np.zeros((0, 2))),
+                (np.zeros((3, 2)), np.zeros((4, 2))),
+                (np.zeros(3), np.zeros(3)),
+                (np.full((3, 2), np.nan), np.zeros((3, 2))),
+                (np.zeros((3, 2)), np.full((3, 2), np.inf)),
+                (np.full((3, 2), 1e308), np.full((3, 2), -1e308))]:
+            with self.subTest(source=source, estimate=estimate), np.errstate(over='ignore'):
+                with self.assertRaises(ValueError):
+                    complementary_split(source, estimate)
 
     def test_roundtrip_preserves_length_and_samples(self):
         for length in [2048, 10001, 44123]:

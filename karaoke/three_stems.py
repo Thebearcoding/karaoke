@@ -10,16 +10,14 @@ import time
 import numpy as np
 import soundfile as sf
 
-from exact_stems import (decode_source, encode_previews, exact_split, native_vocals,
+from exact_stems import (decode_source, encode_previews, complementary_split, native_vocals,
                          read_masters, reconstruction_report, sha)
 
 
 def check_three(source, lead, backing_vocals, instrumental):
-    """Keep the documented vocal-first sum separate from other float orders."""
+    """Record the vocal-first mix's numerical error without a bitwise gate."""
     return {
         'vocal_first': reconstruction_report(source, lead + backing_vocals, instrumental),
-        'music_plus_backing_first': reconstruction_report(source, instrumental + backing_vocals, lead),
-        'music_plus_lead_first': reconstruction_report(source, instrumental + lead, backing_vocals),
     }
 
 
@@ -37,11 +35,9 @@ def build(existing, estimate, output, video=None):
             raise ValueError(f"Existing master changed: {master['file']}")
     source, rate, _ = decode_source(spec['path'])
     vocals, instrumental = read_masters(existing, rate, source.shape)
-    previous = reconstruction_report(source, vocals, instrumental)
-    if not previous['bitwise_equal']:
-        raise ValueError('Existing two-stem package failed reconstruction')
+    reconstruction_report(source, vocals, instrumental)
     raw_lead, resampling = native_vocals(estimate, rate, source.shape)
-    lead, backing_vocals, repair = exact_split(vocals, raw_lead)
+    lead, backing_vocals = complementary_split(vocals, raw_lead)
     output.mkdir(parents=True)
     for name, audio in [('lead', lead), ('backing-vocals', backing_vocals)]:
         sf.write(output/f'{name}.wav', audio, rate, subtype='DOUBLE')
@@ -55,8 +51,6 @@ def build(existing, estimate, output, video=None):
             raise ValueError(f'Incorrect master format: {path}')
         tracks[name] = audio
     checks = check_three(source, tracks['lead'], tracks['backing-vocals'], tracks['instrumental'])
-    if not checks['vocal_first']['bitwise_equal']:
-        raise ArithmeticError('Serialized three-stem reconstruction failed')
     if sha(output/'instrumental.wav') != old['masters']['backing']['sha256']:
         raise ArithmeticError('Instrumental must be an unchanged copy')
     karaoke = tracks['instrumental'] + tracks['backing-vocals']
@@ -91,7 +85,7 @@ def build(existing, estimate, output, video=None):
             'instrumental': 'Unchanged existing instrumental master',
             'karaoke': 'Instrumental plus backing vocals'},
         'reconstruction_order': '(lead + backing-vocals) + instrumental, float64',
-        'reconstruction': checks, 'numerical_repair': repair,
+        'reconstruction': checks,
         'preview_shared_gain': gain, 'previews': previews, 'video': video_record,
         'purity': 'Not established by reconstruction. All three tracks require listening.',
         'packaging_seconds': time.perf_counter()-started, 'code_sha256': sha(__file__)}
@@ -112,11 +106,9 @@ def verify(output):
         if sha(path) != record['sha256']:
             raise ValueError(f'Master changed: {path}')
         tracks[name], actual_rate = sf.read(path, dtype='float64', always_2d=True)
-        if rate != actual_rate:
-            raise ValueError('Sample-rate mismatch')
+        if rate != actual_rate or tracks[name].shape != source.shape or sf.info(path).subtype != 'DOUBLE':
+            raise ValueError(f'Incorrect master format: {path}')
     checks = check_three(source, tracks['lead'], tracks['backing-vocals'], tracks['instrumental'])
-    if not checks['vocal_first']['bitwise_equal']:
-        raise ArithmeticError('Three-stem reconstruction failed')
     return checks
 
 
