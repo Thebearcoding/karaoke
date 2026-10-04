@@ -400,6 +400,6 @@ ASR 固定宽度断行若留下孤立的单字或单词，会在同一短句内�
 
 ### 直接对齐的局部恢复
 
-没有 ASR 锚点的直接歌词对齐会单独检查各句。连续坏句使用左右有效句限定的音频上下文重试，最多 45 秒、每块最多 8 次；只替换坏句，原来的有效邻句保持不变。`alignment/raw.json` 的 `line_recoveries` 保存每次窗口、候选和接纳／拒绝原因；`quality.recovered_alignment_lines` 记录成功恢复的行。未能限定范围的片段保留 `no_measured_neighbour` 或 `requires_coarse_localization`，不反复重跑全曲。
+没有 ASR 锚点的直接歌词对齐会单独检查各句。连续坏句使用左右有效句限定的音频上下文重试，最多 45 秒、每块最多 8 次；只替换坏句，原来的有效邻句保持不变。仍有缺句才调用本地 Whisper 定位：一般只识别坏句窗口，大面积错位才识别整块（最多 600 秒），随后最多重对齐 24 个不超过 45 秒的窗口。识别稿不替换歌词；原有效句仅在识别证据指出明显错位时重新对齐。`alignment/raw.json` 的 `line_recoveries` 和 `asr_localizations` 保存窗口、候选、原始结果及接纳／拒绝原因；`quality.recovered_alignment_lines` 记录成功恢复的行。识别结果按来源与模型哈希缓存于 `asr-requests/`。
 
 回退按当前处理已验证的字词结果、原始字词、粗句边界顺序选择。`playback-warning.json` 保存未解决行和 `requires_review`；仍有缺行则返回 `subtitles_failed`，保留音轨和诊断。整份无歌词／纯音乐占位文案不会送入对齐器。

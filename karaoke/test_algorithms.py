@@ -1458,6 +1458,7 @@ class AlignmentIntegrity(unittest.TestCase):
 
     def test_rejected_alignment_retains_raw_evidence_without_publishing_captions(self):
         import json
+        import shutil
         from unittest.mock import Mock, patch
         from align_lyrics_whisper import main
 
@@ -1466,16 +1467,23 @@ class AlignmentIntegrity(unittest.TestCase):
         model = Mock()
         model._buffers = {'alignment_heads': None}
         model.align.return_value.to_dict.return_value = result
+        model.transcribe.return_value.to_dict.return_value = dict(segments=[])
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             sf.write(root/'audio.wav', np.zeros(3*16000), 16000)
             (root/'lyrics.json').write_text(json.dumps(dict(language='English', lines=['word'])))
             (root/'jobs.json').write_text(json.dumps([dict(audio=str(root/'audio.wav'),
                 lyrics=str(root/'lyrics.json'), output=str(root/'alignment'))]))
-            with patch('stable_whisper.load_model', return_value=model), patch('sys.argv',
+            with patch('stable_whisper.load_model', return_value=model), patch(
+                    'align_lyrics_whisper.sha', return_value='test-model-hash'), patch('sys.argv',
                     ['align', '--jobs', str(root/'jobs.json'), '--device', 'cpu']):
                 with self.assertRaisesRegex(ValueError, 'exactly cover'):
                     main()
+                shutil.rmtree(root/'alignment')
+                model._buffers = {'alignment_heads': None}
+                with self.assertRaisesRegex(ValueError, 'exactly cover'):
+                    main()
+            self.assertEqual(model.transcribe.call_count, 1)
             self.assertEqual(json.loads((root/'alignment/raw.json').read_text())[0]['result'], result)
             self.assertEqual(json.loads((root/'alignment/units.json').read_text())[0]['text'], 'extra word')
             self.assertFalse((root/'alignment/cues.json').exists())

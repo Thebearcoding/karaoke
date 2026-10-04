@@ -138,6 +138,15 @@ def create_poster(source, output, *, thumbnail=None, seconds=30):
     return False
 
 
+def alignment_recovery_summary(raw):
+    localized = [report for block in raw for report in block.get('asr_localizations', [])]
+    return dict(recovered_alignment_lines=sorted(
+        {i for block in raw for report in block.get('line_recoveries', []) if report['accepted']
+         for i in range(report['lines'][0], report['lines'][1]+1)} |
+        {i for report in localized for i in report['accepted_lines']}),
+        asr_localization_windows=len({tuple(r['source_range']) for r in localized if r.get('recognition')}))
+
+
 class Pipeline:
     def __init__(self, request, output, *, separator_python=None, device='auto', text_model='gpt-5-mini',
                  max_duration=900, catalog_root=ROOT, cookies_file=None, audio_only=False,
@@ -673,8 +682,6 @@ class Pipeline:
         self.run('align_words', [sys.executable, ROOT/'align_lyrics_whisper.py', '--jobs',
             output/'alignment-jobs.json', '--device', self.device])
         raw = json.loads((output/'alignment/raw.json').read_text())
-        recovered_lines = sorted({i for block in raw for report in block.get('line_recoveries', [])
-                                  if report['accepted'] for i in range(report['lines'][0], report['lines'][1]+1)})
         coarse, _ = presentation_cues(json.loads((output/'alignment/cues.json').read_text()),
                                      duration, lead=0, tail=0, bridge_gap=0)
         words, mapping = build(coarse, raw, language)
@@ -751,7 +758,7 @@ class Pipeline:
             independent_asr_coverage=None if direct else True,
             restored_repetitions=0 if direct else len(repeats['expansions']),
             fallback_units=sum(u.get('timing_source') == 'prior_word_fallback' for u in units),
-            recovered_alignment_lines=recovered_lines,
+            **alignment_recovery_summary(raw),
             line_order_fallback_lines=order_fallbacks,
             countdown_events=countdown_events(cues)))
 
@@ -855,7 +862,7 @@ class Pipeline:
                 lyrics.update(saved)
         except (OSError, ValueError):
             pass
-        candidates = []
+        candidates, recovery = [], {}
         unverified_draft = lyrics.get('provenance', {}).get('kind') == 'asr_draft'
         for name in (() if unverified_draft else ('final_alignment', 'context/song/cues.json',
                 'english-onsets/cues.json', 'ordered-cues.json', 'repeated-lyrics/cues.json',
@@ -875,8 +882,10 @@ class Pipeline:
         if not unverified_draft and raw_path.parent in self.alignment_outputs and raw_path.is_file():
             from lyric_progress import partial_alignment_cues
             try:
+                blocks = json.loads(raw_path.read_text())
+                recovery = alignment_recovery_summary(blocks)
                 raw = ('alignment/raw.json', partial_alignment_cues(lyrics['lines'],
-                    json.loads(raw_path.read_text()), duration, lyrics['language']))
+                    blocks, duration, lyrics['language']))
                 # Coarse captions have no word timings. Do not discard usable
                 # raw words merely because another line prevented refinement.
                 before_coarse = next((i for i, (name, _) in enumerate(candidates)
@@ -914,7 +923,7 @@ class Pipeline:
         write_json(self.output/'cues.json', cues)
         write_json(self.output/'quality.json', dict(lines=len(cues), units=units,
             lyrics_provenance=dict(lyrics.get('provenance', {}), needs_review=True),
-            playback_fallback=warning, onset_accuracy=None, separation_purity=None))
+            playback_fallback=warning, onset_accuracy=None, separation_purity=None, **recovery))
         if not cues:
             raise StageFailure('subtitles', '未生成任何可用字幕；音轨和诊断已保留，请核对歌词来源与对齐结果') from error
         if omitted:

@@ -1154,6 +1154,68 @@ def test_direct_alignment_defers_unanchored_or_oversized_repairs(far_neighbour):
         'requires_coarse_localization' if far_neighbour else 'no_measured_neighbour')
 
 
+@pytest.mark.parametrize('failure', [None, 'wrong_words', 'outside_window', 'no_speech'])
+def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neighbours(failure):
+    from copy import deepcopy
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines, starts = ['alpha', 'bravo', 'charlie'], [1., 4., 8.]
+    segments = [dict(text=text, start=t, end=t+.8, words=[dict(word=text,start=t,end=t+.8)])
+                for text,t in zip(lines,starts)]
+    segments[1]['words'][0]['end'] = 4.
+    block = dict(range=[0,3],context=[0,3],source_range=[0.,12.],result=dict(segments=segments))
+    original = deepcopy(block)
+    def recognize(begin,end):
+        assert end-begin < 10
+        return dict(segments=[dict(no_speech_prob=1 if failure=='no_speech' else 0,
+            words=[dict(word=text,start=t-begin,end=t+.8-begin) for text,t in zip(lines,starts)])])
+    def align(begin,end,text,**kwargs):
+        assert text.splitlines() == lines
+        result = [dict(text=line,words=[dict(word=line,start=t-begin,end=t+.8-begin)])
+                  for line,t in zip(lines,starts)]
+        if failure == 'wrong_words':result[1]['words'][0]['word'] = 'invented'
+        if failure == 'outside_window':result[1]['words'][0]['end'] = end-begin+10
+        return dict(segments=result)
+    result = recover_with_local_asr(block,lines,np.zeros(12*16000),'English',recognize,align)
+    assert block == original
+    assert result['result']['segments'][0] == segments[0]
+    assert result['result']['segments'][2] == segments[2]
+    assert result['asr_localizations'][0]['accepted_lines'] == ([2] if failure is None else [])
+    if failure is None:
+        assert result['result']['segments'][1]['words'] == [dict(word='bravo',start=4.,end=4.8)]
+    else:
+        assert result['result'] == block['result']
+    good = dict(block,result=dict(segments=[dict(text=t,words=[dict(word=t,start=s,end=s+.8)])
+        for t,s in zip(lines,starts)]))
+    assert recover_with_local_asr(good,lines,np.zeros(12*16000),'English',
+        lambda *a:pytest.fail('A complete alignment ran ASR'),align) is good
+
+
+@pytest.mark.parametrize('partly_timed', [False, True])
+def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(partly_timed):
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines = ['alpha','bravo','charlie','delta','echo','foxtrot','golf','hotel']
+    starts = {line:30.+i*6 for i,line in enumerate(lines)}
+    block = dict(range=[0,8],context=[0,8],source_range=[0.,90.],result=dict(segments=[
+        dict(text=t,words=[dict(word=t,start=float(i),end=float(i if i<5 else i+1))])
+        for i,t in enumerate(lines)]))
+    if partly_timed:
+        for i,s in enumerate(block['result']['segments'][:5]):
+            tokens = [*s['text'][:3],s['text'][3:]]
+            s['words'] = [dict(word=t,start=float(i),end=i+(.05 if j==3 else 0)) for j,t in enumerate(tokens)]
+    calls=[]
+    def recognize(begin,end):
+        calls.append((begin,end))
+        return dict(segments=[dict(words=[dict(word=t,start=starts[t],end=starts[t]+1) for t in lines])])
+    def align(begin,end,text,**kwargs):
+        assert end-begin <= 45
+        return dict(segments=[dict(text=t,words=[dict(word=t,start=starts[t]-begin,end=starts[t]+1-begin)])
+                              for t in text.splitlines()])
+    result = recover_with_local_asr(block,lines,np.zeros(90*16000),'English',recognize,align)
+    assert calls == [(0.,90.)]
+    assert result['asr_localizations'][0]['accepted_lines'] == list(range(1,9))
+    assert [s['words'][0]['start'] for s in result['result']['segments']] == list(starts.values())
+
+
 @pytest.mark.parametrize('padding', ['zero', 'quiet', 'other_channel', 'all_silent', 'nonfinite', 'wrong_duration'])
 def test_lyric_duration_ignores_only_digital_padding(tmp_path, padding):
     import soundfile as sf
@@ -2038,6 +2100,8 @@ def test_playback_fallback_prefers_existing_word_times_to_coarse_lines(tmp_path)
     raw = [dict(range=[0, 2], context=[0, 2], source_range=[10, 15], result=dict(segments=[
         dict(words=[dict(word=w, start=i*2+j*.4, end=i*2+j*.4+.3)
                     for j,w in enumerate(text.split())]) for i,text in enumerate(lines)]))]
+    raw[0]['asr_localizations'] = [dict(source_range=[10,15], accepted_lines=[2],
+                                      recognition=dict(segments=[]))]
     (tmp_path/'alignment/raw.json').write_text(json.dumps(raw))
     pipeline.alignment_outputs.add(tmp_path/'alignment')
     pipeline.playback_fallback({}, 20, StageFailure('align_words', 'unresolved'))
@@ -2046,6 +2110,11 @@ def test_playback_fallback_prefers_existing_word_times_to_coarse_lines(tmp_path)
     warning = json.loads((tmp_path/'playback-warning.json').read_text())
     assert warning['estimated_spans'] == [] and warning['omitted_lines'] == []
     assert not warning['requires_review']
+    quality = json.loads((tmp_path/'quality.json').read_text())
+    assert quality['asr_localization_windows'] == 1 and quality['recovered_alignment_lines'] == [2]
+    from karaoke.tools.playback_sweep import soft_failures
+    events = soft_failures(dict(quality=quality),{})
+    assert next(e for e in events if e['code']=='alignment_localized_with_asr')['windows'] == 1
 
 
 def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatch):
@@ -2148,6 +2217,17 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
     (folder/'lyrics.json').write_text(json.dumps(dict(lines=['Hello'])))
     playback = verify_outputs(None, '', tmp_path, {'id':'job'}, audio_only=True, playback_policy=True)
     assert playback['validation_scope'] == 'playback_audio'
+    # A recorded timing fallback does not authorize dropping lyric lines.
+    result['quality']['playback_fallback'] = dict(subtitle_mode='estimated_word')
+    (folder/'audio-result.json').write_text(json.dumps(result))
+    assert verify_outputs(None, '', tmp_path, {'id':'job'}, audio_only=True,
+                          playback_policy=True)['subtitle_lines'] == 1
+    (folder/'lyrics.json').write_text(json.dumps(dict(lines=['Hello', 'Missing verse'])))
+    with pytest.raises(ValueError, match='omit supplied lyric text'):
+        verify_outputs(None, '', tmp_path, {'id':'job'}, audio_only=True, playback_policy=True)
+    result['quality'].pop('playback_fallback')
+    (folder/'lyrics.json').write_text(json.dumps(dict(lines=['Hello'])))
+    (folder/'audio-result.json').write_text(json.dumps(result))
     original_master = (artifacts/'lead.wav').read_bytes()
     (artifacts/'lead.wav').write_bytes(original_master[:-1] + bytes([original_master[-1] ^ 1]))
     with pytest.raises(ValueError, match='checksum mismatch'):

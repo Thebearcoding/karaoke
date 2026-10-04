@@ -263,11 +263,9 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False, playback_po
         if context_scope_violations(cues, result['quality'].get('english_context_scope')):
             raise ValueError('Word timing falls outside acoustic phrase context')
     if playback_policy:
-        fallback = result['quality'].get('playback_fallback')
-        if not fallback:
-            lyrics = json.loads((folder/'lyrics.json').read_text())
-            if not units or [c['text'] for c in cues] != lyrics['lines']:
-                raise ValueError('Subtitles omit supplied lyric text without a recorded fallback')
+        lyrics = json.loads((folder/'lyrics.json').read_text())
+        if not units or [c['text'] for c in cues] != lyrics['lines']:
+            raise ValueError('Subtitles omit supplied lyric text')
     else:
         from karaoke.song_sources import lyric_coverage, missing_repetitions
         from karaoke.vocal_review import speech_intervals

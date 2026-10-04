@@ -167,6 +167,131 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
     return result
 
 
+def recover_with_local_asr(block, lines, audio, language, recognize, align):
+    """Use recognition only to locate failed lyrics, never as replacement text."""
+    from anchors_from_asr import anchors_from_words
+    from lyric_progress import partial_alignment_cues
+    duration = len(audio)/16000
+    cues = partial_alignment_cues(lines, [block], duration, language)
+    bad = {i for i in range(*block['range']) if cues[i]['status'] != 'candidate'}
+    first, stop = block['context']
+    if len(block['result']['segments']) != stop-first:
+        return block
+    for i in range(*block['range']):
+        words = [w for w in block['result']['segments'][i-first]['words'] if normalized(w['word'])]
+        if len(words) >= 4 and sum(w['end']-w['start'] < .015 for w in words) > len(words)/2:
+            bad.add(i)  # A tiny surviving token must not hide a collapsed phrase.
+    if not bad:
+        return block
+    # Widespread collapse makes the old neighbouring times unsafe as anchors.
+    # Otherwise recognize just the failed run plus its two neighbouring lines.
+    windows, remaining = [], sorted(bad)
+    while remaining:
+        left = remaining.pop(0)
+        right = left+1
+        while remaining and remaining[0] == right:
+            remaining.pop(0)
+            right += 1
+        left = left-1 if left > first else left
+        right = right+1 if right < stop else right
+        begin = max(0., cues[left]['start']-.6) if cues[left]['status'] == 'candidate' else 0.
+        end = min(duration, cues[right-1]['end']+.6) if cues[right-1]['status'] == 'candidate' else duration
+        windows.append((left, right, begin, end))
+    global_recovery = len(bad) >= max(4, (stop-first+4)//5) or any(e-b > 45 for _, _, b, e in windows)
+    if global_recovery:
+        windows = [(first, stop, block['source_range'][0], block['source_range'][1])]
+    result, reports, budget = deepcopy(block), [], 24
+    for left, right, begin, end in windows[:8]:
+        report = dict(context=[left, right], source_range=[begin, end], global_localization=global_recovery,
+                      accepted_lines=[], attempts=[])
+        reports.append(report)
+        if not 0 <= begin < end <= duration or end-begin > 600:
+            report['reason'] = 'localization_budget_exceeded'
+            continue
+        try:
+            response = recognize(begin, end)
+        except ValueError as error:
+            report.update(reason='recognition_failed', error=str(error))
+            continue
+        report['recognition'] = response
+        words = [dict(w, start=w['start']+begin, end=w['end']+begin)
+                 for s in response.get('segments', [])
+                 if s.get('no_speech_prob', 0) < .6 and s.get('compression_ratio', 0) < 2.4
+                 for w in s.get('words') or [] if np.isfinite([w['start'], w['end']]).all()
+                 and 0 <= w['start'] < w['end'] <= end-begin+.001]
+        anchors = anchors_from_words(lines[left:right], words, language, allow_missing=True)
+        report['anchors'] = anchors
+        if not any(a['status'] == 'candidate' for a in anchors):
+            report['reason'] = 'insufficient_recognition_support'
+            continue
+        targets = bad.intersection(range(left, right))
+        if global_recovery:
+            # A several-second contradiction from independently recognized
+            # words is evidence that a superficially valid old line also drifted.
+            targets.update(i+left for i, a in enumerate(anchors) if a['status'] == 'candidate'
+                and cues[i+left]['status'] == 'candidate' and (
+                    abs(cues[i+left]['start']-a['start']) > 4 or
+                    cues[i+left]['end'] < a['start'] or cues[i+left]['start'] > a['end']))
+        proposed, replaced = deepcopy(result), []
+        try:
+            blocks = alignment_blocks(anchors, audio)
+        except ValueError:
+            report['reason'] = 'invalid_recognition_anchors'
+            continue
+        for start, stop_line, cf, cs, ab, ae in blocks:
+            selected = targets.intersection(range(start+left, stop_line+left))
+            if not selected or not 0 < ae-ab <= 45 or budget <= 0:
+                continue
+            budget -= 1
+            attempt = dict(lines=[start+left+1, stop_line+left], source_range=[ab, ae])
+            report['attempts'].append(attempt)
+            try:
+                candidate = align(ab, ae, '\n'.join(lines[cf+left:cs+left]), gap_padding=None,
+                                  dynamic_heads=True, max_word_dur=None, word_dur_factor=None)
+            except ValueError as error:
+                attempt['error'] = str(error)
+                continue
+            attempt['result'] = candidate
+            if candidate is None:
+                continue
+            if any(not np.isfinite([w['start'], w['end']]).all() or
+                   not 0 <= w['start'] <= w['end'] <= ae-ab+.001
+                   for s in candidate['segments'] for w in s['words']):
+                continue
+            part = dict(range=[start+left, stop_line+left], context=[cf+left, cs+left],
+                        source_range=[ab, ae], result=candidate)
+            fresh = partial_alignment_cues(lines, [part], duration, language)
+            for i in sorted(selected):
+                cue, anchor = fresh[i], anchors[i-left]
+                if cue['status'] != 'candidate' or anchor['status'] != 'candidate':
+                    continue
+                if cue['end'] < anchor['start']-2 or cue['start'] > anchor['end']+2:
+                    continue
+                segment = deepcopy(candidate['segments'][i-cf-left])
+                for word in segment['words']:
+                    for key in ('start', 'end'):
+                        word[key] = round(word[key]+ab-block['source_range'][0], 3)
+                segment.update(start=segment['words'][0]['start'], end=segment['words'][-1]['end'])
+                proposed['result']['segments'][i-first] = segment
+                replaced.append(i)
+        fresh = partial_alignment_cues(lines, [proposed], duration, language)
+        usable = [c for c in fresh if c['status'] == 'candidate']
+        try:
+            presentation_cues(usable, duration, lead=0, tail=0, bridge_gap=0)
+            units = [w for c in usable for w in c['units']]
+            if any(a['start'] >= b['start'] for a, b in zip(units, units[1:])):
+                raise ValueError('word_order_conflict')
+        except ValueError:
+            report['reason'] = 'conflicts_with_preserved_neighbours'
+            continue
+        report.update(accepted_lines=[i+1 for i in replaced],
+                      original_segments={i+1: result['result']['segments'][i-first] for i in replaced})
+        result, cues = proposed, fresh
+        bad.difference_update(replaced)
+    result['asr_localizations'] = reports
+    return result
+
+
 def recover_skipped_repeats(result, duration, align):
     """Check a skipped repetition using both its gap and neighbouring phrases.
 
@@ -466,6 +591,7 @@ def main():
         output = Path(job['output'])
         if output.exists():
             raise FileExistsError(output)
+        output.mkdir(parents=True)
         lyrics = json.loads(Path(job['lyrics']).read_text())
         audio_info = sf.info(job['audio'])
         duration = audio_info.frames/audio_info.samplerate
@@ -496,6 +622,26 @@ def main():
             def align_piece(start, stop, text, **options):
                 return align_audio(begin+start, begin+stop, text, **options)
 
+            def recognize_audio(start, stop):
+                from stage_cache import StageCache
+                import anchors_from_asr
+                config = dict(start=start, stop=stop, language=language, model=args.model,
+                              model_sha256=sha(model_root/f'{args.model}.pt'),
+                              temperature=0, condition_on_previous_text=False)
+                key = 'alignment_localization_'+hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:16]
+                path = output.parent/'asr-requests'/(key+'.json')
+                path.parent.mkdir(exist_ok=True)
+                with StageCache(output.parent).stage(key, inputs=[job['audio']], outputs=[path], config=config,
+                        code=[Path(__file__), Path(anchors_from_asr.__file__)]) as reused:
+                    if not reused:
+                        report_progress(detail='定位未对齐的唱段')
+                        recognized = model.transcribe(audio[round(start*16000):round(stop*16000)],
+                            language=language, temperature=0, condition_on_previous_text=False,
+                            word_timestamps=True, regroup=False, verbose=None,
+                            fp16=args.device == 'cuda')
+                        path.write_text(json.dumps(recognized.to_dict(), ensure_ascii=False, default=json_number)+'\n')
+                return dict(json.loads(path.read_text()), localization_cache=dict(file=path.name, reused=reused))
+
             lines = lyrics['lines'][context_first:context_stop]
             result = align_piece(0., len(piece)/16000, '\n'.join(lines))
             if result is None:
@@ -509,6 +655,10 @@ def main():
             block = (recover_unresolved_block(block, lyrics['lines'], anchors, duration, align_audio)
                      if anchors else recover_unresolved_lines(block, lyrics['lines'], duration,
                                                               lyrics['language'], align_audio))
+            if not anchors:
+                (output/'before-localization.json').write_text(json.dumps(block, ensure_ascii=False, default=json_number)+'\n')
+                block = recover_with_local_asr(block, lyrics['lines'], audio, lyrics['language'],
+                                               recognize_audio, align_audio)
             result, begin = block['result'], block['source_range'][0]
             local_units = [{'text': word['word'], 'start': round(word['start']+begin, 3),
                             'end': round(word['end']+begin, 3), 'probability': word['probability']}
@@ -516,7 +666,6 @@ def main():
             units.extend(local_units)
             raw_blocks.append(block)
         # Keep the acoustic evidence even when stitching rejects text or times.
-        output.mkdir(parents=True)
         (output/'raw.json').write_text(json.dumps(raw_blocks, ensure_ascii=False, indent=2, default=json_number)+'\n')
         (output/'units.json').write_text(json.dumps(units, ensure_ascii=False, indent=2, default=json_number)+'\n')
         cues, raw_blocks, boundary_repairs = stitch_blocks(
@@ -539,6 +688,7 @@ def main():
             'dynamic_heads': args.dynamic_heads,
             'boundary_reconciliations': boundary_repairs,
             'line_recoveries': [r for block in raw_blocks for r in block.get('line_recoveries', [])],
+            'asr_localizations': [r for block in raw_blocks for r in block.get('asr_localizations', [])],
             'onset_refinements': refinements,
             'anchors': job.get('anchors'), 'anchors_sha256': sha(job['anchors']) if job.get('anchors') else None,
             'packages': {name: version(name) for name in ['stable-ts', 'openai-whisper', 'torch']},

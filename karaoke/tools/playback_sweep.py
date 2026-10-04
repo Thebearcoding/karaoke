@@ -30,6 +30,9 @@ def soft_failures(result, prepared):
             fallback_units=quality.get('fallback_units', 0),
             line_order_fallback_lines=quality.get('line_order_fallback_lines', []),
             recovered_alignment_lines=quality.get('recovered_alignment_lines', [])))
+    if quality.get('asr_localization_windows'):
+        events.append(dict(module='alignment', code='alignment_localized_with_asr',
+                           windows=quality['asr_localization_windows']))
     lookup = prepared.get('lookup') or {}
     if lookup.get('recording_mismatches'):
         events.append(dict(module='lyrics', code='lyric_recording_mismatch',
