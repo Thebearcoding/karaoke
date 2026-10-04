@@ -32,7 +32,7 @@ export function createVideoSearch(onChange, fetcher = fetch, getLocal = () => []
     try {
       const params = new URLSearchParams(mode === 'youtube' ? {q:query, provider:'youtube'} : {q:query, kind:mode});
       if (cursor) params.set('cursor', cursor);
-      const url = mode === 'artist' ? `/v1/music/artists/${encodeURIComponent(query)}${cursor ? '?'+new URLSearchParams({cursor}) : ''}`
+      const url = ['artist','album'].includes(mode) ? `/v1/music/${mode}s/${encodeURIComponent(query)}${cursor ? '?'+new URLSearchParams({cursor}) : ''}`
         : `${mode === 'youtube' ? '/v1/search' : '/v1/music/search'}?${params}`;
       const response = await fetcher(url, {signal});
       const data = await response.json();
@@ -82,7 +82,7 @@ export function visibleResults(songs, source) {
 
 export function playCount(value) {
   if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? value : null;
-  const match = String(value || '').normalize('NFKC').replaceAll(',', '').trim().match(/^(\d+(?:\.\d+)?)\s*([KMB千万萬亿億])?$/i);
+  const match = String(value || '').normalize('NFKC').replaceAll(',', '').trim().match(/^(?:播放次数:\s*)?(\d+(?:\.\d+)?)\s*([KMB千万萬亿億])?(?:\s*(?:plays|views|次观看|次播放))?$/i);
   return match ? Number(match[1])*({K:1e3, M:1e6, B:1e9, 千:1e3, 万:1e4, 萬:1e4, 亿:1e8, 億:1e8}[match[2]?.toUpperCase()] || 1) : null;
 }
 
@@ -90,6 +90,12 @@ export function orderResults(songs, order) {
   if (order === 'popular') return [...songs].sort((a,b) => (playCount(b.views) ?? -1)-(playCount(a.views) ?? -1));
   if (order === 'ready') return [...songs].sort((a,b) => Number(b.status === 'completed')-Number(a.status === 'completed'));
   if (order === 'title') return [...songs].sort((a,b) => a.title.localeCompare(b.title, 'zh-CN'));
+  if (order === 'relevance') {
+    // Stable partition: only explicit performance labels lower a result's priority.
+    const live = song => /(?:[\[(（【]\s*live\b|\blive(?:\s+(?:at|in|from|on|version|performance|\d{4})\b|\s*[|/·—–-]|[\s)\]）】]*$))|[现現][场場]|演唱[会會]|演奏[会會]|ライブ/i.test(song.title || '') &&
+      !['artist','profile'].includes(song.kind);
+    return [...songs].sort((a,b) => Number(live(a))-Number(live(b)));
+  }
   return songs;
 }
 

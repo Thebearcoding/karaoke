@@ -4410,7 +4410,7 @@ def test_music_catalogue_keeps_provider_order_versions_and_distinct_artist_ids(m
                 calls.append(('search', body['query']))
                 entries = ([dict(artist='SINGER', browseId=namesake_id), dict(artist='Singer', browseId=artist_id)]
                            if body['query'] == 'Singer' else rows)
-                return dict(contents=dict(musicShelfRenderer=dict(contents=entries,
+                return dict(contents=dict(musicShelfRenderer=dict(contents=[dict(musicResponsiveListItemRenderer=e) for e in entries],
                     continuations=[dict(nextContinuationData=dict(continuation='search-next'))])))
             return dict(contents=dict(musicPlaylistShelfRenderer=dict(contents=[dict(continuationItemRenderer=dict(
                 continuationEndpoint=dict(continuationCommand=dict(token='playlist-next'))))])))
@@ -4422,7 +4422,7 @@ def test_music_catalogue_keeps_provider_order_versions_and_distinct_artist_ids(m
             self._send_request('browse', dict(browseId=identifier))
             return dict(tracks=rows)
     monkeypatch.setattr('ytmusicapi.YTMusic', Music)
-    monkeypatch.setattr('ytmusicapi.parsers.search.parse_search_results', lambda contents, kind: contents)
+    monkeypatch.setattr('ytmusicapi.parsers.search.parse_search_results', lambda contents, kind: [row['musicResponsiveListItemRenderer'] for row in contents])
     page = music_entries('songs', 'Evening')
     assert page['continuation'] == dict(params='&ctoken=search-next&continuation=search-next')
     songs = page['results']
@@ -4451,6 +4451,80 @@ def test_music_metadata_does_not_expose_arbitrary_links_or_invent_missing_counts
     assert len(unavailable) == 1 and unavailable[0]['available'] is False
 
 
+def test_unfiltered_music_search_keeps_native_sections_translated_titles_and_collections(monkeypatch):
+    from ytmusicapi import YTMusic
+    from karaoke.video_search import music_entries
+    artist_id = 'UC'+'a'*22
+    artist_run = dict(text='Singer', navigationEndpoint=dict(browseEndpoint=dict(browseId=artist_id)))
+    def row(title, browse_id):
+        return dict(musicResponsiveListItemRenderer=dict(
+            navigationEndpoint=dict(browseEndpoint=dict(browseId=browse_id)),
+            flexColumns=[dict(musicResponsiveListItemFlexColumnRenderer=dict(text=dict(runs=[dict(text=title)]))),
+                dict(musicResponsiveListItemFlexColumnRenderer=dict(text=dict(runs=[
+                    dict(text='专辑'), dict(text=' • '), artist_run, dict(text=' • '), dict(text='2001年')])))]))
+    watch = dict(watchEndpoint=dict(videoId='abcdefghijk', watchEndpointMusicSupportedConfigs=dict(
+        watchEndpointMusicConfig=dict(musicVideoType='MUSIC_VIDEO_TYPE_OMV'))))
+    card = dict(musicCardShelfRenderer=dict(onTap=watch, title=dict(runs=[dict(text='Top song')]),
+        subtitle=dict(runs=[dict(text='视频'), dict(text=' • '), artist_run, dict(text=' • '), dict(text='52M views')])))
+    artist_card = dict(musicCardShelfRenderer=dict(title=dict(runs=[artist_run]), subtitle=dict(runs=[dict(text='歌手')])))
+    sections = [card, dict(itemSectionRenderer=dict(contents=[row('The One and Only', 'MPREexample')])),
+        dict(musicShelfRenderer=dict(contents=[row('Another album', 'MPREanother')])),
+        dict(itemSectionRenderer=dict(contents=[row('Singer', artist_id)])), artist_card]
+    calls = []
+    def send(self, endpoint, body, *params):
+        calls.append((endpoint, body))
+        return dict(contents=dict(sectionListRenderer=dict(contents=sections)))
+    monkeypatch.setattr(YTMusic, '_send_request', send)
+    page = music_entries('songs', '唯一')
+    assert calls == [('search', dict(query='唯一'))]
+    assert page['continuation'] is None
+    assert [s['title'] for s in page['results']] == ['Top song', 'The One and Only', 'Another album', 'Singer', 'Singer']
+    assert [s['kind'] for s in page['results']] == ['song', 'album', 'album', 'artist', 'artist']
+    assert page['results'][1]['browse_id'] == 'MPREexample'
+    assert page['results'][1].get('views') is None  # A release year is not a play count.
+
+
+@pytest.mark.parametrize('first_page', [True, False])
+def test_artist_song_play_counts_survive_native_playlist_parsing(monkeypatch, first_page):
+    from ytmusicapi import YTMusic
+    from karaoke.video_search import music_entries
+    artist_id = 'UC'+'a'*22
+    def column(text, endpoint=None):
+        run = dict(text=text)
+        if endpoint:
+            run['navigationEndpoint'] = endpoint
+        return dict(musicResponsiveListItemFlexColumnRenderer=dict(text=dict(runs=[run])))
+    watch = dict(watchEndpoint=dict(videoId='abcdefghijk'))
+    artist = dict(browseEndpoint=dict(browseId=artist_id, browseEndpointContextSupportedConfigs=dict(
+        browseEndpointContextMusicConfig=dict(pageType='MUSIC_PAGE_TYPE_ARTIST'))))
+    rows = [dict(musicResponsiveListItemRenderer=dict(
+        flexColumns=[column('A song', watch), column('Singer', artist), column(count)],
+        overlay=dict(musicItemThumbnailOverlayRenderer=dict(content=dict(musicPlayButtonRenderer=dict(playNavigationEndpoint=watch))))))
+        for count in ['播放次数：5163万', '52M plays', '2001', '3:21']]
+    monkeypatch.setattr(YTMusic, 'get_artist', lambda self, query: dict(name='Singer', songs=dict(browseId='VLpopular')))
+    def playlist(self, *args, **kwargs):
+        self.response = dict(contents=dict(musicPlaylistShelfRenderer=dict(contents=rows)))
+        return dict(tracks=[])
+    monkeypatch.setattr(YTMusic, 'get_playlist', playlist)
+    monkeypatch.setattr(YTMusic, '_send_request', lambda *a, **k: dict(onResponseReceivedActions=[
+        dict(appendContinuationItemsAction=dict(continuationItems=rows))]))
+    page = music_entries('artist', artist_id, None if first_page else dict(token='next'))
+    assert [s['views'] for s in page['results']] == ['5163万', '52M', None, None]
+    assert all(s['artists'] == [dict(name='Singer', id=artist_id)] for s in page['results'])
+
+
+def test_music_album_browse_keeps_every_track_and_its_order(monkeypatch):
+    from ytmusicapi import YTMusic
+    from karaoke.video_search import music_entries
+    tracks = [dict(title=f'Track {i}', videoId=f'{i:011d}') for i in range(32)]
+    monkeypatch.setattr(YTMusic, 'get_album', lambda self, query: dict(title='An album',
+        artists=[dict(name='Singer', id='UC'+'a'*22)], tracks=tracks))
+    page = music_entries('album', 'MPREexample')
+    assert [s['title'] for s in page['results']] == [s['title'] for s in tracks]
+    assert all(s['album'] == 'An album' and s['uploader'] == 'Singer' for s in page['results'])
+    assert page['continuation'] is None
+
+
 def test_search_api_failure_is_distinct_from_empty_and_creates_no_jobs(tmp_path, monkeypatch):
     from karaoke import video_search
     async def fetch(provider, query, continuation=None):
@@ -4473,6 +4547,8 @@ def test_search_api_failure_is_distinct_from_empty_and_creates_no_jobs(tmp_path,
         assert client.get('/v1/music/search', params=dict(kind='other', q='song')).status_code == 422
         assert client.get('/v1/music/artists/not-an-artist').status_code == 422
         assert client.get('/v1/music/artists/UC'+'a'*22).status_code == 200
+        assert client.get('/v1/music/albums/MPREexample').status_code == 200
+        assert client.get('/v1/music/albums/not-an-album').status_code == 422
         for params in [dict(provider='other', q='song'), dict(provider='youtube', q=' '), dict(provider='youtube', q='a'*161)]:
             assert client.get('/v1/search', params=params).status_code == 422
         assert client.get('/v1/room').json()['entries'] == []
@@ -4642,7 +4718,7 @@ def test_music_pages_keep_localized_names_and_request_only_the_requested_page(mo
     artist_run = dict(text='Singer', navigationEndpoint=dict(browseEndpoint=dict(browseId=artist_id,
         browseEndpointContextSupportedConfigs=dict(browseEndpointContextMusicConfig=dict(pageType='MUSIC_PAGE_TYPE_ARTIST')))))
     row = dict(musicResponsiveListItemRenderer=dict(
-        navigationEndpoint=dict(browseEndpoint=dict(browseId=artist_id)),
+        navigationEndpoint=(dict(browseEndpoint=dict(browseId=artist_id)) if kind == 'artists' else dict(watchEndpoint=dict(videoId='abcdefghijk'))),
         flexColumns=[dict(musicResponsiveListItemFlexColumnRenderer=dict(text=dict(runs=[title_run if kind != 'artists' else artist_run]))),
                      dict(musicResponsiveListItemFlexColumnRenderer=dict(text=dict(runs=[artist_run])))],
         overlay=dict(musicItemThumbnailOverlayRenderer=dict(content=dict(musicPlayButtonRenderer=dict(
@@ -4654,7 +4730,8 @@ def test_music_pages_keep_localized_names_and_request_only_the_requested_page(mo
         if kind == 'artist':
             assert endpoint == 'browse' and body == dict(continuation='second-page')
             return dict(onResponseReceivedActions=[dict(appendContinuationItemsAction=dict(continuationItems=[row]))])
-        assert endpoint == 'search' and body['query'] == 'Singer' and body['params']
+        assert endpoint == 'search' and body['query'] == 'Singer'
+        assert bool(body.get('params')) == (kind == 'artists')
         if first_page:
             shelf = dict(musicShelfRenderer=dict(
                 title=dict(runs=[dict(text='歌曲' if kind == 'songs' else '歌手')]), contents=[row]))

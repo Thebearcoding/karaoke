@@ -103,8 +103,13 @@ test('song, artist and catalogue searches stay separate and discard stale mode r
   requests[2].finish(Array.from({length:150}, (_,i) => ({title:`Song ${i}`})));
   await catalogue;
   assert.equal(snapshots.at(-1).artist.results.length, 150);
+  const album = search.search('MPREexample', 'album');
+  assert.equal(requests[3].url, '/v1/music/albums/MPREexample');
+  requests[3].finish([{title:'An album track',url:'album-track'}]);
+  await album;
+  assert.equal(snapshots.at(-1).album.results[0].title, 'An album track');
   await search.search('Singer', 'local');
-  assert.equal(requests.length, 3);
+  assert.equal(requests.length, 4);
 });
 
 test('popularity uses reported counts, keeps unknowns last and never mutates provider order', () => {
@@ -114,14 +119,29 @@ test('popularity uses reported counts, keeps unknowns last and never mutates pro
   assert.deepEqual(orderResults(songs,'popular').map(s=>s.title), ['C','B','E','D','A']);
   assert.deepEqual(orderResults(songs,'ready').map(s=>s.title), ['D','A','B','C','E']);
   assert.deepEqual(songs.map(s=>s.title), ['A','B','C','D','E']);
-  for (const value of [null, undefined, '', 'unknown', -1, Infinity]) assert.equal(playCount(value), null);
+  for (const value of [null, undefined, '', 'unknown', -1, Infinity, '2001年', '3:21']) assert.equal(playCount(value), null);
   assert.equal(playCount('0'), 0);
   assert.equal(playCount('1.2B'), 1.2e9);
+  assert.equal(playCount('播放次数：5163万'), 51630000);
+  assert.equal(playCount('3443万次观看'), 34430000);
+  assert.equal(playCount('52M plays'), 52000000);
   for (const [value, expected] of [['2591万',25910000], ['1.2亿',120000000], ['２.５萬',25000], ['3千',3000], ['1.2 億',120000000]]) {
     assert.equal(playCount(value), expected);
   }
   assert.deepEqual(orderResults([{views:'2.5M'}, {views:'2591万'}, {views:'1.2亿'}], 'popular').map(s=>s.views), ['1.2亿','2591万','2.5M']);
   assert.ok(previewURL({provider:'youtube_music',url:'https://www.youtube.com/watch?v=abcdefghijk'},'http://localhost').includes('/embed/abcdefghijk'));
+});
+
+test('default lowers explicit live versions without removing results or changing other sorts', () => {
+  const titles = ['A (Live)', 'Studio', 'The One and Only', 'B LIVE at Wembley', 'C 现场版',
+    'Alive', 'Live and Let Die', 'D【LIVE】', 'E ライブ', 'Another studio', 'F Live | Tour'];
+  const songs = titles.map((title,i) => ({title,views:100-i,kind:i === 2 ? 'album' : 'song'}));
+  assert.deepEqual(orderResults(songs,'relevance').map(s=>s.title), [
+    'Studio','The One and Only','Alive','Live and Let Die','Another studio',
+    'A (Live)','B LIVE at Wembley','C 现场版','D【LIVE】','E ライブ','F Live | Tour']);
+  assert.deepEqual(orderResults(songs,'popular'), songs);
+  assert.deepEqual(orderResults(songs,'album'), songs);
+  assert.deepEqual(songs.map(s=>s.title), titles);
 });
 
 

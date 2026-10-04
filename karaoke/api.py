@@ -405,7 +405,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
         return dict(songs=room.library())
 
     async def search_metadata(provider, q, cursor):
-        query = ' '.join(q.split())
+        query = q.strip()
         if not query:
             raise HTTPException(422, '请输入歌名或歌手')
         try:
@@ -421,18 +421,24 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
     @app.get('/v1/search')
     async def search_videos(provider: Literal['youtube'], q: str = Query(min_length=1, max_length=160),
                             cursor: str | None = Query(default=None, min_length=1, max_length=128)):
-        return dict(query=' '.join(q.split()), provider=provider, **await search_metadata(provider, q, cursor))
+        return dict(query=q.strip(), provider=provider, **await search_metadata(provider, q, cursor))
 
     @app.get('/v1/music/search')
     async def search_music(kind: Literal['songs', 'artists'] = 'songs', q: str = Query(min_length=1, max_length=160),
                            cursor: str | None = Query(default=None, min_length=1, max_length=128)):
-        return dict(query=' '.join(q.split()), provider='youtube_music', **await search_metadata(kind, q, cursor))
+        return dict(query=q.strip(), provider='youtube_music', **await search_metadata(kind, q, cursor))
 
     @app.get('/v1/music/artists/{browse_id}')
     async def artist_songs(browse_id: str, cursor: str | None = Query(default=None, min_length=1, max_length=128)):
         if not re.fullmatch(r'UC[\w-]{22}', browse_id):
             raise HTTPException(422, '无效的歌手链接')
         return await search_metadata('artist', browse_id, cursor)
+
+    @app.get('/v1/music/albums/{browse_id}')
+    async def album_songs(browse_id: str):
+        if not re.fullmatch(r'MPRE[\w-]+', browse_id):
+            raise HTTPException(422, '无效的专辑链接')
+        return await search_metadata('album', browse_id, None)
 
     @app.get('/v1/storage')
     async def storage():

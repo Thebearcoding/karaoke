@@ -390,9 +390,9 @@ ASR 固定宽度断行若留下孤立的单字或单词，会在同一短句内�
 
 前后端保留 YouTube 的结果顺序和数量，没有 3 条截断，不按字面关键词、认证、直播状态额外过滤。仅校验单视频 URL 和封面地址。前端在「YouTube 视频」标签展示，本地曲库在独立标签查看。服务端相同查询和分页游标合并请求，元数据缓存 120 秒、最多 32 项；最多并行 2 个查询、待处理最多 8 个，每次含等待最多 25 秒。超量返回 429，平台错误返回 502，成功无结果返回空数组。复用 yt-dlp 解析一个完整原生搜索页，使用平台 continuation 按需翻页，不重复读取前面的页，无需额外 API key。
 
-`GET /v1/music/search?q=关键词&kind=songs|artists` 用 ytmusicapi 按页读取 YouTube Music 搜索结果，默认 songs，使用 `zh_CN` 获取平台提供的中文名称。歌曲包含标准 YouTube `url`、`title`、`artists`（名称与可用的频道 ID）、`album`、`version`、`duration`、平台提供的 `views`（可能带万／亿等单位）、`available`、`thumbnail` 和原始 `rank`。歌手返回 `title`、`browse_id`、频道 `url`、`thumbnail`、`rank`；`provider=youtube_music`。不自行翻译名称、自动选择同名歌手或删改版本。
+`GET /v1/music/search?q=关键词&kind=songs|artists` 用 ytmusicapi 按页读取 YouTube Music 搜索结果，默认参数名保留 songs 以兼容已有客户端，但请求不再添加类型筛选，只向平台传递原始关键词，保留所有类型结果；artists 为用户明确选择的歌手搜索。使用 `zh_CN` 获取平台提供的中文名称。歌曲包含标准 YouTube `url`、`title`、`artists`（名称与可用的频道 ID）、`album`、`version`、`duration`、平台提供的 `views`（可能带万／亿等单位）、`available`、`thumbnail` 和原始 `rank`。歌手返回 `title`、`browse_id`、频道 `url`、`thumbnail`、`rank`；`provider=youtube_music`。不自行翻译名称、自动选择同名歌手或删改版本。
 
-`GET /v1/music/artists/{browse_id}` 只接受 YouTube 频道 ID，读取歌手页及其热门歌单的第一页，返回歌手元数据、`results`、`order=youtube_music_top_songs`、`complete`。没有歌单链接时保留页面精选并标 `complete=false`。平台未提供播放量时保留空值。前端默认平台顺序；播放量排序仅作用于已加载的、计数可知的结果，未知计数排后。这两组接口复用视频搜索的限流、超时、缓存与去重，不下载音视频或创建准备任务。
+`GET /v1/music/artists/{browse_id}` 只接受 YouTube 频道 ID，读取歌手页及其热门歌单的第一页，返回歌手元数据、`results`、`order=youtube_music_top_songs`、`complete`。没有歌单链接时保留页面精选并标 `complete=false`。平台未提供播放量时保留空值。前端默认平台顺序并将明确标注的现场版后置；播放量排序仅作用于已加载的、计数可知的结果，未知计数排后。`GET /v1/music/albums/{browse_id}` 接受 MPRE 专辑 ID，返回专辑元数据及完整曲目列表；专辑内默认沿用曲目顺序。以上接口复用视频搜索的限流、超时、缓存与去重，不下载音视频或创建准备任务。
 
 以上三个接口均返回 `results` 和 `next_cursor`（没有下一页为 `null`）；后续请求在相同接口、相同查询参数上附加 `cursor=next_cursor`。歌手元数据仅在第一页返回；`complete` 表示取得热门歌单入口而非只有页面精选，是否加载到底应看 `next_cursor`。每页保留原始顺序，`rank` 连续编号；前端仅跳过与已加载页面重复的同一来源链接，不合并不同版本。游标与查询／类型绑定，只接受服务端签发的随机句柄，有效期 30 分钟，最多保留 256 个；过期、淘汰或不匹配返回 410，重新搜索即可。游标不包含登录凭据，也不接受客户端指定外部地址。前端在列表末尾附近通过 IntersectionObserver 请求下一页，不轮询；同一页只保留一个在途请求。错误不清空已加载结果，不自动循环重试；空页或全重复页但仍有 continuation 时保留手动加载入口。
 
