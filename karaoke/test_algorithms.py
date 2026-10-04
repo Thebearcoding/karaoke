@@ -879,6 +879,41 @@ class SubtitleIntegrity(unittest.TestCase):
             cue['units'] = [unit]
             self.assertEqual(highlight_coverage_errors([cue], 'English')[0]['reason'], 'invalid display span')
 
+    def test_playback_fallback_limits_estimation_to_broken_word_groups(self):
+        from subtitles import playback_units
+        for language, text, spans in [('Chinese', '今晚一起唱', [(0, 1), (1, 4), (4, 5)]),
+                                      ('English', 'We sing this now', [(0, 3), (3, 13), (13, 16)])]:
+            with self.subTest(language=language):
+                units = [dict(text=text[a:b], first=a, stop=b, start=i+1., end=i+1.5)
+                         for i, (a, b) in enumerate(spans)]
+                cue = dict(text=text, start=0., end=5., units=units)
+                result = playback_units(cue, language)
+                self.assertEqual(result[0], units[0])
+                self.assertEqual(result[2], units[2])
+                self.assertEqual(result[1]['start'], units[1]['start'])
+                self.assertEqual(result[1]['end'], units[1]['end'])
+                self.assertEqual(result[1]['timing_source'], 'linear_fallback')
+                self.assertTrue(highlight_coverage_errors([dict(cue, units=result)], language))
+                self.assertNotIn('timing_source', units[1])
+
+    def test_playback_missing_words_use_neighbor_bounds_not_a_whole_line_reset(self):
+        from subtitles import playback_units
+        first = dict(text='甲', first=0, stop=1, start=1., end=2.)
+        last = dict(text='丁', first=3, stop=4, start=4., end=5.)
+        cue = dict(text='甲乙丙丁', start=0., end=6., units=[first, last])
+        result = playback_units(cue, 'Chinese')
+        self.assertEqual(result[0], first)
+        self.assertEqual(result[-1], last)
+        self.assertEqual((result[1]['text'], result[1]['start'], result[1]['end']), ('乙丙', 2., 4.))
+        # One word with a fabricated interval still cannot pass strict acceptance.
+        missing = dict(text='hello', start=1., end=3., units=[])
+        estimate = playback_units(missing, 'English')
+        self.assertTrue(highlight_coverage_errors([dict(missing, units=estimate)], 'English'))
+        # Overlapping tails expand the local fallback only as far as necessary.
+        overlap = playback_units(dict(cue, units=[dict(first, end=4.2), last]), 'Chinese')
+        self.assertEqual(overlap[-1], last)
+        self.assertEqual((overlap[0]['text'], overlap[0]['start'], overlap[0]['end']), ('甲乙丙', 1., 4.))
+
     def test_display_holds_preserve_acoustic_times_and_instrumental_gaps(self):
         cues = [{'text': '甲', 'start': 1., 'end': 2., 'status': 'candidate'},
                 {'text': '乙', 'start': 1.8, 'end': 3., 'status': 'candidate'},

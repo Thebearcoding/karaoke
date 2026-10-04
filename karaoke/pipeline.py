@@ -154,6 +154,7 @@ class Pipeline:
         self.stage_progress = {}
         self.song_info = {}
         self.aligned_cues = None
+        self.alignment_outputs = set()
         self.source = self.output/'download/source.mkv'
         self.video = self.source
         self.vocals = self.output/'music-separation/song/vocals.wav'
@@ -258,6 +259,8 @@ class Pipeline:
             return self.run_process(name, command, timeout)
         started = time.perf_counter()
         with self.checkpoints.stage(name, **spec) as reused:
+            if name.startswith('align_'):
+                self.alignment_outputs.update(Path(p) for p in spec['outputs'])
             if reused:
                 with self.lock:
                     self.timings['reuse_'+name] = round(time.perf_counter()-started, 3)
@@ -478,6 +481,7 @@ class Pipeline:
                     # An empty anchor list selects direct acoustic alignment.
                     # Neither the lyric provider nor a fabricated transcript supplies times.
                     write_json(self.output/'anchors.json', [])
+                    self.alignment_outputs.add(self.output/'anchors.json')
                     self.phase(song_info={key: lyrics[key] for key in ('title', 'artist', 'language')})
                     return lyrics
                 raise StageFailure('prepare_lyrics', '未找到可靠的已发表歌词；保留音轨，暂不生成猜测歌词')
@@ -663,9 +667,10 @@ class Pipeline:
         coarse, _ = presentation_cues(json.loads((output/'alignment/cues.json').read_text()),
                                      duration, lead=0, tail=0, bridge_gap=0)
         words, mapping = build(coarse, raw, language)
+        write_json(output/'word-cues.json', words)
+        self.alignment_outputs.add(output/'word-cues.json')
         if mapping['fallback_lines']:
             raise StageFailure('align_words', '部分歌词无法生成时间轴；请检查本版本歌词')
-        write_json(output/'word-cues.json', words)
         order_fallbacks = []
         english_context_scope = None
         if language in ('Chinese', 'Japanese'):
@@ -683,6 +688,7 @@ class Pipeline:
             ordered, order_fallbacks = protect_line_order(
                 json.loads((output/'repeated-lyrics/cues.json').read_text()), words)
             write_json(output/'ordered-cues.json', ordered)
+            self.alignment_outputs.add(output/'ordered-cues.json')
             job.update(cues=str(output/'ordered-cues.json'), duration=duration,
                        original_audio=str(output/'source-44100.wav'),
                        output=str(output/'context/song'))
@@ -825,7 +831,7 @@ class Pipeline:
 
     def playback_fallback(self, metadata, duration, error):
         """Keep singing available without presenting unverified word times as valid."""
-        from subtitles import highlight_coverage_errors, normalized
+        from subtitles import playback_units
         lyrics_path = self.output/'lyrics.json'
         lyrics = dict(
             title=self.request.get('title') or metadata.get('track') or metadata.get('title') or 'Untitled',
@@ -837,43 +843,45 @@ class Pipeline:
                 lyrics.update(saved)
         except (OSError, ValueError):
             pass
-        cues, source = [], None
+        candidates = []
         unverified_draft = lyrics.get('provenance', {}).get('kind') == 'asr_draft'
-        for name in (() if unverified_draft else ('final_alignment', 'alignment/cues.json', 'anchors.json')):
+        for name in (() if unverified_draft else ('final_alignment', 'context/song/cues.json',
+                'english-onsets/cues.json', 'ordered-cues.json', 'repeated-lyrics/cues.json',
+                'phonemes/cues.json', 'word-cues.json', 'alignment/cues.json', 'anchors.json')):
             path = self.output/name
-            if name != 'final_alignment' and not path.is_file():
+            if name != 'final_alignment' and (not path.is_file() or not any(
+                    path == p or path.is_relative_to(p) for p in self.alignment_outputs)):
                 continue
             try:
                 candidate = self.aligned_cues if name == 'final_alignment' else json.loads(path.read_text())
-                if not candidate or [c['text'] for c in candidate] != lyrics['lines']:
-                    continue
-                if any(c['status'] != 'candidate' or not all(isinstance(c[k], (int, float)) and math.isfinite(c[k])
-                       for k in ('start', 'end')) or not 0 <= c['start'] < c['end'] <= duration+.001 for c in candidate):
-                    continue
-                if any(a['end'] > b['start'] for a, b in zip(candidate, candidate[1:])):
-                    continue
-                for cue in candidate:
-                    units = cue.get('units', []) if name == 'final_alignment' else []
-                    try:
-                        valid = (units and not highlight_coverage_errors([cue], lyrics['language']) and
-                            normalized(''.join(u['text'] for u in units)) == normalized(cue['text']) and
-                            all(all(isinstance(u[k], (int, float)) and math.isfinite(u[k])
-                                    for k in ('start', 'end')) and
-                                cue['start'] <= u['start'] < u['end'] <= cue['end'] for u in units) and
-                            all(a['start'] < b['start'] for a, b in zip(units, units[1:])))
-                    except (AttributeError, KeyError, TypeError, ValueError):
-                        valid = False
-                    # Keep intact measured lines; one bad line must not erase the rest.
-                    cues.append(dict(cue, units=units) if valid else
-                                dict(text=cue['text'], start=cue['start'], end=cue['end'], status='candidate', units=[]))
-                source = name
-                break
-            except (ValueError, KeyError, TypeError):
+                if isinstance(candidate, list) and len(candidate) == len(lyrics['lines']):
+                    candidates.append((name, candidate))
+            except (OSError, ValueError, KeyError, TypeError):
                 continue
+        cues, sources, estimated, omitted = [], [], [], []
+        for line, text in enumerate(lyrics['lines']):
+            for name, candidate in candidates:
+                cue = candidate[line]
+                try:
+                    if (cue['text'] != text or cue['status'] != 'candidate' or
+                            not all(isinstance(cue[k], (int, float)) and math.isfinite(cue[k]) for k in ('start', 'end')) or
+                            not 0 <= cue['start'] < cue['end'] <= duration+.001 or
+                            cues and cues[-1]['end'] > cue['start']):
+                        continue
+                    units = playback_units(cue, lyrics['language'])
+                except (AttributeError, KeyError, TypeError, ValueError):
+                    continue
+                cues.append(dict(cue, units=units))
+                sources.append(dict(line=line+1, source=name))
+                estimated.extend(dict(line=line+1, **u) for u in units if u.get('timing_source') == 'linear_fallback')
+                break
+            else:
+                omitted.append(line+1)
         units = sum(len(c['units']) for c in cues)
         warning = dict(error=processing_error(error, self.output),
-                       subtitle_mode='partial_word' if units else 'line' if cues else 'unavailable',
-                       phrase_timing_source=source, word_alignment_passed=False,
+                       subtitle_mode='estimated_word' if estimated else 'partial_word' if units else 'line' if cues else 'unavailable',
+                       phrase_timing_sources=sources, word_alignment_passed=False,
+                       estimated_spans=estimated, omitted_lines=omitted,
                        unhighlighted_lines=[i for i, c in enumerate(cues, 1) if not c['units']])
         if unverified_draft:
             warning['unverified_asr_text_omitted'] = True

@@ -1440,6 +1440,7 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
     (tmp_path/'alignment').mkdir()
     coarse = [dict(text='A little song', start=.1, end=.9, status='candidate')]
     (tmp_path/'alignment/cues.json').write_text(json.dumps(coarse))
+    pipeline.alignment_outputs.add(tmp_path/'alignment')
     monkeypatch.setenv('OPENAI_API_KEY', 'unit-test-placeholder')
     monkeypatch.setattr(pipeline, 'download', lambda: ({'format_id': 'fixture'}, 1))
     alignment_started = threading.Event()
@@ -1497,13 +1498,15 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
         assert result['quality']['lyrics_provenance']['needs_review']
         assert not result['quality']['playback_fallback']['word_alignment_passed']
         assert result['quality']['playback_fallback']['error']['code'] == failure+'_failed'
-        assert json.loads((tmp_path/'cues.json').read_text()) == [dict(coarse[0], units=[])]
+        fallback = json.loads((tmp_path/'cues.json').read_text())
+        assert fallback[0]['units'] == [dict(text='A little song', first=0, stop=13, start=.1, end=.9,
+                                           timing_source='linear_fallback', bounds_source='neighbor_or_phrase')]
         assert 'mv' in result['artifacts'] and result['shared_preview_gain'] == .8
         assert not (tmp_path/'audio-result.json').exists()
 
 
 @pytest.mark.parametrize('bad', ['text', 'overlap', 'missing', 'nan'])
-def test_playback_fallback_never_invents_missing_phrase_times(tmp_path, bad):
+def test_playback_fallback_omits_only_phrases_without_usable_times(tmp_path, bad):
     pipeline = Pipeline(dict(url=URL), tmp_path)
     (tmp_path/'lyrics.json').write_text(json.dumps(dict(title='Example', artist='', language='English',
         lines=['First line', 'Next line'], provenance={})))
@@ -1515,9 +1518,15 @@ def test_playback_fallback_never_invents_missing_phrase_times(tmp_path, bad):
     if bad == 'missing': cues[0]['start'] = None
     if bad == 'nan': cues[0]['start'] = float('nan')
     (tmp_path/'alignment/cues.json').write_text(json.dumps(cues))
+    pipeline.alignment_outputs.add(tmp_path/'alignment')
     pipeline.playback_fallback({}, 4, StageFailure('align_words', 'unresolved'))
-    assert json.loads((tmp_path/'cues.json').read_text()) == []
-    assert json.loads((tmp_path/'quality.json').read_text())['playback_fallback']['subtitle_mode'] == 'unavailable'
+    output = json.loads((tmp_path/'cues.json').read_text())
+    retained = 0 if bad == 'overlap' else 1
+    assert len(output) == 1 and output[0]['text'] == cues[retained]['text']
+    assert output[0]['start'] == cues[retained]['start'] and output[0]['end'] == cues[retained]['end']
+    warning = json.loads((tmp_path/'quality.json').read_text())['playback_fallback']
+    assert warning['subtitle_mode'] == 'estimated_word'
+    assert warning['omitted_lines'] == [2 if bad == 'overlap' else 1]
 
 
 @pytest.mark.parametrize('bad', ['merged', 'text', 'span', 'nan', 'outside', 'backward'])
@@ -1538,14 +1547,78 @@ def test_playback_fallback_preserves_other_lines_highlights(tmp_path, bad):
     pipeline.aligned_cues = cues
     pipeline.playback_fallback({}, 4, StageFailure('align_words', 'unresolved'))
     output = json.loads((tmp_path/'cues.json').read_text())
-    assert output[0] == dict(text=lines[0], start=0, end=1, status='candidate', units=[])
+    assert output[0]['units'][0]['timing_source'] == 'linear_fallback'
+    if bad != 'merged':
+        assert output[0]['units'][1:] == cues[0]['units'][1:]
+        assert output[0]['units'][0]['start'] == 0
+        assert output[0]['units'][0]['end'] == .2
     assert output[1] == cues[1]
     quality = json.loads((tmp_path/'quality.json').read_text())
-    assert quality['units'] == 2
-    assert quality['playback_fallback']['subtitle_mode'] == 'partial_word'
-    assert quality['playback_fallback']['unhighlighted_lines'] == [1]
+    assert quality['units'] == (3 if bad == 'merged' else 5)
+    assert quality['playback_fallback']['subtitle_mode'] == 'estimated_word'
+    assert [s['line'] for s in quality['playback_fallback']['estimated_spans']] == [1]
+    assert quality['playback_fallback']['unhighlighted_lines'] == []
     assert quality['playback_fallback']['word_alignment_passed'] is False
     assert quality['onset_accuracy'] is None
+
+
+def test_playback_fallback_recovers_each_phrase_from_available_stages(tmp_path):
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    lines = ['第一句', '第二句', '第三句']
+    (tmp_path/'lyrics.json').write_text(json.dumps(dict(language='Chinese', lines=lines, provenance={})))
+    coarse = [dict(text=text, start=2*i, end=2*i+1, status='candidate') for i, text in enumerate(lines)]
+    (tmp_path/'alignment').mkdir()
+    (tmp_path/'alignment/cues.json').write_text(json.dumps(coarse))
+    refined = [dict(c, units=[dict(text=x, first=i, stop=i+1, start=c['start']+.2*i,
+                                   end=c['start']+.2*(i+1)) for i, x in enumerate(c['text'])]) for c in coarse]
+    refined[1]['start'] = None
+    (tmp_path/'word-cues.json').write_text(json.dumps(refined))
+    pipeline.alignment_outputs.update([tmp_path/'word-cues.json', tmp_path/'alignment'])
+    # A later stage left by an earlier attempt was not revalidated this run.
+    (tmp_path/'context/song').mkdir(parents=True)
+    stale = [dict(c, start=c['start']+.1) for c in coarse]
+    (tmp_path/'context/song/cues.json').write_text(json.dumps(stale))
+    pipeline.playback_fallback({}, 6, StageFailure('align_phonemes', 'fixture'))
+    output = json.loads((tmp_path/'cues.json').read_text())
+    assert output[0] == refined[0] and output[2] == refined[2]
+    assert output[1]['units'][0]['timing_source'] == 'linear_fallback'
+    assert output[1]['start'] == 2 and output[1]['end'] == 3
+    warning = json.loads((tmp_path/'playback-warning.json').read_text())
+    assert warning['omitted_lines'] == []
+    assert [x['source'] for x in warning['phrase_timing_sources']] == [
+        'word-cues.json', 'alignment/cues.json', 'word-cues.json']
+
+
+def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatch):
+    from PIL import Image
+    import karaoke.render_lyric_progress as renderer
+    def caption(text, *, layout_out, **kwargs):
+        # The middle span crosses two display rows. All glyphs are visible white
+        # squares so exact pixels distinguish gradual fill from a whole-word jump.
+        layout_out.update(mask=Image.new('L', (60, 50), 255), characters=[
+            dict(index=i, left=3+20*(i%2), right=13+20*(i%2), top=3+25*(i//2),
+                 baseline=13+25*(i//2), line=i//2, character=x) for i, x in enumerate(text)])
+        return Image.new('RGBA', (60, 50), (255, 255, 255, 255))
+    monkeypatch.setattr(renderer, 'caption_image', caption)
+    cue = dict(text='甲乙丙丁', units=[
+        dict(first=0, stop=1, start=1., end=2.),
+        dict(first=1, stop=3, start=2., end=4., timing_source='linear_fallback'),
+        dict(first=3, stop=4, start=5., end=6.),
+    ])
+    caption = renderer.Caption(cue, 'cinema_focus', 'Chinese')
+    white, amber = (255, 255, 255, 255), caption.color+(255,)
+    assert caption.frame(.9, 'word').getpixel((5, 5)) == white
+    assert caption.frame(1., 'word').getpixel((5, 5)) == amber
+    assert caption.frame(2., 'word').getpixel((25, 5)) == white
+    middle = caption.frame(3., 'word')
+    assert middle.getpixel((25, 5)) == amber and middle.getpixel((5, 30)) == white
+    assert caption.frame(4., 'word').getpixel((5, 30)) == amber
+    assert caption.frame(4.9, 'word').getpixel((25, 30)) == white
+    assert caption.frame(5., 'word').getpixel((25, 30)) == amber
+    # Seeking back must not reuse the cached fully highlighted frame.
+    assert caption.frame(2., 'word').getpixel((25, 5)) == white
+    assert caption.frame(3., 'static').getpixel((5, 5)) == white
+    assert len(caption.cache) <= 3
 
 
 def test_playback_fallback_keeps_unverified_asr_draft_out_of_subtitles(tmp_path):

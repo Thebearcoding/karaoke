@@ -49,16 +49,27 @@ class Caption:
             if instant >= hold_end:
                 return self.base
         key = (mode, index)
-        if key in self.cache:
+        sweeping = mode == 'word' and unit.get('timing_source') == 'linear_fallback'
+        cacheable = not sweeping or instant >= unit['end']
+        if cacheable and key in self.cache:
             return self.cache[key]
         result = self.base.copy()
         chars = self.layout['characters']
         if mode == 'word':
             area = Image.new('L', result.size)
             draw = ImageDraw.Draw(area)
+            if sweeping:
+                selected = [c for c in chars if unit['first'] <= c['index'] < unit['stop']]
+                remaining = sum(c['right']-c['left']+4 for c in selected) * min(
+                    1., max(0., (instant-unit['start'])/(unit['end']-unit['start'])))
             for char in chars:
-                if char['index'] < unit['stop']:
-                    draw.rectangle((char['left']-2, char['top']-2, char['right']+2, char['baseline']+8), fill=255)
+                right = char['right']+2
+                if sweeping and unit['first'] <= char['index'] < unit['stop']:
+                    width = char['right']-char['left']+4
+                    right = char['left']-2+min(width, remaining)
+                    remaining = max(0., remaining-width)
+                if char['index'] < unit['stop'] and right > char['left']-2:
+                    draw.rectangle((char['left']-2, char['top']-2, right, char['baseline']+8), fill=255)
             tint = Image.new('RGBA', result.size, self.color+(0,))
             tint.putalpha(ImageChops.multiply(area, self.layout['mask']))
             result.alpha_composite(tint)
@@ -73,7 +84,8 @@ class Caption:
                 draw.rounded_rectangle((left, y, right, y+2), radius=1, fill=self.color+(255,))
         else:
             raise ValueError(mode)
-        self.cache[key] = result
+        if cacheable:
+            self.cache[key] = result
         return result
 
 
@@ -211,14 +223,16 @@ def main():
         'style_parameters': STYLES[args.style],
         'font': 'Bold Songti / Hiragino Mincho W6; source glyphs verified',
         'shown_lines': sorted(i+1 for i in shown), 'decode_check': 'passed', 'probe': probe,
-        'motion': 'Fixed text positions; hard line cuts; audio-aligned unit boundaries',
+        'motion': 'Fixed text positions; hard line cuts; measured onsets with local linear playback fallback',
         'next_line_enabled': args.next_line,
         'read_ahead_strategy': 'Current and next lines visible; advance at sung onsets, with white preparation during long-gap countdowns',
         'song_intro': intro,
         'countdown': {'enabled': args.countdown, 'events': countdown,
                       'minimum_silence_seconds': TOKENS['countdown']['minimum_silence_seconds'],
                       'policy': 'Three one-second dot steps, then empty rings held for one second before the acoustic onset'},
-        'fallback_lines': [i+1 for i in sorted(shown) if not cues[i].get('units')]}
+        'fallback_lines': [i+1 for i in sorted(shown) if not cues[i].get('units')],
+        'estimated_lines': [i+1 for i in sorted(shown) if any(
+            u.get('timing_source') == 'linear_fallback' for u in cues[i].get('units', []))]}
     args.output.with_suffix('.render.json').write_text(json.dumps(report, ensure_ascii=False, indent=2)+'\n')
     print(json.dumps(report, ensure_ascii=False), flush=True)
 

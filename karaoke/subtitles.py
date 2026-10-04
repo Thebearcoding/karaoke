@@ -46,6 +46,8 @@ def highlight_coverage_errors(cues, language):
     errors = []
     for line, cue in enumerate(cues, 1):
         text, units = cue['text'], cue.get('units', [])
+        if any(u.get('timing_source') == 'linear_fallback' for u in units):
+            errors.append(dict(line=line, reason='estimated playback timing'))
         if any(not isinstance(u.get('first'), int) or not isinstance(u.get('stop'), int)
                or not 0 <= u['first'] < u['stop'] <= len(text)
                or u['text'] != text[u['first']:u['stop']] for u in units):
@@ -62,6 +64,58 @@ def highlight_coverage_errors(cues, language):
             errors.append(dict(line=line, first=first, stop=stop, text=text[first:stop],
                                reason='word or character lacks an independent highlight'))
     return errors
+
+
+def playback_units(cue, language):
+    """Preserve usable onsets and sweep only unresolved spans between known bounds."""
+    text = cue['text']
+    begin, end = cue.get('aligned_start', cue['start']), cue.get('aligned_end', cue['end'])
+    if not all(isinstance(t, (int, float)) and math.isfinite(t) for t in (begin, end)) or not (
+            cue['start'] <= begin < end <= cue['end']):
+        begin, end = cue['start'], cue['end']
+
+    def sweep(first, stop, start, finish, source):
+        return dict(text=text[first:stop], first=first, stop=stop, start=start, end=finish,
+                    timing_source='linear_fallback', bounds_source=source)
+
+    known = []
+    atoms = list(highlight_spans(text, language))
+    for unit in cue.get('units') or []:
+        if not isinstance(unit, dict):
+            continue
+        first, stop, start, finish = (unit.get(k) for k in ('first', 'stop', 'start', 'end'))
+        if (not isinstance(first, int) or not isinstance(stop, int) or
+                not 0 <= first < stop <= len(text) or unit.get('text') != text[first:stop] or
+                not all(isinstance(t, (int, float)) and math.isfinite(t) for t in (start, finish)) or
+                not begin <= start < finish <= end or
+                any(a < first < b or a < stop < b for a, b in atoms) or
+                known and (first < known[-1]['stop'] or start <= known[-1]['start'])):
+            continue
+        single = dict(text=unit['text'], units=[dict(unit, first=0, stop=stop-first)])
+        known.append(sweep(first, stop, start, finish, 'word_group')
+                     if highlight_coverage_errors([single], language) else dict(unit))
+
+    result, cursor = [], 0
+    # A sentinel lets the final missing span use the measured phrase end.
+    for unit in [*known, dict(first=len(text), stop=len(text), start=end, end=end)]:
+        if normalized(text[cursor:unit['first']]):
+            left = result[-1]['end'] if result else begin
+            right = unit['start']
+            if left >= right and result:
+                # Overlapping word tails leave no interval: expand this fallback
+                # by one group, keeping its first onset and the next good onset.
+                previous = result.pop()
+                cursor, left = previous['first'], previous['start']
+            if left < right:
+                result.append(sweep(cursor, unit['first'], left, right, 'neighbor_or_phrase'))
+            else:
+                # A missing prefix shares the first measured onset. Only this
+                # first group must join the sweep, not the rest of the line.
+                unit = sweep(cursor, unit['stop'], begin, unit['end'], 'neighbor_or_phrase')
+        if unit['first'] < unit['stop']:
+            result.append(unit)
+        cursor = unit['stop']
+    return result
 
 
 def lyric_cues(lines, units, duration):
