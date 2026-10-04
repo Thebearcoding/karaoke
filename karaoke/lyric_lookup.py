@@ -143,9 +143,9 @@ def published_lyric_lines(text, title):
     converter = OpenCC('t2s')
     credit = re.compile(r'^(?:歌名|歌曲|词|曲|词曲|作词|作曲|编曲|演唱|专辑|发行日|制作人|监制|'
         r'弦乐(?:编写|编曲)?|合声|和声(?:编写|编曲)?|钢琴|吉他|贝斯|鼓|'
-        r'(?:第[一二三四\d]+)?(?:小提琴|中提琴|大提琴)|录音(?:师)?|混音(?:师)?|母带(?:工程师)?|'
+        r'(?:第[一二三四\d]+)?(?:小提琴|中提琴|大提琴)|录音(?:师|助理)?|混音(?:师)?|母带(?:工程师)?|音频(?:助理|工程师)|'
         r'title|artist|album|composer|lyricist|producer|lyrics|music|written by|produced by|'
-        r'guitar|bass|drums|piano|strings|recorded by|mixed by|mastered by)\s*[：:]', re.I)
+        r'guitar|bass|drums|piano|strings|recorded by|mixed by|mastered by|audio engineer|assistant engineer)\s*[：:]', re.I)
     rows, metadata = [], []
     for i, line in enumerate(text.splitlines(), 1):
         line = line.strip()

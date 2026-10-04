@@ -982,6 +982,17 @@ def test_published_lyrics_remove_credit_blocks_but_keep_sung_titles_and_colons(c
     assert published_lyric_lines('\n'.join(body), '晚風') == (body, [])
 
 
+@pytest.mark.parametrize('credit', ['音频助理', '音頻工程師', '录音助理', 'Audio Engineer', 'Assistant Engineer'])
+def test_translated_production_footer_cannot_change_the_lyric_language(credit):
+    from karaoke.lyric_lookup import published_candidate
+    body = ['Stars above the quiet shore', 'I will sing once more']
+    row = dict(trackId=123, trackTitle='Evening', artists=[dict(artistName='Singer')],
+        album=dict(albumTitle='Evening'), lyrics='\n'.join([*body, credit+' : A Person', 'Another Person']))
+    lines, report = published_candidate([row], dict(title='Evening', artist='Singer'), '')
+    assert lines == body and report['language'] == 'English'
+    assert report['excluded_credit_lines'] == [3, 4]
+
+
 @pytest.mark.parametrize('change', [dict(trackTitle='別的歌'), dict(artists=[dict(artistName='別人')]),
     dict(album=dict(albumTitle='Live')), dict(album=dict(albumTitle='Remix')), dict(artists=None),
     dict(lyrics=None), dict(lyrics='歌名：晚風'), dict(lyrics='專輯：春天\n歌曲：晚風\n作詞：林林'),
