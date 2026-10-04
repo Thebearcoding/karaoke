@@ -151,20 +151,28 @@ function renderVideoResults(providers) {
   renderSearchMore(info);
   searchSongs = orderResults(info.results.map(song => ({...song,
     status:library.find(item => item.url === song.url)?.status || song.status})), searchOrder);
-  $('video-grid').className = artists ? 'artist-grid' : videoSource === 'youtube' ? 'video-grid' : 'music-list';
+  const videos = videoSource === 'youtube', local = videoSource === 'local';
+  $('search-list').className = artists ? '' : `search-list${videos ? ' video-list' : local ? ' local-list' : ''}`;
+  $('search-list').setAttribute('role', artists ? 'group' : 'table');
+  $('search-list').setAttribute('aria-label', artists ? '歌手列表' : videos ? '视频列表' : '歌曲列表');
+  $('music-columns').hidden = artists || !searchSongs.length;
+  $('music-title-heading').textContent = videos ? '视频' : '歌曲';
+  $('music-artist-heading').textContent = videos ? '频道' : '歌手';
+  $('video-grid').className = artists ? 'artist-grid' : 'music-list';
+  if (artists) $('video-grid').removeAttribute('role');
+  else $('video-grid').setAttribute('role', 'rowgroup');
   const rows = searchSongs.map((song, index) => {
     const thumbnail = song.thumbnail ? `<img src="${escape(song.thumbnail)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<span class="music-initial">${escape(song.title.slice(0,1))}</span>`;
     if (artists) return `<button class="artist-card" data-artist-result="${index}">${thumbnail}<strong>${escape(song.title)}</strong><span>热门歌曲 ${icon('arrow')}</span></button>`;
-    if (videoSource === 'youtube') return `<article class="video-card" data-result="${index}">
-      <button class="video-thumbnail" data-preview="${index}" aria-label="预览：${escape(song.title)}">${thumbnail}<span class="preview-label">${icon('play')}预览</span>${song.duration ? `<span class="poster-duration">${time(song.duration)}</span>` : ''}</button>
-      <h3 title="${escape(song.title)}">${escape(song.title)}</h3><p class="video-uploader">${escape(song.uploader)}${playCount(song.views) !== null ? ` · ${formatPlays(song.views)}播放` : ''}</p>
-      <div class="video-actions"><button data-add-video="${index}">${icon('plus')}<span>加入歌单</span></button><a href="${escape(song.url)}" target="_blank" rel="noopener noreferrer">YouTube ↗</a></div></article>`;
-    const credits = song.artists?.length ? song.artists.map(a => a.id ? `<button data-artist-id="${escape(a.id)}" data-artist-name="${escape(a.name)}">${escape(a.name)}</button>` : escape(a.name)).join(' · ') : escape(song.uploader);
-    return `<article class="music-row" data-result="${index}"><span class="music-rank">${String(index+1).padStart(2,'0')}</span>
-      <button class="music-cover" data-preview="${index}" aria-label="预览：${escape(song.title)}">${thumbnail}<span>${icon('play')}</span></button>
-      <div class="music-title"><h3>${escape(song.title)}</h3><p class="music-credits">${credits}</p><p class="music-meta">${escape(song.version || '本地歌曲')}${song.album ? ` · ${escape(song.album)}` : ''}<span class="music-availability"></span></p></div>
-      <div class="music-stats">${playCount(song.views) !== null ? `<span>${formatPlays(song.views)}<small>播放</small></span>` : ''}<span>${song.duration ? time(song.duration) : ''}</span></div>
-      <div class="music-actions"><button class="music-add" data-add-video="${index}" aria-label="加入歌单：${escape(song.title)}">${icon('plus')}<span>加入歌单</span></button>${song.provider === 'youtube_music' ? `<button class="find-mv" data-find-mv="${index}">找 MV</button>` : ''}</div></article>`;
+    const credits = song.artists?.length ? song.artists.map(a => a.id ? `<button data-artist-id="${escape(a.id)}" data-artist-name="${escape(a.name)}">${escape(a.name)}</button>` : escape(a.name)).join(' · ') : escape(song.uploader || '—');
+    return `<article class="music-row" data-result="${index}" role="row"><span class="music-rank" role="cell">${String(index+1).padStart(2,'0')}</span>
+      <div class="music-song" role="cell"><button class="music-cover" data-preview="${index}" aria-label="预览：${escape(song.title)}">${thumbnail}<span>${icon('play')}</span></button>
+        <div class="music-title"><h3 title="${escape(song.title)}">${escape(song.title)}</h3><div class="music-meta"><span>${escape(song.version || (local ? '本地歌曲' : 'YouTube 视频'))}</span><span class="music-availability"></span></div></div></div>
+      <div class="music-credits" role="cell" title="${escape(song.artists?.map(a => a.name).join(' · ') || song.uploader || '')}">${credits}</div>
+      <div class="music-album" role="cell" title="${escape(song.album || '')}">${escape(song.album || '—')}</div>
+      <div class="music-plays" role="cell">${playCount(song.views) !== null ? formatPlays(song.views) : '—'}<small>播放</small></div>
+      <div class="music-duration" role="cell">${song.duration ? time(song.duration) : '—'}</div>
+      <div class="music-actions" role="cell"><button class="music-add" data-add-video="${index}" aria-label="加入歌单：${escape(song.title)}">${icon('plus')}<span>加入歌单</span></button>${song.provider === 'youtube_music' ? `<button class="find-mv" data-find-mv="${index}">找 MV</button>` : videos ? `<a class="find-mv" href="${escape(song.url)}" target="_blank" rel="noopener noreferrer">YouTube ↗</a>` : ''}</div></article>`;
   });
   updateSearchRows(rows);
   document.querySelectorAll('[data-video-source]').forEach(button => {
@@ -252,7 +260,8 @@ function updateVideoButtons() {
   document.querySelectorAll('.music-availability').forEach(label => {
     const song = searchSongs[label.closest('[data-result]').dataset.result];
     const cached = library.find(item => item.url === song.url);
-    label.textContent = cached?.status === 'completed' ? ' · 已准备' : cached?.status === 'running' ? ' · 准备中' : cached?.status === 'queued' ? ' · 等待准备' : cached?.status === 'video_evicted' ? ' · 待补视频' : '';
+    label.textContent = cached?.status === 'completed' ? '已准备' : cached?.status === 'running' ? '准备中' : cached?.status === 'queued' ? '等待准备' : cached?.status === 'video_evicted' ? '待补视频' : '';
+    label.classList.toggle('is-ready', cached?.status === 'completed');
   });
 }
 
