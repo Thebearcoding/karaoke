@@ -1422,7 +1422,7 @@ def test_download_selects_720p_without_reducing_audio_quality(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize('audio_only', [False, True])
-@pytest.mark.parametrize('failure', ['transcribe', 'prepare_lyrics', 'align_words', 'align_phonemes', 'separate_lead', 'package_three_stems', 'overlap'])
+@pytest.mark.parametrize('failure', ['transcribe', 'prepare_lyrics', 'align_words', 'align_phonemes', 'separate_lead', 'package_three_stems', 'overlap', 'dependency_overlap'])
 def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(tmp_path, monkeypatch, audio_only, failure):
     import soundfile as sf
     pipeline = Pipeline(dict(url=URL), tmp_path, audio_only=audio_only, device='cpu')
@@ -1443,16 +1443,33 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
     monkeypatch.setenv('OPENAI_API_KEY', 'unit-test-placeholder')
     monkeypatch.setattr(pipeline, 'download', lambda: ({'format_id': 'fixture'}, 1))
     alignment_started = threading.Event()
+    lyrics_started, resampled, packaged = (threading.Event() for _ in range(3))
     def fail(stage):
         if stage == 'separate_lead' and failure == 'overlap':
             assert alignment_started.wait(10), 'Alignment waited for independent lead separation'
+        if failure == 'dependency_overlap':
+            if stage == 'separate_music' and not audio_only:
+                assert lyrics_started.wait(5), 'Lyric lookup waited for separation'
+            elif stage == 'package_two_stems':
+                assert resampled.wait(5), 'Resampling waited for independent stem packaging'
+            elif stage == 'resample_vocals':
+                resampled.set()
+            elif stage == 'package_three_stems':
+                packaged.set()
         if stage == failure:
             raise StageFailure(stage, 'fixture failure')
-    monkeypatch.setattr(pipeline, 'run', lambda stage, *a, **kw: fail(stage))
+    def run(stage, command, **kwargs):
+        if stage == 'resample_vocals' and failure == 'dependency_overlap':
+            subprocess.run(command, check=True, capture_output=True)
+        fail(stage)
+    monkeypatch.setattr(pipeline, 'run', run)
     def prepare(*args):
+        lyrics_started.set()
+        if failure == 'dependency_overlap':
+            assert packaged.wait(5), 'Stem packaging waited for independent lyric lookup'
         fail('transcribe')
         fail('prepare_lyrics')
-        if failure != 'overlap':
+        if failure != 'overlap' and len(args) > 2:
             args[-1].result()
         return lyrics
     monkeypatch.setattr(pipeline, 'prepare_text', prepare)
@@ -1464,9 +1481,12 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
         fail('align_phonemes')
     monkeypatch.setattr(pipeline, 'align', align)
     monkeypatch.setattr(pipeline, 'render_video', lambda result: (tmp_path/'mv.mp4').write_bytes(b'video fixture'))
-    if failure == 'overlap':
+    if failure.endswith('overlap'):
         result = pipeline.execute()
         assert result['validation_scope'] == ('audio_and_lyrics' if audio_only else 'full_mv')
+        if failure == 'dependency_overlap':
+            assert sf.info(tmp_path/'vocals-16k.wav').samplerate == 16000
+            assert (tmp_path/'vocals-asr.mp3').exists() == audio_only
     elif audio_only or failure in ('separate_lead', 'package_three_stems'):
         with pytest.raises(StageFailure, match='fixture failure'):
             pipeline.execute()
@@ -2973,6 +2993,32 @@ def test_preview_encoder_preserves_partial_final_frames(tmp_path, rate, frames, 
     quieter = encode_preview(source, tmp_path/'quieter.mp3', .25, frames, channels)
     assert quieter['decoded_peak'] == pytest.approx(report['decoded_peak']*.5, rel=.05)
     assert sf.info(source).frames == frames and sf.info(source).subtype == 'DOUBLE'
+
+
+@pytest.mark.parametrize('previews', [False, True])
+def test_master_only_package_still_builds_verified_three_stem_previews(tmp_path, previews):
+    import soundfile as sf
+    from karaoke import exact_stems
+    from karaoke.three_stems import build, verify
+
+    rate, frames = 48000, 48013
+    tone = (.2*np.sin(2*np.pi*440*np.arange(frames)/rate)).astype('float32')
+    audio = np.column_stack([tone, -tone])
+    source, vocals, lead = (tmp_path/f'{name}.wav' for name in ('source', 'vocals', 'lead'))
+    for path, scale in ((source, 1), (vocals, .5), (lead, .25)):
+        sf.write(path, audio*scale, rate, subtype='DOUBLE')
+    two, three = tmp_path/'two', tmp_path/'three'
+    subprocess.run([sys.executable, exact_stems.__file__, 'build', '--source', str(source),
+        '--vocals-estimate', str(vocals), '--output', str(two), *([] if previews else ['--no-previews'])],
+        check=True, capture_output=True)
+    assert {p.name for p in two.glob('*.mp3')} == ({'vocals.mp3', 'backing.mp3'} if previews else set())
+    assert exact_stems.verify(two)['bitwise_equal']
+    result = build(two, lead, three)
+    assert result['reconstruction']['vocal_first']['bitwise_equal']
+    assert verify(three)['vocal_first']['bitwise_equal']
+    assert set(result['previews']) == {'lead', 'backing-vocals', 'instrumental', 'karaoke'}
+    for name in result['previews']:
+        assert validate_preview(three/f'{name}.mp3', frames, 2, rate)['decoded_length_delta_samples'] == 0
 
 
 def test_preview_clipping_reports_measured_peak(tmp_path):

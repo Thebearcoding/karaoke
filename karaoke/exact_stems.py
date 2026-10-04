@@ -177,7 +177,7 @@ def encode_previews(sources, output, gain, frames, channels):
     raise worst
 
 
-def build(source_path, estimate_path, output):
+def build(source_path, estimate_path, output, *, previews=True):
     source_path, estimate_path, output = (Path(p).resolve() for p in (source_path, estimate_path, output))
     if output.exists():
         raise FileExistsError(f'Preserve existing stem package: {output}')
@@ -193,9 +193,11 @@ def build(source_path, estimate_path, output):
     check = reconstruction_report(source, *written)
     if not check['bitwise_equal']:
         raise ArithmeticError('Serialized masters failed bitwise reconstruction')
-    gain = min(1., .9/max(float(np.max(np.abs(a))) for a in (source, *written)))
-    gain, previews = encode_previews({name: output/f'{name}.wav' for name in ('vocals', 'backing')},
-                                    output, gain, len(source), source.shape[1])
+    gain, preview_records = None, {}
+    if previews:
+        gain = min(1., .9/max(float(np.max(np.abs(a))) for a in (source, *written)))
+        gain, preview_records = encode_previews({name: output/f'{name}.wav' for name in ('vocals', 'backing')},
+                                               output, gain, len(source), source.shape[1])
     manifest = {'schema_version': 1, 'source': {'path': str(source_path),
         'container_sha256': sha(source_path), 'decoder': decoder,
         'decoder_version': subprocess.check_output(['ffmpeg', '-version'], text=True).splitlines()[0],
@@ -205,7 +207,7 @@ def build(source_path, estimate_path, output):
         'masters': {name: {'file': f'{name}.wav', 'sha256': sha(output/f'{name}.wav'),
                           'format': 'WAV DOUBLE; unscaled'} for name in ('vocals', 'backing')},
         'reconstruction': check, 'numerical_repair': repair,
-        'preview_shared_gain': gain, 'previews': previews,
+        'preview_shared_gain': gain, 'previews': preview_records,
         'purity': 'Not established by the bitwise test; check vocals and backing separately.',
         'packaging_seconds': time.perf_counter()-started, 'code_sha256': sha(__file__)}
     (output/'manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
@@ -239,9 +241,10 @@ if __name__ == '__main__':
     create.add_argument('--source', required=True, type=Path)
     create.add_argument('--vocals-estimate', required=True, type=Path)
     create.add_argument('--output', required=True, type=Path)
+    create.add_argument('--no-previews', action='store_true', help='Build and verify only the lossless masters')
     check = commands.add_parser('verify')
     check.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
-    result = (build(args.source, args.vocals_estimate, args.output)
+    result = (build(args.source, args.vocals_estimate, args.output, previews=not args.no_previews)
               if args.command == 'build' else verify(args.output))
     print(json.dumps(result, indent=2))

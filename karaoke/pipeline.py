@@ -172,7 +172,8 @@ class Pipeline:
             'separate_music': (['source-44100.wav'], ['music-separation'], [ROOT/'benchmark_neural.py']),
             'package_two_stems': (['download/source.mkv', 'music-separation/song/vocals.wav'],
                                   ['two-stems'], [ROOT/'exact_stems.py']),
-            'resample_vocals': (['music-separation/song/vocals.wav'], ['vocals-16k.wav', 'vocals-asr.mp3'], []),
+            'resample_vocals': (['music-separation/song/vocals.wav'],
+                                ['vocals-16k.wav'] + (['vocals-asr.mp3'] if self.audio_only else []), []),
             'transcribe': (['vocals-asr.mp3', 'source-44100.wav'], ['asr'], [ROOT/p for p in
                 ('transcribe_lyrics.py', 'local_asr.py', 'anchors_from_asr.py', 'subtitles.py', 'job_schema.py')]),
             'separate_lead': (['music-separation/song/vocals.wav'], ['lead-separation'], [ROOT/'benchmark_neural.py']),
@@ -464,14 +465,10 @@ class Pipeline:
         return dict(metadata, format_id=added['format_id']+'+'+metadata['format_id'])
 
     def prepare_text(self, metadata, duration, lead_task=None):
-        self.run('package_two_stems', [sys.executable, ROOT/'exact_stems.py', 'build',
-            '--source', self.source, '--vocals-estimate', self.vocals, '--output', self.output/'two-stems'])
-        self.run('resample_vocals', ['ffmpeg', '-v', 'error', '-nostdin', '-i', self.vocals,
-            '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', self.output/'vocals-16k.wav',
-            '-ar', '16000', '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '64k', self.output/'vocals-asr.mp3'])
         if not self.audio_only:
             from .lyric_lookup import prepare_online_lyrics
             self.phase('prepare_lyrics', True)
+            started = time.perf_counter()
             try:
                 lyrics = (prepare_online_lyrics(self.request, metadata, duration, self.checkpoints,
                                                 self.text_model, self.catalog_root)
@@ -485,10 +482,11 @@ class Pipeline:
                     return lyrics
                 raise StageFailure('prepare_lyrics', '未找到可靠的已发表歌词；保留音轨，暂不生成猜测歌词')
             finally:
+                with self.lock:
+                    self.timings['prepare_lyrics'] = round(time.perf_counter()-started, 3)
                 self.phase('prepare_lyrics', False)
         language = self.request.get('language') or 'auto'
-        # Finish the lead stem before ASR can need it. Packaging and resampling
-        # above still overlap separation, and separation failures propagate here.
+        # The independent ASR check can use the lead stem as an alternate input.
         if lead_task is not None:
             lead_task.result()
         lead = self.output/'lead-separation/song/vocals.wav'
@@ -750,37 +748,44 @@ class Pipeline:
         if self.device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
         metadata, source_duration = self.download()
-        audio = self.output/'source-44100.wav'
-        self.run('decode_audio', ['ffmpeg', '-v', 'error', '-nostdin', '-i', self.source,
-            '-map', '0:a:0', '-ar', '44100', '-ac', '2', '-c:a', 'pcm_f32le', audio])
-        self.inputs(audio, 'mixture-inputs.json')
-        duration = sf.info(audio).duration
-        common = [self.separator_python, '-u', ROOT/'benchmark_neural.py', '--device', self.device,
-                  '--batch-size', os.getenv('KARAOKE_SEPARATION_BATCH_SIZE', '1')]
-        self.run('separate_music', common + ['--model', 'vocals_mel_band_roformer.ckpt', '--config',
-            ROOT/'models/pretrained/vocals_mel_band_roformer.yaml', '--inputs', self.output/'mixture-inputs.json',
-            '--output', self.output/'music-separation'])
-        self.inputs(self.vocals, 'vocal-inputs.json')
         text_error = None
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            # Published text needs only source metadata and duration, not separated audio.
+            text = None if self.audio_only else pool.submit(self.prepare_text, metadata, source_duration)
+            audio = self.output/'source-44100.wav'
+            self.run('decode_audio', ['ffmpeg', '-v', 'error', '-nostdin', '-i', self.source,
+                '-map', '0:a:0', '-ar', '44100', '-ac', '2', '-c:a', 'pcm_f32le', audio])
+            self.inputs(audio, 'mixture-inputs.json')
+            duration = sf.info(audio).duration
+            common = [self.separator_python, '-u', ROOT/'benchmark_neural.py', '--device', self.device,
+                      '--batch-size', os.getenv('KARAOKE_SEPARATION_BATCH_SIZE', '1')]
+            self.run('separate_music', common + ['--model', 'vocals_mel_band_roformer.ckpt', '--config',
+                ROOT/'models/pretrained/vocals_mel_band_roformer.yaml', '--inputs', self.output/'mixture-inputs.json',
+                '--output', self.output/'music-separation'])
+            self.inputs(self.vocals, 'vocal-inputs.json')
             lead = pool.submit(self.run, 'separate_lead', common + ['--model', 'karaoke_bs_roformer_anvuew.ckpt', '--config',
                 ROOT/'models/pretrained/karaoke_bs_roformer_anvuew.yaml', '--target-stem', 'Vocals',
                 '--inputs', self.output/'vocal-inputs.json', '--output', self.output/'lead-separation'])
-            try:
-                lyrics = self.prepare_text(metadata, source_duration, lead)
-            except (StageFailure, ValueError) as error:
-                if self.audio_only or (isinstance(error, StageFailure) and error.stage not in ('transcribe', 'prepare_lyrics')):
-                    raise
-                text_error = error
-                lyrics = None
             def package_stems():
-                # Alignment uses the first vocal stem and need not wait for
-                # lead/backing separation. Audio failures still prevent release.
+                self.run('package_two_stems', [sys.executable, ROOT/'exact_stems.py', 'build',
+                    '--source', self.source, '--vocals-estimate', self.vocals,
+                    '--output', self.output/'two-stems', *([] if self.audio_only else ['--no-previews'])])
                 lead.result()
                 self.run('package_three_stems', [sys.executable, ROOT/'three_stems.py',
                     'build', '--existing', self.output/'two-stems', '--lead-estimate',
                     self.output/'lead-separation/song/vocals.wav', '--output', self.output/'stems'])
             packaging = pool.submit(package_stems)
+            self.run('resample_vocals', ['ffmpeg', '-v', 'error', '-nostdin', '-i', self.vocals,
+                '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', self.output/'vocals-16k.wav',
+                *(['-ar', '16000', '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '64k',
+                   self.output/'vocals-asr.mp3'] if self.audio_only else [])])
+            try:
+                lyrics = self.prepare_text(metadata, source_duration, lead) if text is None else text.result()
+            except (StageFailure, ValueError) as error:
+                if self.audio_only or (isinstance(error, StageFailure) and error.stage not in ('transcribe', 'prepare_lyrics')):
+                    raise
+                text_error = error
+                lyrics = None
             if text_error is None:
                 try:
                     self.align(lyrics, duration)
