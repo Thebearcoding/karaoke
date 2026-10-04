@@ -69,6 +69,32 @@ def map_words(cue, words, offset, language):
     return units
 
 
+def partial_alignment_cues(lines, raw_blocks, duration, language):
+    """Keep independently usable lines when a different line prevents stitching."""
+    from subtitles import lyric_cues
+    cues = [dict(text=text, status='unresolved_timing') for text in lines]
+    for block in raw_blocks:
+        first, stop = block['context']
+        segments = block['result']['segments']
+        if not 0 <= first < stop <= len(lines) or len(segments) != stop-first:
+            continue
+        offset = block['source_range'][0]
+        for index in range(*block['range']):
+            if not first <= index < stop:
+                continue
+            try:
+                words = segments[index-first]['words']
+                units = [dict(text=w['word'], start=offset+w['start'], end=offset+w['end']) for w in words]
+                cue = lyric_cues([lines[index]], units, duration)[0]
+                if cue['status'] != 'candidate':
+                    continue
+                cue['units'] = map_words(cue, words, offset, language)
+                cues[index] = cue
+            except (ValueError, KeyError, IndexError, TypeError):
+                continue
+    return cues
+
+
 def build(display_cues, raw_blocks, language):
     result = [dict(cue, units=[], timing_status='unavailable') for cue in display_cues]
     errors = []

@@ -134,6 +134,28 @@ def text_language(text):
     return None
 
 
+def published_lyric_lines(text, title):
+    """Remove explicit credit headers/footers before wrapping published lyrics."""
+    converter = OpenCC('t2s')
+    credit = re.compile(r'^(?:歌名|词|曲|词曲|作词|作曲|编曲|演唱|专辑|发行日|制作人|监制|'
+        r'弦乐(?:编写|编曲)?|合声|和声(?:编写|编曲)?|钢琴|吉他|贝斯|鼓|'
+        r'(?:第[一二三四\d]+)?(?:小提琴|中提琴|大提琴)|录音(?:师)?|混音(?:师)?|母带(?:工程师)?|'
+        r'title|artist|album|composer|lyricist|producer|lyrics|music|written by|produced by|'
+        r'guitar|bass|drums|piano|strings|recorded by|mixed by|mastered by)\s*[：:]', re.I)
+    rows = [(i, line.strip()) for i, line in enumerate(text.splitlines(), 1) if line.strip()]
+    is_credit = lambda line: bool(credit.match(converter.convert(unicodedata.normalize('NFKC', line))))
+    first = 0
+    while first < len(rows):
+        line = rows[first][1]
+        if is_credit(line) or (identity(line) & identity(title) and
+                first+1 < len(rows) and is_credit(rows[first+1][1])):
+            first += 1
+        else:
+            break
+    stop = next((i for i in range(first, len(rows)) if is_credit(rows[i][1])), len(rows))
+    return [line for _, line in rows[first:stop]], [i for i, _ in rows[:first]+rows[stop:]]
+
+
 def published_candidate(rows, song, source_title):
     """Select published text; recording onsets still come entirely from our audio."""
     def versions(text):
@@ -162,16 +184,7 @@ def published_candidate(rows, song, source_title):
         text = row.get('lyrics')
         if not isinstance(text, str) or not text.strip() or len(text) > 30000:
             continue
-        lines, excluded = [], []
-        for number, line in enumerate(text.splitlines(), 1):
-            if not line.strip():
-                continue
-            if not lines and re.match(
-                    r'^\s*(?:歌名|詞曲|词曲|作詞|作词|作曲|編曲|编曲|演唱|專輯|专辑|發行日|发行日|'
-                    r'title|artist|album|composer|lyricist)\s*[：:]', line, re.I):
-                excluded.append(number)
-            else:
-                lines.append(line.strip())
+        lines, excluded = published_lyric_lines(text, title)
         language = song.get('language') or text_language('\n'.join(lines))
         if not lines or language is None or any('[' in line or ']' in line for line in lines):
             continue
@@ -182,7 +195,7 @@ def published_candidate(rows, song, source_title):
         return lines, dict(status='candidate', provider='line_music', language=language,
             url='https://music-tw.line.me/track/'+track_id, track=title, artists=artists, album=album,
             text_sha256=hashlib.sha256(text.encode()).hexdigest(), excluded_credit_lines=excluded,
-            text_transform='leading_metadata_removed_then_whitespace_only', provider_timestamps_used=False)
+            text_transform='credit_header_footer_removed_then_whitespace_only', provider_timestamps_used=False)
     return None, dict(status='no_matching_published_text', provider='line_music')
 
 

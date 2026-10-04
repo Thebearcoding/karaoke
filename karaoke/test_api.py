@@ -747,6 +747,23 @@ def test_published_lyrics_use_explicit_video_credits_without_a_text_model(tmp_pa
     assert result['provenance']['independent_asr_coverage'] is None
 
 
+@pytest.mark.parametrize('credits', [
+    ('詞：林林', '曲：林林', '弦樂編寫：樂手', '錄音師：工程師'),
+    ('词：林林', '曲：林林', '第一小提琴：乐手', '混音师：工程师'),
+    ('Lyrics: Writer', 'Music: Composer', 'Guitar: Player', 'Mixed by: Engineer')])
+def test_published_lyrics_remove_credit_blocks_but_keep_sung_titles_and_colons(credits):
+    from karaoke.lyric_lookup import published_candidate, published_lyric_lines
+    body = ['晚風', '我说：继续往前走', '晚風']
+    raw = '\n'.join(['晚風', *credits[:2], *body, credits[2], 'A Player', credits[3]])
+    row = dict(trackId=123, trackTitle='晚風', artists=[dict(artistName='林林')],
+               album=dict(albumTitle='春天'), lyrics=raw)
+    lines, report = published_candidate([row], dict(title='晚風', artist='林林'), '')
+    assert lines == body
+    assert report['excluded_credit_lines'] == [1, 2, 3, 7, 8, 9]
+    assert report['text_sha256'] == hashlib.sha256(raw.encode()).hexdigest()
+    assert published_lyric_lines('\n'.join(body), '晚風') == (body, [])
+
+
 @pytest.mark.parametrize('change', [dict(trackTitle='別的歌'), dict(artists=[dict(artistName='別人')]),
     dict(album=dict(albumTitle='Live')), dict(album=dict(albumTitle='Remix')), dict(artists=None),
     dict(lyrics=None), dict(lyrics='歌名：晚風'), dict(trackId='../other')])
@@ -1626,6 +1643,30 @@ def test_playback_fallback_recovers_each_phrase_from_available_stages(tmp_path):
     assert warning['omitted_lines'] == []
     assert [x['source'] for x in warning['phrase_timing_sources']] == [
         'word-cues.json', 'alignment/cues.json', 'word-cues.json']
+
+
+@pytest.mark.parametrize('fresh', [True, False])
+@pytest.mark.parametrize('missing_words', [True, False])
+def test_playback_fallback_retains_raw_aligned_lines_when_whole_block_text_check_fails(tmp_path, fresh, missing_words):
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    lines = ['First phrase', 'Missing phrase', 'Last phrase']
+    (tmp_path/'lyrics.json').write_text(json.dumps(dict(language='English', lines=lines, provenance={})))
+    (tmp_path/'alignment').mkdir()
+    raw = [dict(range=[0,3], context=[0,3], source_range=[10,20], result=dict(segments=[
+        dict(words=[dict(word=text, start=i*2, end=i*2+1)])
+        for i,text in enumerate(['First phrase','incorrect model text','Last phrase'])]))]
+    if missing_words:
+        raw[0]['result']['segments'][1].pop('words')
+    (tmp_path/'alignment/raw.json').write_text(json.dumps(raw))
+    if fresh:
+        pipeline.alignment_outputs.add(tmp_path/'alignment')
+    pipeline.playback_fallback({}, 25, StageFailure('align_words', 'block failed'))
+    output = json.loads((tmp_path/'cues.json').read_text())
+    assert [c['text'] for c in output] == ([lines[0], lines[2]] if fresh else [])
+    assert [c['start'] for c in output] == ([10, 14] if fresh else [])
+    warning = json.loads((tmp_path/'playback-warning.json').read_text())
+    assert warning['omitted_lines'] == ([2] if fresh else [1,2,3])
+    assert not warning['word_alignment_passed']
 
 
 def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatch):

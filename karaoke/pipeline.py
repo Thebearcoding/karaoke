@@ -868,6 +868,14 @@ class Pipeline:
             except (OSError, ValueError, KeyError, TypeError):
                 continue
         cues, sources, estimated, omitted = [], [], [], []
+        raw_path = self.output/'alignment/raw.json'
+        if not unverified_draft and raw_path.parent in self.alignment_outputs and raw_path.is_file():
+            from lyric_progress import partial_alignment_cues
+            try:
+                candidates.append(('alignment/raw.json', partial_alignment_cues(lyrics['lines'],
+                    json.loads(raw_path.read_text()), duration, lyrics['language'])))
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
         for line, text in enumerate(lyrics['lines']):
             for name, candidate in candidates:
                 cue = candidate[line]
