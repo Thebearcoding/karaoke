@@ -485,6 +485,12 @@ def alignment_blocks(anchors, audio):
         if valid(stop-1) and context_stop > stop and anchors[stop]['start']-anchors[stop-1]['end'] > 4:
             context_stop = stop
         begin = max(0., anchors[context_first]['start']-.6) if valid(context_first) else 0.
+        hint = anchors[first].get('search_start')
+        if (not valid(first) and context_first < first and stop < count and valid(stop)
+                and hint is not None and anchors[context_first]['end']+4 < hint < anchors[stop]['start']):
+            # Do not drag a partially recognized phrase back across a long
+            # instrumental gap just to retain the previous line as context.
+            context_first, begin = first, max(0., hint-.6)
         # ASR often stops before a held final syllable; retain its acoustic tail.
         tail_padding = 3.0 if context_stop == count else .6
         end = min(len(audio)/16000, anchors[context_stop-1]['end']+tail_padding) if valid(context_stop-1) else len(audio)/16000

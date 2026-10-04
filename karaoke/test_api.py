@@ -1302,6 +1302,48 @@ def test_local_recognition_broadens_once_when_old_neighbours_miss_the_verse():
     assert [s['words'][0]['start'] for s in result['result']['segments']]==starts
 
 
+@pytest.mark.parametrize('prefix', ['recognized', 'scattered', 'too_short'])
+def test_partial_recognition_narrows_acoustic_search_after_a_long_instrumental(prefix):
+    from karaoke.anchors_from_asr import anchors_from_words
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines = ['前一句', '风吹过this long English phrase', '后一句']
+    words = [dict(word='前一句',start=1.,end=2.)]
+    for i,word in enumerate('风吹过' if prefix != 'too_short' else '风吹'):
+        words.append(dict(word=word,start=30+i*.2,end=30+(i+1)*.2))
+        if prefix == 'scattered':
+            words.append(dict(word='噪声',start=30+(i+1)*.2,end=30+(i+1)*.2+.1))
+    words.append(dict(word='后一句',start=35.,end=36.))
+    anchors = anchors_from_words(lines,words,'Chinese',allow_missing=True)
+    assert anchors[1]['status'] == 'unresolved_text' and anchors[1]['start'] is None
+    if prefix == 'recognized':
+        assert anchors[1]['search_start'] == 30.
+    else:
+        assert 'search_start' not in anchors[1]
+    segments = [dict(words=[dict(word=t,start=s,end=e)]) for t,s,e in
+                zip(lines,[1.,4.,35.],[2.,4.,36.])]
+    block = dict(range=[0,3],context=[0,3],source_range=[0.,40.],result=dict(segments=segments))
+    calls=[]
+    def align(begin,end,text,**kwargs):
+        calls.append((begin,end,text))
+        if begin < 29.:
+            return None
+        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=e-begin)])
+            for t,s,e in zip(lines[1:],[30.,35.],[33.,36.])])
+    result = recover_with_local_asr(block,lines,np.zeros(40*16000),'Chinese',
+        lambda begin,end:dict(segments=[dict(words=[dict(w,start=w['start']-begin,end=w['end']-begin) for w in words])]),align)
+    if prefix == 'recognized':
+        assert len(calls) == 1
+        begin,end,text = calls[0]
+        assert 29. <= begin < 30. and 36. <= end <= 40. and text == '\n'.join(lines[1:])
+        assert result['asr_localizations'][0]['accepted_lines'] == [2]
+        assert result['result']['segments'][1]['words'] == [dict(word=lines[1],start=30.,end=33.)]
+    else:
+        assert all(begin < 29. for begin,end,text in calls)
+        assert result['result'] == block['result']
+    assert result['result']['segments'][0] == segments[0]
+    assert result['result']['segments'][2] == segments[2]
+
+
 @pytest.mark.parametrize('partly_timed', [False, True])
 @pytest.mark.parametrize('asr_gap', ['none', 'long_intro', 'missing_middle', 'boundary_overlap', 'boundary_unresolved', 'unheard_opening', 'long_phrase_window'])
 def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(partly_timed, asr_gap):

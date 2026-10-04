@@ -52,8 +52,20 @@ def _match_words(lines, words, units):
         matched = [correspondence[i] for i in range(position, position+len(key)) if i in correspondence]
         coverage = len(matched)/len(key) if key else 0.
         if coverage < .5:
-            cues.append({'text': line, 'start': None, 'end': None,
-                         'matched_fraction': coverage, 'status': 'unresolved_text'})
+            cue = {'text': line, 'start': None, 'end': None,
+                   'matched_fraction': coverage, 'status': 'unresolved_text'}
+            prefix = []
+            for i in range(position, position+len(key)):
+                owner = correspondence.get(i)
+                if owner is None or (prefix and owner > prefix[-1]+1):
+                    break
+                prefix.append(owner)
+            # A recognized prefix can narrow a later acoustic search even
+            # when the rest (often a language switch) is not recognized.
+            # It is not a timing for the complete line.
+            if len(set(prefix)) >= 3:
+                cue['search_start'] = round(words[prefix[0]]['start'], 3)
+            cues.append(cue)
             position += len(key)
             continue
         start, end = words[min(matched)]['start'], words[max(matched)]['end']
