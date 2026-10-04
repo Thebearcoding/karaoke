@@ -1345,7 +1345,7 @@ def test_partial_recognition_narrows_acoustic_search_after_a_long_instrumental(p
 
 
 @pytest.mark.parametrize('partly_timed', [False, True])
-@pytest.mark.parametrize('asr_gap', ['none', 'long_intro', 'missing_middle', 'boundary_overlap', 'boundary_unresolved', 'unheard_opening', 'long_phrase_window'])
+@pytest.mark.parametrize('asr_gap', ['none', 'long_intro', 'missing_middle', 'boundary_overlap', 'boundary_unresolved', 'unheard_opening', 'long_phrase_window', 'reuse_context'])
 def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(partly_timed, asr_gap):
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines = ['alpha','bravo','charlie','delta','echo','foxtrot','golf','hotel']
@@ -1355,6 +1355,8 @@ def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(part
     duration = 120. if asr_gap=='unheard_opening' else 90.
     if asr_gap=='long_phrase_window':duration=140.
     ends = {line:start+1 for line,start in starts.items()}
+    if asr_gap == 'reuse_context':
+        ends = {line:start+2.5 for line,start in starts.items()}
     block = dict(range=[0,8],context=[0,8],source_range=[0.,duration],result=dict(segments=[
         dict(text=t,words=[dict(word=t,start=float(i),end=float(i if i<5 else i+1))])
         for i,t in enumerate(lines)]))
@@ -1376,12 +1378,21 @@ def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(part
         if asr_gap == 'long_intro':words[0]['start'] = 0.
         if asr_gap == 'long_phrase_window':words[2]['start'] = 42.
         return dict(segments=[dict(words=words)])
+    aligned_texts = []
     def align(begin,end,text,**kwargs):
+        aligned_texts.append(text)
         assert end-begin <= (90 if asr_gap=='long_phrase_window' and text==lines[2] else 45)
         if asr_gap=='boundary_unresolved' and text.splitlines()==lines[2:8]:
             return None
-        return dict(segments=[dict(text=t,words=[dict(word=t,start=starts[t]-begin,end=ends[t]-begin)])
-                              for t in text.splitlines()])
+        segments = [dict(text=t,words=[dict(word=t,start=starts[t]-begin,end=ends[t]-begin)])
+                    for t in text.splitlines()]
+        if asr_gap == 'boundary_unresolved':
+            for segment in segments:
+                if segment['text'] == 'foxtrot':
+                    segment['words'][0]['start'] -= 2  # No existing context fixes this boundary either.
+        if asr_gap == 'reuse_context' and text.splitlines() == lines[2:7]:
+            segments[1]['words'][0]['start'] = starts['charlie']-.5-begin
+        return dict(segments=segments)
     result = recover_with_local_asr(block,lines,np.zeros(int(duration*16000)),'English',recognize,align)
     assert calls == [(0.,duration)]
     last = 6 if asr_gap=='boundary_unresolved' else 7 if asr_gap=='boundary_overlap' else 9
@@ -1393,6 +1404,9 @@ def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(part
     if asr_gap.startswith('boundary_'):
         assert result['result']['segments'][6:] == block['result']['segments'][6:]
         assert result['asr_localizations'][0]['boundary_reconciliations']
+    if asr_gap == 'reuse_context':
+        assert len(aligned_texts) == 3  # Reuse the existing joint prediction, no new inference.
+        assert result['asr_localizations'][0]['boundary_reconciliations'][0]['selected_block'] > 0
 
 
 @pytest.mark.parametrize('padding', ['zero', 'quiet', 'other_channel', 'all_silent', 'nonfinite', 'wrong_duration'])

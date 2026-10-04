@@ -254,7 +254,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                     mislocalized.add(i+left)
             targets.update(mislocalized)
         report['contradicted_lines'] = sorted(i+1 for i in mislocalized)
-        proposed, replaced = deepcopy(result), []
+        proposed, replaced, contexts = deepcopy(result), [], []
         try:
             blocks = alignment_blocks(anchors, audio)
         except ValueError:
@@ -297,6 +297,10 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 continue
             part = dict(range=[start+left, stop_line+left], context=[cf+left, cs+left],
                         source_range=[ab, ae], result=candidate)
+            if valid_recovery(candidate, lines[cf+left:cs+left], ae-ab):
+                # Keep the joint context prediction for later boundary repair;
+                # another window's core can disagree with this valid overlap.
+                contexts.append(dict(part, range=[start+left, start+left]))
             fresh = partial_alignment_cues(lines, [part], duration, language)
             for i in sorted(selected):
                 cue, anchor = fresh[i], anchors[i-left]
@@ -339,7 +343,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 budget -= 1
                 return align(begin, end, text, **options)
             try:
-                _, selected, repairs = stitch_blocks(lines, [proposed], duration, language, reconcile)
+                _, selected, repairs = stitch_blocks(lines, [proposed, *contexts], duration, language, reconcile)
                 report['boundary_reconciliations'] = repairs
                 for selected_block in selected:
                     for i in range(*selected_block['range']):
