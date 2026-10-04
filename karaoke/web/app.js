@@ -450,11 +450,13 @@ function updateTime(position) {
 const player = new Player($('video'), updateTime, id => command('next', {entry_id:id}));
 let bufferingRequest;
 player.onBuffering = (position, startedAt, entryId = player.entry?.id) => {
-  if (bufferingRequest) return;
+  const token = `${entryId}:${startedAt}`;
+  if (bufferingRequest === token) return;
+  bufferingRequest = token;
   loading = true;
   updateCover();
-  bufferingRequest = command('buffering', {entry_id:entryId, position, playback_started_at:startedAt})
-    .finally(() => { bufferingRequest = null; });
+  command('buffering', {entry_id:entryId, position, playback_started_at:startedAt})
+    .finally(() => { if (bufferingRequest === token) bufferingRequest = null; });
 };
 
 async function syncPlayback() {
@@ -464,6 +466,7 @@ async function syncPlayback() {
     player.clear(); readySent = null; loading = false; loadError = '';
     updateCover(); return;
   }
+  const revision = state.revision;
   try {
     if (!state.playing || !state.started_at) player.stop();
     const position = state.position + (state.playing && state.started_at ?
@@ -473,7 +476,6 @@ async function syncPlayback() {
       player.onBuffering(position, state.started_at, song.id);
       return;
     }
-    const revision = state.revision;
     loading = !player.hasAudio(position) || player.key !== song.id;
     updateCover();
     await player.load(song, position);
@@ -487,7 +489,7 @@ async function syncPlayback() {
     player.apply({...state, levels:effectiveLevels()}, clockOffset);
     updateTransport();
   } catch (error) {
-    if (state.current_id !== song.id) return;
+    if (state.current_id !== song.id || state.revision !== revision) return;
     loading = false; loadError = error.message;
     updateCover(); toast(loadError);
   }
