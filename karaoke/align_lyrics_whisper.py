@@ -167,7 +167,8 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
     return result
 
 
-def recover_with_local_asr(block, lines, audio, language, recognize, align):
+def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
+                          force_global=False, max_alignment_attempts=24):
     """Use recognition only to locate failed lyrics, never as replacement text."""
     from anchors_from_asr import anchors_from_words
     from lyric_progress import partial_alignment_cues
@@ -197,10 +198,10 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align):
         begin = max(0., cues[left]['start']-.6) if cues[left]['status'] == 'candidate' else 0.
         end = min(duration, cues[right-1]['end']+.6) if cues[right-1]['status'] == 'candidate' else duration
         windows.append((left, right, begin, end))
-    global_recovery = len(bad) >= max(4, (stop-first+4)//5) or any(e-b > 45 for _, _, b, e in windows)
+    global_recovery = force_global or len(bad) >= max(4, (stop-first+4)//5) or any(e-b > 45 for _, _, b, e in windows)
     if global_recovery:
         windows = [(first, stop, block['source_range'][0], block['source_range'][1])]
-    result, reports, budget = deepcopy(block), [], 24
+    result, reports, budget = deepcopy(block), [], max_alignment_attempts
     for left, right, begin, end in windows[:8]:
         report = dict(context=[left, right], source_range=[begin, end], global_localization=global_recovery,
                       accepted_lines=[], attempts=[])
@@ -342,6 +343,12 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align):
                       original_segments={i+1: result['result']['segments'][i-first] for i in replaced})
         result, cues = proposed, fresh
         bad.difference_update(replaced)
+    if bad and not global_recovery and budget > 0:
+        # Apparently valid neighbours can squeeze missing lyrics into a window
+        # that never contained them. Broaden once, sharing the remaining budget.
+        result = recover_with_local_asr(result, lines, audio, language, recognize, align,
+                                       force_global=True, max_alignment_attempts=budget)
+        reports.extend(result.get('asr_localizations', []))
     result['asr_localizations'] = reports
     return result
 

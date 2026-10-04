@@ -1167,7 +1167,7 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
     block = dict(range=[0,3],context=[0,3],source_range=[0.,12.],result=dict(segments=segments))
     original = deepcopy(block)
     def recognize(begin,end):
-        assert end-begin < 10
+        assert end-begin <= 12
         return dict(segments=[dict(no_speech_prob=1 if failure=='no_speech' else 0,
             words=[dict(word=text,start=t-begin,end=t+.8-begin) for text,t in zip(lines,starts)])])
     def align(begin,end,text,**kwargs):
@@ -1193,6 +1193,26 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
         for t,s in zip(lines,starts)]))
     assert recover_with_local_asr(good,lines,np.zeros(12*16000),'English',
         lambda *a:pytest.fail('A complete alignment ran ASR'),align) is good
+
+
+def test_local_recognition_broadens_once_when_old_neighbours_miss_the_verse():
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines, starts = ['alpha', 'bravo', 'charlie'], [30., 40., 50.]
+    block = dict(range=[0,3],context=[0,3],source_range=[0.,60.],result=dict(segments=[
+        dict(words=[dict(word=t,start=s,end=s+(.8 if i!=1 else 0))])
+        for i,(t,s) in enumerate(zip(lines,[1.,4.,8.]))]))
+    windows=[]
+    def recognize(begin,end):
+        windows.append((begin,end))
+        words=[] if end<30 else [dict(word=t,start=s,end=s+.8) for t,s in zip(lines,starts)]
+        return dict(segments=[dict(words=words)])
+    def align(begin,end,text,**kwargs):
+        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+.8-begin)])
+                             for t,s in zip(lines,starts) if t in text.splitlines()])
+    result=recover_with_local_asr(block,lines,np.zeros(60*16000),'English',recognize,align)
+    assert len(windows)==2 and windows[0][1]<10 and windows[1]==(0.,60.)
+    assert result['asr_localizations'][-1]['accepted_lines']==[1,2,3]
+    assert [s['words'][0]['start'] for s in result['result']['segments']]==starts
 
 
 @pytest.mark.parametrize('partly_timed', [False, True])
