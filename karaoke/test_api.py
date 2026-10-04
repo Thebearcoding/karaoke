@@ -5031,8 +5031,25 @@ def test_playback_survey_classifies_empty_subtitles_without_rewriting_recorded_a
     assert json.dumps(attempts, sort_keys=True) == original
 
 
+def test_playback_survey_records_source_disagreements_and_actual_provider_failures():
+    from karaoke.tools.playback_sweep import soft_failures
+    crosscheck = dict(status='conflicting',sources=[dict(provider='line_music'),dict(provider='lrclib')],
+        unavailable_sources=[dict(provider='netease',status='unavailable',http_status=429,error='HTTPStatusError'),
+                             dict(provider='youtube_music',status='missing_video_identity')])
+    packet = dict(lookup=dict(status='candidate',provider='line_music',crosscheck=crosscheck))
+    events = soft_failures({},packet)
+    assert [e['code'] for e in events] == ['lyric_source_disagreement','lyric_provider_unavailable']
+    assert events[0]['sources'] == ['line_music','lrclib']
+    assert events[1]['provider'] == 'netease' and events[1]['http_status'] == 429
+    crosscheck['status'] = 'corroborated'
+    assert [e['code'] for e in soft_failures({},packet)] == ['lyric_provider_unavailable']
+    crosscheck.update(status='insufficient_sources',unavailable_sources=[])
+    assert soft_failures({},packet) == []  # A missing second source is not a processing exception.
+
+
 @pytest.mark.parametrize('hard_code', ['separate_music_failed', 'subtitles_failed'])
-def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monkeypatch, hard_code):
+@pytest.mark.parametrize('has_full_mv', [False, True])
+def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monkeypatch, hard_code, has_full_mv):
     from contextlib import nullcontext
     from karaoke.tools import playback_sweep as sweep
     data = tmp_path/'data'
@@ -5048,8 +5065,10 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
     original_manifest = manifest.read_bytes()
     prepared = tmp_path/'prepared'
     prepared.mkdir()
+    source_jobs = []
     for case in cases:
         job, _ = app.state.store.create(JobRequest(url=case['url']), 'old')
+        source_jobs.append(job['id'])
         folder = data/job['id']
         (folder/'download').mkdir()
         media = folder/'download/source.mkv'
@@ -5075,11 +5094,17 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
     monkeypatch.setattr(sweep, 'record_failure', lambda *a:None)
     report = tmp_path/'report.json'
     with TestClient(app) as api:
+        if has_full_mv:
+            app.state.store.update(source_jobs[0], status='completed', result=dict(artifacts={}))
         user_queue = api.post('/v1/room/entries',json=dict(url=URL)).json()['entries']
         monkeypatch.setattr(sweep.httpx,'Client',lambda **k:nullcontext(api))
         sweep.run_once(manifest,data,report,prepared,'http://testserver')
         sweep.run_once(manifest,data,report,prepared,'http://testserver')
         assert len(calls) == 3
+        assert calls[1:] == source_jobs[1:]  # Reuse the registered audio job and its stage cache.
+        assert (calls[0] != source_jobs[0]) == has_full_mv
+        if has_full_mv:
+            assert app.state.store.read(source_jobs[0])['status'] == 'completed'
         assert [e['id'] for e in api.get('/v1/room').json()['entries']] == [e['id'] for e in user_queue]
         result = json.loads(report.read_text())
         assert result['summary']['outcomes'] == dict(clean=1,hard_fail=1,soft_fail=1)

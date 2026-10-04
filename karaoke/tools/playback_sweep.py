@@ -33,7 +33,13 @@ def soft_failures(result, prepared):
     metadata_error = (prepared.get('lyrics') or {}).get('provenance', {}).get('metadata_error') or lookup.get('metadata_error')
     if metadata_error:
         events.append(dict(module='metadata', code='metadata_lookup_failed', error_type=metadata_error))
-    for source in (lookup, lookup.get('published_lookup', {})):
+    crosscheck = lookup.get('crosscheck')
+    if crosscheck and crosscheck.get('status') == 'conflicting':
+        events.append(dict(module='lyrics', code='lyric_source_disagreement',
+            provider=lookup.get('provider'), sources=[s['provider'] for s in crosscheck.get('sources', [])]))
+    sources = (crosscheck.get('unavailable_sources', []) if crosscheck else
+               (lookup, lookup.get('published_lookup', {})))
+    for source in sources:
         if source.get('status') == 'unavailable':
             events.append(dict(module='lyrics', code='lyric_provider_unavailable',
                 provider=source.get('provider'), http_status=source.get('http_status'), error_type=source.get('error')))
@@ -114,14 +120,19 @@ def run_once(manifest, data_dir, report, prepared_dir, base):
             try:
                 room = client.get(base+'/v1/room').raise_for_status().json()
                 existing = {e['id'] for e in room['entries']}
+                # Reuse audio checkpoints, but leave an existing full MV intact.
+                force = any(j['input']['url'] == case['url'] and
+                            (j['status'] == 'completed' or j.get('restore_video'))
+                            for j in store.list(-1))
                 room = client.post(base+'/v1/room/entries', json=dict(
-                    url=case['url'], source_title=case['title'], force=True)).raise_for_status().json()
+                    url=case['url'], source_title=case['title'], force=force)).raise_for_status().json()
                 entry = next(e for e in room['entries'] if e['id'] not in existing)
                 job = client.get(f'{base}/v1/jobs/{entry["job_id"]}').raise_for_status().json()
                 folder = data_dir/job['id']
                 attempt.update(job_id=job['id'], entry_id=entry['id'])
                 save(report, state)
-                store.cache.reuse_download(folder, case['url'])
+                if not (folder/'download/source.mkv').is_file():
+                    store.cache.reuse_download(folder, case['url'])
                 if digest(folder/'download/source.mkv') != packet['source_sha256']:
                     raise RuntimeError('Cached audio does not match the prepared lyric source')
                 shutil.copy2(packet_path, folder/'prepared-lyrics.json')

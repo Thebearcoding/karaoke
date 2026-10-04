@@ -250,10 +250,10 @@ with httpx.Client(timeout=30) as client:
 
 跨机器执行时，可用 `--prepared-lyrics FILE` 读取由同一 `prepare_online_lyrics` 查询生成的结果；包中须保存 `prepared_lyrics_identity(url, metadata)`、查询结果 `lyrics` 和来源信息。源元数据、查询代码或歌词来源不符会拒绝使用，不在 GPU 机器重新查询。凭据不属于该文件。
 
-`python -m karaoke.tools.playback_sweep --manifest MANIFEST --data-dir DATA --report REPORT --prepared-dir INPUTS` 对固定清单每首只提交一次，使用 `run_probe` 的锁和共享缓存监控。普通 worker 必须暂停；控制器使用已有来源缓存，保留用户歌单。每首结果写入独立报告的 `audio_attempts`，不会改写原固定清单或历史严格音频／MV 账本。
+`python -m karaoke.tools.playback_sweep --manifest MANIFEST --data-dir DATA --report REPORT --prepared-dir INPUTS` 对固定清单每首只提交一次，使用 `run_probe` 的锁和共享缓存监控。普通 worker 必须暂停；控制器复用已有来源和有效的音频阶段检查点，保留用户歌单；已有完整 MV 时另建音频任务，避免覆盖。每首结果写入独立报告的 `audio_attempts`，不会改写原固定清单或历史严格音频／MV 账本。
 
 - `clean`：音轨、字幕产物通过本轮检查，没有记录到回退。
-- `soft_fail`：产物可用，但歌词查询、字幕对齐或高亮采用了回退；保留原因、缺失行与局部回退数量。
+- `soft_fail`：产物可用，但歌词来源存在文本分歧、单个来源请求失败，或字幕对齐／高亮采用了回退；保留原因、来源、缺失行与局部回退数量。仅未找到第二份来源不算请求失败。
 - `hard_fail`：处理终止或产物完整性检查失败。
 - 同一首可在硬失败前出现软失败，因此软失败事件数与歌曲数分别报告。
 
