@@ -1261,20 +1261,24 @@ def test_local_recognition_broadens_once_when_old_neighbours_miss_the_verse():
 
 
 @pytest.mark.parametrize('partly_timed', [False, True])
-@pytest.mark.parametrize('asr_gap', ['none', 'long_intro', 'missing_middle', 'boundary_overlap'])
+@pytest.mark.parametrize('asr_gap', ['none', 'long_intro', 'missing_middle', 'boundary_overlap', 'boundary_unresolved', 'unheard_opening', 'long_phrase_window'])
 def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(partly_timed, asr_gap):
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines = ['alpha','bravo','charlie','delta','echo','foxtrot','golf','hotel']
-    starts = {line:30.+i*6 for i,line in enumerate(lines)}
+    starts = {line:(50. if asr_gap=='unheard_opening' else 30.)+i*6 for i,line in enumerate(lines)}
+    if asr_gap=='long_phrase_window':
+        starts = {t:s+(48 if i>=2 else 0) for i,(t,s) in enumerate(starts.items())}
+    duration = 120. if asr_gap=='unheard_opening' else 90.
+    if asr_gap=='long_phrase_window':duration=140.
     ends = {line:start+1 for line,start in starts.items()}
-    block = dict(range=[0,8],context=[0,8],source_range=[0.,90.],result=dict(segments=[
+    block = dict(range=[0,8],context=[0,8],source_range=[0.,duration],result=dict(segments=[
         dict(text=t,words=[dict(word=t,start=float(i),end=float(i if i<5 else i+1))])
         for i,t in enumerate(lines)]))
     if partly_timed:
         for i,s in enumerate(block['result']['segments'][:5]):
             tokens = [*s['text'][:3],s['text'][3:]]
             s['words'] = [dict(word=t,start=float(i),end=i+(.05 if j==3 else 0)) for j,t in enumerate(tokens)]
-    if asr_gap == 'boundary_overlap':
+    if asr_gap.startswith('boundary_'):
         ends['echo'] = 59.
         for i in range(5,8):
             start = starts[lines[i]]-(2 if i==5 else 0)
@@ -1283,18 +1287,26 @@ def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(part
     def recognize(begin,end):
         calls.append((begin,end))
         words = [dict(word=t,start=starts[t],end=ends[t]) for t in lines
-                 if not (asr_gap == 'missing_middle' and t == 'golf')]
+                 if not (asr_gap == 'missing_middle' and t == 'golf')
+                 and not (asr_gap == 'unheard_opening' and t in lines[:2])]
         if asr_gap == 'long_intro':words[0]['start'] = 0.
+        if asr_gap == 'long_phrase_window':words[2]['start'] = 42.
         return dict(segments=[dict(words=words)])
     def align(begin,end,text,**kwargs):
-        assert end-begin <= 45
+        assert end-begin <= (90 if asr_gap=='long_phrase_window' and text==lines[2] else 45)
+        if asr_gap=='boundary_unresolved' and text.splitlines()==lines[2:8]:
+            return None
         return dict(segments=[dict(text=t,words=[dict(word=t,start=starts[t]-begin,end=ends[t]-begin)])
                               for t in text.splitlines()])
-    result = recover_with_local_asr(block,lines,np.zeros(90*16000),'English',recognize,align)
-    assert calls == [(0.,90.)]
-    assert result['asr_localizations'][0]['accepted_lines'] == list(range(1,7 if asr_gap=='boundary_overlap' else 9))
-    assert [s['words'][0]['start'] for s in result['result']['segments']] == list(starts.values())
-    if asr_gap == 'boundary_overlap':
+    result = recover_with_local_asr(block,lines,np.zeros(int(duration*16000)),'English',recognize,align)
+    assert calls == [(0.,duration)]
+    last = 6 if asr_gap=='boundary_unresolved' else 7 if asr_gap=='boundary_overlap' else 9
+    assert result['asr_localizations'][0]['accepted_lines'] == list(range(1,last))
+    assert [s['words'][0]['start'] for s in result['result']['segments'] if s['words']] == [v for i,v in enumerate(starts.values()) if asr_gap!='boundary_unresolved' or i!=5]
+    if asr_gap=='boundary_unresolved':
+        assert result['result']['segments'][5]['words'] == []
+        assert result['asr_localizations'][0]['unresolved_segments'][6] == block['result']['segments'][5]
+    if asr_gap.startswith('boundary_'):
         assert result['result']['segments'][6:] == block['result']['segments'][6:]
         assert result['asr_localizations'][0]['boundary_reconciliations']
 

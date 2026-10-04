@@ -257,7 +257,17 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 # well-localized verse. Its core still needs acoustic alignment.
                 cf, cs = start, stop_line
                 ab, ae = max(0., anchors[cf]['start']-.6), min(duration, anchors[cs-1]['end']+.6)
-            if not selected or not 0 < ae-ab <= 45 or budget <= 0:
+            if ae-ab > 45 and anchors[start]['status'] != 'candidate' and anchors[stop_line-1]['status'] != 'candidate':
+                # Search an untimed opening/ending near its one measured
+                # neighbour; the crop is a search bound, never a lyric time.
+                if cf == start and cs > stop_line:
+                    ab = max(ab, ae-45)
+                elif cf < start and cs == stop_line:
+                    ae = min(ae, ab+45)
+            # One recognized line can straddle an MV's long spoken interlude.
+            # Give that isolated line one bounded acoustic search, not a skip.
+            limit = 90 if stop_line-start == 1 and cf == start and cs == stop_line and anchors[start]['status'] == 'candidate' else 45
+            if not selected or not 0 < ae-ab <= limit or budget <= 0:
                 continue
             budget -= 1
             attempt = dict(lines=[start+left+1, stop_line+left], source_range=[ab, ae])
@@ -288,7 +298,8 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 else:
                     before = [a for a in anchors[cf:i-left] if a['status'] == 'candidate']
                     after = [a for a in anchors[i-left+1:cs] if a['status'] == 'candidate']
-                    if not before or not after or not before[-1]['start'] <= cue['start'] < cue['end'] <= after[0]['end']:
+                    low, high = before[-1]['start'] if before else ab, after[0]['end'] if after else ae
+                    if not (before or after) or not low <= cue['start'] < cue['end'] <= high:
                         continue
                 segment = deepcopy(candidate['segments'][i-cf-left])
                 for word in segment['words']:
@@ -337,8 +348,33 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             except ValueError as error:
                 report['boundary_error'] = str(error)
         if fresh is None:
-            report['reason'] = 'conflicts_with_preserved_neighbours'
-            continue
+            # Preserve recoveries elsewhere when a boundary cannot be repaired.
+            # Conflicting candidates stay in diagnostics, not in playable cues.
+            rejected = {}
+            while fresh is None:
+                candidates = [(i, c) for i, c in enumerate(partial_alignment_cues(lines, [proposed], duration, language))
+                              if c['status'] == 'candidate']
+                conflicts = {i for i, c in candidates if any(a['start'] >= b['start']
+                             for a, b in zip(c['units'], c['units'][1:]))}
+                for (i, a), (j, b) in zip(candidates, candidates[1:]):
+                    try:
+                        presentation_cues([a, b], duration, lead=0, tail=0, bridge_gap=0)
+                        if a['units'][-1]['start'] >= b['units'][0]['start']:
+                            raise ValueError('word_order_conflict')
+                    except ValueError:
+                        conflicts.update({i, j}-set(replaced) or {i, j})
+                if not conflicts:
+                    break
+                for i in conflicts:
+                    segment = proposed['result']['segments'][i-first]
+                    rejected[i+1] = deepcopy(segment)
+                    segment['words'] = []
+                replaced = [i for i in replaced if i not in conflicts]
+                bad.update(conflicts)
+                fresh = ordered(proposed)
+            report.update(reason='partial_recovery_with_unresolved_conflicts', unresolved_segments=rejected)
+            if fresh is None:
+                continue
         report.update(accepted_lines=sorted({i+1 for i in replaced}),
                       original_segments={i+1: result['result']['segments'][i-first] for i in replaced})
         result, cues = proposed, fresh
