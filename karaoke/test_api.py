@@ -5043,7 +5043,8 @@ def test_playback_survey_records_source_disagreements_and_actual_provider_failur
     assert events[1]['provider'] == 'netease' and events[1]['http_status'] == 429
     crosscheck['status'] = 'corroborated'
     assert [e['code'] for e in soft_failures({},packet)] == ['lyric_provider_unavailable']
-    crosscheck.update(status='insufficient_sources',unavailable_sources=[])
+    crosscheck.update(status='insufficient_sources',
+        unavailable_sources=[dict(provider='youtube_music',status='unavailable')])
     assert soft_failures({},packet) == []  # A missing second source is not a processing exception.
 
 

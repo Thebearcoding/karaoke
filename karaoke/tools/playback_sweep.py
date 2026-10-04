@@ -40,7 +40,7 @@ def soft_failures(result, prepared):
     sources = (crosscheck.get('unavailable_sources', []) if crosscheck else
                (lookup, lookup.get('published_lookup', {})))
     for source in sources:
-        if source.get('status') == 'unavailable':
+        if source.get('status') == 'unavailable' and source.get('error'):
             events.append(dict(module='lyrics', code='lyric_provider_unavailable',
                 provider=source.get('provider'), http_status=source.get('http_status'), error_type=source.get('error')))
     return events
