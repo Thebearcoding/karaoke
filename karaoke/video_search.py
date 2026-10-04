@@ -198,18 +198,15 @@ def music_entries(kind, query, continuation=None):
             self.response = super()._send_request(*args, **kwargs)
             return self.response
 
-    music = PagedMusic(language='en')
+    music = PagedMusic(language='zh_CN')
     metadata = {}
     if kind in ('songs', 'artists'):
-        if continuation:
-            music._send_request('search', dict(query=query, params=get_search_params(kind, None, False)),
-                                continuation['params'])
-            shelf = music.response['continuationContents']['musicShelfContinuation']
-            entries = parse_search_results(shelf.get('contents', []), kind[:-1])
-        else:
-            # Zero suppresses automatic continuation, not results on this native page.
-            entries = music.search(query, filter=kind, limit=0)
-            shelf = _renderer(music.response, 'musicShelfRenderer') or {}
+        # Parse the requested shelf directly: upstream search compares its localized
+        # heading to English type names and discards Chinese first-page results.
+        music._send_request('search', dict(query=query, params=get_search_params(kind, None, False)),
+                            continuation['params'] if continuation else '')
+        shelf = _renderer(music.response, 'musicShelfContinuation' if continuation else 'musicShelfRenderer') or {}
+        entries = parse_search_results(shelf.get('contents', []), kind[:-1])
         next_page = dict(params=get_continuation_params(shelf)) if shelf.get('continuations') else None
     elif kind == 'artist' and re.fullmatch(r'UC[\w-]{22}', query):
         if continuation:

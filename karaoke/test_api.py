@@ -4195,18 +4195,15 @@ def test_music_catalogue_keeps_provider_order_versions_and_distinct_artist_ids(m
     class Music:
         def __init__(self, **kwargs):
             pass
-        def _send_request(self, endpoint, body):
+        def _send_request(self, endpoint, body, *params):
             if endpoint == 'search':
-                return dict(contents=dict(musicShelfRenderer=dict(contents=[],
+                calls.append(('search', body['query']))
+                entries = ([dict(artist='SINGER', browseId=namesake_id), dict(artist='Singer', browseId=artist_id)]
+                           if body['query'] == 'Singer' else rows)
+                return dict(contents=dict(musicShelfRenderer=dict(contents=entries,
                     continuations=[dict(nextContinuationData=dict(continuation='search-next'))])))
             return dict(contents=dict(musicPlaylistShelfRenderer=dict(contents=[dict(continuationItemRenderer=dict(
                 continuationEndpoint=dict(continuationCommand=dict(token='playlist-next'))))])))
-        def search(self, query, filter, limit):
-            calls.append(('search', query, filter))
-            self._send_request('search', dict(query=query))
-            if filter == 'artists':
-                return [dict(artist='SINGER', browseId=namesake_id), dict(artist='Singer', browseId=artist_id)]
-            return rows
         def get_artist(self, identifier):
             calls.append(('artist', identifier))
             return dict(name='Singer', songs=dict(browseId='VLpopular', results=rows[:5]), monthlyListeners='8M')
@@ -4215,6 +4212,7 @@ def test_music_catalogue_keeps_provider_order_versions_and_distinct_artist_ids(m
             self._send_request('browse', dict(browseId=identifier))
             return dict(tracks=rows)
     monkeypatch.setattr('ytmusicapi.YTMusic', Music)
+    monkeypatch.setattr('ytmusicapi.parsers.search.parse_search_results', lambda contents, kind: contents)
     page = music_entries('songs', 'Evening')
     assert page['continuation'] == dict(params='&ctoken=search-next&continuation=search-next')
     songs = page['results']
@@ -4424,8 +4422,9 @@ def test_youtube_search_fetches_one_native_page_and_resumes_its_continuation(mon
     assert len(calls) == 2 and second['continuation'] is None
 
 
-@pytest.mark.parametrize('kind', ['songs', 'artists', 'artist'])
-def test_music_continuations_parse_provider_rows_without_refetching_first_page(monkeypatch, kind):
+@pytest.mark.parametrize(('kind', 'first_page'), [
+    ('songs', True), ('artists', True), ('songs', False), ('artists', False), ('artist', False)])
+def test_music_pages_keep_localized_names_and_request_only_the_requested_page(monkeypatch, kind, first_page):
     from ytmusicapi import YTMusic
     from karaoke.video_search import music_entries
     artist_id = 'UC'+'a'*22
@@ -4441,18 +4440,26 @@ def test_music_continuations_parse_provider_rows_without_refetching_first_page(m
     calls = []
     def send(self, endpoint, body, *params):
         calls.append((endpoint, body, params))
+        artist_run['text'] = '孙燕姿' if self.language == 'zh_CN' else 'Sun Yanzi'
         if kind == 'artist':
             assert endpoint == 'browse' and body == dict(continuation='second-page')
             return dict(onResponseReceivedActions=[dict(appendContinuationItemsAction=dict(continuationItems=[row]))])
         assert endpoint == 'search' and body['query'] == 'Singer' and body['params']
+        if first_page:
+            shelf = dict(musicShelfRenderer=dict(
+                title=dict(runs=[dict(text='歌曲' if kind == 'songs' else '歌手')]), contents=[row]))
+            sections = dict(sectionListRenderer=dict(contents=[shelf]))
+            return dict(contents=dict(tabbedSearchResultsRenderer=dict(tabs=[dict(tabRenderer=dict(content=sections))])))
         assert params == ('&ctoken=second-page&continuation=second-page',)
         return dict(continuationContents=dict(musicShelfContinuation=dict(contents=[row])))
     monkeypatch.setattr(YTMusic, '_send_request', send)
     continuation = dict(token='second-page') if kind == 'artist' else dict(params='&ctoken=second-page&continuation=second-page')
-    page = music_entries(kind, artist_id if kind == 'artist' else 'Singer', continuation)
+    page = music_entries(kind, artist_id if kind == 'artist' else 'Singer', None if first_page else continuation)
     assert len(calls) == 1 and page['continuation'] is None
     assert len(page['results']) == 1
-    assert page['results'][0]['title'] == ('Singer' if kind == 'artists' else 'Next song')
+    assert page['results'][0]['title'] == ('孙燕姿' if kind == 'artists' else 'Next song')
+    if kind != 'artists':
+        assert page['results'][0]['artists'] == [dict(name='孙燕姿', id=artist_id)]
 
 
 def test_search_pages_bind_cursors_deduplicate_retries_and_reject_expiry(tmp_path, monkeypatch):

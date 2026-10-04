@@ -82,8 +82,8 @@ export function visibleResults(songs, source) {
 
 export function playCount(value) {
   if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? value : null;
-  const match = String(value || '').replaceAll(',', '').trim().match(/^(\d+(?:\.\d+)?)\s*([KMB])?$/i);
-  return match ? Number(match[1])*({K:1e3, M:1e6, B:1e9}[match[2]?.toUpperCase()] || 1) : null;
+  const match = String(value || '').normalize('NFKC').replaceAll(',', '').trim().match(/^(\d+(?:\.\d+)?)\s*([KMB千万萬亿億])?$/i);
+  return match ? Number(match[1])*({K:1e3, M:1e6, B:1e9, 千:1e3, 万:1e4, 萬:1e4, 亿:1e8, 億:1e8}[match[2]?.toUpperCase()] || 1) : null;
 }
 
 export function orderResults(songs, order) {

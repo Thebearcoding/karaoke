@@ -117,6 +117,10 @@ test('popularity uses reported counts, keeps unknowns last and never mutates pro
   for (const value of [null, undefined, '', 'unknown', -1, Infinity]) assert.equal(playCount(value), null);
   assert.equal(playCount('0'), 0);
   assert.equal(playCount('1.2B'), 1.2e9);
+  for (const [value, expected] of [['2591万',25910000], ['1.2亿',120000000], ['２.５萬',25000], ['3千',3000], ['1.2 億',120000000]]) {
+    assert.equal(playCount(value), expected);
+  }
+  assert.deepEqual(orderResults([{views:'2.5M'}, {views:'2591万'}, {views:'1.2亿'}], 'popular').map(s=>s.views), ['1.2亿','2591万','2.5M']);
   assert.ok(previewURL({provider:'youtube_music',url:'https://www.youtube.com/watch?v=abcdefghijk'},'http://localhost').includes('/embed/abcdefghijk'));
 });
 

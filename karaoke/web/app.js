@@ -147,7 +147,7 @@ function renderVideoResults(providers) {
     videoSource === 'songs' ? 'YouTube Music 歌曲搜索顺序' : videoSource === 'youtube' ? 'YouTube 原始搜索顺序' : '本地曲库';
   $('search-status').innerHTML = `<span class="${info.error ? 'search-error' : ''}">${info.loading ? '正在查找…' : info.error ? escape(info.error) : info.results.length ? `${videoSource === 'local' ? '' : '已加载 '}${info.results.length} ${artists ? '位歌手' : videoSource === 'youtube' ? '个视频' : '首'}${catalogue && info.metadata?.complete === false ? ' · 歌手页精选' : ''}` : '没有找到，试试另一个关键词或搜索类型'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`;
   $('artist-summary').hidden = !catalogue;
-  if (catalogue) $('artist-summary').innerHTML = `${metadata.thumbnail ? `<img src="${escape(metadata.thumbnail)}" alt="" referrerpolicy="no-referrer">` : ''}<div><p>歌手</p><h3>${escape(metadata.title)}</h3>${metadata.monthly_listeners ? `<p>${escape(metadata.monthly_listeners)} 月度听众 · YouTube Music</p>` : ''}<button class="text-button" data-artist-back>返回歌手搜索</button></div>`;
+  if (catalogue) $('artist-summary').innerHTML = `${metadata.thumbnail ? `<img src="${escape(metadata.thumbnail)}" alt="" referrerpolicy="no-referrer">` : ''}<div><p>歌手</p><h3>${escape(metadata.title)}</h3>${metadata.monthly_listeners ? `<p>${escape(metadata.monthly_listeners)} · YouTube Music</p>` : ''}<button class="text-button" data-artist-back>返回歌手搜索</button></div>`;
   renderSearchMore(info);
   searchSongs = orderResults(info.results.map(song => ({...song,
     status:library.find(item => item.url === song.url)?.status || song.status})), searchOrder);
@@ -158,6 +158,7 @@ function renderVideoResults(providers) {
   $('music-columns').hidden = artists || !searchSongs.length;
   $('music-title-heading').textContent = videos ? '视频' : '歌曲';
   $('music-artist-heading').textContent = videos ? '频道' : '歌手';
+  $('music-alternative-heading').textContent = videos ? '来源' : '找 MV';
   $('video-grid').className = artists ? 'artist-grid' : 'music-list';
   if (artists) $('video-grid').removeAttribute('role');
   else $('video-grid').setAttribute('role', 'rowgroup');
@@ -170,9 +171,10 @@ function renderVideoResults(providers) {
         <div class="music-title"><h3 title="${escape(song.title)}">${escape(song.title)}</h3><div class="music-meta"><span>${escape(song.version || (local ? '本地歌曲' : 'YouTube 视频'))}</span><span class="music-availability"></span></div></div></div>
       <div class="music-credits" role="cell" title="${escape(song.artists?.map(a => a.name).join(' · ') || song.uploader || '')}">${credits}</div>
       <div class="music-album" role="cell" title="${escape(song.album || '')}">${escape(song.album || '—')}</div>
-      <div class="music-plays" role="cell">${playCount(song.views) !== null ? formatPlays(song.views) : '—'}<small>播放</small></div>
+      <div class="music-plays" role="cell">${playCount(song.views) !== null ? `${formatPlays(song.views)}<small>播放</small>` : '—'}</div>
       <div class="music-duration" role="cell">${song.duration ? time(song.duration) : '—'}</div>
-      <div class="music-actions" role="cell"><button class="music-add" data-add-video="${index}" aria-label="加入歌单：${escape(song.title)}">${icon('plus')}<span>加入歌单</span></button>${song.provider === 'youtube_music' ? `<button class="find-mv" data-find-mv="${index}">找 MV</button>` : videos ? `<a class="find-mv" href="${escape(song.url)}" target="_blank" rel="noopener noreferrer">YouTube ↗</a>` : ''}</div></article>`;
+      <div class="music-actions" role="cell"><button class="music-add" data-add-video="${index}" aria-label="加入歌单：${escape(song.title)}">${icon('plus')}<span>加入歌单</span></button></div>
+      <div class="music-alternative" role="cell">${song.provider === 'youtube_music' ? `<button class="find-mv" data-find-mv="${index}" aria-label="找 MV：${escape(song.title)}">找 MV</button>` : videos ? `<a class="find-mv" href="${escape(song.url)}" target="_blank" rel="noopener noreferrer">YouTube ↗</a>` : ''}</div></article>`;
   });
   updateSearchRows(rows);
   document.querySelectorAll('[data-video-source]').forEach(button => {

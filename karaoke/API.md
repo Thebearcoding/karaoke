@@ -373,7 +373,7 @@ ASR 固定宽度断行若留下孤立的单字或单词，会在同一短句内�
 
 前后端保留 YouTube 的结果顺序和数量，没有 3 条截断，不按字面关键词、认证、直播状态额外过滤。仅校验单视频 URL 和封面地址。前端在「YouTube 视频」标签展示，本地曲库在独立标签查看。服务端相同查询和分页游标合并请求，元数据缓存 120 秒、最多 32 项；最多并行 2 个查询、待处理最多 8 个，每次含等待最多 25 秒。超量返回 429，平台错误返回 502，成功无结果返回空数组。复用 yt-dlp 解析一个完整原生搜索页，使用平台 continuation 按需翻页，不重复读取前面的页，无需额外 API key。
 
-`GET /v1/music/search?q=关键词&kind=songs|artists` 用 ytmusicapi 按页读取 YouTube Music 搜索结果，默认 songs。歌曲包含标准 YouTube `url`、`title`、`artists`（名称与可用的频道 ID）、`album`、`version`、`duration`、平台提供的 `views`、`available`、`thumbnail` 和原始 `rank`。歌手返回 `title`、`browse_id`、频道 `url`、`thumbnail`、`rank`；`provider=youtube_music`。不自动选择同名歌手或删改版本。
+`GET /v1/music/search?q=关键词&kind=songs|artists` 用 ytmusicapi 按页读取 YouTube Music 搜索结果，默认 songs，使用 `zh_CN` 获取平台提供的中文名称。歌曲包含标准 YouTube `url`、`title`、`artists`（名称与可用的频道 ID）、`album`、`version`、`duration`、平台提供的 `views`（可能带万／亿等单位）、`available`、`thumbnail` 和原始 `rank`。歌手返回 `title`、`browse_id`、频道 `url`、`thumbnail`、`rank`；`provider=youtube_music`。不自行翻译名称、自动选择同名歌手或删改版本。
 
 `GET /v1/music/artists/{browse_id}` 只接受 YouTube 频道 ID，读取歌手页及其热门歌单的第一页，返回歌手元数据、`results`、`order=youtube_music_top_songs`、`complete`。没有歌单链接时保留页面精选并标 `complete=false`。平台未提供播放量时保留空值。前端默认平台顺序；播放量排序仅作用于已加载的、计数可知的结果，未知计数排后。这两组接口复用视频搜索的限流、超时、缓存与去重，不下载音视频或创建准备任务。
 
