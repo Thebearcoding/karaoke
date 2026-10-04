@@ -674,6 +674,28 @@ def test_lyric_text_search_skips_a_title_only_result_before_alignment():
     assert lines == lyrics.splitlines() and report['id'] == 2
 
 
+@pytest.mark.parametrize('source_title,album,duration,reason', [
+    ('Evening', 'Evening', 249., 'duration'),
+    ('Evening (Live at Concert Hall)', 'Evening', 257., 'live_performance'),
+    ('Evening (Live at Concert Hall)', 'Live at Other Hall', 257., 'live_performance')])
+def test_published_text_can_cross_recordings_without_relaxing_asr_validation(source_title, album, duration, reason):
+    from karaoke.lyric_lookup import lyric_candidate
+    song = dict(title='Evening', artist='Singer')
+    row = dict(id=1, trackName='Evening', artistName='Singer', albumName=album,
+               duration=duration, instrumental=False, plainLyrics='Stars above the quiet shore')
+    packet = dict(status='ok', results=[dict(row, artistName='Someone else'), row])
+    assert lyric_candidate(packet, song, None, 257., source_title=source_title)[0] is None
+    lines, report = lyric_candidate(packet, song, None, 257., source_title=source_title, allow_recording_mismatch=True)
+    assert lines == [row['plainLyrics']] and reason in report['recording_mismatches']
+    assert report['text_support'] is None and report['audio_word_coverage'] is None
+    assert not report['provider_timestamps_used']
+    with pytest.raises(ValueError, match='independent ASR'):
+        lyric_candidate(packet, song, dict(words=[]), 257., allow_recording_mismatch=True)
+    packet['results'].append(dict(row, id=2, duration=257., albumName=source_title))
+    _, report = lyric_candidate(packet, song, None, 257., source_title=source_title, allow_recording_mismatch=True)
+    assert report['id'] == 2 and not report['recording_mismatches']
+
+
 @pytest.mark.parametrize('found', [True, False])
 @pytest.mark.parametrize('audio_only', [True, False])
 def test_online_lyric_candidate_skips_asr_only_for_interactive_playback(tmp_path, monkeypatch, found, audio_only):
@@ -764,6 +786,25 @@ def test_published_lyrics_use_explicit_video_credits_without_a_text_model(tmp_pa
     assert result['provenance']['independent_asr_coverage'] is None
 
 
+def test_known_video_credits_do_not_skip_lyrics_in_its_description(tmp_path, monkeypatch):
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    metadata = dict(title='Lin Lin 林林【Evening Wind 晚風】Official Music Video',
+        description='晚風\n詞曲：林林\n微風裡慢慢歌唱\n星光下靜靜傾聽\n#Official')
+    calls = []
+    def extract(evidence, *args):
+        calls.append(evidence)
+        return dict(parsed=dict(title='Wrong inferred title', artist='Wrong inferred artist', lyric_line_numbers=[3,4]))
+    def consensus(song, metadata, duration, cache, description):
+        assert song['title'] == 'Evening Wind 晚風' and song['artist'] == 'Lin Lin 林林'
+        return description
+    monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', extract)
+    monkeypatch.setattr(lyric_consensus, 'fetch_lyric_consensus', consensus)
+    result = lyric_lookup.prepare_online_lyrics(dict(url=URL), metadata, 30, StageCache(tmp_path), 'unused', None)
+    assert len(calls) == 1 and result['lines'] == ['微風裡慢慢歌唱', '星光下靜靜傾聽']
+    assert result['provenance']['lyric_lookup']['lyric_line_numbers'] == [3,4]
+
+
 @pytest.mark.parametrize('case', ['agreement', 'minority', 'missing_tail', 'same_publisher', 'tie', 'word_boundary'])
 def test_lyric_crosscheck_preserves_repetitions_and_requires_independent_agreement(case):
     from karaoke.lyric_consensus import compare_lyrics
@@ -836,6 +877,27 @@ def test_source_disagreements_keep_published_text_and_full_diagnostics(tmp_path,
     assert evidence['candidate_texts'] == [published,published[:-1]]
 
 
+@pytest.mark.parametrize('independent', [True, False])
+def test_three_similar_lyric_sources_outweigh_an_outlier_without_claiming_exact_agreement(tmp_path, monkeypatch, independent):
+    from karaoke import lyric_consensus as module
+    from karaoke.stage_cache import StageCache
+    outlier = ['A different lyric in another language']
+    body = 'Stars above the quiet shore and every night we sing and walk along the road back home again'
+    variants = [body, body.replace('Stars', 'Lights'), body.replace('night', 'day')]
+    monkeypatch.setattr(module.lookup, 'fetch_published_lyrics', lambda *a:
+        (outlier, dict(provider='line_music', language='English')))
+    monkeypatch.setattr(module.lookup, 'fetch_lyrics', lambda *a: dict(status='unavailable'))
+    monkeypatch.setattr(module, 'fetch_additional_lyrics', lambda provider, *a:
+        ([variants[0 if provider == 'netease' else 1]], dict(provider=provider, language='English',
+            publisher=provider if independent else 'shared')))
+    lines, report = module.fetch_lyric_consensus(dict(title='Evening', artist='Singer'), {}, 30, StageCache(tmp_path),
+        ([variants[2]], dict(provider='video_description', language='English', publisher='youtube')))
+    review = report['crosscheck']
+    assert review['status'] == 'conflicting' and not review['agreeing_sources']
+    assert lines == ([variants[0]] if independent else outlier)
+    assert review['selection'] == ('similarity_support' if independent else 'published_source')
+
+
 def test_netease_lyrics_reject_other_recordings_and_strip_lrc_metadata(tmp_path, monkeypatch):
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
@@ -905,7 +967,8 @@ def test_lyric_rate_limit_is_shared_between_jobs_without_blocking_other_sources(
 @pytest.mark.parametrize('credits', [
     ('詞：林林', '曲：林林', '弦樂編寫：樂手', '錄音師：工程師'),
     ('词：林林', '曲：林林', '第一小提琴：乐手', '混音师：工程师'),
-    ('Lyrics: Writer', 'Music: Composer', 'Guitar: Player', 'Mixed by: Engineer')])
+    ('Lyrics: Writer', 'Music: Composer', 'Guitar: Player', 'Mixed by: Engineer'),
+    ('專輯：春天', '歌曲：晚風 (Album Version)', '作詞：林林', '作曲：林林')])
 def test_published_lyrics_remove_credit_blocks_but_keep_sung_titles_and_colons(credits):
     from karaoke.lyric_lookup import published_candidate, published_lyric_lines
     body = ['晚風', '我说：继续往前走', '晚風']
@@ -921,7 +984,8 @@ def test_published_lyrics_remove_credit_blocks_but_keep_sung_titles_and_colons(c
 
 @pytest.mark.parametrize('change', [dict(trackTitle='別的歌'), dict(artists=[dict(artistName='別人')]),
     dict(album=dict(albumTitle='Live')), dict(album=dict(albumTitle='Remix')), dict(artists=None),
-    dict(lyrics=None), dict(lyrics='歌名：晚風'), dict(trackId='../other')])
+    dict(lyrics=None), dict(lyrics='歌名：晚風'), dict(lyrics='專輯：春天\n歌曲：晚風\n作詞：林林'),
+    dict(trackId='../other')])
 def test_published_lyrics_reject_wrong_credits_versions_and_empty_text(change):
     from karaoke.lyric_lookup import published_candidate
     row = dict(trackId=123, trackTitle='晚風', artists=[dict(artistName='林林')],
@@ -931,15 +995,35 @@ def test_published_lyrics_reject_wrong_credits_versions_and_empty_text(change):
     assert published_candidate([dict(row, **change)], song, 'Official Music Video')[0] is None
 
 
-def test_published_lyrics_match_both_languages_of_bilingual_credits():
+@pytest.mark.parametrize('title,artist', [
+    ('晚風 Evening Wind', '林林 Lin Lin'), ('Evening Wind 晚風', 'Lin Lin 林林'),
+    ('晚風(Evening Wind)', '林林 Lin Lin')])
+def test_published_lyrics_match_both_languages_of_bilingual_credits(title, artist):
     from karaoke.lyric_lookup import published_candidate
-    row = dict(trackId=123, trackTitle='晚風 Evening Wind', artists=[dict(artistName='林林 Lin Lin')],
+    row = dict(trackId=123, trackTitle=title, artists=[dict(artistName=artist)],
                album=dict(albumTitle='春天'), lyrics='微風裡慢慢歌唱')
     for title, artist in [('Evening Wind', 'Lin Lin'), ('晚風', '林林')]:
         lines, report = published_candidate([row], dict(title=title, artist=artist), 'Official Music Video')
         assert lines == [row['lyrics']] and report['url'].endswith('/123')
     for change in (dict(trackTitle='晚風 Live'), dict(artists=[dict(artistName='林林 Remix')])):
         assert published_candidate([dict(row, **change)], dict(title='Evening Wind', artist='Lin Lin'), '')[0] is None
+
+
+def test_published_text_prefers_same_performance_before_studio_fallback():
+    from karaoke.lyric_lookup import published_candidate
+    song = dict(title='Evening', artist='Singer')
+    row = dict(trackId=123, trackTitle='Evening', artists=[dict(artistName='Singer')],
+               album=dict(albumTitle='Evening'), lyrics='Stars above the quiet shore')
+    source_title = 'Evening (Live at Concert Hall)'
+    assert published_candidate([row], song, source_title)[0] is None
+    lines, report = published_candidate([row], song, source_title, allow_recording_mismatch=True)
+    assert lines and set(report['recording_mismatches']) == {'version', 'live_performance'}
+    for version in ('Remix', 'Karaoke', 'Instrumental'):
+        assert published_candidate([dict(row, album=dict(albumTitle=version))], song, source_title,
+            allow_recording_mismatch=True)[0] is None
+    _, report = published_candidate([row, dict(row, trackId=124, album=dict(albumTitle=source_title))], song,
+                                   source_title, allow_recording_mismatch=True)
+    assert report['url'].endswith('/124') and not report['recording_mismatches']
 
 
 @pytest.mark.parametrize('empty_anchor_file', [False, True])
@@ -5046,6 +5130,9 @@ def test_playback_survey_records_source_disagreements_and_actual_provider_failur
     crosscheck.update(status='insufficient_sources',
         unavailable_sources=[dict(provider='youtube_music',status='unavailable')])
     assert soft_failures({},packet) == []  # A missing second source is not a processing exception.
+    packet['lookup']['recording_mismatches'] = ['duration', 'live_performance']
+    assert soft_failures({},packet) == [dict(module='lyrics', code='lyric_recording_mismatch',
+        provider='line_music', reasons=['duration', 'live_performance'])]
 
 
 @pytest.mark.parametrize('hard_code', ['separate_music_failed', 'subtitles_failed'])

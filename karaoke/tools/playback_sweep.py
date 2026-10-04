@@ -30,6 +30,9 @@ def soft_failures(result, prepared):
             fallback_units=quality.get('fallback_units', 0),
             line_order_fallback_lines=quality.get('line_order_fallback_lines', [])))
     lookup = prepared.get('lookup') or {}
+    if lookup.get('recording_mismatches'):
+        events.append(dict(module='lyrics', code='lyric_recording_mismatch',
+            provider=lookup.get('provider'), reasons=lookup['recording_mismatches']))
     metadata_error = (prepared.get('lyrics') or {}).get('provenance', {}).get('metadata_error') or lookup.get('metadata_error')
     if metadata_error:
         events.append(dict(module='metadata', code='metadata_lookup_failed', error_type=metadata_error))

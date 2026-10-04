@@ -24,10 +24,14 @@ def names(value):
     result = [value] if value else []
     # Music metadata often appends an English translation to a Chinese name.
     # Version labels are not translations: never strip "Live", "Remix", etc.
-    match = re.fullmatch(r'([\u3400-\u9fff]+)\s+([A-Za-z][\x20-\x7e]*)', value)
-    if match and not re.search(r'\b(live|remix|acoustic|instrumental|karaoke|remaster\w*)\b',
-                               match[2], re.I):
-        result.extend((match[2], match[1]))
+    native = r'[\u3040-\u30ff\u3400-\u9fff]+(?:[ ·][\u3040-\u30ff\u3400-\u9fff]+)*'
+    latin = r'[A-Za-z][\x20-\x7e]*?'
+    match = re.fullmatch(rf'({native})(?:\s+({latin})|\s*\(({latin})\))', value)
+    reverse = re.fullmatch(rf'({latin})\s+({native})', value)
+    if match or reverse:
+        local, english = (match[1], match[2] or match[3]) if match else (reverse[2], reverse[1])
+        if not re.search(r'\b(live|remix|acoustic|instrumental|karaoke|remaster\w*)\b', english, re.I):
+            result.extend((english, local))
     return result
 
 
@@ -137,7 +141,7 @@ def text_language(text):
 def published_lyric_lines(text, title):
     """Remove explicit credit headers/footers before wrapping published lyrics."""
     converter = OpenCC('t2s')
-    credit = re.compile(r'^(?:歌名|词|曲|词曲|作词|作曲|编曲|演唱|专辑|发行日|制作人|监制|'
+    credit = re.compile(r'^(?:歌名|歌曲|词|曲|词曲|作词|作曲|编曲|演唱|专辑|发行日|制作人|监制|'
         r'弦乐(?:编写|编曲)?|合声|和声(?:编写|编曲)?|钢琴|吉他|贝斯|鼓|'
         r'(?:第[一二三四\d]+)?(?:小提琴|中提琴|大提琴)|录音(?:师)?|混音(?:师)?|母带(?:工程师)?|'
         r'title|artist|album|composer|lyricist|producer|lyrics|music|written by|produced by|'
@@ -174,9 +178,23 @@ def version_tags(text):
         ('karaoke', r'\bkaraoke\b|伴奏版')) if re.search(pattern, text)}
 
 
-def published_candidate(rows, song, source_title, *, read_lyrics=None):
+def recording_mismatches(song, source_title, title, album):
+    expected = version_tags(source_title) | version_tags(song['title'])
+    actual = version_tags((title or '')+' '+(album or ''))
+    # Live/acoustic releases may supply text for alignment to our own audio.
+    # Instrumentals, karaoke edits and remixes are not interchangeable lyrics.
+    if (expected ^ actual) - {'live', 'acoustic'}:
+        return None
+    mismatch = ['version'] if expected != actual else []
+    performance = live_performance(source_title)
+    if performance and performance not in (live_performance(title), live_performance(album)):
+        mismatch.append('live_performance')
+    return mismatch
+
+
+def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_recording_mismatch=False):
     """Select published text; recording onsets still come entirely from our audio."""
-    expected_versions = version_tags(source_title) | version_tags(song['title'])
+    candidates = []
     for row in rows:
         title = row.get('trackTitle')
         if not isinstance(title, str) or not isinstance(row.get('artists'), list) or not isinstance(row.get('album'), dict):
@@ -186,12 +204,14 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None):
         if not isinstance(album, str):
             continue
         if (not identity(song['title'], title=True) & identity(title, title=True) or
-                not any(identity(song['artist']) & identity(a) for a in artists) or
-                version_tags((title or '')+' '+album) != expected_versions):
+                not any(identity(song['artist']) & identity(a) for a in artists)):
             continue
-        performance = live_performance(source_title)
-        if performance and performance not in (live_performance(title), live_performance(album)):
+        mismatch = recording_mismatches(song, source_title, title, album)
+        if mismatch is None or mismatch and not allow_recording_mismatch:
             continue
+        candidates.append((mismatch, row, title, artists, album))
+    # Try the same performance first, even when search ranks studio text higher.
+    for mismatch, row, title, artists, album in sorted(candidates, key=lambda c: len(c[0])):
         text = row.get('lyrics')
         if text is None and read_lyrics is not None:
             text = read_lyrics(row)
@@ -208,6 +228,7 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None):
         return lines, dict(status='candidate', provider='line_music', language=language,
             url='https://music-tw.line.me/track/'+track_id, track=title, artists=artists, album=album,
             text_sha256=hashlib.sha256(text.encode()).hexdigest(), excluded_credit_lines=excluded,
+            recording_mismatches=mismatch,
             text_transform='credit_header_footer_removed_then_whitespace_only', provider_timestamps_used=False)
     return None, dict(status='no_matching_published_text', provider='line_music')
 
@@ -233,7 +254,7 @@ def fetch_published_lyrics(song, source_title, cache):
                 rows = response['response']['result']['tracks']
                 if not isinstance(rows, list) or len(rows) > 30 or any(not isinstance(r, dict) for r in rows):
                     raise ValueError('Invalid published lyric response')
-                lines, report = published_candidate(rows, song, source_title)
+                lines, report = published_candidate(rows, song, source_title, allow_recording_mismatch=True)
                 packet = dict(lines=lines, report=report)
             except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
                 status = getattr(getattr(error, 'response', None), 'status_code', None)
@@ -262,17 +283,19 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
         evidence = {key: metadata.get(key) for key in ('title', 'track', 'artist', 'artists', 'uploader')}
         evidence['description_lines'] = [dict(number=i+1, text=line) for i, line in enumerate(description_lines)]
         from openai import OpenAIError
+        known_identity = bool(song['artist'] and (metadata.get('track') or
+                              song['title'] != metadata.get('title') or request.get('title') and request.get('artist')))
         try:
-            packet = (dict(parsed=None) if song['artist'] and (metadata.get('track') or
-                      song['title'] != metadata.get('title') or request.get('title') and request.get('artist')) else
+            packet = (dict(parsed=None) if known_identity and not description.strip() else
                       extract_song_metadata(evidence, model, cache))
             parsed = SongText.model_validate(packet['parsed']) if packet['parsed'] is not None else None
         except (OpenAIError, ValueError) as error:
             metadata_error = type(error).__name__
             parsed = None
         if parsed is not None:
-            song.update(title=request.get('title') or metadata.get('track') or parsed.title or song['title'],
-                        artist=song['artist'] or parsed.artist)
+            if not known_identity:
+                song.update(title=request.get('title') or metadata.get('track') or parsed.title or song['title'],
+                            artist=song['artist'] or parsed.artist)
             selected = parsed.lyric_line_numbers
             if selected and selected == sorted(set(selected)) and all(1 <= i <= len(description_lines) for i in selected):
                 lines = [description_lines[i-1].strip() for i in selected if description_lines[i-1].strip()]
@@ -317,7 +340,10 @@ def read_prepared_lyrics(path, url, metadata):
     return lyrics
 
 
-def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, source_title=None):
+def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, source_title=None,
+                    allow_recording_mismatch=False):
+    if allow_recording_mismatch and transcription is not None:
+        raise ValueError('Text-only candidates cannot validate independent ASR coverage')
     report = {key: value for key, value in packet.items() if key != 'results'}
     if packet.get('status') != 'ok':
         return None, report
@@ -331,7 +357,10 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
         if (not identity(song['title'], title=True) & identity(row.get('trackName'), title=True) or
                 not identity(song['artist']) & identity(row.get('artistName')) or row.get('instrumental') is not False):
             continue
-        if performance and performance not in {live_performance(row.get(field)) for field in ('trackName', 'albumName')}:
+        mismatch = (recording_mismatches(song, source_title, row.get('trackName'), row.get('albumName'))
+                    if allow_recording_mismatch else ['live_performance'] if performance and performance not in
+                    {live_performance(row.get(field)) for field in ('trackName', 'albumName')} else [])
+        if mismatch is None or mismatch and not allow_recording_mismatch:
             continue
         try:
             reference_duration, basis = duration, None
@@ -343,8 +372,12 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
                 if padding is not None:
                     reference_duration, basis = padding['nonzero_duration'], padding
                     difference = abs(float(row['duration'])-reference_duration)
-            if not math.isfinite(difference) or difference > max(3., min(10., reference_duration*.02)):
+            if not math.isfinite(difference):
                 continue
+            if difference > max(3., min(10., reference_duration*.02)):
+                if not allow_recording_mismatch:
+                    continue
+                mismatch.append('duration')
             raw_text = row['plainLyrics']
             if not isinstance(raw_text, str) or not raw_text.strip() or len(raw_text) > 30000:
                 continue
@@ -370,16 +403,17 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
                 continue
         except (KeyError, TypeError, ValueError, OverflowError):
             continue
-        candidates.append((min(support, coverage), -difference, lines, dict(
+        candidates.append((not mismatch, min(support, coverage), -difference, lines, dict(
             id=row['id'], url=f"https://lrclib.net/api/get/{row['id']}",
             track=row['trackName'], artist=row['artistName'], album=row.get('albumName'),
             duration=row['duration'], language=language,
             text_support=support if transcription is not None else None,
             audio_word_coverage=coverage if transcription is not None else None,
             duration_basis=basis or dict(kind='recording', recording_duration=duration),
+            recording_mismatches=mismatch,
             excluded_credit_lines=excluded, provider_timestamps_used=False,
             text_sha256=hashlib.sha256(raw_text.encode()).hexdigest())))
     if not candidates:
         return None, dict(report, status='no_supported_recording')
-    best = max(candidates, key=lambda c: c[:2])
-    return best[2], dict(report, status='accepted' if transcription is not None else 'candidate', provider='lrclib', **best[3])
+    best = max(candidates, key=lambda c: c[:3])
+    return best[3], dict(report, status='accepted' if transcription is not None else 'candidate', provider='lrclib', **best[4])

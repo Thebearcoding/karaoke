@@ -85,7 +85,8 @@ def fetch_additional_lyrics(provider, song, metadata, cache):
                         data = read_document('https://music.163.com/api/song/lyric?'+urlencode(
                             dict(id=row['trackId'], lv=-1, kv=-1, tv=-1)), timeout=10)
                         return data.get('lrc', {}).get('lyric')
-                    lines, report = lookup.published_candidate(rows, song, metadata.get('title'), read_lyrics=lyrics)
+                    lines, report = lookup.published_candidate(rows, song, metadata.get('title'),
+                        read_lyrics=lyrics, allow_recording_mismatch=True)
                     if lines:
                         report['url'] = 'https://music.163.com/#/song?id='+report['url'].rsplit('/',1)[-1]
                 else:
@@ -130,10 +131,8 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None):
     """Five possible routes, queried together; unavailable sources never vote."""
     def lrclib():
         packet = lookup.fetch_lyrics(song, cache.root/'download/source.info.json', cache)
-        expected = lookup.version_tags(song['title']) | lookup.version_tags(metadata.get('title'))
-        packet = dict(packet, results=[r for r in packet.get('results', []) if
-            lookup.version_tags((r.get('trackName') or '')+' '+(r.get('albumName') or '')) == expected])
-        lines, report = lookup.lyric_candidate(packet, song, None, duration, source_title=metadata.get('title'))
+        lines, report = lookup.lyric_candidate(packet, song, None, duration,
+            source_title=metadata.get('title'), allow_recording_mismatch=True)
         return lines, dict(report, provider='lrclib')
     sources = [('line_music', lambda: lookup.fetch_published_lyrics(song, metadata.get('title'), cache)), ('lrclib', lrclib),
                ('netease', lambda: fetch_additional_lyrics('netease', song, metadata, cache)),
@@ -172,11 +171,31 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None):
         # Agreement outranks provider preference. Without it, retain one
         # published source and its disagreements for acoustic alignment.
         preferred = ('line_music', 'youtube_music', 'netease', 'video_description', 'lrclib')
-        index = (review['agreeing_sources'][0] if lines else min(range(len(candidates)),
-            key=lambda i: preferred.index(candidates[i][1]['provider'])))
+        index = min(range(len(candidates)), key=lambda i:
+            (bool(candidates[i][1].get('recording_mismatches')), preferred.index(candidates[i][1]['provider'])))
+        selection = 'published_source'
+        if lines:
+            index, selection = review['agreeing_sources'][0], 'agreement'
+        else:
+            # Three close, independently published texts outweigh an outlier.
+            # Similarity only selects a whole candidate; differences stay soft
+            # failures and are never reported as exact agreement or accuracy.
+            support = [{i} for i in range(len(candidates))]
+            for comparison in review['comparisons']:
+                if comparison['similarity'] >= .9:
+                    a, b = comparison['sources']
+                    support[a].add(b)
+                    support[b].add(a)
+            votes = [len({candidates[i][1].get('publisher') or candidates[i][1]['provider'] for i in group})
+                     for group in support]
+            if max(votes) >= 3:
+                index = min(range(len(candidates)), key=lambda i: (-votes[i],
+                    bool(candidates[i][1].get('recording_mismatches')), preferred.index(candidates[i][1]['provider'])))
+                review['supporting_sources'] = sorted(support[index])
+                selection = 'similarity_support'
         lines, selected = candidates[index]
         review['selected_source'] = index
-        review['selection'] = 'agreement' if review['agreeing_sources'] else 'published_source'
+        review['selection'] = selection
         report = dict(selected, crosscheck=review)
     else:
         report = dict(status=review['status'], crosscheck=review)
