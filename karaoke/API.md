@@ -40,7 +40,15 @@ API 的依赖文件只安装服务依赖。新检出请按[安装说明](../SETU
 
 预处理队列按歌单中尚未开始的歌曲重新排序，不中断当前处理。播放抵达未准备好的歌曲时等待；媒体加载完成后由播放页发送 `ready`，从设定位置起播，不把预处理／加载耗时算入歌曲时间。移除点歌项解除缓存保护；已提交的预处理仍会完成，成品可按 LRU 回收。
 
-浏览器用同一个 Web Audio 时钟播放三条 MP3 试听音轨，MV 静音跟随。普通页面负责播放；`/?remote=1` 只点歌和控制，不发声。完整说明见 [APP.md](APP.md)。
+浏览器用同一个 Web Audio 时钟播放三条按需分段的 FLAC 音轨，MV 静音跟随。普通页面负责播放；`/?remote=1` 只点歌和控制，不发声。完整说明见 [APP.md](APP.md)。
+
+### 分段播放
+
+`GET /v1/jobs/{id}/playback` 返回三轨共有的 `sample_rate`、`channels`、`frames`、`chunk_frames`、`padding_frames`。仅允许已完成任务，三轨格式、共同增益或文件无效时拒绝播放。此元数据查询不刷新 LRU。
+
+`GET /v1/jobs/{id}/playback/{stem}/{chunk}` 返回单段 24-bit FLAC，`stem` 是 `instrumental`、`backing_vocals` 或 `lead_vocals`，`chunk` 从零开始。两个请求都传入浏览器 AudioContext 的 `sample_rate`（默认 48000）。每段 8 秒，前后附加至少 20 ms 的重采样余量，边界同时落在源采样与浏览器采样的整数位置；按元数据裁掉重叠部分，并以整型源帧边界调度三轨。读取期间取得缓存租约，实际音频访问刷新 LRU；不写入新缓存文件，不触发预处理模型。
+
+播放页发送 `buffering` 时携带 `entry_id`、共同的已播 `position` 和当前 `playback_started_at`。服务器拒绝切歌、定位、暂停之前的过期事件；有效请求保留播放意图并清空 `started_at`，直到片段齐备后收到带当前 `revision` 的 `ready`。
 
 ## 提交
 

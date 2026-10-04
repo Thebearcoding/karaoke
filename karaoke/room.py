@@ -28,11 +28,12 @@ class StemLevels(BaseModel):
 
 class RoomCommand(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    action: Literal['play', 'pause', 'seek', 'next', 'select', 'remove', 'reorder', 'mix', 'levels', 'pitch', 'ready', 'retry']
+    action: Literal['play', 'pause', 'seek', 'next', 'select', 'remove', 'reorder', 'mix', 'levels', 'pitch', 'ready', 'buffering', 'retry']
     entry_id: str | None = None
     position: float = Field(default=0, ge=0, allow_inf_nan=False)
     order: list[str] | None = None
     revision: int | None = None
+    playback_started_at: float | None = Field(default=None, allow_inf_nan=False)
     mix: Literal['karaoke', 'instrumental', 'original'] | None = None
     levels: StemLevels | None = None
     pitch_semitones: int | None = Field(default=None, ge=-6, le=6, strict=True)
@@ -210,7 +211,7 @@ class Room:
         current = next((e for e in state['entries'] if e['id'] == state['current_id']), None)
         entry = next((e for e in state['entries'] if e['id'] == command.entry_id), None)
         action = command.action
-        if action in ('pause', 'seek', 'ready', 'next') and command.entry_id != state['current_id']:
+        if action in ('pause', 'seek', 'ready', 'buffering', 'next') and command.entry_id != state['current_id']:
             raise HTTPException(409, '已经切换到另一首歌')
         if action in ('select', 'remove', 'retry') and entry is None:
             raise HTTPException(404, '歌曲已从歌单移除')
@@ -229,6 +230,14 @@ class Room:
             duration = self.describe(current)['duration']
             state.update(position=min(command.position, max(0, duration-.05)),
                          started_at=time.time() if state['started_at'] else None)
+        elif action == 'buffering':
+            # A delayed request from before a seek/pause must not rewind this
+            # song or restart its clock. Mix/volume revisions are independent.
+            if (not state['playing'] or state['started_at'] is None
+                    or command.playback_started_at != state['started_at']):
+                raise HTTPException(409, '播放位置已经改变')
+            duration = self.describe(current)['duration']
+            state.update(position=min(command.position, duration), started_at=None)
         elif action == 'ready':
             if current and self.describe(current)['status'] == 'completed' and state['playing']:
                 if state['started_at'] is None:

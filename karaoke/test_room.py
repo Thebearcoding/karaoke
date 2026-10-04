@@ -157,6 +157,30 @@ def test_wait_for_preparation_then_play_pause_seek_mix_and_persist(tmp_path):
         assert empty['entries'] == [] and empty['current_id'] is None
 
 
+def test_buffering_freezes_room_until_ready_and_rejects_old_playback_events(tmp_path):
+    app = create_app(tmp_path, version='test')
+    app.state.store.cache.minimum_free = 0
+    job = ready_job(app.state.store)
+    with TestClient(app) as client:
+        entry = client.post('/v1/room/entries', json={'job_id':job['id']}).json()['entries'][0]
+        def command(action, **fields):
+            return client.post('/v1/room/commands', json={'action':action, 'entry_id':entry['id'], **fields})
+        command('play')
+        playing = command('ready').json()
+        request = dict(position=4, playback_started_at=playing['started_at'])
+        waiting = command('buffering', **request).json()
+        assert waiting['playing'] and waiting['started_at'] is None and waiting['position'] == 4
+        assert client.get('/v1/room').json()['position'] == 4
+        resumed = command('ready', revision=waiting['revision']).json()
+        assert resumed['started_at'] is not None and resumed['position'] == 4
+        assert command('buffering', **request).status_code == 409
+        seeked = command('seek', position=7).json()
+        assert command('buffering', position=4, playback_started_at=resumed['started_at']).status_code == 409
+        command('pause')
+        assert command('buffering', position=7, playback_started_at=seeked['started_at']).status_code == 409
+        assert command('buffering', entry_id='old', **request).status_code == 409
+
+
 def test_independent_levels_preserve_playback_persist_and_presets_reset_them(tmp_path):
     app = create_app(tmp_path, version='test')
     job = ready_job(app.state.store)

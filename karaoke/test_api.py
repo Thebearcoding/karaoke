@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import re
@@ -100,6 +101,55 @@ def test_submission_outputs_cache_and_range_requests(tmp_path):
         repaired = client.post('/v1/jobs', json={'url': URL})
         assert repaired.status_code == 202 and repaired.json()['id'] != job_id
         assert finished(client, repaired.json()['id'])['status'] == 'completed'
+
+
+@pytest.mark.parametrize('rate,playback_rate', [(16000,48000), (44100,48000), (48000,44100)])
+def test_playback_windows_preserve_channels_gain_and_boundaries_and_release_leases(tmp_path, rate, playback_rate):
+    import soundfile as sf
+    app = create_app(tmp_path, version='test')
+    store = app.state.store
+    job, _ = store.create(JobRequest(url=URL), 'test')
+    folder = tmp_path/job['id']
+    samples = np.random.default_rng(7).uniform(-.7, .7, (rate*9, 2))
+    artifacts = {}
+    names = ('instrumental', 'backing_vocals', 'lead_vocals')
+    for i, name in enumerate(names):
+        path = folder/f'{name}.wav'
+        sf.write(path, samples/(i+1), rate, subtype='DOUBLE')
+        artifacts[name] = dict(path=path.name, bytes=path.stat().st_size)
+    result = dict(artifacts=artifacts, shared_preview_gain=.6)
+    store.update(job['id'], status='completed', result=result, last_accessed_at='2000-01-01T00:00:00Z')
+    # Do not start the worker: only exercise the existing completed artifacts.
+    client = TestClient(app)
+    url = f"/v1/jobs/{job['id']}/playback"
+    info = client.get(url, params={'sample_rate':playback_rate}).json()
+    assert info['frames'] == rate*9 and info['channels'] == 2
+    assert info['padding_frames']*playback_rate % rate == 0
+    assert store.read(job['id'])['last_accessed_at'] == '2000-01-01T00:00:00Z'
+    for i, name in enumerate(names):
+        parts = []
+        for index in (0, 1):
+            response = client.get(f'{url}/{name}/{index}', params={'sample_rate':playback_rate})
+            assert response.status_code == 200
+            assert response.headers['content-type'] == 'audio/flac'
+            audio, sample_rate = sf.read(io.BytesIO(response.content), always_2d=True)
+            assert sample_rate == rate
+            parts.append(audio[:rate*8] if index == 0 else audio[info['padding_frames']:])
+        decoded = np.concatenate(parts)
+        np.testing.assert_allclose(decoded, samples*.6/(i+1), rtol=0, atol=9e-8)
+        assert not store.cache.leases
+    assert store.read(job['id'])['last_accessed_at'] != '2000-01-01T00:00:00Z'
+    assert client.get(f'{url}/instrumental/2').status_code == 409
+    assert client.get(f'{url}/instrumental/-1').status_code == 404
+    assert client.get(f'{url}/unknown/0').status_code == 404
+    artifacts['lead_vocals']['path'] = '../outside.wav'
+    store.update(job['id'], result=result)
+    assert client.get(url).status_code == 409
+    assert not store.cache.leases
+    store.update(job['id'], status='evicted')
+    assert client.get(url).status_code == 410
+    store.update(job['id'], status='running')
+    assert client.get(url).status_code == 409
 
 
 def test_failures_are_visible_and_retry_creates_new_job(tmp_path):

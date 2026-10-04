@@ -6,3 +6,5 @@ openai==1.109.1
 yt-dlp[default]==2026.8.19
 ytmusicapi==1.12.3
 opencc-python-reimplemented==0.1.7
+numpy==1.26.4
+soundfile==0.13.1

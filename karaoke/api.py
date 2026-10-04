@@ -4,8 +4,10 @@ from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+import io
 import json
 import logging
+import math
 import mimetypes
 import os
 from pathlib import Path
@@ -29,6 +31,56 @@ from .video_search import SearchCursorExpired, VideoSearch
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+PLAYBACK_STEMS = ('instrumental', 'backing_vocals', 'lead_vocals')
+CHUNK_SECONDS = 8
+
+
+def playback_sources(folder, result, playback_rate):
+    import soundfile as sf
+    paths = []
+    formats = []
+    for name in PLAYBACK_STEMS:
+        path = (folder / result['artifacts'][name]['path']).resolve()
+        if not path.is_relative_to(folder) or not path.is_file():
+            raise ValueError('Missing stem')
+        info = sf.info(path)
+        paths.append(path)
+        formats.append((info.samplerate, info.channels, info.frames))
+    rate, channels, frames = formats[0]
+    gain = result['shared_preview_gain']
+    if len(set(formats)) != 1 or channels not in (1, 2) or frames <= 0 or not 0 < rate <= 192000:
+        raise ValueError('Incompatible stems')
+    if not math.isfinite(gain) or not 0 < gain <= 1:
+        raise ValueError('Invalid preview gain')
+    # Both ends of the padding must land on integer samples in the source AND
+    # browser clocks. Otherwise per-window resampling introduces a phase jump.
+    common_rate = math.gcd(rate, playback_rate)
+    padding = math.ceil(.02 * common_rate) * rate // common_rate
+    return paths, dict(sample_rate=rate, channels=channels, frames=frames,
+                       chunk_frames=rate * CHUNK_SECONDS, padding_frames=padding)
+
+
+def playback_window_bytes(path, info, chunk, gain):
+    import numpy as np
+    import soundfile as sf
+    first = chunk * info['chunk_frames']
+    if first >= info['frames']:
+        raise ValueError('Window is past the end')
+    start = max(0, first - info['padding_frames'])
+    end = min(info['frames'], first + info['chunk_frames'] + info['padding_frames'])
+    with sf.SoundFile(path) as source:
+        source.seek(start)
+        samples = source.read(end - start, dtype='float64', always_2d=True)
+    samples *= gain
+    if len(samples) != end - start or not np.isfinite(samples).all() or np.max(np.abs(samples)) >= 1:
+        raise ValueError('Invalid playback samples')
+    output = io.BytesIO()
+    # FLAC has no encoder priming/padding. 24-bit previews preserve the common
+    # headroom without sending float PCM's much larger payload over Wi-Fi.
+    sf.write(output, samples, info['sample_rate'], format='FLAC', subtype='PCM_24')
+    return output.getvalue()
 
 
 def now():
@@ -520,6 +572,34 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
                             record_access=name != 'poster',
                             media_type=mimetypes.guess_type(path.name)[0] or 'application/octet-stream',
                             filename=path.name, content_disposition_type='inline')
+
+    @app.get('/v1/jobs/{job_id}/playback')
+    @app.get('/v1/jobs/{job_id}/playback/{stem}/{chunk}')
+    def playback_window(job_id: UUID, stem: str | None = None, chunk: int = 0,
+                        sample_rate: int = Query(48000, ge=8000, le=192000)):
+        # Run disk reads and the small FLAC encode in the thread pool, never on
+        # the event loop. No models, subprocesses, or persistent copies.
+        key = str(job_id)
+        doc = store.read(key)
+        if doc is None:
+            raise HTTPException(404, 'Unknown job')
+        if doc['status'] == 'evicted':
+            raise HTTPException(410, '歌曲缓存已回收，请重新点歌')
+        if doc['status'] != 'completed':
+            raise HTTPException(409, '歌曲尚未准备完成')
+        if chunk < 0 or stem is not None and stem not in PLAYBACK_STEMS:
+            raise HTTPException(404, 'Unknown audio window')
+        store.cache.acquire(key, record_access=stem is not None)
+        try:
+            paths, info = playback_sources(store.cache.folder(key), doc['result'], sample_rate)
+            if stem is None:
+                return info
+            data = playback_window_bytes(paths[PLAYBACK_STEMS.index(stem)], info, chunk, doc['result']['shared_preview_gain'])
+            return Response(data, media_type='audio/flac', headers={'Cache-Control': 'no-store'})
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError) as error:
+            raise HTTPException(409, '播放音轨不完整，请重新准备') from error
+        finally:
+            store.cache.release(key)
 
     assets = StaticFiles(directory=ROOT/'web')
     app.mount('/assets', assets, name='assets')

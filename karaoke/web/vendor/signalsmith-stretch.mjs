@@ -248,6 +248,13 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 				this.timeMap.shift();
 			}
 			let currentMapSegment = this.timeMap[0];
+			// Local playback never needs a silent STFT tail while this path is
+			// inactive. The dry path has its own fixed delay and the next start
+			// resets this processor before feeding audio again.
+			if (!currentMapSegment.active) {
+				outputList[0].forEach(channel => channel.fill(0));
+				return true;
+			}
 
 			let wasmModule = this.wasmModule;
 			wasmModule._setTransposeSemitones(currentMapSegment.semitones, currentMapSegment.tonalityHz/sampleRate);

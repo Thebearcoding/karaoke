@@ -434,7 +434,7 @@ function updateTransport() {
 
 function updateCover() {
   const song = current();
-  $('screen-cover').hidden = Boolean(song?.status === 'completed' && !loading && !loadError && !remote && player.unlocked && player.buffers);
+  $('screen-cover').hidden = Boolean(song?.status === 'completed' && !loading && !loadError && !remote && player.unlocked && player.ready);
   $('screen-status').textContent = remote ? '遥控模式' : loadError || (!song ? '请先点歌' : song.status !== 'completed' ? statusText(song) : loading ? '加载音轨…' : '');
   $('screen-status').hidden = !$('screen-status').textContent || song?.status === 'running';
   $('screen-start').hidden = remote || !song || song.status !== 'completed' || loading;
@@ -448,6 +448,14 @@ function updateTime(position) {
 }
 
 const player = new Player($('video'), updateTime, id => command('next', {entry_id:id}));
+let bufferingRequest;
+player.onBuffering = (position, startedAt, entryId = player.entry?.id) => {
+  if (bufferingRequest) return;
+  loading = true;
+  updateCover();
+  bufferingRequest = command('buffering', {entry_id:entryId, position, playback_started_at:startedAt})
+    .finally(() => { bufferingRequest = null; });
+};
 
 async function syncPlayback() {
   if (remote) return;
@@ -457,14 +465,23 @@ async function syncPlayback() {
     updateCover(); return;
   }
   try {
-    loading = !player.buffers || player.key !== song.id;
+    if (!state.playing || !state.started_at) player.stop();
+    const position = state.position + (state.playing && state.started_at ?
+      Math.max(0, Date.now()/1000 + clockOffset - state.started_at) : 0);
+    if (state.playing && state.started_at && player.unlocked && (player.key !== song.id || !player.hasAudio(position))) {
+      player.stop();
+      player.onBuffering(position, state.started_at, song.id);
+      return;
+    }
+    const revision = state.revision;
+    loading = !player.hasAudio(position) || player.key !== song.id;
     updateCover();
-    await player.load(song);
-    if (state.current_id !== song.id) return;
+    await player.load(song, position);
+    if (state.current_id !== song.id || state.revision !== revision) return;
     loading = false; loadError = '';
     if (state.playing && !state.started_at && player.unlocked && readySent !== song.id) {
       readySent = song.id;
-      await command('ready', {entry_id:song.id});
+      if (!await command('ready', {entry_id:song.id, revision})) readySent = null;
     }
     if (!state.playing || state.started_at) readySent = null;
     player.apply({...state, levels:effectiveLevels()}, clockOffset);

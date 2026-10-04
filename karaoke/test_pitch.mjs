@@ -98,3 +98,20 @@ test('reported processor delay matches the zero-shift audio timeline', async () 
   for (let i=10000;i<40000;i++) { error+=(input[i]-output[i+delay])**2; energy+=input[i]**2; }
   assert.ok(error/energy<1e-6, `Latency mismatch: relative error ${error/energy}`);
 });
+
+test('inactive pitch path skips DSP and resumes processing when enabled', async () => {
+  const {node, call}=await processor();
+  const original=node.wasmModule._process;
+  let calls=0;
+  node.wasmModule._process=(...args)=>{calls++;return original(...args);};
+  const input=[new Float32Array(128).fill(.1),new Float32Array(128).fill(.2)];
+  const output=input.map(a=>a.slice());
+  await call('stop');
+  for (let i=0;i<100;i++) node.process([input],[output],{});
+  assert.equal(calls,0);
+  assert.ok(output.every(channel=>channel.every(value=>value===0)));
+  await call('configure',pitchConfiguration);
+  await call('schedule',{active:true,semitones:3});
+  node.process([input],[output],{});
+  assert.equal(calls,1);
+});

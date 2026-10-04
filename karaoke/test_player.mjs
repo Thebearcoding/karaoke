@@ -5,19 +5,22 @@ import {Player} from './web/player.js';
 let frame;
 globalThis.requestAnimationFrame = callback => { frame = callback; };
 class Context {
+  sampleRate = 48000;
   currentTime = 10;
   state = 'running';
   destination = {};
   createGain() { return {gain:{value:0,setTargetAtTime(value){this.value=value;}},connect(target){this.target=target;},disconnect(){this.target=null;}}; }
   createBufferSource() {
-    return {playbackRate:{value:1},connect(target){this.target=target;},start(time,offset){this.started=[time,offset];},stop(){this.stopped=true;},disconnect(){}};
+    return {playbackRate:{value:1},connect(target){this.target=target;},start(time,offset,duration){this.started=[time,offset];this.length=duration;},stop(){this.stopped=true;},disconnect(){}};
   }
   resume() { return Promise.resolve(); }
   decodeAudioData(data) { return Promise.resolve({duration:20, tag:data}); }
 }
 globalThis.window = {AudioContext:Context};
-globalThis.fetch = async url => ({ok:true,arrayBuffer:async()=>url});
-const song = {id:'one',duration:20,artifacts:{mv:'video.mp4',instrumental_preview:'instrumental',backing_vocals_preview:'backing',lead_vocals_preview:'lead'}};
+const metadata = {sample_rate:48000, channels:2, frames:960000, chunk_frames:960000, padding_frames:256};
+const fetchAudio = async url => ({ok:true,json:async()=>metadata,arrayBuffer:async()=>url});
+globalThis.fetch = fetchAudio;
+const song = {id:'one',job_id:'one',duration:20,artifacts:{mv:'video.mp4',instrumental_preview:'instrumental',backing_vocals_preview:'backing',lead_vocals_preview:'lead'}};
 const state = {current_id:'one',position:3,started_at:100,playing:true,mix:'karaoke'};
 function setup(onEnd=()=>{}) {
   const video = Object.assign(new EventTarget(), {currentTime:0,readyState:4,load(){},removeAttribute(){},pause(){this.paused=true;},play(){this.paused=false;return Promise.resolve();}});
@@ -72,7 +75,7 @@ test('decoded audio cannot start the clock before the video is ready', async () 
   const pending=p.load(song).then(()=>{loaded=true;});
   await new Promise(resolve=>setImmediate(resolve));
   p.apply(state,clockOffset());
-  assert.equal(loaded,false); assert.equal(p.sources.length,0); assert.equal(p.buffers,null);
+  assert.equal(loaded,false); assert.equal(p.sources.length,0); assert.equal(p.ready,false);
   p.video.readyState=1; p.video.dispatchEvent(new Event('loadeddata'));
   await new Promise(resolve=>setImmediate(resolve)); assert.equal(loaded,false);
   p.video.readyState=2; p.video.dispatchEvent(new Event('canplay'));
@@ -84,10 +87,10 @@ test('a failed or superseded video never releases stale audio', async () => {
   const p=setup(); await p.unlock(); p.video.readyState=0;
   const failed=p.load(song);
   p.video.dispatchEvent(new Event('error'));
-  await assert.rejects(failed,/视频加载失败/); assert.equal(p.buffers,null);
+  await assert.rejects(failed,/视频加载失败/); assert.equal(p.ready,false);
   const old=p.load(song);
   const current=p.load({...song,id:'two'});
-  await old; assert.equal(p.buffers,null);
+  await old; assert.equal(p.ready,false);
   p.video.readyState=2; p.video.dispatchEvent(new Event('canplay'));
   await current; assert.equal(p.entry.id,'two');
   p.clear();
@@ -132,13 +135,13 @@ test('seek and pause stop all previous sources; end notification fires once', as
 test('a late download from the previous selection cannot replace current audio', async () => {
   const p=setup();await p.unlock();
   const originalFetch=globalThis.fetch;const pending=[];
-  globalThis.fetch=url=>new Promise(resolve=>pending.push(()=>resolve({ok:true,arrayBuffer:async()=>url})));
+  globalThis.fetch=url=>new Promise(resolve=>pending.push(()=>resolve({ok:true,json:async()=>metadata,arrayBuffer:async()=>url})));
   const oldLoad=p.load(song);
   globalThis.fetch=originalFetch;
-  await p.load({...song,id:'two',artifacts:{...song.artifacts,lead_vocals_preview:'new-lead'}});
+  await p.load({...song,id:'two',job_id:'two'});
   pending.forEach(resolve=>resolve());await oldLoad;
-  assert.equal(p.entry.id,'two');assert.equal(p.buffers[2].tag,'new-lead');
-  p.clear();assert.equal(p.entry,null);assert.equal(p.buffers,null);
+  assert.equal(p.entry.id,'two');assert.equal(p.stream.at(0)[2].tag,'/v1/jobs/two/playback/lead_vocals/0?sample_rate=48000');
+  p.clear();assert.equal(p.entry,null);assert.equal(p.ready,false);
 });
 
 test('live key changes affect the common mix without restarting; video follows audible time', async () => {
@@ -198,4 +201,80 @@ test('an unopened playback tab does not seek through another device\'s playing c
   assert.equal(seeks,1); assert.equal(videoTime,state.position); assert.equal(p.sources.length,0);
   p.apply({...state,position:12},clockOffset()); assert.equal(videoTime,12);
   p.clear();
+});
+
+const settled = () => new Promise(resolve => setImmediate(resolve));
+function streamingFetch(intercept = () => null) {
+  const info = {...metadata, frames:48000*80, chunk_frames:48000*8};
+  return async (url, options) => intercept(url.split('?')[0], options) || {
+    ok:true, json:async()=>info, arrayBuffer:async()=>url,
+  };
+}
+
+test('long songs retain two windows and schedule adjacent stems on exact common boundaries', async () => {
+  globalThis.fetch=streamingFetch();
+  const p=setup();
+  try {
+    await p.unlock(); await p.load({...song,duration:80}); await settled();
+    p.apply({...state,position:0},clockOffset());
+    assert.equal(p.sources.length,6);
+    const first=p.sources.slice(0,3), next=p.sources.slice(3);
+    assert.ok(first.every(s=>s.length===8 && s.started[1]===0));
+    assert.ok(next.every(s=>Math.abs(s.started[0]-first[0].started[0]-8)<1e-9));
+    assert.ok(next.every(s=>Math.abs(s.started[1]-256/48000)<1e-9));
+    for (let position=1;position<79;position++) {
+      p.context.currentTime=p.anchor+position;
+      for (const source of [...p.sources]) {
+        if (source.started[0]+source.length<=p.context.currentTime) source.onended();
+      }
+      frame(); await settled();
+      assert.notEqual(p.anchor,null);
+      assert.ok(p.stream.windows.size<=2);
+      assert.ok(p.sources.length<=6);
+      assert.ok([...p.stream.windows.keys()].every(i=>i>=Math.floor(position/8)));
+    }
+  } finally { p.clear(); globalThis.fetch=fetchAudio; }
+});
+
+test('one delayed stem freezes all audio at the last common boundary and a seek can resume', async () => {
+  let release;
+  globalThis.fetch=streamingFetch(url=>url.endsWith('/lead_vocals/1') ? new Promise(resolve=>{release=()=>resolve({ok:true,arrayBuffer:async()=>url});}) : null);
+  const p=setup(), waiting=[];
+  p.onBuffering=(...args)=>waiting.push(args);
+  try {
+    await p.unlock(); await p.load({...song,duration:80}); await settled();
+    p.apply({...state,position:0},clockOffset());
+    assert.equal(p.sources.length,3);
+    const previous=[...p.sources];
+    p.context.currentTime=p.anchor+8.1; frame(); frame();
+    assert.equal(p.anchor,null); assert.deepEqual(waiting,[[8,100]]);
+    assert.ok(previous.every(s=>s.stopped));
+    await p.load({...song,duration:80},60);
+    p.apply({...state,position:60},clockOffset());
+    const resumed=p.sources.slice(0,3);
+    assert.ok(resumed.every(s=>Math.abs(s.started[1]-(4+256/48000))<1e-8));
+    release(); await settled();
+    assert.deepEqual([...p.stream.windows.keys()],[7,8]);
+    assert.ok(p.sources.every(s=>!s.buffer.tag.endsWith('/1')));
+  } finally { release?.(); p.clear(); globalThis.fetch=fetchAudio; }
+});
+
+test('a failed prefetch does not retry in a loop or interrupt the buffered window', async () => {
+  let failures=0;
+  globalThis.fetch=streamingFetch(url=>url.endsWith('/lead_vocals/1') ? (failures++, {ok:false}) : null);
+  const p=setup(), waiting=[];
+  p.onBuffering=(...args)=>waiting.push(args);
+  try {
+    await p.unlock(); await p.load({...song,duration:80}); await settled();
+    p.apply({...state,position:0},clockOffset());
+    for (let i=0;i<10;i++) { p.context.currentTime+=.1; frame(); }
+    assert.equal(failures,1); assert.equal(waiting.length,0);
+    p.context.currentTime=p.anchor+8.01; frame();
+    assert.deepEqual(waiting,[[8,100]]);
+    await assert.rejects(p.load({...song,duration:80},8),/音轨加载失败/);
+    assert.equal(p.key,null);
+    globalThis.fetch=streamingFetch();
+    await p.load({...song,duration:80},8);
+    assert.ok(p.hasAudio(8));
+  } finally { p.clear(); globalThis.fetch=fetchAudio; }
 });
