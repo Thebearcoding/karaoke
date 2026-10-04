@@ -112,7 +112,7 @@ class SongCache:
     def compact(self, job, *, source_only=False):
         """Keep published outputs and bounded diagnostics; discard working audio."""
         folder = self.folder(job['id'])
-        keep = {'request.json', 'result.json', 'error.json', 'worker.log'}
+        keep = {'request.json', 'result.json', 'error.json', 'worker.log', 'lyric-crosscheck.json'}
         if (job['status'] in ('failed', 'audio_ready', 'source_ready') or
                 (job.get('result') or {}).get('validation_scope') == 'playback_audio_preview'):
             keep.update(retained_files(folder))

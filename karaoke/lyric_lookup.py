@@ -142,7 +142,17 @@ def published_lyric_lines(text, title):
         r'(?:第[一二三四\d]+)?(?:小提琴|中提琴|大提琴)|录音(?:师)?|混音(?:师)?|母带(?:工程师)?|'
         r'title|artist|album|composer|lyricist|producer|lyrics|music|written by|produced by|'
         r'guitar|bass|drums|piano|strings|recorded by|mixed by|mastered by)\s*[：:]', re.I)
-    rows = [(i, line.strip()) for i, line in enumerate(text.splitlines(), 1) if line.strip()]
+    rows, metadata = [], []
+    for i, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if re.fullmatch(r'\[(?:ar|ti|al|by|offset|re|ve):[^\]]*\]', line, re.I):
+            metadata.append(i)
+            continue
+        # Ignore a line timestamp as timing evidence. Multiple timestamps on
+        # one line remain unsupported rather than silently losing repetitions.
+        line = re.sub(r'^\[\d{1,3}:\d{2}(?:[.:]\d{1,3})?\]\s*', '', line)
+        if line:
+            rows.append((i, line))
     is_credit = lambda line: bool(credit.match(converter.convert(unicodedata.normalize('NFKC', line))))
     first = 0
     while first < len(rows):
@@ -153,19 +163,20 @@ def published_lyric_lines(text, title):
         else:
             break
     stop = next((i for i in range(first, len(rows)) if is_credit(rows[i][1])), len(rows))
-    return [line for _, line in rows[first:stop]], [i for i, _ in rows[:first]+rows[stop:]]
+    return [line for _, line in rows[first:stop]], sorted(metadata+[i for i, _ in rows[:first]+rows[stop:]])
 
 
-def published_candidate(rows, song, source_title):
+def version_tags(text):
+    text = OpenCC('tw2s').convert(text or '').casefold()
+    return {kind for kind, pattern in (
+        ('live', r'\blive\b|演唱会|现场'), ('remix', r'\bremix\b|混音'),
+        ('acoustic', r'\bacoustic\b'), ('instrumental', r'\binstrumental\b|纯音乐'),
+        ('karaoke', r'\bkaraoke\b|伴奏版')) if re.search(pattern, text)}
+
+
+def published_candidate(rows, song, source_title, *, read_lyrics=None):
     """Select published text; recording onsets still come entirely from our audio."""
-    def versions(text):
-        text = OpenCC('tw2s').convert(text or '').casefold()
-        return {kind for kind, pattern in (
-            ('live', r'\blive\b|演唱会|现场'), ('remix', r'\bremix\b|混音'),
-            ('acoustic', r'\bacoustic\b'), ('instrumental', r'\binstrumental\b|纯音乐'),
-            ('karaoke', r'\bkaraoke\b|伴奏版')) if re.search(pattern, text)}
-
-    expected_versions = versions(source_title) | versions(song['title'])
+    expected_versions = version_tags(source_title) | version_tags(song['title'])
     for row in rows:
         title = row.get('trackTitle')
         if not isinstance(title, str) or not isinstance(row.get('artists'), list) or not isinstance(row.get('album'), dict):
@@ -176,12 +187,14 @@ def published_candidate(rows, song, source_title):
             continue
         if (not identity(song['title'], title=True) & identity(title, title=True) or
                 not any(identity(song['artist']) & identity(a) for a in artists) or
-                versions((title or '')+' '+album) != expected_versions):
+                version_tags((title or '')+' '+album) != expected_versions):
             continue
         performance = live_performance(source_title)
         if performance and performance not in (live_performance(title), live_performance(album)):
             continue
         text = row.get('lyrics')
+        if text is None and read_lyrics is not None:
+            text = read_lyrics(row)
         if not isinstance(text, str) or not text.strip() or len(text) > 30000:
             continue
         lines, excluded = published_lyric_lines(text, title)
@@ -230,7 +243,7 @@ def fetch_published_lyrics(song, source_title, cache):
                     retry_at=time.time()+max(30, retry_after_seconds(error) or 0) if transient else None)
             path.write_text(json.dumps(packet, ensure_ascii=False)+'\n')
     packet = json.loads(path.read_text())
-    return packet['lines'], packet['report']
+    return packet['lines'], dict(packet['report'], **({'retry_at':packet['retry_at']} if packet.get('retry_at') else {}))
 
 
 def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_root):
@@ -265,20 +278,19 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 lines = [description_lines[i-1].strip() for i in selected if description_lines[i-1].strip()]
                 provenance = dict(kind='video_description', description_sha256=hashlib.sha256(description.encode()).hexdigest(),
                                   lyric_line_numbers=selected)
+        from .lyric_consensus import fetch_lyric_consensus
+        description = (lines, dict(provenance, provider='video_description', publisher='youtube',
+            language=song.get('language') or text_language(''.join(lines)), url=request['url'],
+            text_sha256=hashlib.sha256('\n'.join(lines).encode()).hexdigest())) if lines else None
+        lines, report = fetch_lyric_consensus(song, metadata, duration, cache, description)
+        if metadata_error:
+            report = dict(report, metadata_error=metadata_error)
+        (cache.root/'lyrics-first-lookup.json').write_text(json.dumps(report, ensure_ascii=False)+'\n')
         if not lines:
-            lines, report = fetch_published_lyrics(song, metadata.get('title'), cache)
-            if not lines:
-                packet = fetch_lyrics(song, cache.root/'download/source.info.json', cache)
-                lines, fallback_report = lyric_candidate(packet, song, None, duration, source_title=metadata.get('title'))
-                report = dict(fallback_report, published_lookup=report)
-            if metadata_error:
-                report = dict(report, metadata_error=metadata_error)
-            (cache.root/'lyrics-first-lookup.json').write_text(json.dumps(report, ensure_ascii=False)+'\n')
-            if not lines:
-                return None
-            song['language'] = report['language']
-            provenance = dict(kind='online_lyric_text', lyric_lookup=report,
-                              text_transform=report.get('text_transform', 'whitespace_only'))
+            return None
+        song['language'] = report['language']
+        provenance = dict(kind='online_lyric_text', lyric_lookup=report,
+                          text_transform=report.get('text_transform', 'whitespace_only'))
     language = song.get('language') or text_language(''.join(lines))
     if not language or len(lines) > 1000 or any(not line.strip() or len(line) > 200 for line in lines):
         return None
@@ -292,7 +304,7 @@ def prepared_lyrics_identity(url, metadata):
     root = Path(__file__).parent
     return dict(url=url, metadata_sha256=hashlib.sha256(json.dumps(metadata, sort_keys=True).encode()).hexdigest(),
                 code_sha256={name: hashlib.sha256((root/name).read_bytes()).hexdigest()
-                             for name in ('lyric_lookup.py', 'song_sources.py', 'source_captions.py')})
+                             for name in ('lyric_lookup.py', 'lyric_consensus.py', 'song_sources.py', 'source_captions.py')})
 
 
 def read_prepared_lyrics(path, url, metadata):
@@ -333,8 +345,17 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
                     difference = abs(float(row['duration'])-reference_duration)
             if not math.isfinite(difference) or difference > max(3., min(10., reference_duration*.02)):
                 continue
-            text = row['plainLyrics']
-            if not isinstance(text, str) or not text.strip() or len(text) > 30000 or re.search(r'\[[^\]\n]+\]', text):
+            raw_text = row['plainLyrics']
+            if not isinstance(raw_text, str) or not raw_text.strip() or len(raw_text) > 30000:
+                continue
+            clean_lines, excluded = published_lyric_lines(raw_text, row['trackName'])
+            if len(clean_lines) == 1:
+                heading = re.split(r'\s+[-–—]\s+', clean_lines[0], maxsplit=1)
+                if (len(heading) == 2 and identity(heading[0], title=True) & identity(row['trackName'], title=True)
+                        and identity(re.split(r'[（(]', heading[1])[0]) & identity(row['artistName'])):
+                    continue
+            text = '\n'.join(clean_lines)
+            if not text or re.search(r'\[[^\]\n]+\]', text):
                 continue
             language = song.get('language') or text_language(text)
             if language is None:
@@ -350,12 +371,14 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
         except (KeyError, TypeError, ValueError, OverflowError):
             continue
         candidates.append((min(support, coverage), -difference, lines, dict(
-            id=row['id'], track=row['trackName'], artist=row['artistName'], album=row.get('albumName'),
+            id=row['id'], url=f"https://lrclib.net/api/get/{row['id']}",
+            track=row['trackName'], artist=row['artistName'], album=row.get('albumName'),
             duration=row['duration'], language=language,
             text_support=support if transcription is not None else None,
             audio_word_coverage=coverage if transcription is not None else None,
             duration_basis=basis or dict(kind='recording', recording_duration=duration),
-            text_sha256=hashlib.sha256(text.encode()).hexdigest())))
+            excluded_credit_lines=excluded, provider_timestamps_used=False,
+            text_sha256=hashlib.sha256(raw_text.encode()).hexdigest())))
     if not candidates:
         return None, dict(report, status='no_supported_recording')
     best = max(candidates, key=lambda c: c[:2])
