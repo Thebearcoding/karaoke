@@ -232,6 +232,14 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align):
                 and cues[i+left]['status'] == 'candidate' and (
                     abs(cues[i+left]['start']-a['start']) > 4 or
                     cues[i+left]['end'] < a['start'] or cues[i+left]['start'] > a['end']))
+            for i, anchor in enumerate(anchors):
+                if anchor['status'] == 'candidate' or cues[i+left]['status'] != 'candidate':
+                    continue
+                before = [a for a in anchors[:i] if a['status'] == 'candidate']
+                after = [a for a in anchors[i+1:] if a['status'] == 'candidate']
+                if before and after and (cues[i+left]['start'] < before[-1]['start']-2 or
+                                         cues[i+left]['end'] > after[0]['end']+2):
+                    targets.add(i+left)
         proposed, replaced = deepcopy(result), []
         try:
             blocks = alignment_blocks(anchors, audio)
@@ -240,6 +248,11 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align):
             continue
         for start, stop_line, cf, cs, ab, ae in blocks:
             selected = targets.intersection(range(start+left, stop_line+left))
+            if ae-ab > 45 and all(anchors[i]['status'] == 'candidate' for i in (start, stop_line-1)):
+                # A long neighbouring intro must not suppress an otherwise
+                # well-localized verse. Its core still needs acoustic alignment.
+                cf, cs = start, stop_line
+                ab, ae = max(0., anchors[cf]['start']-.6), min(duration, anchors[cs-1]['end']+.6)
             if not selected or not 0 < ae-ab <= 45 or budget <= 0:
                 continue
             budget -= 1
@@ -263,10 +276,16 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align):
             fresh = partial_alignment_cues(lines, [part], duration, language)
             for i in sorted(selected):
                 cue, anchor = fresh[i], anchors[i-left]
-                if cue['status'] != 'candidate' or anchor['status'] != 'candidate':
+                if cue['status'] != 'candidate':
                     continue
-                if cue['end'] < anchor['start']-2 or cue['start'] > anchor['end']+2:
-                    continue
+                if anchor['status'] == 'candidate':
+                    if cue['end'] < anchor['start']-2 or cue['start'] > anchor['end']+2:
+                        continue
+                else:
+                    before = [a for a in anchors[cf:i-left] if a['status'] == 'candidate']
+                    after = [a for a in anchors[i-left+1:cs] if a['status'] == 'candidate']
+                    if not before or not after or not before[-1]['start'] <= cue['start'] < cue['end'] <= after[0]['end']:
+                        continue
                 segment = deepcopy(candidate['segments'][i-cf-left])
                 for word in segment['words']:
                     for key in ('start', 'end'):

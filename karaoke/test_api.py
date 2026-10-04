@@ -1191,7 +1191,8 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
 
 
 @pytest.mark.parametrize('partly_timed', [False, True])
-def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(partly_timed):
+@pytest.mark.parametrize('asr_gap', ['none', 'long_intro', 'missing_middle'])
+def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(partly_timed, asr_gap):
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines = ['alpha','bravo','charlie','delta','echo','foxtrot','golf','hotel']
     starts = {line:30.+i*6 for i,line in enumerate(lines)}
@@ -1205,7 +1206,10 @@ def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(part
     calls=[]
     def recognize(begin,end):
         calls.append((begin,end))
-        return dict(segments=[dict(words=[dict(word=t,start=starts[t],end=starts[t]+1) for t in lines])])
+        words = [dict(word=t,start=starts[t],end=starts[t]+1) for t in lines
+                 if not (asr_gap == 'missing_middle' and t == 'golf')]
+        if asr_gap == 'long_intro':words[0]['start'] = 0.
+        return dict(segments=[dict(words=words)])
     def align(begin,end,text,**kwargs):
         assert end-begin <= 45
         return dict(segments=[dict(text=t,words=[dict(word=t,start=starts[t]-begin,end=starts[t]+1-begin)])
