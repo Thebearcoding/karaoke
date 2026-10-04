@@ -90,7 +90,7 @@ curl -sS http://127.0.0.1:8746/v1/jobs/任务UUID
 
 状态依次为 `queued`、`running`、`completed`；失败为 `failed`，通过 `error.code` 与 `error.message` 获取原因。`active_stages` 会显示当前正在下载、分离、整理歌词、对齐还是渲染。同一首歌的独立步骤可并行，因此可能同时显示两个阶段。
 
-普通点歌与严格音频验收区分处理。普通点歌先查已发表的歌词文本，核对歌名、歌手与版本，再做声学对齐；该路径的 `validation_scope=playback_lyrics_first`，不声称完成独立 ASR 覆盖率验证。LINE MUSIC、LRCLIB、网易云及同一视频的 YouTube Music 歌词并行获取，加上已有视频简介歌词最多五路；LRCLIB 候选另做时长检查。正文规范化后至少两个不同来源一致且无同票数冲突时优先采用一致版本，已知同一出版方去重；未达成一致时选用可信来源原文并保留冲突，不拼接歌词。`lyrics_provenance.lyric_lookup.crosscheck` 记录来源和比较结果，`lyric-crosscheck.json` 另保留各份候选文本。结果状态包括 `corroborated`、`conflicting`、`insufficient_sources`，`selection` 记录 `agreement` 或 `published_source`，后两种状态本身不阻止声学对齐；来源站点可能互相转载，这不是独立人工验证。无可靠文本或全曲无可用字幕时为 hard fail，保留音轨和诊断，不返回可唱成品或“已准备”。对齐局部失败但仍有可用字幕时，可返回 `completed`，`validation_scope=playback_with_lyrics_review`，`quality.playback_fallback` 保留错误与字幕模式，`lyrics_provenance.needs_review=true`。各句独立恢复，有效词字保留原时间；失败词组在已有词组起止点或相邻词组／唱句边界之间匀速扫亮。`timing_source=linear_fallback` 仅用于播放，内部记录 `estimated_spans`、`phrase_timing_sources` 和 `omitted_lines`，页面不额外显示估算标记。不能确定合法唱句时间时只跳过该句。历史 ASR 草稿仅作诊断，不作为回退字幕。音轨分离、文件和完整解码失败仍然阻止发布。`--audio-only` 固定回归继续执行原有完整验收，任何这类回退都不能计为通过。
+普通点歌与严格音频验收区分处理。普通点歌先查已发表的歌词文本，核对歌名、歌手与版本，再做声学对齐；该路径的 `validation_scope=playback_lyrics_first`，不声称完成独立 ASR 覆盖率验证。LINE MUSIC、LRCLIB、网易云及同一视频的 YouTube Music 歌词并行获取，加上已有视频简介歌词最多五路；LRCLIB 候选另做时长检查。正文规范化后至少两个不同来源一致且无同票数冲突时优先采用一致版本，已知同一出版方去重；未达成一致时选用可信来源原文并保留冲突，不拼接歌词。`lyrics_provenance.lyric_lookup.crosscheck` 记录来源和比较结果，`lyric-crosscheck.json` 另保留各份候选文本。结果状态包括 `corroborated`、`conflicting`、`insufficient_sources`，`selection` 记录 `agreement` 或 `published_source`，后两种状态本身不阻止声学对齐；来源站点可能互相转载，这不是独立人工验证。无可靠文本、全曲无可用字幕或仍有输入歌词行缺失时为 hard fail，保留音轨、可用字幕和诊断，不返回可唱成品或“已准备”。输入歌词完整但字词精度需要局部回退时，可返回 `completed`，`validation_scope=playback_with_lyrics_review`，`quality.playback_fallback` 保留错误与字幕模式，`lyrics_provenance.needs_review=true`。各句独立恢复，有效词字保留原时间；失败词组在已有词组起止点或相邻词组／唱句边界之间匀速扫亮。`timing_source=linear_fallback` 仅用于播放，内部记录 `estimated_spans`、`phrase_timing_sources` 和 `omitted_lines`，页面不额外显示估算标记。不能确定合法唱句时间时保留缺行诊断并阻止发布；不因其他行可用就把整首标为已准备。历史 ASR 草稿仅作诊断，不作为回退字幕。音轨分离、文件和完整解码失败仍然阻止发布。`--audio-only` 固定回归继续执行原有完整验收，任何这类回退都不能计为通过。
 
 多首交错处理时，普通 worker 使用数据目录中的 `stage-locks/` 协调下载、分离、识别／对齐、编码四个独立阶段；同阶段单任务，不同阶段可并行。首次下载和补视频共用下载阶段，避免突发请求和同时改写登录文件。`stage_progress.<阶段>.waiting=true` 表示尚未获得执行机会，等待不计入模型运行超时。任务结束或进程退出会释放阶段锁；共享缓存预算保持不变。
 
@@ -253,7 +253,7 @@ with httpx.Client(timeout=30) as client:
 `python -m karaoke.tools.playback_sweep --manifest MANIFEST --data-dir DATA --report REPORT --prepared-dir INPUTS` 对固定清单每首只提交一次，使用 `run_probe` 的锁和共享缓存监控。普通 worker 必须暂停；控制器复用已有来源和有效的音频阶段检查点，保留用户歌单；已有完整 MV 时另建音频任务，避免覆盖。每首结果写入独立报告的 `audio_attempts`，不会改写原固定清单或历史严格音频／MV 账本。
 
 - `clean`：音轨、字幕产物通过本轮检查，没有记录到回退。
-- `soft_fail`：产物可用，但歌词来源存在文本分歧、单个来源请求失败，或字幕对齐／高亮采用了回退；保留原因、来源、缺失行与局部回退数量。仅未找到第二份来源不算请求失败。
+- `soft_fail`：产物可用，但歌词来源存在文本分歧、单个来源请求失败，或字幕对齐／高亮采用了回退；保留原因、来源与局部回退数量；仍有缺失行时处理失败。仅未找到第二份来源不算请求失败。
 - `hard_fail`：处理终止或产物完整性检查失败。
 - 同一首可在硬失败前出现软失败，因此软失败事件数与歌曲数分别报告。
 
@@ -397,3 +397,9 @@ ASR 固定宽度断行若留下孤立的单字或单词，会在同一短句内�
 以上三个接口均返回 `results` 和 `next_cursor`（没有下一页为 `null`）；后续请求在相同接口、相同查询参数上附加 `cursor=next_cursor`。歌手元数据仅在第一页返回；`complete` 表示取得热门歌单入口而非只有页面精选，是否加载到底应看 `next_cursor`。每页保留原始顺序，`rank` 连续编号；前端仅跳过与已加载页面重复的同一来源链接，不合并不同版本。游标与查询／类型绑定，只接受服务端签发的随机句柄，有效期 30 分钟，最多保留 256 个；过期、淘汰或不匹配返回 410，重新搜索即可。游标不包含登录凭据，也不接受客户端指定外部地址。前端在列表末尾附近通过 IntersectionObserver 请求下一页，不轮询；同一页只保留一个在途请求。错误不清空已加载结果，不自动循环重试；空页或全重复页但仍有 continuation 时保留手动加载入口。
 
 从结果点歌使用 `POST /v1/room/entries`，例如 `{"url":"视频链接","source_title":"搜索返回的视频标题"}`。`source_title` 只给新任务提供临时展示标题（最多 500 字），不参与缓存键，不覆盖后续元数据；用户显式传入的 `title` 仍是优先标题。处理中的 `song_info` 按字段合并，空对象、空字符串或 `null` 不清除已知信息；下载进度、语言识别等更新不能把已有歌名变回占位文字。已有准备任务优先用 `job_id` 加入。
+
+### 直接对齐的局部恢复
+
+没有 ASR 锚点的直接歌词对齐会单独检查各句。连续坏句使用左右有效句限定的音频上下文重试，最多 45 秒、每块最多 8 次；只替换坏句，原来的有效邻句保持不变。`alignment/raw.json` 的 `line_recoveries` 保存每次窗口、候选和接纳／拒绝原因；`quality.recovered_alignment_lines` 记录成功恢复的行。未能限定范围的片段保留 `no_measured_neighbour` 或 `requires_coarse_localization`，不反复重跑全曲。
+
+回退按当前处理已验证的字词结果、原始字词、粗句边界顺序选择。`playback-warning.json` 保存未解决行和 `requires_review`；仍有缺行则返回 `subtitles_failed`，保留音轨和诊断。整份无歌词／纯音乐占位文案不会送入对齐器。

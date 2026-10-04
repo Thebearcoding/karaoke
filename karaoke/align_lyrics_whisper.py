@@ -97,6 +97,76 @@ def recover_unresolved_block(block, lines, anchors, duration, align):
     return block
 
 
+def recover_unresolved_lines(block, lines, duration, language, align, max_attempts=8):
+    """Re-align only broken runs inside their measured neighbouring phrases."""
+    from lyric_progress import partial_alignment_cues
+    first, stop = block['context']
+    if len(block['result']['segments']) != stop-first:
+        return dict(block, line_recoveries=[dict(accepted=False, reason='segment_count_mismatch')])
+    result = deepcopy(block)
+    cues = partial_alignment_cues(lines, [result], duration, language)
+    bad = [i for i in range(*block['range']) if cues[i]['status'] != 'candidate']
+    reports, attempts = [], 0
+    while bad:
+        begin_line = bad.pop(0)
+        end_line = begin_line+1
+        while bad and bad[0] == end_line:
+            bad.pop(0)
+            end_line += 1
+        left = begin_line-1 if begin_line > first and cues[begin_line-1]['status'] == 'candidate' else begin_line
+        right = end_line+1 if end_line < stop and cues[end_line]['status'] == 'candidate' else end_line
+        begin = max(block['source_range'][0], cues[left]['start']-.6) if left < begin_line else block['source_range'][0]
+        end = min(block['source_range'][1], cues[right-1]['end']+.6) if right > end_line else block['source_range'][1]
+        report = dict(lines=[begin_line+1, end_line], context=[left, right],
+                      source_range=[begin, end], accepted=False)
+        reports.append(report)
+        if left == begin_line and right == end_line:
+            report['reason'] = 'no_measured_neighbour'
+            continue
+        if not 0 <= begin < end <= duration+.001 or end-begin > 45:
+            report['reason'] = 'requires_coarse_localization'
+            continue
+        if attempts >= max_attempts:
+            report['reason'] = 'local_retry_budget_exhausted'
+            continue
+        attempts += 1
+        try:
+            candidate = align(begin, end, '\n'.join(lines[left:right]),
+                              gap_padding=None, dynamic_heads=True,
+                              max_word_dur=None, word_dur_factor=None)
+        except ValueError as error:
+            report.update(reason='local_alignment_failed', error=str(error))
+            continue
+        report['result'] = candidate
+        if not valid_recovery(candidate, lines[left:right], end-begin):
+            report['reason'] = 'invalid_acoustic_result'
+            continue
+        replacement = deepcopy(candidate['segments'][begin_line-left:end_line-left])
+        for segment in replacement:
+            for word in segment['words']:
+                for key in ('start', 'end'):
+                    word[key] = round(word[key]+begin-block['source_range'][0], 3)
+            segment.update(start=segment['words'][0]['start'], end=segment['words'][-1]['end'])
+        updated = deepcopy(result)
+        updated['result']['segments'][begin_line-first:end_line-first] = replacement
+        proposed = partial_alignment_cues(lines, [updated], duration, language)
+        try:
+            # Context is read-only. A retry must fit the original neighbouring
+            # timings rather than moving an already usable phrase out of its way.
+            presentation_cues(proposed[left:right], duration, lead=0, tail=0, bridge_gap=0)
+            words = [w for cue in proposed[left:right] for w in cue['units']]
+            if any(a['start'] >= b['start'] for a, b in zip(words, words[1:])):
+                raise ValueError('word_order_conflict')
+        except (KeyError, ValueError):
+            report['reason'] = 'conflicts_with_preserved_neighbours'
+            continue
+        report.update(accepted=True, original_segments=result['result']['segments'][begin_line-first:end_line-first])
+        result, cues = updated, proposed
+    if reports:
+        result['line_recoveries'] = reports
+    return result
+
+
 def recover_skipped_repeats(result, duration, align):
     """Check a skipped repetition using both its gap and neighbouring phrases.
 
@@ -433,9 +503,12 @@ def main():
             result, text_recovery = recover_changed_text(result, lines, len(piece)/16000,
                 lambda: align_piece(0., len(piece)/16000, '\n'.join(lines), gap_padding=None, dynamic_heads=True))
             result, repeat_recoveries = recover_skipped_repeats(result, len(piece)/16000, align_piece)
-            block = recover_unresolved_block(dict(range=[first, stop], context=[context_first, context_stop],
+            block = dict(range=[first, stop], context=[context_first, context_stop],
                 source_range=[begin, end], result=result, repeat_recoveries=repeat_recoveries,
-                text_recovery=text_recovery), lyrics['lines'], anchors, duration, align_audio)
+                text_recovery=text_recovery)
+            block = (recover_unresolved_block(block, lyrics['lines'], anchors, duration, align_audio)
+                     if anchors else recover_unresolved_lines(block, lyrics['lines'], duration,
+                                                              lyrics['language'], align_audio))
             result, begin = block['result'], block['source_range'][0]
             local_units = [{'text': word['word'], 'start': round(word['start']+begin, 3),
                             'end': round(word['end']+begin, 3), 'probability': word['probability']}
@@ -465,6 +538,7 @@ def main():
             'model_sha256': sha(model_root/f'{args.model}.pt'), 'runner_sha256': sha(__file__),
             'dynamic_heads': args.dynamic_heads,
             'boundary_reconciliations': boundary_repairs,
+            'line_recoveries': [r for block in raw_blocks for r in block.get('line_recoveries', [])],
             'onset_refinements': refinements,
             'anchors': job.get('anchors'), 'anchors_sha256': sha(job['anchors']) if job.get('anchors') else None,
             'packages': {name: version(name) for name in ['stable-ts', 'openai-whisper', 'torch']},

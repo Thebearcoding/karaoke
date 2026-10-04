@@ -993,6 +993,27 @@ def test_translated_production_footer_cannot_change_the_lyric_language(credit):
     assert report['excluded_credit_lines'] == [3, 4]
 
 
+@pytest.mark.parametrize('placeholder', ['[00:00.00]纯音乐，请欣赏', '純音樂，請您欣賞',
+    '此歌曲为没有填词的纯音乐，请您欣赏', '暂无歌词', 'No lyrics available', 'Instrumental'])
+def test_published_lyrics_skip_placeholder_and_try_the_next_release(placeholder):
+    from karaoke.lyric_lookup import published_candidate, published_lyric_lines
+    row = dict(trackId=123, trackTitle='Evening', artists=[dict(artistName='Singer')],
+               album=dict(albumTitle='Evening'), lyrics=placeholder)
+    song = dict(title='Evening', artist='Singer')
+    assert published_candidate([row], song, '')[0] is None
+    body = ['Stars above the quiet shore', 'I will sing once more']
+    lines, report = published_candidate([row, dict(row, trackId=124, lyrics='\n'.join(body))], song, '')
+    assert lines == body and report['url'].endswith('/124')
+    # These words may occur in real lyrics; only a whole placeholder is rejected.
+    assert published_lyric_lines(placeholder+'\n'+body[0], 'Evening')[0]
+
+
+def test_published_lyric_html_entities_keep_the_source_words():
+    from karaoke.lyric_lookup import published_lyric_lines
+    assert published_lyric_lines('You&nbsp;&amp;&nbsp;me\nWe&#39;ll sing', 'Evening')[0] == [
+        'You\u00a0&\u00a0me', "We'll sing"]
+
+
 @pytest.mark.parametrize('change', [dict(trackTitle='別的歌'), dict(artists=[dict(artistName='別人')]),
     dict(album=dict(albumTitle='Live')), dict(album=dict(albumTitle='Remix')), dict(artists=None),
     dict(lyrics=None), dict(lyrics='歌名：晚風'), dict(lyrics='專輯：春天\n歌曲：晚風\n作詞：林林'),
@@ -1060,6 +1081,77 @@ def test_direct_lyrics_reach_acoustic_aligner_without_asr_anchors(tmp_path, monk
     monkeypatch.setattr(sys, 'argv', ['align', '--jobs', str(tmp_path/'jobs.json'), '--device', 'cpu'])
     with pytest.raises(ReachedAlignment):
         aligner.main()
+
+
+@pytest.mark.parametrize('failure', [None, 'changed_text', 'collapsed', 'outside', 'crossing', 'raised'])
+def test_direct_alignment_repairs_only_bad_lines_with_acoustic_results(failure):
+    from copy import deepcopy
+    from karaoke.align_lyrics_whisper import recover_unresolved_lines
+    lines = ['First phrase', 'Middle phrase', 'Last phrase']
+    def segment(text, start):
+        words = [dict(word=w, start=start+i*.4, end=start+i*.4+.3) for i,w in enumerate(text.split())]
+        return dict(text=text, start=start, end=words[-1]['end'], words=words)
+    segments = [segment(text, start) for text,start in zip(lines, [1., 4., 8.])]
+    for word in segments[1]['words']:
+        word.update(start=4., end=4.)
+    original = dict(context=[0,3], range=[0,3], source_range=[0.,300.], result=dict(segments=segments))
+    saved = deepcopy(original)
+    calls = []
+    def align(begin, end, text, **options):
+        calls.append((begin,end,text))
+        assert end-begin < 10 and options['dynamic_heads']
+        if failure == 'raised':
+            raise ValueError('No usable acoustic alignment')
+        candidate = [segment(line, start-begin) for line,start in zip(lines, [1.1,4.,8.1])]
+        word = candidate[1]['words'][0]
+        if failure == 'changed_text': word['word'] = 'Unrelated'
+        if failure == 'collapsed': word['end'] = word['start']
+        if failure == 'outside': word['end'] = end+10
+        if failure == 'crossing': word['start'] = 0
+        return dict(segments=candidate)
+    result = recover_unresolved_lines(original,lines,300.,'English',align)
+    assert original == saved and len(calls) == 1
+    assert result['line_recoveries'][0]['accepted'] == (failure is None)
+    actual = result['result']['segments']
+    assert actual[0] == segments[0] and actual[2] == segments[2]
+    if failure is None:
+        assert actual[1] == segment(lines[1],4.)
+    else:
+        assert actual == segments
+
+
+def test_direct_alignment_has_a_shared_local_retry_budget():
+    from karaoke.align_lyrics_whisper import recover_unresolved_lines
+    lines = ['first', 'second', 'third', 'fourth', 'fifth']
+    segments = [dict(text=text, words=[dict(word=text, start=float(i*3+1),
+        end=float(i*3+1 if i%2 else i*3+2))]) for i,text in enumerate(lines)]
+    block = dict(context=[0,5], range=[0,5], source_range=[0.,20.], result=dict(segments=segments))
+    calls = []
+    def align(begin,end,text,**options):
+        calls.append(text)
+        return dict(segments=[dict(text=line, words=[dict(word=line, start=i*3+1-begin,
+            end=i*3+2-begin)]) for i,line in enumerate(text.splitlines())])
+    result = recover_unresolved_lines(block,lines,20.,'English',align,max_attempts=1)
+    assert calls == ['\n'.join(lines[:3])]
+    assert result['line_recoveries'][0]['accepted']
+    assert result['line_recoveries'][1]['reason'] == 'local_retry_budget_exhausted'
+    assert result['result']['segments'][3:] == segments[3:]
+
+
+@pytest.mark.parametrize('far_neighbour', [False, True])
+def test_direct_alignment_defers_unanchored_or_oversized_repairs(far_neighbour):
+    from karaoke.align_lyrics_whisper import recover_unresolved_lines
+    lines = ['First phrase', 'Last phrase']
+    segments = [dict(text=text, words=[dict(word=text,start=0.,end=0.)]) for text in lines]
+    if far_neighbour:
+        segments[1]['words'][0].update(start=200.,end=201.)
+    original = dict(context=[0,2],range=[0,2],source_range=[0.,300.],result=dict(segments=segments))
+    def align(*args,**kwargs):
+        raise AssertionError('Unsafe whole-song retry')
+    result = recover_unresolved_lines(original,lines,300.,'English',align)
+    assert result['result'] == original['result']
+    assert result['line_recoveries'][0]['reason'] == (
+        'requires_coarse_localization' if far_neighbour else 'no_measured_neighbour')
 
 
 @pytest.mark.parametrize('padding', ['zero', 'quiet', 'other_channel', 'all_silent', 'nonfinite', 'wrong_duration'])
@@ -1836,7 +1928,8 @@ def test_playback_fallback_omits_only_phrases_without_usable_times(tmp_path, bad
     if bad == 'nan': cues[0]['start'] = float('nan')
     (tmp_path/'alignment/cues.json').write_text(json.dumps(cues))
     pipeline.alignment_outputs.add(tmp_path/'alignment')
-    pipeline.playback_fallback({}, 4, StageFailure('align_words', 'unresolved'))
+    with pytest.raises(StageFailure, match='1 行歌词未能定位'):
+        pipeline.playback_fallback({}, 4, StageFailure('align_words', 'unresolved'))
     output = json.loads((tmp_path/'cues.json').read_text())
     retained = 0 if bad == 'overlap' else 1
     assert len(output) == 1 and output[0]['text'] == cues[retained]['text']
@@ -1922,7 +2015,8 @@ def test_playback_fallback_retains_raw_aligned_lines_when_whole_block_text_check
     if fresh:
         pipeline.alignment_outputs.add(tmp_path/'alignment')
     if fresh:
-        pipeline.playback_fallback({}, 25, StageFailure('align_words', 'block failed'))
+        with pytest.raises(StageFailure, match='1 行歌词未能定位'):
+            pipeline.playback_fallback({}, 25, StageFailure('align_words', 'block failed'))
     else:
         with pytest.raises(StageFailure, match='未生成任何可用字幕'):
             pipeline.playback_fallback({}, 25, StageFailure('align_words', 'block failed'))
@@ -1932,6 +2026,26 @@ def test_playback_fallback_retains_raw_aligned_lines_when_whole_block_text_check
     warning = json.loads((tmp_path/'playback-warning.json').read_text())
     assert warning['omitted_lines'] == ([2] if fresh else [1,2,3])
     assert not warning['word_alignment_passed']
+
+
+def test_playback_fallback_prefers_existing_word_times_to_coarse_lines(tmp_path):
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    lines = ['First phrase', 'Last phrase']
+    (tmp_path/'lyrics.json').write_text(json.dumps(dict(language='English', lines=lines, provenance={})))
+    (tmp_path/'alignment').mkdir()
+    coarse = [dict(text=text, start=10+i*2, end=11+i*2, status='candidate') for i, text in enumerate(lines)]
+    (tmp_path/'alignment/cues.json').write_text(json.dumps(coarse))
+    raw = [dict(range=[0, 2], context=[0, 2], source_range=[10, 15], result=dict(segments=[
+        dict(words=[dict(word=w, start=i*2+j*.4, end=i*2+j*.4+.3)
+                    for j,w in enumerate(text.split())]) for i,text in enumerate(lines)]))]
+    (tmp_path/'alignment/raw.json').write_text(json.dumps(raw))
+    pipeline.alignment_outputs.add(tmp_path/'alignment')
+    pipeline.playback_fallback({}, 20, StageFailure('align_words', 'unresolved'))
+    cues = json.loads((tmp_path/'cues.json').read_text())
+    assert [u['start'] for c in cues for u in c['units']] == [10., 10.4, 12., 12.4]
+    warning = json.loads((tmp_path/'playback-warning.json').read_text())
+    assert warning['estimated_spans'] == [] and warning['omitted_lines'] == []
+    assert not warning['requires_review']
 
 
 def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatch):

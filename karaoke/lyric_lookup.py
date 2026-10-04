@@ -1,5 +1,6 @@
 """Optional independent lyric text; provider timestamps never become onsets."""
 import hashlib
+import html
 import json
 import math
 from pathlib import Path
@@ -148,7 +149,7 @@ def published_lyric_lines(text, title):
         r'guitar|bass|drums|piano|strings|recorded by|mixed by|mastered by|audio engineer|assistant engineer)\s*[：:]', re.I)
     rows, metadata = [], []
     for i, line in enumerate(text.splitlines(), 1):
-        line = line.strip()
+        line = html.unescape(line).strip()
         if re.fullmatch(r'\[(?:ar|ti|al|by|offset|re|ve):[^\]]*\]', line, re.I):
             metadata.append(i)
             continue
@@ -167,7 +168,13 @@ def published_lyric_lines(text, title):
         else:
             break
     stop = next((i for i in range(first, len(rows)) if is_credit(rows[i][1])), len(rows))
-    return [line for _, line in rows[first:stop]], sorted(metadata+[i for i, _ in rows[:first]+rows[stop:]])
+    body = rows[first:stop]
+    marker = re.sub(r'[^\w]', '', converter.convert(''.join(line for _, line in body))).casefold()
+    if marker in {'纯音乐请欣赏', '纯音乐请您欣赏', '此歌曲为没有填词的纯音乐请您欣赏',
+                  '暂无歌词', '暂无该歌曲歌词', '歌词暂未提供', 'nolyricsavailable',
+                  'lyricsnotavailable', 'instrumental'}:
+        return [], sorted(metadata+[i for i, _ in rows])
+    return [line for _, line in body], sorted(metadata+[i for i, _ in rows[:first]+rows[stop:]])
 
 
 def version_tags(text):
@@ -229,7 +236,8 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
             url='https://music-tw.line.me/track/'+track_id, track=title, artists=artists, album=album,
             text_sha256=hashlib.sha256(text.encode()).hexdigest(), excluded_credit_lines=excluded,
             recording_mismatches=mismatch,
-            text_transform='credit_header_footer_removed_then_whitespace_only', provider_timestamps_used=False)
+            text_transform='html_entities_decoded_credit_header_footer_removed_then_whitespace_only',
+            provider_timestamps_used=False)
     return None, dict(status='no_matching_published_text', provider='line_music')
 
 

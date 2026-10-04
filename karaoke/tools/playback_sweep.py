@@ -21,14 +21,15 @@ def soft_failures(result, prepared):
     events = []
     fallback = quality.get('playback_fallback')
     if fallback and fallback['subtitle_mode'] != 'unavailable':
-        events.append(dict(module='alignment' if fallback['error']['code'].startswith('align') else 'lyrics',
+        events.append(dict(module='alignment',
             **fallback['error'], subtitle_mode=fallback['subtitle_mode'],
             estimated_spans=len(fallback.get('estimated_spans', [])),
             omitted_lines=fallback.get('omitted_lines', [])))
-    if quality.get('fallback_units') or quality.get('line_order_fallback_lines'):
+    if quality.get('fallback_units') or quality.get('line_order_fallback_lines') or quality.get('recovered_alignment_lines'):
         events.append(dict(module='alignment', code='alignment_recovered',
             fallback_units=quality.get('fallback_units', 0),
-            line_order_fallback_lines=quality.get('line_order_fallback_lines', [])))
+            line_order_fallback_lines=quality.get('line_order_fallback_lines', []),
+            recovered_alignment_lines=quality.get('recovered_alignment_lines', [])))
     lookup = prepared.get('lookup') or {}
     if lookup.get('recording_mismatches'):
         events.append(dict(module='lyrics', code='lyric_recording_mismatch',

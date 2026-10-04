@@ -673,6 +673,8 @@ class Pipeline:
         self.run('align_words', [sys.executable, ROOT/'align_lyrics_whisper.py', '--jobs',
             output/'alignment-jobs.json', '--device', self.device])
         raw = json.loads((output/'alignment/raw.json').read_text())
+        recovered_lines = sorted({i for block in raw for report in block.get('line_recoveries', [])
+                                  if report['accepted'] for i in range(report['lines'][0], report['lines'][1]+1)})
         coarse, _ = presentation_cues(json.loads((output/'alignment/cues.json').read_text()),
                                      duration, lead=0, tail=0, bridge_gap=0)
         words, mapping = build(coarse, raw, language)
@@ -749,6 +751,7 @@ class Pipeline:
             independent_asr_coverage=None if direct else True,
             restored_repetitions=0 if direct else len(repeats['expansions']),
             fallback_units=sum(u.get('timing_source') == 'prior_word_fallback' for u in units),
+            recovered_alignment_lines=recovered_lines,
             line_order_fallback_lines=order_fallbacks,
             countdown_events=countdown_events(cues)))
 
@@ -872,8 +875,13 @@ class Pipeline:
         if not unverified_draft and raw_path.parent in self.alignment_outputs and raw_path.is_file():
             from lyric_progress import partial_alignment_cues
             try:
-                candidates.append(('alignment/raw.json', partial_alignment_cues(lyrics['lines'],
-                    json.loads(raw_path.read_text()), duration, lyrics['language'])))
+                raw = ('alignment/raw.json', partial_alignment_cues(lyrics['lines'],
+                    json.loads(raw_path.read_text()), duration, lyrics['language']))
+                # Coarse captions have no word timings. Do not discard usable
+                # raw words merely because another line prevented refinement.
+                before_coarse = next((i for i, (name, _) in enumerate(candidates)
+                                      if name in ('alignment/cues.json', 'anchors.json')), len(candidates))
+                candidates.insert(before_coarse, raw)
             except (OSError, ValueError, KeyError, TypeError):
                 pass
         for line, text in enumerate(lyrics['lines']):
@@ -898,7 +906,7 @@ class Pipeline:
         warning = dict(error=processing_error(error, self.output),
                        subtitle_mode='estimated_word' if estimated else 'partial_word' if units else 'line' if cues else 'unavailable',
                        phrase_timing_sources=sources, word_alignment_passed=False,
-                       estimated_spans=estimated, omitted_lines=omitted,
+                       estimated_spans=estimated, omitted_lines=omitted, requires_review=bool(omitted),
                        unhighlighted_lines=[i for i, c in enumerate(cues, 1) if not c['units']])
         if unverified_draft:
             warning['unverified_asr_text_omitted'] = True
@@ -909,6 +917,8 @@ class Pipeline:
             playback_fallback=warning, onset_accuracy=None, separation_purity=None))
         if not cues:
             raise StageFailure('subtitles', '未生成任何可用字幕；音轨和诊断已保留，请核对歌词来源与对齐结果') from error
+        if omitted:
+            raise StageFailure('subtitles', f'仍有 {len(omitted)} 行歌词未能定位；已保留音轨、可用字幕和局部修复诊断') from error
         return lyrics
 
     def render_video(self, result):
