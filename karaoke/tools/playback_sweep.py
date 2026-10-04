@@ -20,7 +20,7 @@ def soft_failures(result, prepared):
     quality = result.get('quality', {})
     events = []
     fallback = quality.get('playback_fallback')
-    if fallback:
+    if fallback and fallback['subtitle_mode'] != 'unavailable':
         events.append(dict(module='alignment' if fallback['error']['code'].startswith('align') else 'lyrics',
             **fallback['error'], subtitle_mode=fallback['subtitle_mode'],
             estimated_spans=len(fallback.get('estimated_spans', [])),
@@ -40,11 +40,23 @@ def soft_failures(result, prepared):
     return events
 
 
+def review_attempt(attempt):
+    """Apply the no-empty-subtitles rule to evidence without rewriting old attempts."""
+    evidence = attempt.get('evidence', {})
+    fallback = evidence.get('quality', {}).get('playback_fallback', {})
+    if attempt.get('outcome') in ('clean', 'soft_fail') and (
+            evidence.get('subtitle_lines') == 0 or fallback.get('subtitle_mode') == 'unavailable'):
+        return dict(attempt, outcome='hard_fail', error=dict(code='subtitles_failed',
+            message='未生成任何可用字幕；音轨和诊断已保留', cause=fallback.get('error')),
+            soft_failures=[e for e in attempt.get('soft_failures', []) if e.get('subtitle_mode') != 'unavailable'])
+    return attempt
+
+
 def summarize(cases):
     outcomes = Counter()
     hard, soft, soft_songs = Counter(), Counter(), Counter()
     for case in cases:
-        attempt = (case.get('audio_attempts') or [{}])[-1]
+        attempt = review_attempt((case.get('audio_attempts') or [{}])[-1])
         outcomes[attempt.get('outcome', 'pending')] += 1
         if attempt.get('outcome') == 'hard_fail':
             hard[(attempt.get('error') or {}).get('code', 'unknown')] += 1

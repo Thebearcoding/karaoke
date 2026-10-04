@@ -1444,7 +1444,7 @@ def test_download_selects_720p_without_reducing_audio_quality(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize('mode', ['full', 'audio', 'playback_audio'])
-@pytest.mark.parametrize('failure', ['transcribe', 'prepare_lyrics', 'align_words', 'align_phonemes', 'separate_lead', 'package_three_stems', 'overlap', 'dependency_overlap'])
+@pytest.mark.parametrize('failure', ['transcribe', 'prepare_lyrics', 'align_words', 'align_phonemes', 'no_subtitles', 'separate_lead', 'package_three_stems', 'overlap', 'dependency_overlap'])
 def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(tmp_path, monkeypatch, mode, failure):
     import soundfile as sf
     audio_only, strict = mode != 'full', mode == 'audio'
@@ -1502,6 +1502,9 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
         alignment_started.set()
         (tmp_path/'quality.json').write_text('{}')
         (tmp_path/'cues.json').write_text(json.dumps(coarse))
+        if failure == 'no_subtitles':
+            pipeline.alignment_outputs.clear()
+            raise StageFailure('align_words', 'fixture failure')
         fail('align_words')
         fail('align_phonemes')
     monkeypatch.setattr(pipeline, 'align', align)
@@ -1512,10 +1515,18 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
         if failure == 'dependency_overlap':
             assert sf.info(tmp_path/'vocals-16k.wav').samplerate == 16000
             assert (tmp_path/'vocals-asr.mp3').exists() == strict
-    elif strict or failure in ('separate_lead', 'package_three_stems'):
-        with pytest.raises(StageFailure, match='fixture failure'):
+    elif strict or failure in ('separate_lead', 'package_three_stems', 'no_subtitles'):
+        with pytest.raises(StageFailure) as caught:
             pipeline.execute()
         assert not (tmp_path/'result.json').exists()
+        assert not (tmp_path/'audio-result.json').exists()
+        if failure == 'no_subtitles' and not strict:
+            assert caught.value.stage == 'subtitles'
+            assert not (tmp_path/'mv.mp4').exists()
+            assert (tmp_path/'stems/lead.wav').is_file()
+            assert json.loads((tmp_path/'playback-warning.json').read_text())['omitted_lines'] == [1]
+        else:
+            assert str(caught.value) == 'fixture failure'
     else:
         result = pipeline.execute()
         assert result['validation_scope'] == 'playback_with_lyrics_review'
@@ -1660,7 +1671,11 @@ def test_playback_fallback_retains_raw_aligned_lines_when_whole_block_text_check
     (tmp_path/'alignment/raw.json').write_text(json.dumps(raw))
     if fresh:
         pipeline.alignment_outputs.add(tmp_path/'alignment')
-    pipeline.playback_fallback({}, 25, StageFailure('align_words', 'block failed'))
+    if fresh:
+        pipeline.playback_fallback({}, 25, StageFailure('align_words', 'block failed'))
+    else:
+        with pytest.raises(StageFailure, match='未生成任何可用字幕'):
+            pipeline.playback_fallback({}, 25, StageFailure('align_words', 'block failed'))
     output = json.loads((tmp_path/'cues.json').read_text())
     assert [c['text'] for c in output] == ([lines[0], lines[2]] if fresh else [])
     assert [c['start'] for c in output] == ([10, 14] if fresh else [])
@@ -1711,7 +1726,8 @@ def test_playback_fallback_keeps_unverified_asr_draft_out_of_subtitles(tmp_path)
     (tmp_path/'alignment').mkdir()
     (tmp_path/'alignment/cues.json').write_text(json.dumps([cue]))
     (tmp_path/'anchors.json').write_text(json.dumps([cue]))
-    pipeline.playback_fallback({}, 3, StageFailure('align_words', 'unresolved'))
+    with pytest.raises(StageFailure, match='未生成任何可用字幕'):
+        pipeline.playback_fallback({}, 3, StageFailure('align_words', 'unresolved'))
     assert json.loads((tmp_path/'cues.json').read_text()) == []
     assert json.loads((tmp_path/'lyrics.json').read_text()) == draft
     warning = json.loads((tmp_path/'playback-warning.json').read_text())
@@ -1791,6 +1807,14 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
     # old text/monotonicity gates. Checksums must not make it a valid highlight.
     subtitle_path = folder/'cues.json'
     original = subtitle_path.read_text()
+    subtitle_path.write_text('[]')
+    result['artifacts']['subtitles'].update(bytes=subtitle_path.stat().st_size, sha256=file_hash(subtitle_path))
+    result['quality']['playback_fallback'] = dict(subtitle_mode='unavailable')
+    (folder/'audio-result.json').write_text(json.dumps(result))
+    for policy in (True, False):
+        with pytest.raises(ValueError, match='No usable subtitles'):
+            verify_outputs(None, '', tmp_path, {'id':'job'}, audio_only=True, playback_policy=policy)
+    result['quality'].pop('playback_fallback')
     subtitle_path.write_text(json.dumps([dict(text='Hello world', start=.1, end=.12,
         units=[dict(text='Hello world', first=0, stop=11, start=.1, end=.12)])]))
     result['artifacts']['subtitles'].update(bytes=subtitle_path.stat().st_size, sha256=file_hash(subtitle_path))
@@ -4829,7 +4853,26 @@ def test_search_pages_bind_cursors_deduplicate_retries_and_reject_expiry(tmp_pat
         assert len(calls) == 9  # first page, failed continuation, successful retry for each mode
 
 
-def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monkeypatch):
+def test_playback_survey_classifies_empty_subtitles_without_rewriting_recorded_attempts():
+    from karaoke.tools.playback_sweep import summarize
+    event = dict(code='align_words_failed', subtitle_mode='unavailable')
+    attempts = [
+        dict(outcome='soft_fail', evidence=dict(subtitle_lines=0), soft_failures=[event]),
+        dict(outcome='clean', evidence=dict(quality=dict(playback_fallback=dict(subtitle_mode='unavailable')))),
+        dict(outcome='soft_fail', evidence=dict(subtitle_lines=1),
+             soft_failures=[dict(event, subtitle_mode='estimated_word')]),
+        dict(outcome='clean', evidence=dict(subtitle_lines=10)),
+        dict(outcome='running')]
+    original = json.dumps(attempts, sort_keys=True)
+    result = summarize([dict(audio_attempts=[a]) for a in attempts])
+    assert result['outcomes'] == dict(hard_fail=2, soft_fail=1, clean=1, running=1)
+    assert result['hard_failures'] == dict(subtitles_failed=2)
+    assert result['soft_failures'] == dict(align_words_failed=1)
+    assert json.dumps(attempts, sort_keys=True) == original
+
+
+@pytest.mark.parametrize('hard_code', ['separate_music_failed', 'subtitles_failed'])
+def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monkeypatch, hard_code):
     from contextlib import nullcontext
     from karaoke.tools import playback_sweep as sweep
     data = tmp_path/'data'
@@ -4860,7 +4903,7 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
     def process(client, base, folder, command):
         calls.append(folder.name)
         if len(calls) == 2:
-            (folder/'error.json').write_text(json.dumps(dict(code='separate_music_failed', message='test')))
+            (folder/'error.json').write_text(json.dumps(dict(code=hard_code, message='test')))
             return 1
         quality = dict(playback_fallback=dict(error=dict(code='align_words_failed', message='test'),
             subtitle_mode='estimated_word', estimated_spans=[{}])) if len(calls) == 3 else {}
@@ -4880,7 +4923,7 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
         assert [e['id'] for e in api.get('/v1/room').json()['entries']] == [e['id'] for e in user_queue]
         result = json.loads(report.read_text())
         assert result['summary']['outcomes'] == dict(clean=1,hard_fail=1,soft_fail=1)
-        assert result['summary']['hard_failures'] == dict(separate_music_failed=1)
+        assert result['summary']['hard_failures'] == {hard_code:1}
         assert result['summary']['soft_failures'] == dict(align_words_failed=1)
         assert all(len(c['audio_attempts']) == 1 for c in result['cases'])
         result['cases'][0]['audio_attempts'][0]['outcome']='running'

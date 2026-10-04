@@ -244,6 +244,8 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False, playback_po
         paths[name], hashes[name] = path, digest
     audio_format = verify_stems(paths, result['duration_seconds'])
     cues = json.loads(paths['subtitles'].read_text())
+    if not cues:
+        raise ValueError('No usable subtitles; audio and diagnostics retained')
     units = [u for cue in cues for u in cue['units']]
     duration = result['duration_seconds']
     if any(not 0 <= c['start'] < c['end'] <= duration+.05 for c in cues):

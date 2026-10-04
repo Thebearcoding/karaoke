@@ -907,6 +907,8 @@ class Pipeline:
         write_json(self.output/'quality.json', dict(lines=len(cues), units=units,
             lyrics_provenance=dict(lyrics.get('provenance', {}), needs_review=True),
             playback_fallback=warning, onset_accuracy=None, separation_purity=None))
+        if not cues:
+            raise StageFailure('subtitles', '未生成任何可用字幕；音轨和诊断已保留，请核对歌词来源与对齐结果') from error
         return lyrics
 
     def render_video(self, result):
