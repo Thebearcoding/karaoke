@@ -11,7 +11,7 @@ import numpy as np
 import soundfile as sf
 
 from exact_stems import (decode_source, encode_previews, complementary_split, native_vocals,
-                         read_masters, reconstruction_report, sha)
+                         read_masters, reconstruction_report, sha, source_samples)
 
 
 def check_three(source, lead, backing_vocals, instrumental):
@@ -21,7 +21,7 @@ def check_three(source, lead, backing_vocals, instrumental):
     }
 
 
-def build(existing, estimate, output, video=None):
+def build(existing, estimate, output, video=None, *, source_pcm=None):
     existing, estimate, output = (Path(p).resolve() for p in (existing, estimate, output))
     if output.exists():
         raise FileExistsError(f'Preserve existing output: {output}')
@@ -33,7 +33,7 @@ def build(existing, estimate, output, video=None):
     for master in old['masters'].values():
         if sha(existing/master['file']) != master['sha256']:
             raise ValueError(f"Existing master changed: {master['file']}")
-    source, rate, _ = decode_source(spec['path'])
+    source, rate, _ = source_samples(spec['path'], source_pcm)
     vocals, instrumental = read_masters(existing, rate, source.shape)
     reconstruction_report(source, vocals, instrumental)
     raw_lead, resampling = native_vocals(estimate, rate, source.shape)
@@ -120,9 +120,10 @@ if __name__ == '__main__':
     create.add_argument('--lead-estimate', type=Path, required=True)
     create.add_argument('--output', type=Path, required=True)
     create.add_argument('--video', type=Path)
+    create.add_argument('--source-pcm', type=Path)
     check = sub.add_parser('verify')
     check.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    result = (build(args.existing, args.lead_estimate, args.output, args.video)
+    result = (build(args.existing, args.lead_estimate, args.output, args.video, source_pcm=args.source_pcm)
               if args.command == 'build' else verify(args.output))
     print(json.dumps(result, indent=2))

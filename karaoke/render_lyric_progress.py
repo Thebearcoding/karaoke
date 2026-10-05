@@ -93,6 +93,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--video', type=Path, required=True)
     parser.add_argument('--audio', type=Path)
+    parser.add_argument('--video-only', action='store_true', help='Render the picture before final audio is ready')
     parser.add_argument('--cues', type=Path, required=True)
     parser.add_argument('--song-info', type=Path,
                         help='JSON with title, optional original_artist and version for opening credits')
@@ -136,11 +137,11 @@ def main():
     command = ['ffmpeg', '-v', 'error', '-nostdin', '-ss', str(args.start), '-i', str(args.video),
         '-f', 'rawvideo', '-pixel_format', 'rgba', '-video_size', f'{width}x{height}',
         '-framerate', str(fps), '-i', 'pipe:0']
-    if args.audio:
+    if args.audio and not args.video_only:
         command += ['-ss', str(args.start), '-i', str(args.audio)]
-    audio_index = 2 if args.audio else 0
+    audio_index = 2 if args.audio and not args.video_only else 0
     if intro_path:
-        intro_index = 3 if args.audio else 2
+        intro_index = 3 if args.audio and not args.video_only else 2
         command += ['-loop', '1', '-framerate', str(fps), '-i', str(intro_path)]
     filters = (
         '[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,'
@@ -149,10 +150,15 @@ def main():
     if intro_path:
         filters += (f'[captioned];[captioned][{intro_index}:v]overlay=0:{intro["top"]}:format=auto:'
                     f'enable=\'lt(t,{intro["end"]-args.start:.9f})\'')
-    command += ['-filter_complex', filters+',format=yuv420p[v]',
-        '-map', '[v]', '-map', f'{audio_index}:a:0', '-af', f'volume={args.gain:.17g},asetpts=PTS-STARTPTS',
+    command += ['-filter_complex', filters+',format=yuv420p[v]', '-map', '[v]']
+    if args.video_only:
+        command += ['-an']
+    else:
+        command += ['-map', f'{audio_index}:a:0', '-af', f'volume={args.gain:.17g},asetpts=PTS-STARTPTS',
+                    '-c:a', 'aac', '-b:a', '192k']
+    command += [
         '-t', str(args.duration), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19',
-        '-threads', '4', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', str(args.output)]
+        '-threads', '4', '-movflags', '+faststart', str(args.output)]
     started = time.perf_counter()
     blank = Image.new('RGBA', (width, height))
     cue_starts = [c['start'] for c in cues]
@@ -213,7 +219,8 @@ def main():
             process.wait()
             raise
     report_progress(detail='校验视频')
-    subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(args.output), '-f', 'null', '-'], check=True)
+    if not args.video_only:
+        subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(args.output), '-f', 'null', '-'], check=True)
     probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',
         'format=duration:stream=codec_type,width,height', '-of', 'json', str(args.output)]))
     if abs(float(probe['format']['duration'])-args.duration) > .1:
@@ -222,7 +229,8 @@ def main():
         'duration': args.duration, 'mode': args.mode, 'style': args.style, 'style_version': TOKENS['version'],
         'style_parameters': STYLES[args.style],
         'font': 'Bold Songti / Hiragino Mincho W6; source glyphs verified',
-        'shown_lines': sorted(i+1 for i in shown), 'decode_check': 'passed', 'probe': probe,
+        'shown_lines': sorted(i+1 for i in shown),
+        'decode_check': 'pending_final_mux' if args.video_only else 'passed', 'probe': probe,
         'motion': 'Fixed text positions; hard line cuts; measured onsets with local linear playback fallback',
         'next_line_enabled': args.next_line,
         'read_ahead_strategy': 'Current and next lines visible; advance at sung onsets, with white preparation during long-gap countdowns',

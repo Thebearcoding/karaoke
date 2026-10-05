@@ -431,3 +431,24 @@ def test_search_title_is_immediate_but_does_not_override_metadata_or_cache(tmp_p
         assert again['entries'][-1]['job_id'] == job['id']
         assert again['entries'][-1]['title'] == 'Clean song title'
         assert len(app.state.store.list()) == 1
+
+
+@pytest.mark.parametrize('recreate', ['force', 'version', 'evicted'])
+def test_recreated_song_keeps_known_metadata_before_any_worker_runs(tmp_path, recreate):
+    app = create_app(tmp_path, version='new')
+    (tmp_path/'preparation.pause').touch()
+    old = ready_job(app.state.store)
+    if recreate == 'evicted':
+        import shutil
+        shutil.rmtree(tmp_path/old['id'])
+        app.state.store.update(old['id'], status='evicted')
+    with TestClient(app) as client:
+        entry = client.post('/v1/room/entries', json=dict(
+            url=URL, force=recreate == 'force', source_title='Less useful search title')).json()['entries'][0]
+        assert entry['job_id'] != old['id'] and entry['status'] == 'queued'
+        assert (entry['title'], entry['artist'], entry['duration']) == ('Test song', 'Singer', 10)
+        from karaoke.pipeline import Pipeline
+        pipeline = Pipeline(dict(url=URL), tmp_path/entry['job_id'])
+        assert pipeline.song_info['title'] == 'Test song'
+        other = client.post('/v1/room/entries', json=dict(url='https://www.youtube.com/watch?v=abcdefghijk')).json()['entries'][-1]
+        assert other['title'] == '新点的歌'

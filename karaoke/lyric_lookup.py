@@ -1,4 +1,5 @@
 """Optional independent lyric text; provider timestamps never become onsets."""
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import html
 import json
@@ -306,27 +307,39 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
         from openai import OpenAIError
         known_identity = bool(song['artist'] and (metadata.get('track') or
                               song['title'] != metadata.get('title') or request.get('title') and request.get('artist')))
-        try:
-            packet = (dict(parsed=None) if known_identity and not description.strip() else
-                      extract_song_metadata(evidence, model, cache))
-            parsed = SongText.model_validate(packet['parsed']) if packet['parsed'] is not None else None
-        except (OpenAIError, ValueError) as error:
-            metadata_error = type(error).__name__
-            parsed = None
-        if parsed is not None:
+        def read_description():
+            nonlocal metadata_error
+            try:
+                packet = (dict(parsed=None) if known_identity and not description.strip() else
+                          extract_song_metadata(evidence, model, cache))
+                parsed = SongText.model_validate(packet['parsed']) if packet['parsed'] is not None else None
+            except (OpenAIError, ValueError) as error:
+                metadata_error = type(error).__name__
+                parsed = None
+            if parsed is None:
+                return None
             if not known_identity:
                 song.update(title=request.get('title') or metadata.get('track') or parsed.title or song['title'],
                             artist=song['artist'] or parsed.artist)
             selected = parsed.lyric_line_numbers
-            if selected and selected == sorted(set(selected)) and all(1 <= i <= len(description_lines) for i in selected):
-                lines = [description_lines[i-1].strip() for i in selected if description_lines[i-1].strip()]
-                provenance = dict(kind='video_description', description_sha256=hashlib.sha256(description.encode()).hexdigest(),
-                                  lyric_line_numbers=selected)
+            if not selected or selected != sorted(set(selected)) or not all(1 <= i <= len(description_lines) for i in selected):
+                return None
+            text = [description_lines[i-1].strip() for i in selected if description_lines[i-1].strip()]
+            if not text:
+                return None
+            return text, dict(kind='video_description', provider='video_description', publisher='youtube',
+                description_sha256=hashlib.sha256(description.encode()).hexdigest(), lyric_line_numbers=selected,
+                language=song.get('language') or text_language(''.join(text)), url=request['url'],
+                text_sha256=hashlib.sha256('\n'.join(text).encode()).hexdigest())
         from .lyric_consensus import fetch_lyric_consensus
-        description = (lines, dict(provenance, provider='video_description', publisher='youtube',
-            language=song.get('language') or text_language(''.join(lines)), url=request['url'],
-            text_sha256=hashlib.sha256('\n'.join(lines).encode()).hexdigest())) if lines else None
-        lines, report = fetch_lyric_consensus(song, metadata, duration, cache, description)
+        if known_identity:
+            # The description remains a full vote; it need not delay other sources.
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pending = pool.submit(read_description)
+                lines, report = fetch_lyric_consensus(song, metadata, duration, cache, pending.result)
+        else:
+            candidate = read_description()
+            lines, report = fetch_lyric_consensus(song, metadata, duration, cache, candidate)
         if metadata_error:
             report = dict(report, metadata_error=metadata_error)
         (cache.root/'lyrics-first-lookup.json').write_text(json.dumps(report, ensure_ascii=False)+'\n')

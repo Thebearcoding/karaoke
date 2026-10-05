@@ -1,6 +1,7 @@
 """Package unmodified vocal estimates and their complement as float64 WAVs."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 from pathlib import Path
@@ -64,6 +65,31 @@ def decode_source(path):
     if not audio.size or not np.isfinite(audio).all():
         raise ValueError('Source is empty or contains non-finite audio')
     return audio, int(stream['sample_rate']), {'stream': stream, 'command': command}
+
+
+def cache_source(path, pcm):
+    """Keep the exact native decode for both packaging stages in this attempt."""
+    pcm = Path(pcm)
+    audio, rate, decoder = decode_source(path)
+    sf.write(pcm, audio, rate, subtype='DOUBLE')
+    record = dict(source_sha256=sha(path), sha256=sha(pcm), sample_rate=rate,
+                  frames=len(audio), channels=audio.shape[1], decoder=decoder)
+    pcm.with_suffix('.json').write_text(json.dumps(record)+'\n')
+    return record
+
+
+def source_samples(path, pcm=None):
+    if pcm is None:
+        return decode_source(path)
+    pcm = Path(pcm)
+    record = json.loads(pcm.with_suffix('.json').read_text())
+    if record['source_sha256'] != sha(path) or record['sha256'] != sha(pcm):
+        raise ValueError('Cached native audio or its source changed')
+    audio, rate = sf.read(pcm, dtype='float64', always_2d=True)
+    if (rate != record['sample_rate'] or audio.shape != (record['frames'], record['channels'])
+            or sf.info(pcm).subtype != 'DOUBLE' or not audio.size or not np.isfinite(audio).all()):
+        raise ValueError('Invalid cached native audio')
+    return audio, rate, record['decoder']
 
 
 def native_vocals(path, rate, shape):
@@ -139,11 +165,14 @@ def encode_previews(sources, output, gain, frames, channels):
     """Re-encode the whole group at one gain if lossy reconstruction overshoots."""
     for _ in range(3):
         previews, clipped = {}, []
-        for name, source in sources.items():
-            try:
-                previews[name] = encode_preview(source, Path(output)/f'{name}.mp3', gain, frames, channels)
-            except PreviewClippingError as error:
-                clipped.append(error)
+        with ThreadPoolExecutor(max_workers=min(2, len(sources))) as pool:
+            pending = {name: pool.submit(encode_preview, source, Path(output)/f'{name}.mp3', gain, frames, channels)
+                       for name, source in sources.items()}
+            for name, future in pending.items():
+                try:
+                    previews[name] = future.result()
+                except PreviewClippingError as error:
+                    clipped.append(error)
         if not clipped:
             return gain, previews
         worst = max(clipped, key=lambda error: error.peak)
@@ -151,12 +180,12 @@ def encode_previews(sources, output, gain, frames, channels):
     raise worst
 
 
-def build(source_path, estimate_path, output, *, previews=True):
+def build(source_path, estimate_path, output, *, previews=True, source_pcm=None):
     source_path, estimate_path, output = (Path(p).resolve() for p in (source_path, estimate_path, output))
     if output.exists():
         raise FileExistsError(f'Preserve existing stem package: {output}')
     started = time.perf_counter()
-    source, rate, decoder = decode_source(source_path)
+    source, rate, decoder = source_samples(source_path, source_pcm)
     estimate, resampling = native_vocals(estimate_path, rate, source.shape)
     vocals, backing = complementary_split(source, estimate)
     output.mkdir(parents=True)
@@ -213,9 +242,14 @@ if __name__ == '__main__':
     create.add_argument('--vocals-estimate', required=True, type=Path)
     create.add_argument('--output', required=True, type=Path)
     create.add_argument('--no-previews', action='store_true', help='Build and verify only the lossless masters')
+    create.add_argument('--source-pcm', type=Path)
+    decode = commands.add_parser('decode')
+    decode.add_argument('--source', required=True, type=Path)
+    decode.add_argument('--output', required=True, type=Path)
     check = commands.add_parser('verify')
     check.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
-    result = (build(args.source, args.vocals_estimate, args.output, previews=not args.no_previews)
-              if args.command == 'build' else verify(args.output))
+    result = (build(args.source, args.vocals_estimate, args.output, previews=not args.no_previews, source_pcm=args.source_pcm)
+              if args.command == 'build' else cache_source(args.source, args.output) if args.command == 'decode'
+              else verify(args.output))
     print(json.dumps(result, indent=2))

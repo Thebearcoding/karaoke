@@ -125,6 +125,19 @@ class Store:
                 fields['song_info'] = {**(doc.get('song_info') or {}), **{
                     key: value for key, value in (fields['song_info'] or {}).items()
                     if value is not None and value != ''}}
+            if fields.get('status') in ('completed', 'failed') or (
+                    'song_info' in fields and fields['song_info'] != doc.get('song_info')):
+                # Tiny, content-checked metadata survives media LRU eviction.
+                metadata = {}
+                for name in ('song-metadata.json', 'checkpoints/extract_song_metadata.json'):
+                    path = self.root/job_id/name
+                    if path.is_file() and not path.is_symlink() and path.stat().st_size <= 262144:
+                        try:
+                            metadata[name] = json.loads(path.read_text())
+                        except (OSError, ValueError):
+                            pass
+                if len(metadata) == 2:
+                    fields['metadata_cache'] = metadata
             doc.update(fields, updated_at=now())
             if 'pipeline_version' in fields:
                 payload = {key: value for key, value in doc['input'].items() if key != 'force'}
@@ -196,11 +209,29 @@ class Store:
             job_id, stamp = str(uuid4()), now()
             doc = dict(id=job_id, status='queued', active_stages=[], created_at=stamp, updated_at=stamp,
                        last_accessed_at=stamp, input=payload.model_dump(), result=None, error=None, pipeline_version=version)
+            previous = db.execute("SELECT doc FROM jobs WHERE json_extract(doc, '$.input.url')=? ORDER BY created_at DESC",
+                                  (payload.url,)).fetchall()
+            for row in previous:
+                old = json.loads(row[0])
+                info = {**(old.get('song_info') or {}), **{
+                    k: v for k, v in (old.get('result') or {}).items()
+                    if k in ('title', 'artist', 'language', 'duration_seconds') and v}}
+                doc['song_info'] = {**{k: v for k, v in info.items() if v is not None and v != ''},
+                                    **doc.get('song_info', {})}
+                if old.get('metadata_cache') and not doc.get('metadata_cache'):
+                    doc['metadata_cache'] = old['metadata_cache']
             folder = self.root/job_id
             folder.mkdir()
             (folder/'request.json').write_text(json.dumps(payload.model_dump(), ensure_ascii=False)+'\n')
+            if doc.get('song_info'):
+                (folder/'progress.json').write_text(json.dumps({'song_info': doc['song_info']}, ensure_ascii=False)+'\n')
             if not payload.force:
                 self.cache.reuse_download(folder, payload.url)
+            for name, value in doc.get('metadata_cache', {}).items():
+                if name in ('song-metadata.json', 'checkpoints/extract_song_metadata.json'):
+                    path = folder/name
+                    path.parent.mkdir(exist_ok=True)
+                    path.write_text(json.dumps(value, ensure_ascii=False)+'\n')
             db.execute('INSERT INTO jobs VALUES (?,?,?,?,?)',
                        (job_id, key, 'queued', stamp, json.dumps(doc, ensure_ascii=False)))
         return doc, False
@@ -234,6 +265,11 @@ class Worker:
         return self.store.cache.headroom * max(1, len(self.processes))
 
     def prioritize(self, job_ids):
+        folder = self.store.root/'stage-locks'
+        folder.mkdir(exist_ok=True)
+        temporary = folder/(str(uuid4())+'.tmp')
+        temporary.write_text(json.dumps(job_ids))
+        temporary.replace(folder/'priority.json')
         pending = []
         while not self.queue.empty():
             pending.append(self.queue.get_nowait())
@@ -421,7 +457,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
             except BlockingIOError as error:
                 raise RuntimeError('此任务目录已有服务在运行。每个 GPU 队列只运行一个 API worker。') from error
             await worker.start()
-            worker.prioritize([entry['job_id'] for entry in room.read()['entries']])
+            worker.prioritize(room.preparation_order())
             try:
                 yield
             finally:

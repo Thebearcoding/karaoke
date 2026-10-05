@@ -162,6 +162,8 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None):
             return None, dict(provider=name, status='unavailable', error=type(error).__name__)
     with ThreadPoolExecutor(max_workers=len(sources)) as pool:
         results = list(pool.map(fetch, sources))
+    if callable(description):
+        description = description()
     if description:
         results.append(description)
     candidates = [(lines, report) for lines, report in results if lines]

@@ -94,8 +94,12 @@ class Room:
         state['revision'] += 1
         with self.store.connect() as db:
             db.execute('UPDATE room SET state=? WHERE id=1', (json.dumps(state),))
-        self.worker.prioritize([e['job_id'] for e in state['entries']])
+        self.worker.prioritize(self.preparation_order(state))
         self.updates.publish()
+
+    def preparation_order(self, state=None):
+        state = self.read() if state is None else state
+        return [e['job_id'] for e in sorted(state['entries'], key=lambda e: e['id'] != state['current_id'])]
 
     @staticmethod
     def position(state):
@@ -196,7 +200,7 @@ class Room:
                 raise HTTPException(422, '请输入有效的 YouTube 或 Bilibili 单个视频链接') from error
             job, cached = self.store.create(payload, self.version)
             if not cached:
-                if request.source_title:
+                if request.source_title and not (job.get('song_info') or {}).get('title'):
                     job = self.store.update(job['id'], song_info={'title': request.source_title})
                 self.worker.queue.put_nowait(job['id'])
         state['entries'].append(dict(id=str(uuid4()), job_id=job['id']))

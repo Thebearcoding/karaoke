@@ -171,8 +171,17 @@ class Pipeline:
         self.strict_audio = audio_only and not playback_policy
         self.prepared_lyrics = Path(prepared_lyrics) if prepared_lyrics else None
         self.active, self.timings, self.lock = set(), {}, threading.Lock()
+        self.timeline, self.clock_start = {}, time.perf_counter()
+        self.metadata_ready = None
+        self.audio_first = False
+        self.source_announced = False
+        self.fresh_source_metadata = False
         self.stage_progress = {}
         self.song_info = {}
+        try:
+            self.song_info.update(json.loads((self.output/'progress.json').read_text()).get('song_info') or {})
+        except (OSError, ValueError):
+            pass
         self.aligned_cues = None
         self.alignment_outputs = set()
         self.source = self.output/'download/source.mkv'
@@ -190,6 +199,7 @@ class Pipeline:
         english = str(ROOT/'align_english_onsets.py') in [str(a) for a in command]
         specs = {
             'decode_audio': (['download/source.mkv'], ['source-44100.wav'], []),
+            'decode_native': (['download/source.mkv'], ['source-native.wav', 'source-native.json'], [ROOT/'exact_stems.py']),
             'separate_music': (['source-44100.wav'], ['music-separation'], [ROOT/'benchmark_neural.py']),
             'package_two_stems': (['download/source.mkv', 'music-separation/song/vocals.wav'],
                                   ['two-stems'], [ROOT/'exact_stems.py']),
@@ -213,6 +223,8 @@ class Pipeline:
         if name not in specs:
             return None
         inputs, outputs, code = specs[name]
+        if name in ('package_two_stems', 'package_three_stems') and '--source-pcm' in command:
+            inputs = [*inputs, 'source-native.wav', 'source-native.json']
         config = dict(command=[str(a) for a in command])
         if name in ('separate_music', 'separate_lead'):
             model = 'vocals_mel_band_roformer' if name == 'separate_music' else 'karaoke_bs_roformer_anvuew'
@@ -273,7 +285,22 @@ class Pipeline:
         if os.getenv('KARAOKE_EVENTS_STDOUT') == '1':
             print('KARAOKE_PROGRESS ' + json.dumps(progress), flush=True)
 
+    def stage_event(self, name, event, **fields):
+        with self.lock:
+            record = self.timeline.setdefault(name, {})
+            if event == 'ready' and 'finished' in record:
+                history = record.pop('previous_attempts', [])
+                self.timeline[name] = record = {'previous_attempts': [*history, record]}
+            instant = round(time.perf_counter()-self.clock_start, 6)
+            if event == 'finished':
+                record[event] = instant
+            else:
+                record.setdefault(event, instant)
+            record.update(fields)
+            write_json(self.output/'stage-timeline.json', self.timeline)
+
     def run(self, name, command, timeout=3600):
+        self.stage_event(name, 'ready')
         spec = self.stage_spec(name, command)
         if spec is None:
             return self.run_process(name, command, timeout)
@@ -282,6 +309,7 @@ class Pipeline:
             if name.startswith('align_'):
                 self.alignment_outputs.update(Path(p) for p in spec['outputs'])
             if reused:
+                self.stage_event(name, 'finished', status='cached')
                 with self.lock:
                     self.timings['reuse_'+name] = round(time.perf_counter()-started, 3)
                     self.publish_progress()
@@ -289,7 +317,9 @@ class Pipeline:
                 self.run_process(name, command, timeout)
 
     def run_process(self, name, command, timeout=3600):
+        self.stage_event(name, 'ready')
         with self.stage_slot(name):
+            self.stage_event(name, 'resource_acquired')
             return self.run_subprocess(name, command, timeout)
 
     @contextmanager
@@ -299,6 +329,8 @@ class Pipeline:
         lane = ('separation' if name.startswith('separate_') else
                 'alignment' if name == 'transcribe' or name.startswith('align_') else
                 'render' if name == 'render' else
+                'mux' if name in ('mux_video', 'verify_video') else
+                'packaging' if name.startswith('package_') else
                 'download' if name in ('download', 'download_video') else None)
         if not directory or lane is None:
             yield
@@ -306,23 +338,61 @@ class Pipeline:
         import fcntl
         folder = Path(directory)
         folder.mkdir(parents=True, exist_ok=True)
-        with (folder/(lane+'.lock')).open('a') as slot:
+        stamp = time.time_ns()
+        request = folder/f'{lane}.{os.getpid()}.{threading.get_ident()}.{stamp}.json'
+        with request.open('x+') as registration, (folder/(lane+'.lock')).open('a') as slot:
+            fcntl.flock(registration, fcntl.LOCK_EX)
+            json.dump(dict(job=self.output.name, ready=stamp), registration)
+            registration.flush()
             try:
-                fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                with self.lock:
-                    self.active.add(name)
-                    self.stage_progress[name] = dict(waiting=True, detail='等待前一首完成此阶段')
-                    self.publish_progress()
-                fcntl.flock(slot, fcntl.LOCK_EX)
-            try:
+                waiting = False
+                while True:
+                    try:
+                        fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        try:
+                            order = json.loads((folder/'priority.json').read_text())
+                        except (OSError, ValueError):
+                            order = []
+                        rank = {job: index for index, job in reversed(list(enumerate(order)))}
+                        candidates = []
+                        for path in folder.glob(lane+'.*.json'):
+                            try:
+                                with path.open('r+') as owner:
+                                    try:
+                                        fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                    except BlockingIOError:
+                                        item = json.load(owner)
+                                    else:
+                                        # File locks die with their process; PID reuse
+                                        # cannot leave an abandoned request blocking work.
+                                        path.unlink(missing_ok=True)
+                                        continue
+                            except (OSError, ValueError):
+                                continue
+                            candidates.append((rank.get(item['job'], len(rank)), item['ready'], path.name))
+                        if not candidates or min(candidates)[2] == request.name:
+                            break
+                        fcntl.flock(slot, fcntl.LOCK_UN)
+                    except BlockingIOError:
+                        pass
+                    if not waiting:
+                        with self.lock:
+                            self.active.add(name)
+                            self.stage_progress[name] = dict(waiting=True, detail='等待处理资源')
+                            self.publish_progress()
+                        waiting = True
+                    time.sleep(.05)
+                request.unlink(missing_ok=True)
                 yield
             finally:
+                request.unlink(missing_ok=True)
                 fcntl.flock(slot, fcntl.LOCK_UN)
 
     def run_subprocess(self, name, command, timeout=3600):
         self.phase(name, True)
+        self.stage_event(name, 'started')
         started = time.perf_counter()
+        succeeded = False
         try:
             with (self.output/f'{name}.log').open('wb') as log, selectors.DefaultSelector() as selector:
                 with subprocess.Popen([str(a) for a in command], cwd=ROOT.parent,
@@ -343,6 +413,8 @@ class Pipeline:
                             lines = (pending+block).split(b'\n')
                             pending = lines.pop() if block else b''
                             for line in lines:
+                                if name == 'download' and line == b'KARAOKE_SOURCE_READY':
+                                    self.source_metadata_ready()
                                 value = parse_progress(line.decode(errors='replace'))
                                 if value is not None:
                                     with self.lock:
@@ -365,9 +437,11 @@ class Pipeline:
                         'Empty alignment audio', 'FFmpeg failed to read "[]"')):
                     raise StageFailure(name, '歌词对齐失败：歌词时间范围内没有有效音频，请检查歌词与视频版本')
                 raise StageFailure(name, f'{name} 阶段失败；具体错误已保存在任务日志中')
+            succeeded = True
         except subprocess.TimeoutExpired as error:
             raise StageFailure(name, f'{name} 阶段超过允许的处理时间') from error
         finally:
+            self.stage_event(name, 'finished', status='completed' if succeeded else 'failed')
             with self.lock:
                 self.timings[name] = round(time.perf_counter()-started, 3)
             self.phase(name, False)
@@ -377,8 +451,19 @@ class Pipeline:
         write_json(self.output/name, [dict(id='song', input=str(audio), input_sha256=file_hash(audio),
                                           duration_seconds=sf.info(audio).duration)])
 
+    def source_metadata_ready(self):
+        """yt-dlp has written metadata, but need not have downloaded any media."""
+        if self.metadata_ready is not None:
+            metadata = json.loads((self.output/'download/source.info.json').read_text())
+            duration = metadata.get('duration')
+            if isinstance(duration, (int, float)) and math.isfinite(duration) and 0 < duration <= self.max_duration+1:
+                callback, self.metadata_ready = self.metadata_ready, None
+                self.phase(song_info={**video_song_info(metadata), **self.song_info})
+                self.source_announced = True
+                callback(metadata, duration)
+
     def download(self, *, artwork=True, format_id=None):
-        artwork = artwork and not self.audio_only
+        artwork = artwork and not self.audio_only and not self.audio_first
         cached = self.output/'source.json'
         if cached.exists() and self.source.is_file() and (self.output/'download/source.info.json').is_file():
             started = time.perf_counter()
@@ -387,9 +472,11 @@ class Pipeline:
                 if not 0 < source['duration'] <= self.max_duration+1:
                     raise StageFailure('download', '缓存视频超过当前时长上限')
                 metadata = json.loads((self.output/'download/source.info.json').read_text())
-                if source.get('audio_only') and not self.audio_only:
+                self.source_metadata_ready()
+                if source.get('audio_only') and not self.audio_only and not self.audio_first:
                     metadata = self.promote_video(metadata, source)
-                self.phase(song_info=video_song_info(metadata))
+                if not self.source_announced:
+                    self.phase(song_info={**video_song_info(metadata), **self.song_info})
                 if artwork and not (self.output/'poster.jpg').exists():
                     create_poster(self.video, self.output/'poster.jpg', seconds=min(30, source['duration']*.1))
                 self.timings['reuse_download'] = round(time.perf_counter()-started, 3)
@@ -415,10 +502,11 @@ class Pipeline:
             'download:KARAOKE_STAGE_PROGRESS {"completed":%(progress.downloaded_bytes)j,'
             '"total":%(progress.total_bytes)j,"unit":"bytes","vcodec":%(info.vcodec)j}',
             '--progress-template', 'postprocess:KARAOKE_STAGE_PROGRESS {"detail":"合并视频"}',
-            '--write-info-json', '--no-overwrites', '--retries', '2', '--fragment-retries', '2',
+            '--write-info-json', '--print', 'before_dl:KARAOKE_SOURCE_READY', '--no-simulate',
+            '--no-overwrites', '--retries', '2', '--fragment-retries', '2',
             '--socket-timeout', '25', '--max-filesize', '2G', '--match-filter',
             f'!is_live & duration <= {self.max_duration}', '-f', format_id or (
-                'ba' if self.audio_only else 'bv[height<=720]+ba/b[height<=720]'),
+                'ba' if self.audio_only else 'ba/b[height<=720]' if self.audio_first else 'bv[height<=720]+ba/b[height<=720]'),
             '--merge-output-format', 'mkv', '--remux-video', 'mkv',
             '-o', self.output/'download/source.%(ext)s']
         if self.cookies_file.is_file():
@@ -429,10 +517,13 @@ class Pipeline:
         if not self.source.exists() or not info_path.exists():
             raise StageFailure('download', '没有下载到完整视频；请检查链接、直播状态、时长或站点登录要求')
         metadata = json.loads(info_path.read_text())
-        self.phase(song_info=video_song_info(metadata))
+        self.fresh_source_metadata = True
+        self.source_metadata_ready()
+        if not self.source_announced:
+            self.phase(song_info={**video_song_info(metadata), **self.song_info})
         probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_streams',
             '-show_format', '-of', 'json', str(self.source)]))
-        required = {'audio'} if self.audio_only else {'audio', 'video'}
+        required = {'audio'} if self.audio_only or self.audio_first else {'audio', 'video'}
         if not required <= {s['codec_type'] for s in probe['streams']}:
             raise StageFailure('download', '输入必须同时包含视频和音频')
         duration = float(probe['format']['duration'])
@@ -461,7 +552,12 @@ class Pipeline:
                     '--remux-video', 'mkv', '-o', folder/'source.%(ext)s']
                 if self.cookies_file.is_file():
                     command.extend(['--cookies', self.cookies_file])
-                self.run('download_video', command+[self.request['url']], timeout=900)
+                if self.fresh_source_metadata and metadata.get('formats'):
+                    command[2] = 'karaoke.download_from_info'
+                    command.extend(['--load-info-json', self.output/'download/source.info.json'])
+                else:
+                    command.append(self.request['url'])
+                self.run('download_video', command, timeout=900)
         added = json.loads(info.read_text())
         if not metadata.get('id') or (added.get('id'), added.get('extractor_key')) != (
                 metadata['id'], metadata.get('extractor_key')):
@@ -491,6 +587,8 @@ class Pipeline:
         if not self.strict_audio:
             from .lyric_lookup import prepare_online_lyrics, read_prepared_lyrics
             self.phase('prepare_lyrics', True)
+            self.stage_event('prepare_lyrics', 'ready')
+            self.stage_event('prepare_lyrics', 'started')
             started = time.perf_counter()
             try:
                 if self.prepared_lyrics:
@@ -515,6 +613,7 @@ class Pipeline:
                 with self.lock:
                     self.timings['prepare_lyrics'] = round(time.perf_counter()-started, 3)
                 self.phase('prepare_lyrics', False)
+                self.stage_event('prepare_lyrics', 'finished')
         language = self.request.get('language') or 'auto'
         # The independent ASR check can use the lead stem as an alternate input.
         if lead_task is not None:
@@ -781,14 +880,35 @@ class Pipeline:
         if not shutil.which(self.separator_python):
             raise StageFailure('configuration', '找不到分离环境的 Python，请设置 KARAOKE_SEPARATOR_PYTHON')
         import soundfile as sf
-        import torch
-        if self.device == 'auto':
-            self.device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
-        metadata, source_duration = self.download()
         text_error = None
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            # Published text needs only source metadata and duration, not separated audio.
-            text = None if self.strict_audio else pool.submit(self.prepare_text, metadata, source_duration)
+        artifacts = dict(instrumental='stems/instrumental.wav',
+            backing_vocals='stems/backing-vocals.wav', lead_vocals='stems/lead.wav',
+            instrumental_preview='stems/instrumental.mp3', backing_vocals_preview='stems/backing-vocals.mp3',
+            lead_vocals_preview='stems/lead.mp3')
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            text, text_duration = None, None
+            def start_text(metadata, duration):
+                nonlocal text, text_duration
+                if text is None and not self.strict_audio:
+                    text_duration = duration
+                    text = pool.submit(self.prepare_text, metadata, duration)
+            self.metadata_ready = start_text if not self.strict_audio else None
+            self.audio_first = not self.audio_only
+            metadata, source_duration = self.download()
+            start_text(metadata, source_duration)
+            def complete_video():
+                source = json.loads((self.output/'source.json').read_text())
+                result = self.promote_video(metadata, source) if source.get('audio_only') else metadata
+                if not (self.output/'poster.jpg').exists():
+                    create_poster(self.video, self.output/'poster.jpg', thumbnail=metadata.get('thumbnail'),
+                                  seconds=min(30, source_duration*.1))
+                return result
+            video = pool.submit(complete_video) if not self.audio_only else None
+            native = pool.submit(self.run, 'decode_native', [sys.executable, ROOT/'exact_stems.py', 'decode',
+                '--source', self.source, '--output', self.output/'source-native.wav'])
+            if self.device == 'auto':
+                import torch
+                self.device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
             audio = self.output/'source-44100.wav'
             self.run('decode_audio', ['ffmpeg', '-v', 'error', '-nostdin', '-i', self.source,
                 '-map', '0:a:0', '-ar', '44100', '-ac', '2', '-c:a', 'pcm_f32le', audio])
@@ -804,13 +924,17 @@ class Pipeline:
                 ROOT/'models/pretrained/karaoke_bs_roformer_anvuew.yaml', '--target-stem', 'Vocals',
                 '--inputs', self.output/'vocal-inputs.json', '--output', self.output/'lead-separation'])
             def package_stems():
+                native.result()
                 self.run('package_two_stems', [sys.executable, ROOT/'exact_stems.py', 'build',
                     '--source', self.source, '--vocals-estimate', self.vocals,
-                    '--output', self.output/'two-stems', *([] if self.strict_audio else ['--no-previews'])])
+                    '--output', self.output/'two-stems', '--source-pcm', self.output/'source-native.wav',
+                    *([] if self.strict_audio else ['--no-previews'])])
                 lead.result()
                 self.run('package_three_stems', [sys.executable, ROOT/'three_stems.py',
                     'build', '--existing', self.output/'two-stems', '--lead-estimate',
-                    self.output/'lead-separation/song/vocals.wav', '--output', self.output/'stems'])
+                    self.output/'lead-separation/song/vocals.wav', '--output', self.output/'stems',
+                    '--source-pcm', self.output/'source-native.wav'])
+                return {key: self.artifact_record(path) for key, path in artifacts.items()}
             packaging = pool.submit(package_stems)
             self.run('resample_vocals', ['ffmpeg', '-v', 'error', '-nostdin', '-i', self.vocals,
                 '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', self.output/'vocals-16k.wav',
@@ -818,6 +942,10 @@ class Pipeline:
                    self.output/'vocals-asr.mp3'] if self.strict_audio else [])])
             try:
                 lyrics = self.prepare_text(metadata, source_duration, lead) if text is None else text.result()
+                # Re-evaluate duration-dependent selection if provider metadata
+                # differs materially from the actual audio. Queries remain cached.
+                if text is not None and abs(text_duration-source_duration) > 1:
+                    lyrics = self.prepare_text(metadata, source_duration)
             except (StageFailure, ValueError) as error:
                 if self.strict_audio or (isinstance(error, StageFailure) and error.stage not in ('transcribe', 'prepare_lyrics')):
                     raise
@@ -832,12 +960,18 @@ class Pipeline:
                     text_error = error
             if text_error is not None:
                 lyrics = self.playback_fallback(metadata, duration, text_error)
-            packaging.result()
+            render_info = dict(title=lyrics['title'], artist=lyrics['artist'], language=lyrics['language'],
+                               duration_seconds=duration)
+            def prepare_picture():
+                source_metadata = video.result()
+                self.render_picture(render_info)
+                return source_metadata
+            picture = pool.submit(prepare_picture) if video is not None else None
+            records = packaging.result()
+            if picture is not None:
+                metadata = picture.result()
         stems = json.loads((self.output/'stems/manifest.json').read_text())
-        artifacts = dict(instrumental='stems/instrumental.wav',
-            backing_vocals='stems/backing-vocals.wav', lead_vocals='stems/lead.wav',
-            instrumental_preview='stems/instrumental.mp3', backing_vocals_preview='stems/backing-vocals.mp3',
-            lead_vocals_preview='stems/lead.mp3', subtitles='cues.json')
+        artifacts['subtitles'] = 'cues.json'
         if not self.audio_only:
             artifacts['mv'] = 'mv.mp4'
         if (self.output/'poster.jpg').is_file():
@@ -849,16 +983,20 @@ class Pipeline:
             reconstruction=stems['reconstruction']['vocal_first'], device=self.device)
         if not self.audio_only:
             self.render_video(result)
-        for artifact in result['artifacts'].values():
-            path = self.output/artifact['path']
-            artifact.update(bytes=path.stat().st_size, sha256=file_hash(path))
+        for key, artifact in result['artifacts'].items():
+            artifact.update(records[key] if key in records else self.artifact_record(artifact['path']))
         result.update(processing_seconds=round(time.perf_counter()-started, 3), timings=self.timings,
+                      stage_timeline=self.timeline,
                       reused_stages=self.checkpoints.reused,
                       validation_scope=('playback_with_lyrics_review' if text_error is not None else
                                         'playback_lyrics_first' if lyrics.get('provenance', {}).get('route') == 'lyrics_first' else
                                         'audio_and_lyrics' if self.audio_only else 'full_mv'))
         write_json(self.output/('audio-result.json' if self.audio_only else 'result.json'), result)
         return result
+
+    def artifact_record(self, path):
+        file = self.output/path
+        return dict(path=str(path), bytes=file.stat().st_size, sha256=file_hash(file))
 
     def playback_fallback(self, metadata, duration, error):
         """Keep singing available without presenting unverified word times as valid."""
@@ -954,6 +1092,23 @@ class Pipeline:
             raise StageFailure('subtitles', f'仍有 {len(omitted)} 行歌词未能定位；已保留音轨、可用字幕和局部修复诊断') from error
         return lyrics
 
+    def render_picture(self, result):
+        subtitles = self.output/result.get('artifacts', {}).get('subtitles', {}).get('path', 'cues.json')
+        picture = self.output/'captioned-picture.mp4'
+        with self.checkpoints.stage('render_picture', inputs=[self.video, subtitles], outputs=[picture],
+                config={**{key: result[key] for key in ('title', 'artist', 'language', 'duration_seconds')},
+                        'implementation': inspect.getsource(type(self).render_picture)},
+                code=[ROOT/p for p in ('render_lyric_progress.py', 'render_subtitles.py', 'subtitles.py',
+                                      'subtitle_style.py', 'subtitle-styles.json')]) as reused:
+            if not reused:
+                write_json(self.output/'song-info.json', dict(title=result['title'], original_artist=result['artist']))
+                self.run('render', [sys.executable, ROOT/'render_lyric_progress.py', '--video', self.video,
+                    '--video-only', '--cues', subtitles, '--song-info', self.output/'song-info.json',
+                    '--language', {'English': 'Latin'}.get(result['language'], result['language']),
+                    '--duration', result['duration_seconds'], '--bottom-margin', '96', '--next-line',
+                    '--countdown', '--output', picture])
+        return picture
+
     def render_video(self, result):
         paths = {name: self.output/a['path'] for name, a in result['artifacts'].items()}
         with self.checkpoints.stage('render',
@@ -969,6 +1124,7 @@ class Pipeline:
 
     def render_uncached(self, result):
         import soundfile as sf
+        picture = self.render_picture(result)
         paths = {name: self.output/a['path'] for name, a in result['artifacts'].items()}
         instrumental, rate = sf.read(paths['instrumental'], dtype='float32', always_2d=True)
         if result['mv_audio'] == 'instrumental_backing':
@@ -976,14 +1132,18 @@ class Pipeline:
             instrumental += backing
         mixed = self.output/'render-mix.wav'
         sf.write(mixed, instrumental, rate, subtype='FLOAT')
-        write_json(self.output/'song-info.json', dict(title=result['title'], original_artist=result['artist']))
         rendered = self.output/'rendered-mv.mp4'
         rendered.unlink(missing_ok=True)
-        self.run('render', [sys.executable, ROOT/'render_lyric_progress.py', '--video', self.video,
-            '--audio', mixed, '--cues', paths['subtitles'], '--song-info', self.output/'song-info.json',
-            '--language', {'English': 'Latin'}.get(result['language'], result['language']),
-            '--duration', result['duration_seconds'], '--gain', result['shared_preview_gain'],
-            '--bottom-margin', '96', '--next-line', '--countdown', '--output', rendered])
+        self.run('mux_video', ['ffmpeg', '-v', 'error', '-nostdin', '-i', picture, '-i', mixed,
+            '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-af',
+            f"volume={result['shared_preview_gain']:.17g},asetpts=PTS-STARTPTS", '-c:a', 'aac', '-b:a', '192k',
+            '-t', result['duration_seconds'], '-movflags', '+faststart', rendered])
+        self.run('verify_video', ['ffmpeg', '-v', 'error', '-nostdin', '-i', rendered, '-f', 'null', '-'])
+        probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',
+            'format=duration:stream=codec_type', '-of', 'json', str(rendered)]))
+        if ({s['codec_type'] for s in probe['streams']} != {'audio', 'video'} or
+                abs(float(probe['format']['duration'])-result['duration_seconds']) > .1):
+            raise StageFailure('verify_video', '成品视频缺少音画或时长不符')
         rendered.replace(paths['mv'])
         mixed.unlink()
 
