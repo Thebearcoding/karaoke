@@ -1670,6 +1670,26 @@ class AlignmentIntegrity(unittest.TestCase):
                 presentation_cues(cues,15.,lead=0,tail=0,bridge_gap=0)
                 self.assertEqual([b['range'] for b in stitched],[[0,1],[1,4],[4,5]])
 
+    def test_joint_repair_extends_crop_when_crossing_reaches_context_edge(self):
+        from copy import deepcopy
+        lines = ['alpha','bravo','charlie','delta','echo','foxtrot','golf','hotel']
+        old = [(1.,1.8),(3.,5.1),(5.,5.8),(7.,7.8),(9.,9.8),(6.,6.8),(13.,13.8),(15.,15.8)]
+        new = [(1.,1.8),(3.,3.8),(4.4,5.),(5.,5.6),(5.6,6.2),(6.2,6.8),(13.,13.8),(15.,15.8)]
+        def segment(text,times,offset=0.):
+            return dict(text=text,words=[dict(word=text,start=times[0]-offset,end=times[1]-offset)])
+        raw = dict(range=[0,8],context=[0,8],source_range=[0.,18.],result=dict(segments=[
+            segment(t,s) for t,s in zip(lines,old)]))
+        original, calls = deepcopy(raw), []
+        def align(begin,end,text,**options):
+            calls.append(text.splitlines())
+            return dict(segments=[segment(t,new[lines.index(t)],begin) for t in text.splitlines()])
+        cues, _, repairs = stitch_blocks(lines,[raw],18.,'English',align)
+        self.assertEqual(calls,[lines[2:],lines[1:]])
+        self.assertEqual(raw,original)
+        self.assertEqual(repairs[0]['required_context'],[1,8])
+        np.testing.assert_allclose([(c['start'],c['end']) for c in cues],new,rtol=0,atol=1e-12)
+        presentation_cues(cues,18.,lead=0,tail=0,bridge_gap=0)
+
     def test_crossing_block_boundary_uses_one_complete_joint_prediction(self):
         lines = ['first tail', 'second line', 'last phrase']
 

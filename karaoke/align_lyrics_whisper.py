@@ -622,7 +622,7 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
                 break
             first -= first in introduced
             stop += stop in introduced
-        return None
+        return None, first, stop
 
     while bad := conflicts(owners):
         repaired = False
@@ -631,10 +631,9 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
             # an adjoining window may already have a valid single-line result.
             for first, stop in ((index-1, index+1), (index-1, index), (index, index+1)):
                 for owner in dict.fromkeys(owners[index-1:index+1]+list(range(len(predictions)))):
-                    selected = select_prediction(owner, first, stop, bad)
-                    if selected is None:
+                    candidate, repaired_first, repaired_stop = select_prediction(owner, first, stop, bad)
+                    if candidate is None:
                         continue
-                    candidate, repaired_first, repaired_stop = selected
                     repairs.append(dict(lines=[repaired_first+1, repaired_stop],
                         previous_blocks=owners[repaired_first:repaired_stop], selected_block=owner,
                         context=raw_blocks[owner]['context'], source_range=raw_blocks[owner]['source_range']))
@@ -645,56 +644,60 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
             if repaired:
                 break
         if not repaired and align is not None:
-            for index in sorted(bad-attempted):
-                attempted.add(index)
+            for index in sorted(bad):
                 # Start with the conflicting pair. The same joint prediction
                 # may include adjacent lines only to resolve edge crossings.
                 first, stop = max(0, index-3), min(len(lines), index+3)
-                context = [predictions[owners[i]][i][0] for i in range(first, stop)]
-                if context[0]['status'] != 'candidate' or context[-1]['status'] != 'candidate':
-                    continue
-                measured = [c for c in context if c['status'] == 'candidate']
-                begin = max(0., min(c['start'] for c in measured)-.6)
-                end = min(duration, max(c['end'] for c in measured)+.6)
-                if not 0 < end-begin <= 45:
-                    continue
-                try:
-                    result = align_candidate(align, begin, end, '\n'.join(lines[first:stop]),
-                        gap_padding=None, dynamic_heads=True, max_word_dur=None, word_dur_factor=None)
-                except ValueError as error:
-                    repairs.append(dict(method='joint_context_retry', accepted=False,
-                        range=[index-1, index+1], context=[first, stop],
-                        source_range=[begin, end], error=str(error)))
-                    continue
-                block = dict(range=[index-1, index+1], context=[first, stop],
-                             source_range=[begin, end], result=result)
-                report = dict(method='joint_context_retry', accepted=False, **block)
-                repairs.append(report)
-                if result is None or [normalized(''.join(w['word'] for w in s['words']))
-                        for s in result['segments']] != [normalized(line) for line in lines[first:stop]]:
-                    continue
-                if any(not np.isfinite([w['start'], w['end']]).all() or
-                       not 0 <= w['start'] <= w['end'] <= end-begin+.001
-                       for s in result['segments'] for w in s['words']):
-                    continue
-                prediction = prediction_for(block)
-                if any(not prediction[i][1] for i in range(index-1, index+1)):
-                    continue
-                words = [w for i in range(index-1, index+1) for w in prediction[i][1]]
-                if any(b['start']-a['start'] < .015-1e-9 for a, b in zip(words, words[1:])):
-                    continue
-                owner = len(predictions)
-                predictions.append(prediction)
-                selected = select_prediction(owner, index-1, index+1, bad)
-                if selected is None:
-                    predictions.pop()
-                    continue
-                candidate, repaired_first, repaired_stop = selected
-                report['range'] = block['range'] = [repaired_first, repaired_stop]
-                report['accepted'] = True
-                raw_blocks.append(block)
-                owners, repaired = candidate, True
-                break
+                while len(attempted) < 24:
+                    context = [predictions[owners[i]][i][0] for i in range(first, stop)]
+                    if context[0]['status'] != 'candidate' or context[-1]['status'] != 'candidate':
+                        break
+                    measured = [c for c in context if c['status'] == 'candidate']
+                    begin = max(0., min(c['start'] for c in measured)-.6)
+                    end = min(duration, max(c['end'] for c in measured)+.6)
+                    request = (first, stop, begin, end)
+                    if not 0 < end-begin <= 45 or request in attempted:
+                        break
+                    attempted.add(request)
+                    try:
+                        result = align_candidate(align, begin, end, '\n'.join(lines[first:stop]),
+                            gap_padding=None, dynamic_heads=True, max_word_dur=None, word_dur_factor=None)
+                    except ValueError as error:
+                        repairs.append(dict(method='joint_context_retry', accepted=False,
+                            range=[index-1, index+1], context=[first, stop],
+                            source_range=[begin, end], error=str(error)))
+                        break
+                    block = dict(range=[index-1, index+1], context=[first, stop],
+                                 source_range=[begin, end], result=result)
+                    report = dict(method='joint_context_retry', accepted=False, **block)
+                    repairs.append(report)
+                    if result is None or [normalized(''.join(w['word'] for w in s['words']))
+                            for s in result['segments']] != [normalized(line) for line in lines[first:stop]]:
+                        break
+                    if any(not np.isfinite([w['start'], w['end']]).all() or
+                           not 0 <= w['start'] <= w['end'] <= end-begin+.001
+                           for s in result['segments'] for w in s['words']):
+                        break
+                    owner = len(predictions)
+                    predictions.append(prediction_for(block))
+                    candidate, repaired_first, repaired_stop = select_prediction(owner, index-1, index+1, bad)
+                    if candidate is None:
+                        predictions.pop()
+                        # Only grow for an actual crossing beyond this crop.
+                        # Internal failures need a different method, not retries.
+                        expanded = (max(0, min(first, repaired_first)), min(len(lines), max(stop, repaired_stop)))
+                        if expanded == (first, stop):
+                            break
+                        report['required_context'] = list(expanded)
+                        first, stop = expanded
+                        continue
+                    report['range'] = block['range'] = [repaired_first, repaired_stop]
+                    report['accepted'] = True
+                    raw_blocks.append(block)
+                    owners, repaired = candidate, True
+                    break
+                if repaired:
+                    break
         if not repaired:
             break  # Never invent times or relax the downstream quality gate.
 
