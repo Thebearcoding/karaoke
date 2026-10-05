@@ -389,13 +389,13 @@ function preparationHTML(entry) {
   if (entry?.status !== 'running') return '';
   const started = Date.parse(entry.preparation_started_at)/1000;
   const elapsed = Number.isFinite(started) ? `<span class="preparation-elapsed" data-preparation-start="${started}">${preparationTime(started)}</span>` : '';
-  return `<div class="preparation">${elapsed}${(entry.active_stages?.length ? entry.active_stages : ['starting']).map(stage => {
+  return `<div class="preparation">${(entry.active_stages?.length ? entry.active_stages : ['starting']).map((stage, index) => {
     const p = entry.stage_progress?.[stage] || {};
     const measured = Number.isFinite(p.completed) && Number.isFinite(p.total) && p.total > 0;
     const percent = measured ? Math.min(100, Math.floor(100*p.completed/p.total)) : null;
     const label = `${stages[stage] || '开始准备'}${p.detail ? ` · ${p.detail}` : ''}`;
     const amount = percent !== null ? `${percent}%` : p.unit === 'bytes' && Number.isFinite(p.completed) ? `${(p.completed/1024**2).toFixed(1)} MB` : '';
-    return `<div class="preparation-stage"><div class="preparation-label"><span>${escape(label)}</span><span>${amount}</span></div><progress max="100" ${percent === null ? '' : `value="${percent}"`} aria-label="${escape(label)}"></progress></div>`;
+    return `<div class="preparation-stage"><div class="preparation-label"><span title="${escape(label)}">${escape(label)}</span><span class="preparation-metrics">${index === 0 ? elapsed : ''}${amount ? `<span>${amount}</span>` : ''}</span></div><progress max="100" ${percent === null ? '' : `value="${percent}"`} aria-label="${escape(label)}"></progress></div>`;
   }).join('')}</div>`;
 }
 
