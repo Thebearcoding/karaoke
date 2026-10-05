@@ -732,11 +732,11 @@ def test_published_text_can_cross_recordings_without_relaxing_asr_validation(sou
     from karaoke.lyric_lookup import lyric_candidate
     song = dict(title='Evening', artist='Singer')
     row = dict(id=1, trackName='Evening', artistName='Singer', albumName=album,
-               duration=duration, instrumental=False, plainLyrics='Stars above the quiet shore')
+               duration=duration, instrumental=False, plainLyrics='\n'.join(['Stars above the quiet shore'] * 6))
     packet = dict(status='ok', results=[dict(row, artistName='Someone else'), row])
     assert lyric_candidate(packet, song, None, 257., source_title=source_title)[0] is None
     lines, report = lyric_candidate(packet, song, None, 257., source_title=source_title, allow_recording_mismatch=True)
-    assert lines == [row['plainLyrics']] and reason in report['recording_mismatches']
+    assert lines == row['plainLyrics'].splitlines() and reason in report['recording_mismatches']
     assert report['text_support'] is None and report['audio_word_coverage'] is None
     assert not report['provider_timestamps_used']
     with pytest.raises(ValueError, match='independent ASR'):
@@ -826,7 +826,7 @@ def test_published_lyrics_use_explicit_video_credits_without_a_text_model(tmp_pa
     monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', lambda *a: pytest.fail('Explicit credits need no model'))
     metadata = dict(title='林林 Lin Lin【晚風 Evening Wind】-Official Music Video', uploader='Unrelated channel')
     for _ in range(2):
-        result = lyric_lookup.prepare_online_lyrics(dict(url=URL), metadata, 350,
+        result = lyric_lookup.prepare_online_lyrics(dict(url=URL), metadata, 30,
                                                    StageCache(tmp_path), 'unused', None)
     assert len(calls) == 1
     assert result['lines'] == ['微風裡慢慢歌唱', '星光下靜靜傾聽']
@@ -950,6 +950,53 @@ def test_source_disagreements_keep_published_text_and_full_diagnostics(tmp_path,
     assert report['crosscheck']['comparisons'][0]['differences']
     evidence = json.loads((tmp_path/'lyric-crosscheck.json').read_text())
     assert evidence['candidate_texts'] == [published,published[:-1]]
+
+
+@pytest.mark.parametrize('fragment', ['林林 - 晚風', '晚風 / 林林', '這是僅有的一句', 'Singer — Evening'])
+@pytest.mark.parametrize('all_short', [False, True])
+def test_short_lyrics_retry_other_sources_before_alignment(tmp_path, monkeypatch, fragment, all_short):
+    from karaoke import lyric_lookup, lyric_consensus
+    body = ['微風裡我們輕輕慢慢地歌唱', '星光下我們靜靜細細地傾聽'] * 3
+    monkeypatch.setattr(lyric_lookup, 'fetch_published_lyrics', lambda *a:
+        ([fragment], dict(provider='line_music', language='Chinese')))
+    monkeypatch.setattr(lyric_lookup, 'fetch_lyrics', lambda *a: dict(status='unavailable'))
+    monkeypatch.setattr(lyric_consensus, 'fetch_additional_lyrics', lambda provider, *a:
+        (([fragment] if all_short else body) if provider == 'youtube_music' else None,
+         dict(provider=provider, language='Chinese')))
+    pipeline = Pipeline(dict(url=URL, title='晚風', artist='林林'), tmp_path)
+    if all_short:
+        with pytest.raises(StageFailure, match='未找到可靠'):
+            pipeline.prepare_text(dict(track='晚風', artist='林林'), 300)
+        assert not (tmp_path/'lyrics.json').exists()
+    else:
+        result = pipeline.prepare_text(dict(track='晚風', artist='林林'), 300)
+        assert result['lines'] == body
+        assert result['provenance']['lyric_lookup']['provider'] == 'youtube_music'
+    review = json.loads((tmp_path/'lyric-crosscheck.json').read_text())['crosscheck']
+    assert len(review['rejected_sources']) == (2 if all_short else 1)
+    assert all(r['reason'] == 'lyrics_too_short' for r in review['rejected_sources'])
+    if all_short:
+        assert review['status'] == 'lyrics_incomplete' and not review['agreeing_sources']
+
+
+@pytest.mark.parametrize('other_performance', [False, True])
+def test_lyric_excerpt_yields_to_fuller_source_for_same_recording(tmp_path, monkeypatch, other_performance):
+    from karaoke import lyric_consensus as module
+    from karaoke.stage_cache import StageCache
+    fragment = ['Stars above the quiet shore']
+    body = ['We will sing as the night begins', *fragment, 'And once again we all sing together']
+    monkeypatch.setattr(module.lookup, 'fetch_published_lyrics', lambda *a:
+        (fragment, dict(provider='line_music', language='English')))
+    monkeypatch.setattr(module.lookup, 'fetch_lyrics', lambda *a: dict(status='unavailable'))
+    monkeypatch.setattr(module, 'fetch_additional_lyrics', lambda provider, *a:
+        (body if provider == 'youtube_music' else None, dict(provider=provider, language='English',
+            recording_mismatches=['live_performance'] if other_performance else [])))
+    lines, report = module.fetch_lyric_consensus(dict(title='Evening', artist='Singer'), {}, 30, StageCache(tmp_path))
+    assert lines == (fragment if other_performance else body)
+    rejected = report['crosscheck']['rejected_sources']
+    assert len(rejected) == (0 if other_performance else 1)
+    if rejected:
+        assert rejected[0]['reason'] == 'lyrics_fragment' and rejected[0]['fuller_source'] == 1
 
 
 @pytest.mark.parametrize('independent', [True, False])
@@ -1178,7 +1225,7 @@ def test_published_lyrics_match_joined_artist_scripts_without_matching_collabora
         assert published_candidate([dict(row, artists=[dict(artistName=name)])], song, '')[0] is None
 
 
-@pytest.mark.parametrize('first_hit', [False, True])
+@pytest.mark.parametrize('first_hit', ['yes', 'wrong_identity', 'short'])
 def test_published_lyric_search_uses_a_bounded_title_query_only_after_no_match(tmp_path, monkeypatch, first_hit):
     from urllib.parse import parse_qs, urlparse
     from karaoke import lyric_lookup
@@ -1189,14 +1236,50 @@ def test_published_lyric_search_uses_a_bounded_title_query_only_after_no_match(t
     def read(url, **kwargs):
         query = parse_qs(urlparse(url).query)['query'][0]
         calls.append(query)
-        selected = row if first_hit or query == '晚風' else dict(row, trackTitle='無關歌曲')
+        selected = row if first_hit == 'yes' or query == '晚風' else (
+            dict(row, lyrics='林林 - 晚風') if first_hit == 'short' else dict(row, trackTitle='無關歌曲'))
         return dict(response=dict(result=dict(tracks=[selected])))
     monkeypatch.setattr(lyric_lookup, 'read_document', read)
     song = dict(title='晚風', artist='林林')
     for _ in range(2):
-        lines, report = lyric_lookup.fetch_published_lyrics(song, '', StageCache(tmp_path))
+        lines, report = lyric_lookup.fetch_published_lyrics(song, '', StageCache(tmp_path), 60)
         assert lines == [row['lyrics']] and report['url'].endswith('/123')
-    assert calls == (['晚風 林林'] if first_hit else ['晚風 林林', '晚風'])
+        assert bool(report['rejected_candidates']) == (first_hit == 'short')
+    assert calls == (['晚風 林林'] if first_hit == 'yes' else ['晚風 林林', '晚風'])
+
+
+@pytest.mark.parametrize('provider', ['line_music', 'lrclib', 'netease'])
+def test_short_lyric_release_does_not_hide_later_complete_release(tmp_path, monkeypatch, provider):
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    song = dict(title='晚風', artist='林林')
+    body = '微風裡慢慢歌唱\n星光下靜靜傾聽\n' * 3
+    row = dict(trackId=1, trackTitle='晚風', artists=[dict(artistName='林林')],
+               album=dict(albumTitle='春天'), lyrics='林林 - 晚風')
+    if provider == 'line_music':
+        lines, report = lyric_lookup.published_candidate([row, dict(row, trackId=2, lyrics=body)],
+            song, '', duration=300)
+        assert report['url'].endswith('/2')
+    elif provider == 'lrclib':
+        row = dict(id=1, trackName='晚風', artistName='林林', duration=300, instrumental=False,
+                   plainLyrics=row['lyrics'])
+        lines, report = lyric_lookup.lyric_candidate(dict(status='ok', results=[row, dict(row, id=2, plainLyrics=body)]),
+            song, None, 300)
+        assert report['id'] == 2
+    else:
+        calls = []
+        def read(url, **kwargs):
+            calls.append(url)
+            if 'cloudsearch' in url:
+                return dict(code=200, result=dict(songs=[dict(id=i, name='晚風', ar=[dict(name='林林')],
+                    al=dict(name='春天')) for i in (1, 2)]))
+            return dict(lrc=dict(lyric=row['lyrics'] if 'id=1&' in url else body))
+        monkeypatch.setattr(lyric_consensus, 'read_document', read)
+        lines, report = lyric_consensus.fetch_additional_lyrics(provider, song, {}, StageCache(tmp_path), 300)
+        assert len(calls) == 3 and report['url'].endswith('id=2')
+    assert lines == body.splitlines()
+    assert len(report['rejected_candidates']) == 1
+    assert report['rejected_candidates'][0]['reason'] == 'lyrics_too_short'
 
 
 def test_published_lyric_search_does_not_issue_another_query_after_rate_limit(tmp_path, monkeypatch):

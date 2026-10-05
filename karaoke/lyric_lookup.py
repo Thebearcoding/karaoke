@@ -214,7 +214,22 @@ def recording_mismatches(song, source_title, title, album):
     return mismatch
 
 
-def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_recording_mismatch=False):
+def short_lyric_text(lines, duration):
+    """Reject obvious scraps, not certify completeness or acoustic coverage."""
+    if duration is None or not math.isfinite(duration) or duration <= 0:
+        return None
+    text = unicodedata.normalize('NFKC', ' '.join(lines)).casefold()
+    units = len(re.findall(r"[a-z\u00c0-\u024f]+(?:['’][a-z\u00c0-\u024f]+)*|\d+|[^\W_]", text))
+    # Deliberately sparse: one Latin word / other character per ten seconds.
+    # Count repetitions and ignore line wrapping; neither is evidence of junk.
+    minimum = math.ceil(duration / 10)
+    if units < minimum:
+        return dict(reason='lyrics_too_short', units=units, minimum_units=minimum, duration=duration)
+    return None
+
+
+def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_recording_mismatch=False,
+                        duration=None):
     """Select published text; recording onsets still come entirely from our audio."""
     candidates = []
     for row in rows:
@@ -233,6 +248,7 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
             continue
         candidates.append((mismatch, row, title, artists, album))
     # Try the same performance first, even when search ranks studio text higher.
+    rejected = []
     for mismatch, row, title, artists, album in sorted(candidates, key=lambda c: len(c[0])):
         text = row.get('lyrics')
         if text is None and read_lyrics is not None:
@@ -247,16 +263,20 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
         track_id = str(row.get('trackId', ''))
         if not track_id.isdigit() or len(lines) > 1000 or any(len(line) > 200 for line in lines):
             continue
+        if issue := short_lyric_text(lines, duration):
+            rejected.append(dict(issue, track_id=track_id, text_sha256=hashlib.sha256(text.encode()).hexdigest()))
+            continue
         return lines, dict(status='candidate', provider='line_music', language=language,
             url='https://music-tw.line.me/track/'+track_id, track=title, artists=artists, album=album,
             text_sha256=hashlib.sha256(text.encode()).hexdigest(), excluded_credit_lines=excluded,
             recording_mismatches=mismatch,
+            rejected_candidates=rejected,
             text_transform='html_entities_decoded_credit_header_footer_removed_then_whitespace_only',
             provider_timestamps_used=False)
-    return None, dict(status='no_matching_published_text', provider='line_music')
+    return None, dict(status='no_matching_published_text', provider='line_music', rejected_candidates=rejected)
 
 
-def fetch_published_lyrics(song, source_title, cache):
+def fetch_published_lyrics(song, source_title, cache, duration=None):
     if not song.get('title') or not song.get('artist'):
         return None, dict(status='missing_identity', provider='line_music')
     path, stage = cache.root/'published-lyrics.json', 'fetch_published_lyrics'
@@ -268,11 +288,12 @@ def fetch_published_lyrics(song, source_title, cache):
             (cache.directory/(stage+'.json')).unlink(missing_ok=True)
     except (OSError, ValueError, TypeError):
         pass
-    with cache.stage(stage, inputs=[Path(__file__)], outputs=[path], config=dict(song=song, source_title=source_title),
+    with cache.stage(stage, inputs=[Path(__file__)], outputs=[path],
+                     config=dict(song=song, source_title=source_title, duration=duration),
                      code=[Path(__file__), Path(__file__).with_name('source_captions.py')]) as reused:
         if not reused:
             try:
-                attempted = []
+                attempted, rejected = [], []
                 for query in queries:
                     response = read_document('https://music-tw.line.me/api/search/v4/track.json?'+urlencode(
                         dict(query=query, start=1, display=30, sort='RELEVANCE')),
@@ -281,15 +302,19 @@ def fetch_published_lyrics(song, source_title, cache):
                     if not isinstance(rows, list) or len(rows) > 30 or any(not isinstance(r, dict) for r in rows):
                         raise ValueError('Invalid published lyric response')
                     attempted.append(dict(query=query, results=rows))
-                    lines, report = published_candidate(rows, song, source_title, allow_recording_mismatch=True)
+                    lines, report = published_candidate(rows, song, source_title,
+                        allow_recording_mismatch=True, duration=duration)
+                    rejected.extend(report.get('rejected_candidates', []))
                     if lines:
                         break
+                report['rejected_candidates'] = rejected
                 packet = dict(lines=lines, report=report, query_results=attempted)
             except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
                 status = getattr(getattr(error, 'response', None), 'status_code', None)
                 transient = isinstance(error, httpx.TransportError) or status == 429 or (status or 0) >= 500
                 packet = dict(lines=None, report=dict(status='unavailable', provider='line_music',
-                    error=type(error).__name__, http_status=status),
+                    error=type(error).__name__, http_status=status, rejected_candidates=rejected),
+                    query_results=attempted,
                     retry_at=time.time()+max(30, retry_after_seconds(error) or 0) if transient else None)
             path.write_text(json.dumps(packet, ensure_ascii=False)+'\n')
     packet = json.loads(path.read_text())
@@ -392,6 +417,7 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
     if performance:
         report['required_live_performance'] = performance
     candidates, padding, padding_checked = [], None, False
+    report['rejected_candidates'] = []
     for row in packet['results']:
         # A text search can return covers, live cuts and unrelated recordings.
         # Identity and duration must agree before using any audio-text score.
@@ -430,6 +456,10 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
             if language is None:
                 continue
             lines = transcript_lines(dict(text=text), language)
+            if transcription is None and (issue := short_lyric_text(lines, duration)):
+                report['rejected_candidates'].append(dict(issue, id=row.get('id'),
+                    text_sha256=hashlib.sha256(raw_text.encode()).hexdigest()))
+                continue
             observed = [u for w in (transcription or {}).get('words', []) for u in text_units(w['word'], language)]
             expected = text_units(''.join(lines), language)
             matched = sum(b.src_end-b.src_start for b in Levenshtein.opcodes(expected, observed) if b.tag == 'equal')

@@ -42,16 +42,18 @@ def compare_lyrics(candidates):
         differences = [dict(kind=kind, left=[i,j], right=[k,l])
             for kind,i,j,k,l in match.get_opcodes() if kind != 'equal']
         comparisons.append(dict(sources=[a,b], identical=not differences,
-                                similarity=round(match.ratio(), 4), differences=differences))
+                                similarity=round(match.ratio(), 4), differences=differences,
+                                matched_units=sum(block.size for block in match.get_matching_blocks())))
     report = dict(status='corroborated' if agreed else 'conflicting' if len(groups) > 1 else 'insufficient_sources',
                   sources=[r for _, r in candidates], comparisons=comparisons,
                   agreeing_sources=ordered[0] if agreed else [],
                   independent_sources=len(votes(ordered[0])) if agreed else 0, provider_timestamps_used=False,
+                  text_units=[len(text) for text in texts],
                   comparison_unit='latin_words_and_other_characters')
     return (candidates[ordered[0][0]][0] if agreed else None), report
 
 
-def fetch_additional_lyrics(provider, song, metadata, cache):
+def fetch_additional_lyrics(provider, song, metadata, cache, duration=None):
     """Read source-bound Music lyrics or an identity-matched NetEase release."""
     if not song.get('title') or not song.get('artist'):
         return None, dict(provider=provider, status='missing_identity')
@@ -65,7 +67,7 @@ def fetch_additional_lyrics(provider, song, metadata, cache):
     except (OSError, ValueError, TypeError):
         pass
     with cache.stage(stage, inputs=[Path(__file__)], outputs=[path],
-                     config=dict(song=song, video_id=metadata.get('id'), source_title=metadata.get('title')),
+                     config=dict(song=song, video_id=metadata.get('id'), source_title=metadata.get('title'), duration=duration),
                      code=[Path(__file__), Path(__file__).with_name('lyric_lookup.py'),
                            Path(__file__).with_name('source_captions.py')]) as reused:
         if not reused:
@@ -86,7 +88,7 @@ def fetch_additional_lyrics(provider, song, metadata, cache):
                             dict(id=row['trackId'], lv=-1, kv=-1, tv=-1)), timeout=10)
                         return data.get('lrc', {}).get('lyric')
                     lines, report = lookup.published_candidate(rows, song, metadata.get('title'),
-                        read_lyrics=lyrics, allow_recording_mismatch=True)
+                        read_lyrics=lyrics, allow_recording_mismatch=True, duration=duration)
                     if lines:
                         report['url'] = 'https://music.163.com/#/song?id='+report['url'].rsplit('/',1)[-1]
                 else:
@@ -134,9 +136,9 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None):
         lines, report = lookup.lyric_candidate(packet, song, None, duration,
             source_title=metadata.get('title'), allow_recording_mismatch=True)
         return lines, dict(report, provider='lrclib')
-    sources = [('line_music', lambda: lookup.fetch_published_lyrics(song, metadata.get('title'), cache)), ('lrclib', lrclib),
-               ('netease', lambda: fetch_additional_lyrics('netease', song, metadata, cache)),
-               ('youtube_music', lambda: fetch_additional_lyrics('youtube_music', song, metadata, cache))]
+    sources = [('line_music', lambda: lookup.fetch_published_lyrics(song, metadata.get('title'), cache, duration)), ('lrclib', lrclib),
+               ('netease', lambda: fetch_additional_lyrics('netease', song, metadata, cache, duration)),
+               ('youtube_music', lambda: fetch_additional_lyrics('youtube_music', song, metadata, cache, duration))]
     def fetch(source):
         name, request = source
         hold = cache.root.parent/'lyric-provider-backoff'/f'{name}.json'
@@ -167,14 +169,28 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None):
     if description:
         results.append(description)
     candidates = [(lines, report) for lines, report in results if lines]
-    lines, review = compare_lyrics(candidates)
+    _, review = compare_lyrics(candidates)
+    lines = None
     review['unavailable_sources'] = [report for text, report in results if not text]
-    if candidates:
+    rejected = {i: issue for i, (text, _) in enumerate(candidates)
+                if (issue := lookup.short_lyric_text(text, duration))}
+    for comparison in review['comparisons']:
+        for i, j in (comparison['sources'], comparison['sources'][::-1]):
+            short, long = review['text_units'][i], review['text_units'][j]
+            left, right = candidates[i][1], candidates[j][1]
+            if (i not in rejected and j not in rejected and short < long * .5 and
+                    comparison['matched_units'] >= short * .9 and
+                    not left.get('recording_mismatches') and not right.get('recording_mismatches') and
+                    (left.get('publisher') or left['provider']) != (right.get('publisher') or right['provider'])):
+                rejected[i] = dict(reason='lyrics_fragment', units=short, fuller_source=j, fuller_units=long)
+    review['rejected_sources'] = [dict(issue, source=i) for i, issue in sorted(rejected.items())]
+    usable = set(range(len(candidates))) - rejected.keys()
+    if usable:
         # A majority from another performance must not outrank text attached
         # to this recording. Compare agreement within the eligible versions.
         preferred = ('line_music', 'youtube_music', 'netease', 'video_description', 'lrclib')
-        eligible = {i for i, (_, r) in enumerate(candidates) if not r.get('recording_mismatches')}
-        eligible = eligible or set(range(len(candidates)))
+        eligible = {i for i in usable if not candidates[i][1].get('recording_mismatches')}
+        eligible = eligible or usable
         review['eligible_sources'] = sorted(eligible)
         index = min(eligible, key=lambda i: preferred.index(candidates[i][1]['provider']))
         selection = 'published_source'
@@ -205,6 +221,8 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None):
         review['selection'] = selection
         report = dict(selected, crosscheck=review)
     else:
+        if rejected or any(r.get('rejected_candidates') for r in review['unavailable_sources']):
+            review.update(status='lyrics_incomplete', agreeing_sources=[], independent_sources=0)
         report = dict(status=review['status'], crosscheck=review)
     (cache.root/'lyric-crosscheck.json').write_text(json.dumps(dict(report,
         candidate_texts=[text for text, _ in candidates]), ensure_ascii=False)+'\n')
