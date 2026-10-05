@@ -157,10 +157,11 @@ export function orderResults(songs, order) {
   if (order === 'ready') return [...songs].sort((a,b) => Number(b.status === 'completed')-Number(a.status === 'completed'));
   if (order === 'title') return [...songs].sort((a,b) => a.title.localeCompare(b.title, 'zh-CN'));
   if (order === 'relevance') {
-    // Stable partition: only explicit performance labels lower a result's priority.
+    // Keep provider order within each group; playable songs precede albums.
+    const group = song => !song.kind || song.kind === 'song' ? 0 : song.kind === 'album' ? 1 : 2;
     const live = song => /(?:[\[(（【]\s*live\b|\blive(?:\s+(?:at|in|from|on|version|performance|\d{4})\b|\s*[|/·—–-]|[\s)\]）】]*$))|[现現][场場]|演唱[会會]|演奏[会會]|ライブ/i.test(song.title || '') &&
-      !['artist','profile'].includes(song.kind);
-    return [...songs].sort((a,b) => Number(live(a))-Number(live(b)));
+      group(song) === 0;
+    return [...songs].sort((a,b) => group(a)-group(b) || Number(live(a))-Number(live(b)));
   }
   return songs;
 }

@@ -166,7 +166,7 @@ function renderVideoResults(providers) {
   $('search-order-note').textContent = artists ? '选一位歌手，看看有哪些歌想唱' :
     searchOrder === 'popular' ? '已加载结果按播放量排序 · YouTube 提供' : searchOrder === 'ready' ? '已加载结果中，已准备歌曲排在前面' :
     searchOrder === 'title' ? '已加载结果按歌名排序' : album ? 'YouTube Music 专辑曲目顺序' :
-    videoSource === 'local' ? '本地曲库 · 现场版靠后' : 'YouTube 原顺序 · 现场版靠后';
+    videoSource === 'local' ? '本地曲库 · 现场版靠后' : videoSource === 'songs' ? '歌曲优先 · 现场版靠后' : 'YouTube 原顺序 · 现场版靠后';
   $('search-status').innerHTML = `<span class="${info.error ? 'search-error' : ''}">${info.loading ? '正在查找…' : info.error ? escape(info.error) : info.results.length ? `${videoSource === 'local' ? '' : '已加载 '}${info.results.length} ${artists ? '位歌手' : videoSource === 'youtube' ? '个视频' : videoSource === 'songs' ? '项' : '首'}${catalogue && info.metadata?.complete === false ? ' · 歌手页精选' : ''}` : '没有找到，试试另一个关键词或搜索类型'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`;
   $('artist-summary').hidden = !catalogue;
   if (catalogue) $('artist-summary').innerHTML = `${metadata.thumbnail ? `<img src="${escape(metadata.thumbnail)}" alt="" referrerpolicy="no-referrer">` : ''}<div><p>${album ? '专辑' : '歌手'}</p><h3>${escape(metadata.title)}</h3>${metadata.monthly_listeners ? `<p>${escape(metadata.monthly_listeners)} · YouTube Music</p>` : ''}</div>`;

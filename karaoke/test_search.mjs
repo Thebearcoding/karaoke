@@ -211,16 +211,23 @@ test('view history restores nested catalogues, reloads and forward navigation wi
   assert.doesNotThrow(()=>unavailable.save()); assert.equal(unavailable.back(),false);
 });
 
-test('default lowers explicit live versions without removing results or changing other sorts', () => {
+test('default puts songs before albums and lowers live songs without removing results or changing other sorts', () => {
   const titles = ['A (Live)', 'Studio', 'The One and Only', 'B LIVE at Wembley', 'C 现场版',
     'Alive', 'Live and Let Die', 'D【LIVE】', 'E ライブ', 'Another studio', 'F Live | Tour'];
   const songs = titles.map((title,i) => ({title,views:100-i,kind:i === 2 ? 'album' : 'song'}));
   assert.deepEqual(orderResults(songs,'relevance').map(s=>s.title), [
-    'Studio','The One and Only','Alive','Live and Let Die','Another studio',
-    'A (Live)','B LIVE at Wembley','C 现场版','D【LIVE】','E ライブ','F Live | Tour']);
+    'Studio','Alive','Live and Let Die','Another studio',
+    'A (Live)','B LIVE at Wembley','C 现场版','D【LIVE】','E ライブ','F Live | Tour','The One and Only']);
   assert.deepEqual(orderResults(songs,'popular'), songs);
   assert.deepEqual(orderResults(songs,'album'), songs);
   assert.deepEqual(songs.map(s=>s.title), titles);
+  const mixed = [
+    {kind:'artist',title:'Live'}, {kind:'album',title:'Live at Wembley'},
+    {kind:'song',title:'Song (Live)'}, {kind:'album',title:'Studio album'},
+    {title:'Local or video result'}, {kind:'playlist',title:'Playlist'}, {kind:'song',title:'Studio song'}];
+  assert.deepEqual(orderResults(mixed,'relevance'), [mixed[4],mixed[6],mixed[2],mixed[1],mixed[3],mixed[0],mixed[5]]);
+  assert.deepEqual(orderResults(mixed,'ready'), mixed);
+  assert.deepEqual(orderResults(mixed,'title'), [mixed[0],mixed[1],mixed[4],mixed[5],mixed[2],mixed[3],mixed[6]]);
 });
 
 
