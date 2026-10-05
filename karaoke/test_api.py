@@ -1671,6 +1671,29 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
         lambda *a:pytest.fail('A complete alignment ran ASR'),align) is good
 
 
+def test_local_recognition_cannot_search_outside_its_observed_crop():
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines, starts = ['alpha', 'bravo', 'charlie', 'delta', 'omega'], [10.,30.,31.,32.,50.]
+    segments = [dict(words=[dict(word=t,start=s,end=s+(0 if i==2 else .4))])
+                for i,(t,s) in enumerate(zip(lines,starts))]
+    block = dict(range=[0,5],context=[0,5],source_range=[0.,60.],result=dict(segments=segments))
+    observed = []
+    def recognize(begin,end):
+        observed.append((begin,end))
+        # Only the right neighbour is recognized; the left search boundary
+        # must still be the crop start, not the start of the whole recording.
+        return dict(segments=[dict(words=[dict(word='delta',start=32.-begin,end=32.4-begin)])])
+    def align(begin,end,text,**options):
+        assert observed[-1][0] <= begin < end <= observed[-1][1]
+        return dict(segments=[dict(words=[dict(word=t,start=starts[lines.index(t)]-begin,
+            end=starts[lines.index(t)]+.4-begin)]) for t in text.splitlines()])
+    result = recover_with_local_asr(block,lines,np.zeros(60*16000),'English',recognize,align)
+    assert len(observed) == 1
+    assert result['result']['segments'][2]['words'][0]['start'] == 31.
+    assert result['result']['segments'][0] == segments[0]
+    assert result['result']['segments'][4] == segments[4]
+
+
 def test_isolated_missing_lines_preserve_budget_for_global_localization():
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines, missing = ['line'+str(i) for i in range(30)], {3,9,15,21}

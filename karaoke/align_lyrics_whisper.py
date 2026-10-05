@@ -276,6 +276,9 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             continue
         for start, stop_line, cf, cs, ab, ae in blocks:
             selected = targets.intersection(range(start+left, stop_line+left))
+            # The recognizer only observed this crop. Missing edge anchors
+            # must not turn a local repair into a search through other verses.
+            ab, ae = max(ab, begin), min(ae, end)
             if selected and global_recovery:
                 # An unrecognized run can drift together while every old line
                 # remains superficially valid. Repair its shared acoustic core;
@@ -599,6 +602,28 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
         return bad
 
     repairs, attempted = [], set()
+
+    def select_prediction(owner, first, stop, bad):
+        # A coherent local prediction can move a crossing to its edge. Include
+        # just that neighbour from the same prediction before accepting it;
+        # never splice half of a repair or discard unrelated valid lines.
+        prediction = predictions[owner]
+        while all(i in prediction and prediction[i][1] for i in range(first, stop)):
+            words = [w for i in range(first, stop) for w in prediction[i][1]]
+            if any(b['start']-a['start'] < .015-1e-9 for a, b in zip(words, words[1:])):
+                break
+            candidate = owners.copy()
+            candidate[first:stop] = [owner]*(stop-first)
+            remaining = conflicts(candidate)
+            if remaining < bad:
+                return candidate, first, stop
+            introduced = remaining-bad
+            if not introduced or not introduced <= {first, stop}:
+                break
+            first -= first in introduced
+            stop += stop in introduced
+        return None
+
     while bad := conflicts(owners):
         repaired = False
         for index in sorted(bad):
@@ -606,18 +631,12 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
             # an adjoining window may already have a valid single-line result.
             for first, stop in ((index-1, index+1), (index-1, index), (index, index+1)):
                 for owner in dict.fromkeys(owners[index-1:index+1]+list(range(len(predictions)))):
-                    prediction = predictions[owner]
-                    if not all(i in prediction and prediction[i][1] for i in range(first, stop)):
+                    selected = select_prediction(owner, first, stop, bad)
+                    if selected is None:
                         continue
-                    words = [w for i in range(first, stop) for w in prediction[i][1]]
-                    if any(b['start']-a['start'] < .015-1e-9 for a, b in zip(words, words[1:])):
-                        continue
-                    candidate = owners.copy()
-                    candidate[first:stop] = [owner]*(stop-first)
-                    if not conflicts(candidate) < bad:
-                        continue
-                    repairs.append(dict(lines=[first+1, stop],
-                        previous_blocks=owners[first:stop], selected_block=owner,
+                    candidate, repaired_first, repaired_stop = selected
+                    repairs.append(dict(lines=[repaired_first+1, repaired_stop],
+                        previous_blocks=owners[repaired_first:repaired_stop], selected_block=owner,
                         context=raw_blocks[owner]['context'], source_range=raw_blocks[owner]['source_range']))
                     owners, repaired = candidate, True
                     break
@@ -628,9 +647,8 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
         if not repaired and align is not None:
             for index in sorted(bad-attempted):
                 attempted.add(index)
-                # Neighbouring phrases establish the boundary; only the two
-                # conflicting core lines may change. Replacing context lines
-                # can merely move the crossing to the edge of the new crop.
+                # Start with the conflicting pair. The same joint prediction
+                # may include adjacent lines only to resolve edge crossings.
                 first, stop = max(0, index-3), min(len(lines), index+3)
                 context = [predictions[owners[i]][i][0] for i in range(first, stop)]
                 if context[0]['status'] != 'candidate' or context[-1]['status'] != 'candidate':
@@ -667,11 +685,12 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
                     continue
                 owner = len(predictions)
                 predictions.append(prediction)
-                candidate = owners.copy()
-                candidate[index-1:index+1] = [owner, owner]
-                if not conflicts(candidate) < bad:
+                selected = select_prediction(owner, index-1, index+1, bad)
+                if selected is None:
                     predictions.pop()
                     continue
+                candidate, repaired_first, repaired_stop = selected
+                report['range'] = block['range'] = [repaired_first, repaired_stop]
                 report['accepted'] = True
                 raw_blocks.append(block)
                 owners, repaired = candidate, True

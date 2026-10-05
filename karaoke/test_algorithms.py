@@ -1647,6 +1647,29 @@ class AlignmentIntegrity(unittest.TestCase):
                 else:
                     self.assertEqual(stitched[0]['result'],raw['result'])
 
+    def test_joint_repair_expands_only_across_connected_edge_conflicts(self):
+        from copy import deepcopy
+        from unittest.mock import Mock
+        lines = ['alpha', 'bravo', 'charlie', 'delta', 'omega']
+        old, new = [1.,7.,9.,4.,13.], [1.1,3.,5.,7.,13.1]
+        def result(starts, offset=0.):
+            return dict(segments=[dict(text=t,words=[dict(word=t,start=s-offset,end=s+.8-offset)])
+                                  for t,s in zip(lines,starts)])
+        raw = dict(range=[0,5],context=[0,5],source_range=[0.,15.],result=result(old))
+        original = deepcopy(raw)
+        for cached in (True, False):
+            with self.subTest(cached=cached):
+                predictions = [raw]
+                align = Mock(side_effect=lambda begin,end,text,**kw: result(new,begin))
+                if cached:
+                    predictions.append(dict(range=[0,0],context=[0,5],source_range=[0.,15.],result=result(new)))
+                cues, stitched, repairs = stitch_blocks(lines,predictions,15.,'English',align)
+                self.assertEqual([c['start'] for c in cues],[1.,3.,5.,7.,13.])
+                self.assertEqual(raw,original)
+                self.assertEqual(align.call_count,0 if cached else 1)
+                presentation_cues(cues,15.,lead=0,tail=0,bridge_gap=0)
+                self.assertEqual([b['range'] for b in stitched],[[0,1],[1,4],[4,5]])
+
     def test_crossing_block_boundary_uses_one_complete_joint_prediction(self):
         lines = ['first tail', 'second line', 'last phrase']
 
