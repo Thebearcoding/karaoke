@@ -138,7 +138,7 @@ function renderLibrary() {
     <div class="song-poster">${song.poster ? `<img src="${escape(song.poster)}" alt="" loading="lazy">` : `<span class="poster-initial">${escape(song.title.slice(0,1))}</span>`}
       <span class="poster-duration">${time(song.duration)}</span>
       <button class="add-song" data-song="${escape(song.id)}" aria-label="点歌：${escape(song.title)}" title="点歌">${icon('plus')}</button></div>
-    <div class="song-detail"><h3>${escape(song.title)}</h3><div class="song-info-row"><span class="song-artist">${escape(song.artist)}</span>${label ? `<span class="${ready ? 'ready-label' : 'prepare-label'}">${label}</span>` : ''}</div>${song.status === 'running' ? `<div class="preparation-slot">${preparationHTML(song)}</div>` : ''}</div></article>`;
+    <div class="song-detail"><h3>${escape(song.title)}</h3><div class="song-info-row"><span class="song-artist">${escape(song.artist)}</span>${preparationElapsedHTML(song)}${label ? `<span class="${ready ? 'ready-label' : 'prepare-label'}">${label}</span>` : ''}</div>${song.status === 'running' ? `<div class="preparation-slot">${preparationHTML(song)}</div>` : ''}</div></article>`;
     }).join('');
   } else {
     updatePreparationSlots($('song-grid'), songs);
@@ -385,17 +385,21 @@ function statusText(entry) {
   return (entry.active_stages || []).map(s => stages[s] || '正在准备').join(' · ') || '开始准备';
 }
 
-function preparationHTML(entry) {
+function preparationElapsedHTML(entry) {
   if (entry?.status !== 'running') return '';
   const started = Date.parse(entry.preparation_started_at)/1000;
-  const elapsed = Number.isFinite(started) ? `<span class="preparation-elapsed" data-preparation-start="${started}">${preparationTime(started)}</span>` : '';
-  return `<div class="preparation">${(entry.active_stages?.length ? entry.active_stages : ['starting']).map((stage, index) => {
+  return Number.isFinite(started) ? `<span class="preparation-elapsed" data-preparation-start="${started}">${preparationTime(started)}</span>` : '';
+}
+
+function preparationHTML(entry) {
+  if (entry?.status !== 'running') return '';
+  return `<div class="preparation">${(entry.active_stages?.length ? entry.active_stages : ['starting']).map(stage => {
     const p = entry.stage_progress?.[stage] || {};
     const measured = Number.isFinite(p.completed) && Number.isFinite(p.total) && p.total > 0;
     const percent = measured ? Math.min(100, Math.floor(100*p.completed/p.total)) : null;
     const label = `${stages[stage] || '开始准备'}${p.detail ? ` · ${p.detail}` : ''}`;
     const amount = percent !== null ? `${percent}%` : p.unit === 'bytes' && Number.isFinite(p.completed) ? `${(p.completed/1024**2).toFixed(1)} MB` : '';
-    return `<div class="preparation-stage"><div class="preparation-label"><span title="${escape(label)}">${escape(label)}</span><span class="preparation-metrics">${index === 0 ? elapsed : ''}${amount ? `<span>${amount}</span>` : ''}</span></div><progress max="100" ${percent === null ? '' : `value="${percent}"`} aria-label="${escape(label)}"></progress></div>`;
+    return `<div class="preparation-stage"><div class="preparation-label"><span title="${escape(label)}">${escape(label)}</span><span class="preparation-metrics">${amount}</span></div><progress max="100" ${percent === null ? '' : `value="${percent}"`} aria-label="${escape(label)}"></progress></div>`;
   }).join('')}</div>`;
 }
 
@@ -436,7 +440,7 @@ function renderQueue() {
     const preparing = ['running','queued'].includes(entry.status);
     return `<article class="queue-entry ${active ? 'current' : ''}" data-entry="${escape(entry.id)}"><span class="entry-number">${active && state.playing ? '♫' : String(i+1).padStart(2,'0')}</span>
       ${entry.poster ? `<img class="entry-art" src="${escape(entry.poster)}" alt="">` : `<span class="entry-art">♪</span>`}
-      <div class="entry-info"><h3 class="entry-title">${escape(entry.title)}</h3><p class="entry-artist">${escape(entry.artist || (entry.url.includes('bili') ? 'Bilibili 视频' : 'YouTube 视频'))}</p>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : `<p class="entry-status ${preparing ? 'preparing' : entry.status === 'failed' ? 'failed' : ''}">${escape(statusText(entry))}</p>`}</div>
+      <div class="entry-info"><h3 class="entry-title">${escape(entry.title)}</h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || (entry.url.includes('bili') ? 'Bilibili 视频' : 'YouTube 视频'))}</p>${preparationElapsedHTML(entry)}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : `<p class="entry-status ${preparing ? 'preparing' : entry.status === 'failed' ? 'failed' : ''}">${escape(statusText(entry))}</p>`}</div>
       <div class="entry-tools">${entry.status === 'failed' ? `<button data-action="retry">重试</button>` : ''}${!active ? `<button data-action="select">${icon('play')}现在唱</button><button data-action="up" aria-label="上移：${escape(entry.title)}" ${i <= (state.current_id ? 1 : 0) ? 'disabled' : ''}>${icon('up')}</button><button data-action="down" aria-label="下移：${escape(entry.title)}" ${i === state.entries.length-1 ? 'disabled' : ''}>${icon('down')}</button>` : ''}<button data-action="remove" aria-label="移除：${escape(entry.title)}">${icon('trash')}</button></div></article>`;
   }).join('');
 }
@@ -449,6 +453,7 @@ function updateTransport() {
   $('now-art').querySelector('span').hidden = Boolean(song?.poster);
   $('player-title').textContent = song?.title || '未播放';
   $('player-artist').textContent = song?.artist || '';
+  $('player-elapsed').innerHTML = preparationElapsedHTML(song);
   $('play-icon').setAttribute('href', state.playing && (remote || player.unlocked) ? '#i-pause' : '#i-play');
   $('play-toggle').setAttribute('aria-label', state.playing && (remote || player.unlocked) ? '暂停' : '播放');
   $('play-toggle').disabled = state.entries.length === 0;
