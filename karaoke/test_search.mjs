@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createVideoSearch, previewURL, searchLibrary, visibleResults, playCount, orderResults} from './web/search.js';
+import {createVideoSearch, createViewHistory, previewURL, searchLibrary, visibleResults, playCount, orderResults} from './web/search.js';
 
 function setup() {
   const requests = [], snapshots = [];
@@ -130,6 +130,85 @@ test('popularity uses reported counts, keeps unknowns last and never mutates pro
   }
   assert.deepEqual(orderResults([{views:'2.5M'}, {views:'2591万'}, {views:'1.2亿'}], 'popular').map(s=>s.views), ['1.2亿','2591万','2.5M']);
   assert.ok(previewURL({provider:'youtube_music',url:'https://www.youtube.com/watch?v=abcdefghijk'},'http://localhost').includes('/embed/abcdefghijk'));
+});
+
+test('album browsing reuses successful metadata and retries failed loads', async () => {
+  const {search,requests,snapshots} = setup();
+  let pending = search.search('MPREalbum','album');
+  requests[0].finish([],false);
+  await pending;
+  pending = search.search('MPREalbum','album');
+  requests[1].finish([{kind:'song',url:'one',title:'One'}]);
+  await pending;
+  await search.search('anything','local');
+  await search.search('MPREalbum','album');
+  assert.equal(requests.length,2);
+  const saved = JSON.parse(JSON.stringify(search.snapshot()));
+  const restored = createVideoSearch(() => {}, () => assert.fail('Album metadata fetched again'));
+  assert.ok(restored.restore(saved));
+  await restored.search('MPREalbum','album');
+  assert.equal(snapshots.at(-1).album.results[0].url,'one');
+});
+
+test('restored search keeps loaded pages and cursor, and ignores old responses', async () => {
+  const {search,requests,snapshots} = setup();
+  let pending = search.search('Song','songs');
+  requests[0].finish([{url:'one',title:'One'}],true,'page-two');
+  await pending;
+  pending = search.loadMore();
+  const saved = JSON.parse(JSON.stringify(search.snapshot()));
+  assert.ok(search.restore(saved));
+  requests[1].finish([{url:'stale',title:'Stale'}]);
+  await pending;
+  assert.deepEqual(snapshots.at(-1).songs.results.map(s=>s.url),['one']);
+  assert.equal(snapshots.at(-1).songs.loadingMore,false);
+  pending = search.loadMore();
+  assert.equal(new URL(requests[2].url,'http://localhost').searchParams.get('cursor'),'page-two');
+  requests[2].finish([{url:'two',title:'Two'}]);
+  await pending;
+  const again = setup();
+  assert.ok(again.search.restore(JSON.parse(JSON.stringify(search.snapshot()))));
+  assert.equal(again.requests.length,0);
+  assert.deepEqual(again.snapshots.at(-1).songs.results.map(s=>s.url),['one','two']);
+  assert.equal(again.search.restore(null),false);
+});
+
+test('reloading an unfinished search restarts it instead of preserving a spinner', async () => {
+  const first = setup();
+  const pending = first.search.search('Pending','songs');
+  const next = setup();
+  assert.ok(next.search.restore(JSON.parse(JSON.stringify(first.search.snapshot()))));
+  assert.equal(next.requests.length,1);
+  next.requests[0].finish([{url:'fresh'}]);
+  await flush();
+  assert.equal(next.snapshots.at(-1).songs.loading,false);
+  first.requests[0].finish([]);
+  await pending;
+});
+
+test('view history restores nested catalogues, reloads and forward navigation without losing the parent', () => {
+  const stack = [null]; let index=0;
+  const history = {get state(){return stack[index];},
+    replaceState(value){stack[index]=structuredClone(value);},
+    pushState(value){stack.splice(++index,stack.length,structuredClone(value));},
+    back(){index--;}};
+  let view={query:'唯一',mode:'songs',order:'popular',scroll:870,pages:['one','two']};
+  let navigation=createViewHistory(history,()=>view,value=>{view=structuredClone(value);navigation.save();});
+  navigation.save();
+  assert.equal(navigation.back(),false);
+  navigation.push();
+  view={query:'唯一',mode:'album',selection:'MPREalbum',scroll:0}; navigation.save();
+  navigation.push();
+  view={query:'唯一',mode:'artist',selection:'UCsinger',scroll:0}; navigation.save();
+  // A fresh controller models a page reload with only browser history retained.
+  navigation=createViewHistory(history,()=>view,value=>{view=structuredClone(value);navigation.save();});
+  view={}; assert.ok(navigation.restore()); assert.equal(view.mode,'artist');
+  assert.ok(navigation.back()); navigation.restore(); assert.equal(view.selection,'MPREalbum');
+  assert.ok(navigation.back()); navigation.restore();
+  assert.deepEqual(view,{query:'唯一',mode:'songs',order:'popular',scroll:870,pages:['one','two']});
+  index++; navigation.restore(); assert.equal(view.mode,'album');
+  const unavailable=createViewHistory({replaceState(){throw new Error('blocked');}},()=>view,()=>{});
+  assert.doesNotThrow(()=>unavailable.save()); assert.equal(unavailable.back(),false);
 });
 
 test('default lowers explicit live versions without removing results or changing other sorts', () => {

@@ -1,5 +1,5 @@
 import { Player } from './player.js';
-import { createVideoSearch, previewURL, searchLibrary, playCount, orderResults } from './search.js';
+import { createVideoSearch, createViewHistory, previewURL, searchLibrary, playCount, orderResults } from './search.js';
 
 const $ = id => document.getElementById(id);
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -17,6 +17,8 @@ let searchTimer, searchQuery = '', searchSongs = [], previewSong = null, skippin
 let videoSource = 'songs', searchOrder = 'relevance', searchSnapshot = null, catalogueSelection = null;
 const addingVideos = new Set();
 const videoSearch = createVideoSearch(renderVideoResults, fetch, query => searchLibrary(library, query));
+const navigation = createViewHistory(history, () => ({query:$('song-input').value, title:$('title-input').value,
+  filter, view, videoSource, searchOrder, catalogueSelection, search:videoSearch.snapshot(), scroll:scrollY}), restoreView);
 const current = () => state.entries.find(e => e.id === state.current_id);
 const effectiveLevels = () => ({...state.levels, ...sendingLevels, ...pendingLevels});
 
@@ -89,6 +91,24 @@ function switchView(next) {
     button.classList.toggle('selected', button.dataset.view === view);
     button.setAttribute('aria-current', button.dataset.view === view ? 'page' : 'false');
   });
+  navigation.save();
+}
+
+function restoreView(saved) {
+  clearTimeout(scrollSave);
+  clearVideoSearch();
+  $('song-input').value = saved.query || '';
+  $('title-input').value = saved.title || '';
+  filter = saved.filter || 'all';
+  videoSource = saved.videoSource || 'songs';
+  searchOrder = saved.searchOrder || 'relevance';
+  catalogueSelection = saved.catalogueSelection || null;
+  searchQuery = saved.search ? saved.query.trim() : '';
+  document.querySelectorAll('[data-filter]').forEach(button => button.classList.toggle('selected', button.dataset.filter === filter));
+  renderLibrary();
+  videoSearch.restore(saved.search);
+  switchView(saved.view || 'library');
+  requestAnimationFrame(() => window.scrollTo(0, saved.scroll || 0));
 }
 
 function renderLibrary() {
@@ -135,6 +155,7 @@ function renderVideoResults(providers) {
   if (!info) return;
   const artists = videoSource === 'artists', album = videoSource === 'album', catalogue = album || videoSource === 'artist';
   const metadata = info.metadata || catalogueSelection || {};
+  $('clear-search').textContent = catalogue ? '返回上一级' : '返回曲库';
   const popularityAvailable = info.results.some(song => playCount(song.views) !== null);
   if (searchOrder === 'popular' && !popularityAvailable) searchOrder = 'relevance';
   $('search-order').value = searchOrder;
@@ -148,7 +169,7 @@ function renderVideoResults(providers) {
     videoSource === 'local' ? '本地曲库 · 现场版靠后' : 'YouTube 原顺序 · 现场版靠后';
   $('search-status').innerHTML = `<span class="${info.error ? 'search-error' : ''}">${info.loading ? '正在查找…' : info.error ? escape(info.error) : info.results.length ? `${videoSource === 'local' ? '' : '已加载 '}${info.results.length} ${artists ? '位歌手' : videoSource === 'youtube' ? '个视频' : videoSource === 'songs' ? '项' : '首'}${catalogue && info.metadata?.complete === false ? ' · 歌手页精选' : ''}` : '没有找到，试试另一个关键词或搜索类型'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`;
   $('artist-summary').hidden = !catalogue;
-  if (catalogue) $('artist-summary').innerHTML = `${metadata.thumbnail ? `<img src="${escape(metadata.thumbnail)}" alt="" referrerpolicy="no-referrer">` : ''}<div><p>${album ? '专辑' : '歌手'}</p><h3>${escape(metadata.title)}</h3>${metadata.monthly_listeners ? `<p>${escape(metadata.monthly_listeners)} · YouTube Music</p>` : ''}<button class="text-button" data-artist-back>返回搜索</button></div>`;
+  if (catalogue) $('artist-summary').innerHTML = `${metadata.thumbnail ? `<img src="${escape(metadata.thumbnail)}" alt="" referrerpolicy="no-referrer">` : ''}<div><p>${album ? '专辑' : '歌手'}</p><h3>${escape(metadata.title)}</h3>${metadata.monthly_listeners ? `<p>${escape(metadata.monthly_listeners)} · YouTube Music</p>` : ''}</div>`;
   renderSearchMore(info);
   searchSongs = orderResults(info.results.map(song => ({...song,
     status:library.find(item => item.url === song.url)?.status || song.status})), album && searchOrder === 'relevance' ? 'album' : searchOrder);
@@ -171,11 +192,11 @@ function renderVideoResults(providers) {
     const open = playable ? `data-preview="${index}"` : catalogueAction || `href="${escape(song.url)}" target="_blank" rel="noopener noreferrer"`;
     const tag = playable || catalogueAction ? 'button' : 'a';
     const action = playable ? `<button class="music-add" data-add-video="${index}" aria-label="点歌：${escape(song.title)}">${icon('plus')}<span>点歌</span></button>` :
-      `<${tag} class="music-add" ${open}>${catalogueAction ? '查看歌曲' : '打开'} ${icon('arrow')}</${tag}>`;
+      `<${tag} class="music-add" ${open}>${song.kind === 'album' ? '查看专辑' : catalogueAction ? '查看歌曲' : '打开'} ${icon('arrow')}</${tag}>`;
     const credits = song.artists?.length ? song.artists.map(a => a.id ? `<button data-artist-id="${escape(a.id)}" data-artist-name="${escape(a.name)}">${escape(a.name)}</button>` : escape(a.name)).join(' · ') : escape(song.uploader || '—');
     return `<article class="music-row" data-result="${index}" role="row"><span class="music-rank" role="cell">${String(index+1).padStart(2,'0')}</span>
       <div class="music-song" role="cell"><${tag} class="music-cover" ${open} aria-label="${playable ? '预览' : '打开'}：${escape(song.title)}">${thumbnail}<span>${icon(playable ? 'play' : 'arrow')}</span></${tag}>
-        <div class="music-title"><h3 title="${escape(song.title)}">${escape(song.title)}</h3><div class="music-meta"><span>${escape(song.version || (local ? '本地歌曲' : 'YouTube 视频'))}</span><span class="music-availability"></span></div></div></div>
+        <div class="music-title"><h3 title="${escape(song.title)}">${escape(song.title)}</h3><div class="music-meta"><span${song.kind === 'album' ? ' class="music-kind"' : ''}>${escape(song.version || (local ? '本地歌曲' : 'YouTube 视频'))}</span><span class="music-availability"></span></div></div></div>
       <div class="music-credits" role="cell" title="${escape(song.artists?.map(a => a.name).join(' · ') || song.uploader || '')}">${credits}</div>
       <div class="music-album" role="cell" title="${escape(song.album || '')}">${escape(song.album || '—')}</div>
       <div class="music-plays" role="cell">${playCount(song.views) !== null ? `${formatPlays(song.views)}<small>播放</small>` : '—'}</div>
@@ -190,6 +211,7 @@ function renderVideoResults(providers) {
     button.setAttribute('aria-pressed', String(selected));
   });
   updateVideoButtons();
+  navigation.save();
 }
 
 function updateSearchRows(rows) {
@@ -243,6 +265,7 @@ function formatPlays(value) {
 }
 
 function openCatalogue(item) {
+  navigation.push();
   const query = $('song-input').value.trim();
   clearVideoSearch();
   const returnMode = catalogueSelection?.returnMode || videoSource;
@@ -250,11 +273,15 @@ function openCatalogue(item) {
   videoSource = item.kind || 'artist'; searchOrder = 'relevance';
   searchQuery = query;
   videoSearch.search(item.browse_id, videoSource);
+  window.scrollTo(0, 0);
 }
 
-function changeSearchMode(mode) {
+function changeSearchMode(mode, query) {
+  navigation.push();
+  if (query !== undefined) $('song-input').value = query;
   videoSource = mode; searchOrder = 'relevance'; catalogueSelection = null;
   searchVideos(true);
+  window.scrollTo(0, 0);
 }
 
 function updateVideoButtons() {
@@ -303,6 +330,7 @@ function editSearch() {
   if (['artist','album'].includes(videoSource)) { videoSource = catalogueSelection?.returnMode || 'songs'; catalogueSelection = null; }
   clearVideoSearch();
   renderLibrary();
+  navigation.save();
   if (!composing) searchTimer = setTimeout(searchVideos, 700);
 }
 
@@ -530,14 +558,20 @@ document.querySelectorAll('[data-filter]').forEach(button => button.onclick = ()
   filter = button.dataset.filter;
   document.querySelectorAll('[data-filter]').forEach(b => b.classList.toggle('selected', b === button));
   renderLibrary();
+  navigation.save();
 });
 $('song-input').oninput = editSearch;
 document.querySelectorAll('[data-video-source]').forEach(button => button.onclick = () => changeSearchMode(button.dataset.videoSource));
 $('search-order').onchange = () => { searchOrder = $('search-order').value; if (searchSnapshot) renderVideoResults(searchSnapshot); };
-$('artist-summary').onclick = event => { if (event.target.closest('[data-artist-back]')) changeSearchMode(catalogueSelection?.returnMode || 'songs'); };
 $('song-input').oncompositionstart = () => { composing = true; clearVideoSearch(); };
 $('song-input').oncompositionend = () => { composing = false; editSearch(); };
-$('clear-search').onclick = () => { $('song-input').value = ''; editSearch(); $('song-input').focus(); };
+$('clear-search').onclick = () => {
+  if (['artist','album'].includes(videoSource)) {
+    if (!navigation.back()) changeSearchMode(catalogueSelection?.returnMode || 'songs');
+  } else {
+    navigation.push(); $('song-input').value = ''; editSearch(); $('song-input').focus();
+  }
+};
 const searchObserver = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
   const info = searchSnapshot?.[videoSource];
   if (entries.some(entry => entry.isIntersecting) && view === 'library' && info && !info.moreError && !info.autoBlocked) videoSearch.loadMore();
@@ -553,7 +587,7 @@ $('video-grid').onclick = event => {
   const artist = event.target.closest('[data-artist-result], [data-artist-id]');
   if (artist) { openCatalogue(artist.dataset.artistId ? {browse_id:artist.dataset.artistId, title:artist.dataset.artistName} : searchSongs[artist.dataset.artistResult]); return; }
   const mv = event.target.closest('[data-find-mv]');
-  if (mv) { const song = searchSongs[mv.dataset.findMv]; $('song-input').value = `${song.uploader} ${song.title}`; changeSearchMode('youtube'); return; }
+  if (mv) { const song = searchSongs[mv.dataset.findMv]; changeSearchMode('youtube', `${song.uploader} ${song.title}`); return; }
   const preview = event.target.closest('[data-preview]');
   const add = event.target.closest('[data-add-video]');
   if (preview) previewVideo(searchSongs[preview.dataset.preview]);
@@ -667,6 +701,11 @@ document.addEventListener('keydown', event => {
   if (event.key.toLowerCase() === 'f') fullscreen();
 });
 window.addEventListener('resize', () => switchView(view));
+history.scrollRestoration = 'manual';
+window.addEventListener('popstate', event => navigation.restore(event.state));
+window.addEventListener('pagehide', () => navigation.save());
+let scrollSave;
+window.addEventListener('scroll', () => { clearTimeout(scrollSave); scrollSave = setTimeout(() => navigation.save(), 150); }, {passive:true});
 const events = new EventSource('/v1/room/events');
 events.addEventListener('room', event => {
   $('connection-dot').classList.add('online');
@@ -685,3 +724,4 @@ if (remote) {
   requestAnimationFrame(remoteTick);
 }
 updateTransport();
+if (!navigation.restore()) navigation.save();

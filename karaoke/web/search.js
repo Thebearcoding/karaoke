@@ -1,6 +1,26 @@
 // Local results remain available while YouTube loads; stale responses cannot repaint.
 export function createVideoSearch(onChange, fetcher = fetch, getLocal = () => []) {
   let controller, generation = 0, active;
+  const albums = new Map();
+  async function readPage(url, signal) {
+    const response = await fetcher(url, {signal});
+    const data = await response.json();
+    if (!response.ok) throw Object.assign(new Error(data.detail || '搜索失败，请重试'), {expired:response.status === 410});
+    if (!Array.isArray(data.results)) throw new Error('搜索结果暂不可用，请重试');
+    return data;
+  }
+  function getAlbum(id) {
+    if (!albums.has(id)) {
+      const record = {};
+      record.pending = readPage(`/v1/music/albums/${encodeURIComponent(id)}`).then(data => {
+        record.data = data;
+        return data;
+      }).catch(error => { if (albums.get(id) === record) albums.delete(id); throw error; });
+      albums.set(id, record);
+      if (albums.size > 32) albums.delete(albums.keys().next().value);
+    }
+    return albums.get(id).pending;
+  }
   function cancel() {
     generation++;
     controller?.abort();
@@ -34,10 +54,7 @@ export function createVideoSearch(onChange, fetcher = fetch, getLocal = () => []
       if (cursor) params.set('cursor', cursor);
       const url = ['artist','album'].includes(mode) ? `/v1/music/${mode}s/${encodeURIComponent(query)}${cursor ? '?'+new URLSearchParams({cursor}) : ''}`
         : `${mode === 'youtube' ? '/v1/search' : '/v1/music/search'}?${params}`;
-      const response = await fetcher(url, {signal});
-      const data = await response.json();
-      if (!response.ok) throw Object.assign(new Error(data.detail || '搜索失败，请重试'), {expired:response.status === 410});
-      if (!Array.isArray(data.results)) throw new Error('搜索结果暂不可用，请重试');
+      const data = mode === 'album' ? await getAlbum(query) : await readPage(url, signal);
       if (signal.aborted || request.generation !== generation) return;
       // Suppress only overlap with earlier pages, keeping distinct source versions.
       const seen = new Set(append ? info.results.map(song => song.browse_id || song.url).filter(Boolean) : []);
@@ -65,7 +82,56 @@ export function createVideoSearch(onChange, fetcher = fetch, getLocal = () => []
     active.providers.local = {loading:false, results, error:''};
     onChange(active.providers);
   }
-  return {search, loadMore, cancel, refreshLocal};
+  function snapshot() {
+    if (!active) return null;
+    return structuredClone({query:active.query, mode:active.mode, providers:active.providers,
+      albums:[...albums].filter(([,record]) => record.data).map(([id,record]) => [id,record.data])});
+  }
+  function restore(saved) {
+    const info = saved?.providers?.[saved.mode];
+    if (!['local','youtube','songs','artists','artist','album'].includes(saved?.mode) ||
+        typeof saved?.query !== 'string' || !Array.isArray(info?.results)) return false;
+    cancel();
+    for (const [id,data] of saved.albums || []) albums.set(id, {data, pending:Promise.resolve(data)});
+    while (albums.size > 32) albums.delete(albums.keys().next().value);
+    if (info.loading && !info.results.length) { search(saved.query, saved.mode); return true; }
+    controller = new AbortController();
+    const providers = structuredClone(saved.providers);
+    providers[saved.mode].loading = false;
+    providers[saved.mode].loadingMore = false;
+    providers.local = {loading:false, results:getLocal(saved.query), error:''};
+    active = {query:saved.query, mode:saved.mode, providers, generation, signal:controller.signal};
+    onChange(providers);
+    return true;
+  }
+  return {search, loadMore, cancel, refreshLocal, snapshot, restore};
+}
+
+// One browser-history entry per navigation; refresh restores the same search scene.
+export function createViewHistory(history, capture, apply) {
+  let restoring = false;
+  function save(push = false) {
+    if (restoring) return;
+    const depth = (history.state?.karaokeView?.depth || 0) + Number(push);
+    try {
+      history[push ? 'pushState' : 'replaceState']({...history.state,
+        karaokeView:{version:1, depth, value:capture()}}, '');
+    } catch { /* Browsers may disallow storage; navigation must remain usable. */ }
+  }
+  function push() { save(); save(true); }
+  function restore(state = history.state) {
+    const saved = state?.karaokeView;
+    if (saved?.version !== 1 || !saved.value) return false;
+    restoring = true;
+    try { apply(saved.value); return true; }
+    finally { restoring = false; }
+  }
+  function back() {
+    if (!(history.state?.karaokeView?.depth > 0)) return false;
+    history.back();
+    return true;
+  }
+  return {save, push, restore, back};
 }
 
 export function searchLibrary(library, query) {
