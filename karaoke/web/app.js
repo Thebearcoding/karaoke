@@ -387,7 +387,9 @@ function statusText(entry) {
 
 function preparationHTML(entry) {
   if (entry?.status !== 'running') return '';
-  return `<div class="preparation">${(entry.active_stages?.length ? entry.active_stages : ['starting']).map(stage => {
+  const started = Date.parse(entry.preparation_started_at)/1000;
+  const elapsed = Number.isFinite(started) ? `<span class="preparation-elapsed" data-preparation-start="${started}">${preparationTime(started)}</span>` : '';
+  return `<div class="preparation">${elapsed}${(entry.active_stages?.length ? entry.active_stages : ['starting']).map(stage => {
     const p = entry.stage_progress?.[stage] || {};
     const measured = Number.isFinite(p.completed) && Number.isFinite(p.total) && p.total > 0;
     const percent = measured ? Math.min(100, Math.floor(100*p.completed/p.total)) : null;
@@ -396,6 +398,17 @@ function preparationHTML(entry) {
     return `<div class="preparation-stage"><div class="preparation-label"><span>${escape(label)}</span><span>${amount}</span></div><progress max="100" ${percent === null ? '' : `value="${percent}"`} aria-label="${escape(label)}"></progress></div>`;
   }).join('')}</div>`;
 }
+
+function preparationTime(started) {
+  return `已用时 ${time(Date.now()/1000 + clockOffset - started)}`;
+}
+
+setInterval(() => {
+  for (const label of document.querySelectorAll('[data-preparation-start]')) {
+    const text = preparationTime(Number(label.dataset.preparationStart));
+    if (label.textContent !== text) label.textContent = text;
+  }
+}, 1000);
 
 function updatePreparationSlots(container, songs) {
   for (const element of container.children) {
@@ -527,11 +540,11 @@ async function syncPlayback() {
 function acceptState(updated) {
   if (updated.revision < state.revision) return;
   state = updated;
+  clockOffset = state.server_time - Date.now()/1000;
   library = updated.library || [];
   renderLibrary();
   videoSearch.refreshLocal();
   $('screen-preparation').innerHTML = preparationHTML(current());
-  clockOffset = state.server_time - Date.now()/1000;
   renderQueue(); updateTransport(); renderStorage();
   updateVideoButtons();
   if (!player.anchor) updateTime(state.position);

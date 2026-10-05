@@ -126,6 +126,7 @@ class Room:
             url=inputs['url'], status='unprepared' if job['status'] in ('audio_ready', 'source_ready') else job['status'],
             active_stages=job.get('active_stages', []),
             stage_progress=job.get('stage_progress', {}) if job['status'] == 'running' else {},
+            preparation_started_at=job.get('started_at') if job['status'] == 'running' else None,
             language=inputs.get('language') or result.get('language') or song_info.get('language') or featured.get('language', ''),
             error=job.get('error'), duration=result.get('duration_seconds') or song_info.get('duration_seconds', 0),
             poster=(f"/v1/jobs/{job['id']}/artifacts/poster"
@@ -170,7 +171,7 @@ class Room:
                 songs.append(song)
                 by_url[url] = song
             song.update({key: info[key] for key in ('title', 'artist', 'url', 'language', 'duration',
-                'poster', 'status', 'active_stages', 'stage_progress', 'error')})
+                'poster', 'status', 'active_stages', 'stage_progress', 'preparation_started_at', 'error')})
             song['job_id'] = job['id'] if ready or job.get('restore_video') or job['status'] in ('queued', 'running') else None
             if job['status'] == 'completed' and not ready:
                 song.update(status='evicted', poster=None)

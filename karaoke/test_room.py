@@ -383,7 +383,11 @@ def test_song_info_updates_push_to_room_and_preserve_user_overrides(tmp_path):
         def entry(event):
             return json.loads(event.split('data: ', 1)[1])['entries'][0]
 
-        assert entry(await anext(stream))['title'] == '新点的歌'
+        queued = entry(await anext(stream))
+        assert queued['title'] == '新点的歌' and queued['preparation_started_at'] is None
+        started_at = '2026-10-05T22:00:00+00:00'
+        store.update(job['id'], status='running', started_at=started_at)
+        assert entry(await anext(stream))['preparation_started_at'] == started_at
         for done, title in enumerate(('Video title', 'Resolved song title'), 1):
             counters = {'separate_music': dict(completed=done, total=4, unit='chunks')}
             store.update(job['id'], status='running', song_info=dict(title=title, artist='Singer', language='English'),
@@ -391,14 +395,26 @@ def test_song_info_updates_push_to_room_and_preserve_user_overrides(tmp_path):
             event = await asyncio.wait_for(anext(stream), 1)
             visible = entry(event)
             assert visible['title'] == title and visible['stage_progress'] == counters
+            assert visible['preparation_started_at'] == started_at
             song = next(s for s in json.loads(event.split('data: ', 1)[1])['library'] if s['url'] == URL)
             assert song['title'] == title and song['language'] == 'English'
             assert song['stage_progress'] == counters
+            assert song['preparation_started_at'] == started_at
+        # Reconnecting/reloading reads the persisted start, not the last progress update.
+        assert room.snapshot()['entries'][0]['preparation_started_at'] == started_at
         store.update(job['id'], status='failed', error=dict(code='test', message='Test failure'))
         visible = entry(await anext(stream))
         assert visible['title'] == 'Resolved song title' and visible['stage_progress'] == {}
+        assert visible['preparation_started_at'] is None
+        # A queued retry must not inherit the previous attempt's clock.
+        store.update(job['id'], status='queued')
+        assert entry(await anext(stream))['preparation_started_at'] is None
+        retry_started_at = '2026-10-05T22:10:00+00:00'
+        store.update(job['id'], status='running', started_at=retry_started_at)
+        assert entry(await anext(stream))['preparation_started_at'] == retry_started_at
         store.update(job['id'], status='completed', result=dict(title='Final title', artist='Final singer'))
-        assert entry(await anext(stream))['title'] == 'Final title'
+        completed = entry(await anext(stream))
+        assert completed['title'] == 'Final title' and completed['preparation_started_at'] is None
         await stream.aclose()
 
         manual, _ = store.create(JobRequest(url=URL, title='My title', artist='My singer'), 'test')
