@@ -495,6 +495,15 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     prepare()
     assert calls == ['align_words', 'transcribe']
     calls.clear()
+    for filename, affected in (
+            ('cjk_recovery.py', ['align_context']),
+            ('align_lyric_phonemes.py', ['align_phonemes', 'align_context']),
+            ('align_lyrics_whisper.py', ['align_words'])):
+        path = code/filename
+        path.write_bytes(path.read_bytes()+b'updated')
+        prepare()
+        assert calls == affected
+        calls.clear()
     (folder/'source-44100.wav').write_bytes(b'updated original audio')
     prepare()
     assert calls == ['transcribe', 'align_context']
@@ -511,6 +520,9 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     g2p.parent.mkdir(parents=True)
     g2p.write_text('pronunciation = 1\n')
     (code/'align_english_sofa.py').write_text('aligner = 1\n')
+    for path in pipeline.stage_spec('align_context', stages['align_context'])['code']:
+        if not path.exists():
+            path.write_text('input')
     prepare()
     calls.clear()
     for asset in (dictionary, g2p, models[3]):
@@ -845,7 +857,7 @@ def test_known_video_credits_do_not_skip_lyrics_in_its_description(tmp_path, mon
     def extract(evidence, *args):
         calls.append(evidence)
         return dict(parsed=dict(title='Wrong inferred title', artist='Wrong inferred artist', lyric_line_numbers=[3,4]))
-    def consensus(song, metadata, duration, cache, description):
+    def consensus(song, metadata, duration, cache, description, preserve_title=False):
         assert song['title'] == 'Evening Wind 晚風' and song['artist'] == 'Lin Lin 林林'
         return description() if callable(description) else description
     monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', extract)
@@ -1082,7 +1094,8 @@ def test_netease_lyrics_reject_other_recordings_and_strip_lrc_metadata(tmp_path,
 
 
 @pytest.mark.parametrize('same_recording', [True, False])
-def test_music_lyrics_are_bound_to_the_requested_video(tmp_path, monkeypatch, same_recording):
+@pytest.mark.parametrize('artist', ['Singer', ''])
+def test_music_lyrics_are_bound_to_the_requested_video(tmp_path, monkeypatch, same_recording, artist):
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
     import ytmusicapi
@@ -1091,29 +1104,68 @@ def test_music_lyrics_are_bound_to_the_requested_video(tmp_path, monkeypatch, sa
         def __init__(self, **kwargs): pass
         def get_watch_playlist(self, videoId, limit):
             calls.append(videoId)
-            return dict(lyrics='lyrics-id',tracks=[dict(videoId=videoId if same_recording else 'another')])
+            return dict(lyrics='lyrics-id',tracks=[dict(videoId=videoId if same_recording else 'another',
+                title='Evening', artists=[dict(name='Confirmed singer')])])
         def get_lyrics(self, key):
             return dict(lyrics='Stars above the quiet shore',source='Source: LyricFind')
     monkeypatch.setattr(ytmusicapi,'YTMusic',Music)
     for _ in range(2):
-        lines, report = module.fetch_additional_lyrics('youtube_music',dict(title='Evening',artist='Singer'),
+        lines, report = module.fetch_additional_lyrics('youtube_music',dict(title='Evening',artist=artist),
             dict(id='abcdefghijk'),StageCache(tmp_path))
         assert bool(lines) == same_recording
     assert len(calls) == 1
     if same_recording:
         assert report['publisher'] == 'lyricfind' and not report['provider_timestamps_used']
+        assert report['recording_identity']['artist'] == 'Confirmed singer'
+    else:
+        assert not report.get('recording_identity')
+
+
+@pytest.mark.parametrize('lyric_response', ['absent', 'failure'])
+@pytest.mark.parametrize('manual_title', [None, 'User title'])
+def test_source_identity_survives_missing_lyrics_and_enables_other_sources(tmp_path, monkeypatch, lyric_response, manual_title):
+    from karaoke import lyric_lookup, lyric_consensus
+    import ytmusicapi
+    calls = []
+    class Music:
+        def __init__(self, **kwargs): pass
+        def get_watch_playlist(self, videoId, limit):
+            calls.append(videoId)
+            return dict(lyrics='lyrics-id' if lyric_response == 'failure' else None,
+                tracks=[dict(videoId=videoId,title='Evening',artists=[dict(name='Confirmed singer')])])
+        def get_lyrics(self, key):
+            raise ValueError('This lyric endpoint is unavailable')
+    monkeypatch.setattr(ytmusicapi,'YTMusic',Music)
+    monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', lambda *a:pytest.fail('Source identity needs no model'))
+    def published(song, *args):
+        assert song['artist'] == 'Confirmed singer'
+        assert song['title'] == (manual_title or 'Evening')
+        return ['Stars above the quiet shore'], dict(provider='line_music',language='English')
+    monkeypatch.setattr(lyric_lookup, 'fetch_published_lyrics', published)
+    monkeypatch.setattr(lyric_lookup, 'fetch_lyrics', lambda *a:dict(status='unavailable'))
+    additional = lyric_consensus.fetch_additional_lyrics
+    monkeypatch.setattr(lyric_consensus, 'fetch_additional_lyrics', lambda provider,*args:
+        additional(provider,*args) if provider=='youtube_music' else (None,dict(provider=provider,status='unavailable')))
+    for _ in range(2):
+        result = Pipeline(dict(url=URL,title=manual_title),tmp_path).prepare_text(
+            dict(title='Channel - Evening (official video)',id='abcdefghijk'),30)
+        assert result['artist'] == 'Confirmed singer' and result['lines'] == ['Stars above the quiet shore']
+        assert result['title'] == (manual_title or 'Evening')
+    assert calls == ['abcdefghijk']
 
 
 @pytest.mark.parametrize('http_status', [401, 429])
 def test_lyric_rate_limit_is_shared_between_jobs_without_blocking_other_sources(tmp_path, monkeypatch, http_status):
+    import httpx
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
     clock, calls = [1000.], []
     monkeypatch.setattr(module.time,'time',lambda:clock[0])
-    def limited(*args):
+    def limited(url, **kwargs):
         calls.append('line_music')
-        return None,dict(status='unavailable',http_status=http_status,retry_at=1900.)
-    monkeypatch.setattr(module.lookup,'fetch_published_lyrics',limited)
+        response = httpx.Response(http_status, headers={'Retry-After':'900'}, request=httpx.Request('GET',url))
+        response.raise_for_status()
+    monkeypatch.setattr(module.lookup,'read_document',limited)
     monkeypatch.setattr(module.lookup,'fetch_lyrics',lambda *a:dict(status='unavailable'))
     monkeypatch.setattr(module,'fetch_additional_lyrics',lambda provider,*a:
         (['The quiet shore'],dict(provider=provider,language='English')))
@@ -1123,6 +1175,145 @@ def test_lyric_rate_limit_is_shared_between_jobs_without_blocking_other_sources(
         lines, report = module.fetch_lyric_consensus(dict(title='Evening',artist='Singer'),{},30,StageCache(tmp_path/str(i)))
         assert lines == ['The quiet shore']
     assert calls == (['line_music','line_music'] if http_status == 429 else ['line_music'])
+    if http_status == 401:
+        (tmp_path/'lyric-provider-backoff/line_music.json').unlink()
+        module.lookup.fetch_published_lyrics(dict(title='Evening',artist='Singer'),None,StageCache(tmp_path/'0'),30)
+        assert calls == ['line_music','line_music']  # New authorization retries a cached 401.
+
+
+@pytest.mark.parametrize('http_status', [401, 429])
+def test_music_backoff_never_supplies_another_songs_identity(tmp_path, monkeypatch, http_status):
+    import httpx
+    import ytmusicapi
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    calls, authorized = [], [False]
+    class Music:
+        def __init__(self, **kwargs): pass
+        def get_watch_playlist(self, videoId, limit):
+            calls.append(videoId)
+            return dict(lyrics='lyrics-id',tracks=[dict(videoId=videoId,title='Song A',artists=[dict(name='Singer A')])])
+        def get_lyrics(self, key):
+            if authorized[0]:
+                return dict(lyrics='Stars above the quiet shore')
+            response = httpx.Response(http_status, headers={'Retry-After':'900'}, request=httpx.Request('GET','https://example.com'))
+            response.raise_for_status()
+    monkeypatch.setattr(ytmusicapi,'YTMusic',Music)
+    monkeypatch.setattr(lyric_lookup,'read_document',lambda *a,**kw:dict(response=dict(result=dict(tracks=[]))))
+    monkeypatch.setattr(lyric_lookup,'fetch_lyrics',lambda *a:dict(status='unavailable'))
+    additional = lyric_consensus.fetch_additional_lyrics
+    monkeypatch.setattr(lyric_consensus,'fetch_additional_lyrics',lambda provider,*a:
+        additional(provider,*a) if provider=='youtube_music' else (None,dict(status='unavailable')))
+    for name in ('a','b'):
+        (tmp_path/name).mkdir()
+    song_a = dict(title='Upload A',artist='')
+    lyric_consensus.fetch_lyric_consensus(song_a,dict(title='Upload A',id='aaaaaaaaaaa'),30,StageCache(tmp_path/'a'))
+    assert song_a == dict(title='Song A',artist='Singer A')
+    song_b = dict(title='Upload B',artist='')
+    lines, _ = lyric_consensus.fetch_lyric_consensus(song_b,dict(title='Upload B',id='bbbbbbbbbbb'),30,StageCache(tmp_path/'b'))
+    assert lines is None and song_b == dict(title='Upload B',artist='')
+    assert calls == ['aaaaaaaaaaa']
+    if http_status == 401:
+        authorized[0] = True
+        (tmp_path/'lyric-provider-backoff/youtube_music.json').unlink()
+        lines, _ = lyric_consensus.fetch_lyric_consensus(song_a,dict(title='Upload A',id='aaaaaaaaaaa'),30,StageCache(tmp_path/'a'))
+        assert lines == ['Stars above the quiet shore'] and calls == ['aaaaaaaaaaa']
+
+
+@pytest.mark.parametrize('complete_identity', [False, True])
+@pytest.mark.parametrize('video_title', ['Channel - Evening (cover)', 'Evening'])
+def test_source_metadata_precedes_model_and_keeps_description_vote(tmp_path, monkeypatch, complete_identity, video_title):
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    calls, source_started = [], threading.Event()
+    body = ['Stars above the quiet shore','Morning light will guide me home']
+    def additional(provider,*args):
+        if provider != 'youtube_music':
+            return None, dict(provider=provider,status='unavailable')
+        calls.append('source')
+        return body, dict(provider=provider,language='English',publisher='lyricfind',
+            recording_identity=dict(video_id='abcdefghijk',title='Evening',artist='Singer' if complete_identity else ''))
+    def extract(*args):
+        assert calls == ['source']
+        calls.append('model')
+        if complete_identity:
+            assert source_started.wait(5), 'Description extraction blocked name-based providers'
+        return dict(parsed=dict(title='Wrong inferred title',artist='Singer',lyric_line_numbers=[1,2]))
+    def published(song,*args):
+        assert song['title'] == 'Evening' and song['artist'] == 'Singer'
+        source_started.set()
+        return None, dict(provider='line_music',status='unavailable')
+    monkeypatch.setattr(lyric_consensus,'fetch_additional_lyrics',additional)
+    monkeypatch.setattr(lyric_lookup,'extract_song_metadata',extract)
+    monkeypatch.setattr(lyric_lookup,'fetch_published_lyrics',published)
+    monkeypatch.setattr(lyric_lookup,'fetch_lyrics',lambda *a:dict(status='unavailable'))
+    result = lyric_lookup.prepare_online_lyrics(dict(url=URL),
+        dict(id='abcdefghijk',title=video_title,description='\n'.join(body)),30,StageCache(tmp_path),'unused',None)
+    assert result['title'] == 'Evening' and result['artist'] == 'Singer'
+    assert result['provenance']['lyric_lookup']['crosscheck']['independent_sources'] == 2
+    assert calls == ['source','model']
+
+
+@pytest.mark.parametrize('provider', ['line_music','netease'])
+def test_duration_reselects_cached_lyrics_and_can_fetch_a_later_candidate(tmp_path, monkeypatch, provider):
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    song = dict(title='Evening',artist='Singer')
+    body = 'Stars above the quiet shore\nMorning light will guide me home'
+    rows = [dict(trackId=i,trackTitle='Evening',artists=[dict(artistName='Singer')],
+        album=dict(albumTitle='Night'),lyrics=text) for i,text in ((1,'Stars'),(2,body))]
+    calls = []
+    def read(url,**kwargs):
+        calls.append(url)
+        if provider == 'line_music':
+            return dict(response=dict(result=dict(tracks=rows[:1] if 'query=Evening+Singer' in url else rows[1:])))
+        if 'cloudsearch' in url:
+            return dict(code=200,result=dict(songs=[dict(id=row['trackId'],name='Evening',ar=[dict(name='Singer')],
+                al=dict(name='Night')) for row in rows]))
+        return dict(lrc=dict(lyric='Stars' if 'id=1&' in url else body))
+    monkeypatch.setattr(lyric_lookup if provider=='line_music' else lyric_consensus,'read_document',read)
+    folder = tmp_path/'song'
+    folder.mkdir()
+    cache = StageCache(folder)
+    def fetch(duration):
+        return (lyric_lookup.fetch_published_lyrics(song,None,cache,duration) if provider=='line_music' else
+                lyric_consensus.fetch_additional_lyrics(provider,song,{},cache,duration))
+    assert fetch(10)[0] == ['Stars']
+    assert len(calls) == (1 if provider=='line_music' else 2)
+    lines, report = fetch(100)
+    assert lines == body.splitlines() and report['url'].endswith('2')
+    hold = tmp_path/'lyric-provider-backoff'/f'{provider}.json'
+    hold.parent.mkdir(exist_ok=True)
+    hold.write_text(json.dumps(dict(status='unavailable',http_status=401,requires_access=True)))
+    assert fetch(10)[0] == ['Stars']
+    assert len(calls) == (2 if provider=='line_music' else 3)
+    assert len(set(calls)) == len(calls)
+
+
+def test_music_cached_body_survives_duration_changes_and_other_song_backoff(tmp_path, monkeypatch):
+    import ytmusicapi
+    from karaoke import lyric_consensus
+    from karaoke.stage_cache import StageCache
+    calls = []
+    class Music:
+        def __init__(self, **kwargs): pass
+        def get_watch_playlist(self, videoId, limit):
+            calls.append('watch')
+            return dict(lyrics='lyrics-id',tracks=[dict(videoId=videoId,title='Evening',artists=[dict(name='Singer')])])
+        def get_lyrics(self, key):
+            calls.append('lyrics')
+            return dict(lyrics='Stars above the quiet shore')
+    monkeypatch.setattr(ytmusicapi,'YTMusic',Music)
+    folder = tmp_path/'song'
+    folder.mkdir()
+    cache = StageCache(folder)
+    first = lyric_consensus.fetch_additional_lyrics('youtube_music',dict(title='Evening',artist='Singer'),dict(id='abcdefghijk'),cache,30)
+    hold = tmp_path/'lyric-provider-backoff/youtube_music.json'
+    hold.parent.mkdir()
+    hold.write_text(json.dumps(dict(status='unavailable',http_status=401,requires_access=True,
+        recording_identity=dict(video_id='other-video',title='Wrong song',artist='Wrong singer'))))
+    second = lyric_consensus.fetch_additional_lyrics('youtube_music',dict(title='Evening',artist='Singer'),dict(id='abcdefghijk'),cache,40)
+    assert first == second and calls == ['watch','lyrics']
 
 
 @pytest.mark.parametrize('credits', [
@@ -1312,7 +1503,9 @@ def test_published_lyric_search_does_not_issue_another_query_after_rate_limit(tm
         response = httpx.Response(429, request=httpx.Request('GET', url))
         response.raise_for_status()
     monkeypatch.setattr(lyric_lookup, 'read_document', limited)
-    lines, report = lyric_lookup.fetch_published_lyrics(dict(title='晚風',artist='林林'), '', StageCache(tmp_path))
+    folder = tmp_path/'song'
+    folder.mkdir()
+    lines, report = lyric_lookup.fetch_published_lyrics(dict(title='晚風',artist='林林'), '', StageCache(folder))
     assert lines is None and report['http_status'] == 429 and len(calls) == 1
 
 
@@ -1329,6 +1522,7 @@ def test_direct_lyrics_reach_acoustic_aligner_without_asr_anchors(tmp_path, monk
     model = SimpleNamespace(_buffers={'alignment_heads': None}, to=lambda device: None,
                             register_buffer=lambda *a, **kw: None, align=align)
     monkeypatch.setattr(aligner.stable_whisper, 'load_model', lambda *a, **kw: model)
+    monkeypatch.setattr(aligner, 'sha', lambda path:'test-model-hash')
     sf.write(tmp_path/'audio.wav', np.ones(32000)*.1, 16000)
     (tmp_path/'lyrics.json').write_text(json.dumps(dict(language='English', lines=['Stars above the quiet shore'])))
     job = dict(audio=str(tmp_path/'audio.wav'), lyrics=str(tmp_path/'lyrics.json'), output=str(tmp_path/'aligned'))
@@ -1681,6 +1875,8 @@ def test_online_lyric_fetch_retries_after_backoff_and_invalidates_changed_source
     import httpx
     from karaoke import lyric_lookup
     from karaoke.stage_cache import StageCache, retained_files
+    tmp_path = tmp_path/'song'
+    tmp_path.mkdir()
     info = tmp_path/'source.info.json'
     info.write_text('{"id":"one"}')
     song = dict(title='A Song', artist='A Singer')
@@ -1700,6 +1896,9 @@ def test_online_lyric_fetch_retries_after_backoff_and_invalidates_changed_source
     lyric_lookup.fetch_lyrics(song, info, cache)
     assert len(calls) == 2
     info.write_text('{"id":"two"}')
+    lyric_lookup.fetch_lyrics(song, info, cache)
+    assert len(calls) == 2  # A changed source cannot bypass the provider's active hold.
+    clock[0] = 2802.
     lyric_lookup.fetch_lyrics(song, info, cache)
     assert len(calls) == 3
 
@@ -2294,9 +2493,9 @@ def test_asr_detects_language_unless_requested(tmp_path, monkeypatch, metadata, 
     assert calls == [expected]
 
 
-@pytest.mark.parametrize('matching_video', [True, False])
+@pytest.mark.parametrize('video_issue', [None, 'identity', 'duration'])
 @pytest.mark.parametrize('audio_codec', ['pcm_s16le', 'libopus'])
-def test_audio_download_promotes_to_video_without_replacing_tested_audio(tmp_path, monkeypatch, matching_video, audio_codec):
+def test_audio_download_promotes_to_video_without_replacing_tested_audio(tmp_path, monkeypatch, video_issue, audio_codec):
     from karaoke.exact_stems import decode_source, pcm_sha
     pipeline = Pipeline(dict(url=URL), tmp_path, audio_only=True)
     calls = []
@@ -2308,9 +2507,9 @@ def test_audio_download_promotes_to_video_without_replacing_tested_audio(tmp_pat
             assert command[command.index('-f')+1] == 'ba'
             args += ['sine=frequency=440:duration=2', '-c:a', audio_codec]
         else:
-            args += ['color=blue:s=160x90:r=30:d=2', '-c:v', 'libx264']
+            args += [f'color=blue:s=160x90:r=30:d={4 if video_issue == "duration" else 2}', '-c:v', 'libx264']
         subprocess.run(args+[str(path)], check=True)
-        path.with_suffix('.info.json').write_text(json.dumps(dict(id='same' if matching_video or name=='download' else 'wrong',
+        path.with_suffix('.info.json').write_text(json.dumps(dict(id='wrong' if video_issue=='identity' and name!='download' else 'same',
             extractor_key='Youtube', title='Example', duration=2, format_id='a1' if name=='download' else 'v1')))
     monkeypatch.setattr(pipeline, 'run', download)
     with patch('karaoke.pipeline.create_poster', side_effect=AssertionError('Audio test downloaded artwork')):
@@ -2319,8 +2518,8 @@ def test_audio_download_promotes_to_video_without_replacing_tested_audio(tmp_pat
     before = pcm_sha(decode_source(pipeline.source)[0])
     assert calls == ['download'] and not (tmp_path/'result.json').exists()
     pipeline.audio_only = False
-    if not matching_video:
-        with pytest.raises(StageFailure, match='来源不同'):
+    if video_issue:
+        with pytest.raises(StageFailure, match='来源不同' if video_issue == 'identity' else '时长不匹配'):
             pipeline.download(artwork=False)
         assert json.loads((tmp_path/'source.json').read_text())['audio_only']
     else:
@@ -2328,7 +2527,10 @@ def test_audio_download_promotes_to_video_without_replacing_tested_audio(tmp_pat
         assert metadata['format_id'] == 'v1+a1'
         pipeline.download(artwork=False)
         assert json.loads((tmp_path/'source.json').read_text())['audio_only']
-        assert pcm_sha(decode_source(pipeline.video)[0]) == before
+        probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_streams',
+            '-of', 'json', str(pipeline.video)]))
+        assert {stream['codec_type'] for stream in probe['streams']} == {'video'}
+        assert not (tmp_path/'video-download/with-audio.mkv').exists()
         assert pipeline.video != pipeline.source
     assert calls == ['download', 'download_video']
     assert pcm_sha(decode_source(pipeline.source)[0]) == before
@@ -4290,12 +4492,18 @@ def test_master_only_package_still_builds_verified_three_stem_previews(tmp_path,
     assert {p.name for p in two.glob('*.mp3')} == ({'vocals.mp3', 'backing.mp3'} if previews else set())
     assert (exact_stems.verify(two)['max_absolute_error'] > 0) is not silent
     np.testing.assert_array_equal(sf.read(two/'vocals.wav')[0], sf.read(vocals)[0])
-    result = build(two, lead, three, source_pcm=native)
+    result = build(two, lead, three, source_pcm=native, karaoke_preview=previews)
     assert (result['reconstruction']['vocal_first']['max_absolute_error'] > 0) is not silent
     assert verify(three) == result['reconstruction']
     np.testing.assert_array_equal(sf.read(three/'lead.wav')[0], sf.read(lead)[0])
     assert exact_stems.sha(three/'instrumental.wav') == exact_stems.sha(two/'backing.wav')
-    assert set(result['previews']) == {'lead', 'backing-vocals', 'instrumental', 'karaoke'}
+    assert set(result['previews']) == {'lead', 'backing-vocals', 'instrumental'} | ({'karaoke'} if previews else set())
+    assert (three/'karaoke.mp3').exists() == previews
+    assert not (three/'.karaoke-mix.wav').exists()
+    masters = {name: sf.read(three/spec['file'], always_2d=True)[0] for name, spec in result['masters'].items()}
+    peak = max(float(np.max(np.abs(track))) for track in (
+        *masters.values(), sf.read(source, always_2d=True)[0], masters['instrumental']+masters['backing-vocals']))
+    assert result['preview_shared_gain'] == min(1., .84/max(peak, 1e-12))
     for name in result['previews']:
         assert validate_preview(three/f'{name}.mp3', frames, 2, rate)['decoded_length_delta_samples'] == 0
     if native:

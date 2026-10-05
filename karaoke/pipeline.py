@@ -191,12 +191,18 @@ class Pipeline:
 
     def stage_spec(self, name, command):
         """Explicit inputs/outputs prevent a downstream fix from discarding upstream work."""
-        alignment_code = [ROOT/p for p in ('align_lyrics_whisper.py', 'align_lyric_phonemes.py',
-            'align_english_onsets.py', 'align_repeated_lyrics.py', 'phoneme_progress.py',
-            'phonetic_align.py', 'anchors_from_asr.py', 'subtitles.py', 'lyric_progress.py',
-            'onset_consensus.py', 'word_onset_metrics.py', 'cjk_recovery.py', 'qwen_witness.py', 'experiments/cjk-onsets-v003/run.py',
-            'experiments/cjk-onsets-v003/protocol.json')]
+        common = ['subtitles.py', 'lyric_progress.py', 'stage_progress.py']
+        whisper = ['align_lyrics_whisper.py', 'anchors_from_asr.py', 'stage_cache.py']
+        phonemes = ['align_lyric_phonemes.py', 'phoneme_progress.py']
+        english_code = [*whisper, 'align_english_onsets.py', 'onset_consensus.py', 'word_onset_metrics.py']
         english = str(ROOT/'align_english_onsets.py') in [str(a) for a in command]
+        alignment_code = {key: [ROOT/p for p in common+files] for key, files in {
+            'align_words': whisper,
+            'align_phonemes': english_code if english else phonemes,
+            'align_repeats': [*phonemes, 'align_repeated_lyrics.py'],
+            'align_context': [*phonemes, 'align_repeated_lyrics.py', 'cjk_recovery.py', 'qwen_witness.py',
+                              'experiments/cjk-onsets-v003/run.py', 'experiments/cjk-onsets-v003/protocol.json'],
+        }.items()}
         specs = {
             'decode_audio': (['download/source.mkv'], ['source-44100.wav'], []),
             'decode_native': (['download/source.mkv'], ['source-native.wav', 'source-native.json'], [ROOT/'exact_stems.py']),
@@ -211,14 +217,14 @@ class Pipeline:
             'package_three_stems': (['two-stems', 'lead-separation/song/vocals.wav'],
                                     ['stems'], [ROOT/'exact_stems.py', ROOT/'three_stems.py']),
             'align_words': (['vocals-16k.wav', 'lyrics.json', 'anchors.json', 'alignment-jobs.json'],
-                            ['alignment'], alignment_code),
+                            ['alignment'], alignment_code['align_words']),
             'align_phonemes': ((['vocals-16k.wav', 'lyrics.json', 'word-cues.json', 'english-jobs.json'] if english else
                                 ['music-separation/song/vocals.wav', 'word-cues.json', 'phoneme-jobs.json']),
-                               ['english-onsets' if english else 'phonemes'], alignment_code),
+                               ['english-onsets' if english else 'phonemes'], alignment_code['align_phonemes']),
             'align_repeats': (['music-separation/song/vocals.wav', 'phonemes/cues.json', 'word-cues.json', 'repeat-jobs.json'],
-                              ['repeated-lyrics'], alignment_code),
+                              ['repeated-lyrics'], alignment_code['align_repeats']),
             'align_context': (['music-separation/song/vocals.wav', 'source-44100.wav', 'ordered-cues.json', 'context-jobs.json'],
-                              ['context'], alignment_code),
+                              ['context'], alignment_code['align_context']),
         }
         if name not in specs:
             return None
@@ -245,7 +251,7 @@ class Pipeline:
                     weights.append(ROOT/'models/alignment/mms/model.pt')
                     weights.extend(p for p in (ROOT/'models/alignment/sofa/english').rglob('*')
                                    if p.suffix in ('.ckpt', '.ptsd', '.yaml') or p.name == 'dict.txt')
-                    code = code+[ROOT/'align_english_sofa.py']
+                    code = code+[ROOT/p for p in ['align_english_sofa.py', *english_code]]
                     g2p = ROOT/'research/word-onset-2026-09-18/labelmakr/models/g2p_model.py'
                     if g2p.is_file():
                         code = code+[g2p]
@@ -538,7 +544,6 @@ class Pipeline:
 
     def promote_video(self, metadata, source):
         """Add this video's picture while preserving the already tested audio stream."""
-        from .exact_stems import decode_source, pcm_sha
         folder = self.output/'video-download'
         video, info = folder/'source.mkv', folder/'source.info.json'
         with self.checkpoints.stage('download_video', inputs=[self.source], outputs=[video, info],
@@ -562,25 +567,17 @@ class Pipeline:
         if not metadata.get('id') or (added.get('id'), added.get('extractor_key')) != (
                 metadata['id'], metadata.get('extractor_key')):
             raise StageFailure('verify_video', '补充的视频与已测试音频来源不同')
-        merged = folder/'with-audio.mkv'
-        with self.checkpoints.stage('prepare_video', inputs=[self.source, video, info],
-                outputs=[merged], code=[ROOT/'pipeline.py']) as reused:
-            if not reused:
-                try:
-                    subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(video),
-                        '-i', str(self.source), '-map', '0:v:0', '-map', '1:a:0', '-c', 'copy', str(merged)], check=True)
-                    original, rate, _ = decode_source(self.source)
-                    promoted, new_rate, _ = decode_source(merged)
-                    if rate != new_rate or pcm_sha(original) != pcm_sha(promoted):
-                        raise StageFailure('verify_video', '补充视频改变了已测试音频，保留原音频及检查点')
-                    probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_streams',
-                        '-show_format', '-of', 'json', str(merged)]))
-                    if abs(float(probe['format']['duration'])-source['duration']) > 1:
-                        raise StageFailure('verify_video', '补充视频与已测试音频时长不匹配')
-                except BaseException:
-                    merged.unlink(missing_ok=True)
-                    raise
-        self.video = merged
+        probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_streams',
+            '-show_format', '-of', 'json', str(video)]))
+        duration = float(probe['format']['duration'])
+        if (not any(s['codec_type'] == 'video' for s in probe['streams']) or
+                not math.isfinite(duration) or abs(duration-source['duration']) > 1):
+            raise StageFailure('verify_video', '补充视频与已测试音频时长不匹配')
+        # Rendering resets video timestamps and supplies the verified stem mix.
+        # The original audio never needs copying into this intermediate picture.
+        self.video = video
+        (folder/'with-audio.mkv').unlink(missing_ok=True)
+        (self.checkpoints.directory/'prepare_video.json').unlink(missing_ok=True)
         return dict(metadata, format_id=added['format_id']+'+'+metadata['format_id'])
 
     def prepare_text(self, metadata, duration, lead_task=None):
@@ -933,7 +930,7 @@ class Pipeline:
                 self.run('package_three_stems', [sys.executable, ROOT/'three_stems.py',
                     'build', '--existing', self.output/'two-stems', '--lead-estimate',
                     self.output/'lead-separation/song/vocals.wav', '--output', self.output/'stems',
-                    '--source-pcm', self.output/'source-native.wav'])
+                    '--source-pcm', self.output/'source-native.wav', '--no-karaoke-preview'])
                 return {key: self.artifact_record(path) for key, path in artifacts.items()}
             packaging = pool.submit(package_stems)
             self.run('resample_vocals', ['ffmpeg', '-v', 'error', '-nostdin', '-i', self.vocals,
@@ -1101,7 +1098,7 @@ class Pipeline:
                 code=[ROOT/p for p in ('render_lyric_progress.py', 'render_subtitles.py', 'subtitles.py',
                                       'subtitle_style.py', 'subtitle-styles.json')]) as reused:
             if not reused:
-                write_json(self.output/'song-info.json', dict(title=result['title'], original_artist=result['artist']))
+                write_json(self.output/'song-info.json', dict(title=result['title'], artist=result['artist']))
                 self.run('render', [sys.executable, ROOT/'render_lyric_progress.py', '--video', self.video,
                     '--video-only', '--cues', subtitles, '--song-info', self.output/'song-info.json',
                     '--language', {'English': 'Latin'}.get(result['language'], result['language']),

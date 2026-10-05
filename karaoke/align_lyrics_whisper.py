@@ -4,6 +4,7 @@ import argparse
 from copy import deepcopy
 import hashlib
 from importlib.metadata import version
+import inspect
 import json
 from pathlib import Path
 import time
@@ -62,7 +63,7 @@ def valid_recovery(candidate, lines, duration):
     return True
 
 
-def recover_changed_text(result, lines, duration, realign):
+def recover_changed_text(result, lines, duration, realign, *, align=None, language='English'):
     """Retry a malformed alignment, never edit its words to fit the lyrics."""
     expected = [normalized(line) for line in lines]
 
@@ -72,9 +73,18 @@ def recover_changed_text(result, lines, duration, realign):
 
     if matches(result):
         return result, None
+    original = result
+    local = []
+    if align is not None and len(result['segments']) == len(lines):
+        block = recover_unresolved_lines(dict(range=[0, len(lines)], context=[0, len(lines)],
+            source_range=[0., duration], result=result), lines, duration, language, align)
+        result, local = block['result'], block.get('line_recoveries', [])
+        if matches(result):
+            return result, dict(original_result=original, retry_result=result,
+                accepted=True, method='local text recovery', local_recoveries=local)
     candidate = realign()
-    report = dict(original_result=result, retry_result=candidate, accepted=False,
-                  method='dynamic attention heads without inter-line gap padding')
+    report = dict(original_result=original, retry_result=candidate, accepted=False,
+                  method='dynamic attention heads without inter-line gap padding', local_recoveries=local)
     if valid_recovery(candidate, lines, duration):
         report['accepted'] = True
         return candidate, report
@@ -548,7 +558,15 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
         segments = block['result']['segments']
         units = [dict(text=w['word'], start=round(offset+w['start'], 3),
                       end=round(offset+w['end'], 3)) for s in segments for w in s['words']]
-        cues = lyric_cues(lines[first:stop], units, duration)
+        try:
+            cues = lyric_cues(lines[first:stop], units, duration)
+        except ValueError:
+            # A missing line is what the boundary repair must resolve, not a
+            # reason to discard every other prediction before trying it.
+            from lyric_progress import partial_alignment_cues
+            if len(segments) != stop-first:
+                raise
+            cues = partial_alignment_cues(lines, [dict(block, range=[first,stop])], duration, language)[first:stop]
         prediction = {}
         for index, (cue, segment) in enumerate(zip(cues, segments), first):
             try:
@@ -572,6 +590,8 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
         selected = [predictions[owner][i] for i, owner in enumerate(selection)]
         bad = set()
         for i, ((left, left_words), (right, right_words)) in enumerate(zip(selected, selected[1:]), 1):
+            if left['status'] != 'candidate' or right['status'] != 'candidate':
+                bad.add(i)
             if left_words and right_words and right_words[0]['start']-left_words[-1]['start'] < .015-1e-9:
                 bad.add(i)
             try:
@@ -617,10 +637,11 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
                 # can merely move the crossing to the edge of the new crop.
                 first, stop = max(0, index-3), min(len(lines), index+3)
                 context = [predictions[owners[i]][i][0] for i in range(first, stop)]
-                if any(c['status'] != 'candidate' for c in context):
+                if context[0]['status'] != 'candidate' or context[-1]['status'] != 'candidate':
                     continue
-                begin = max(0., min(c['start'] for c in context)-.6)
-                end = min(duration, max(c['end'] for c in context)+.6)
+                measured = [c for c in context if c['status'] == 'candidate']
+                begin = max(0., min(c['start'] for c in measured)-.6)
+                end = min(duration, max(c['end'] for c in measured)+.6)
                 if not 0 < end-begin <= 45:
                     continue
                 try:
@@ -733,6 +754,7 @@ def main():
     loading_start = time.perf_counter()
     report_progress(detail='加载模型')
     model = stable_whisper.load_model(args.model, device='cpu', download_root=str(model_root))
+    model_hash = sha(model_root/f'{args.model}.pt')
     # The sparse head-selection buffer is indexed on the host; MPS cannot move it.
     heads = model._buffers.pop('alignment_heads')
     model.to(args.device)
@@ -776,15 +798,16 @@ def main():
 
             def recognize_audio(start, stop):
                 from stage_cache import StageCache
-                import anchors_from_asr
                 config = dict(start=start, stop=stop, language=language, model=args.model,
-                              model_sha256=sha(model_root/f'{args.model}.pt'),
-                              temperature=0, condition_on_previous_text=False)
+                              model_sha256=model_hash, device=args.device,
+                              temperature=0, condition_on_previous_text=False,
+                              implementation=inspect.getsource(recognize_audio),
+                              packages={name: version(name) for name in ('stable-ts', 'openai-whisper')})
                 key = 'alignment_localization_'+hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:16]
                 path = output.parent/'asr-requests'/(key+'.json')
                 path.parent.mkdir(exist_ok=True)
                 with StageCache(output.parent).stage(key, inputs=[job['audio']], outputs=[path], config=config,
-                        code=[Path(__file__), Path(anchors_from_asr.__file__)]) as reused:
+                        code=[Path(inspect.getfile(StageCache))]) as reused:
                     if not reused:
                         report_progress(detail='定位未对齐的唱段')
                         recognized = model.transcribe(audio[round(start*16000):round(stop*16000)],
@@ -799,14 +822,16 @@ def main():
             if result is None:
                 raise ValueError(f'Alignment returned no result for {job["lyrics"]}')
             result, text_recovery = recover_changed_text(result, lines, len(piece)/16000,
-                lambda: align_piece(0., len(piece)/16000, '\n'.join(lines), gap_padding=None, dynamic_heads=True))
+                lambda: align_piece(0., len(piece)/16000, '\n'.join(lines), gap_padding=None, dynamic_heads=True),
+                align=align_piece, language=lyrics['language'])
             result, repeat_recoveries = recover_skipped_repeats(result, len(piece)/16000, align_piece)
             block = dict(range=[first, stop], context=[context_first, context_stop],
                 source_range=[begin, end], result=result, repeat_recoveries=repeat_recoveries,
                 text_recovery=text_recovery)
-            block = (recover_unresolved_block(block, lyrics['lines'], anchors, duration, align_audio)
-                     if anchors else recover_unresolved_lines(block, lyrics['lines'], duration,
-                                                              lyrics['language'], align_audio))
+            if anchors:
+                block = recover_unresolved_block(block, lyrics['lines'], anchors, duration, align_audio)
+            elif text_recovery is None:
+                block = recover_unresolved_lines(block, lyrics['lines'], duration, lyrics['language'], align_audio)
             if not anchors:
                 (output/'before-localization.json').write_text(json.dumps(block, ensure_ascii=False, default=json_number)+'\n')
                 block = recover_with_local_asr(block, lyrics['lines'], audio, lyrics['language'],
@@ -822,6 +847,12 @@ def main():
         (output/'units.json').write_text(json.dumps(units, ensure_ascii=False, indent=2, default=json_number)+'\n')
         cues, raw_blocks, boundary_repairs = stitch_blocks(
             lyrics['lines'], raw_blocks, duration, lyrics['language'], align_audio)
+        (output/'raw.json').write_text(json.dumps(raw_blocks, ensure_ascii=False, indent=2, default=json_number)+'\n')
+        for block in raw_blocks:
+            for i in range(*block['range']):
+                words = block['result']['segments'][i-block['context'][0]]['words']
+                if normalized(''.join(w['word'] for w in words)) != normalized(lyrics['lines'][i]):
+                    raise ValueError('Aligned units do not exactly cover the supplied lyric text')
         if args.device == 'mps':
             torch.mps.synchronize()
         elapsed = time.perf_counter()-started
@@ -831,12 +862,11 @@ def main():
         summary = write_captions(cues, output)
         summary['zero_duration_units'] = sum(unit['end'] <= unit['start'] for unit in units)
         summary['unit_count'] = len(units)
-        (output/'raw.json').write_text(json.dumps(raw_blocks, ensure_ascii=False, indent=2, default=json_number)+'\n')
         report = {'model': args.model, 'device': args.device, 'dtype': 'float32',
             'model_loading_seconds': loading, 'alignment_seconds': elapsed,
             'audio': str(Path(job['audio']).resolve()), 'audio_sha256': sha(job['audio']),
             'lyrics': str(Path(job['lyrics']).resolve()), 'lyrics_sha256': sha(job['lyrics']),
-            'model_sha256': sha(model_root/f'{args.model}.pt'), 'runner_sha256': sha(__file__),
+            'model_sha256': model_hash, 'runner_sha256': sha(__file__),
             'dynamic_heads': args.dynamic_heads,
             'boundary_reconciliations': boundary_repairs,
             'line_recoveries': [r for block in raw_blocks for r in block.get('line_recoveries', [])],

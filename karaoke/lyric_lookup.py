@@ -1,9 +1,9 @@
 """Optional independent lyric text; provider timestamps never become onsets."""
-from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import html
 import json
 import math
+import os
 from pathlib import Path
 import re
 import time
@@ -11,6 +11,7 @@ import unicodedata
 from urllib.parse import urlencode
 
 import httpx
+import requests
 from opencc import OpenCC
 from rapidfuzz.distance import Levenshtein
 
@@ -19,6 +20,83 @@ from .job_schema import retry_after_seconds
 from .song_sources import (SongText, extract_song_metadata, find_verified_lyrics,
                            transcript_lines, video_song_info)
 from .source_captions import read_document
+
+
+class LyricRequestError(httpx.HTTPError):
+    def __init__(self, report):
+        super().__init__(report.get('error', 'Lyric provider is unavailable'))
+        self.report = report
+
+
+def lyric_request_error(error, minimum_delay=30):
+    if isinstance(error, LyricRequestError):
+        return error.report
+    status = getattr(getattr(error, 'response', None), 'status_code', None)
+    transient = isinstance(error, (httpx.TransportError, requests.ConnectionError, requests.Timeout)) or status == 429 or (status or 0) >= 500
+    return dict(status='unavailable', error=type(error).__name__, http_status=status,
+                retry_at=time.time()+max(minimum_delay, retry_after_seconds(error) or 0) if transient else None)
+
+
+def lyric_retry_due(report, provider, cache):
+    if report.get('retry_at') is not None and report['retry_at'] <= time.time():
+        return True
+    if report.get('http_status') == 401:
+        try:
+            hold = json.loads((cache.root.parent/'lyric-provider-backoff'/f'{provider}.json').read_text())
+        except (OSError, ValueError):
+            return True
+        return not hold.get('requires_access')
+    return False
+
+
+def cached_lyric_request(provider, identity, cache, request, minimum_delay=30):
+    """Cache provider responses independently of duration and lyric selection."""
+    key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
+    path = cache.root/'lyric-responses'/f'{provider}-{key}.json'
+    stage = f'lyric_response_{provider}_{key}'
+    try:
+        previous = json.loads(path.read_text()).get('error') or {}
+        if lyric_retry_due(previous, provider, cache):
+            (cache.directory/(stage+'.json')).unlink(missing_ok=True)
+    except (OSError, ValueError, TypeError):
+        pass
+    with cache.stage(stage, inputs=[Path(__file__).with_name('source_captions.py')], outputs=[path],
+                     config=dict(provider=provider, request=identity, schema_version=1)) as reused:
+        if not reused:
+            hold = cache.root.parent/'lyric-provider-backoff'/f'{provider}.json'
+            try:
+                previous = json.loads(hold.read_text())
+            except (OSError, ValueError, TypeError):
+                previous = {}
+            if previous.get('requires_access') or (previous.get('retry_at') or 0) > time.time():
+                # A provider-wide hold carries no identity or text from its song.
+                raise LyricRequestError({k: previous[k] for k in
+                    ('status', 'error', 'http_status', 'retry_at', 'requires_access') if k in previous})
+            try:
+                packet = dict(data=request())
+            except Exception as error:
+                report = lyric_request_error(error, minimum_delay)
+                packet = dict(error=report)
+                if report['http_status'] in (401, 429):
+                    import fcntl
+                    hold.parent.mkdir(parents=True, exist_ok=True)
+                    with hold.with_suffix('.lock').open('a') as lock:
+                        fcntl.flock(lock, fcntl.LOCK_EX)
+                        try:
+                            previous = json.loads(hold.read_text())
+                        except (OSError, ValueError):
+                            previous = {}
+                        pending = dict(report, requires_access=bool(previous.get('requires_access')) or report['http_status'] == 401,
+                            retry_at=max(previous.get('retry_at') or 0, report.get('retry_at') or time.time()+30))
+                        temporary = hold.with_suffix(f'.{os.getpid()}.{time.time_ns()}.tmp')
+                        temporary.write_text(json.dumps(pending)+'\n')
+                        temporary.replace(hold)
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(json.dumps(packet, ensure_ascii=False)+'\n')
+    packet = json.loads(path.read_text())
+    if 'error' in packet:
+        raise LyricRequestError(packet['error'])
+    return packet['data']
 
 
 def names(value):
@@ -81,7 +159,7 @@ def fetch_lyrics(song, metadata_path, cache):
     path, stage = cache.root/'lyric-lookup.json', 'fetch_lyric_text'
     try:
         old = json.loads(path.read_text())
-        if old.get('retry_at') is not None and old['retry_at'] <= time.time():
+        if lyric_retry_due(old, 'lrclib', cache):
             (cache.directory/(stage+'.json')).unlink(missing_ok=True)
     except (OSError, ValueError, TypeError):
         pass
@@ -93,17 +171,15 @@ def fetch_lyrics(song, metadata_path, cache):
                 for query in queries:
                     if query == simplified and simplified != native and packet['results']:
                         break
-                    response = read_document('https://lrclib.net/api/search?'+urlencode(query))
+                    url = 'https://lrclib.net/api/search?'+urlencode(query)
+                    response = cached_lyric_request('lrclib', url, cache, lambda: read_document(url), 300)
                     if not isinstance(response, list) or len(response) > 100:
                         raise ValueError('Invalid lyric search response')
                     packet['results'].extend({key: row.get(key) for key in (
                         'id', 'trackName', 'artistName', 'albumName', 'duration', 'instrumental', 'plainLyrics')}
                         for row in response if isinstance(row, dict))
             except (httpx.HTTPError, ValueError) as error:
-                status = getattr(getattr(error, 'response', None), 'status_code', None)
-                transient = isinstance(error, httpx.TransportError) or status == 429 or (status or 0) >= 500
-                packet.update(status='unavailable', error=type(error).__name__, http_status=status,
-                              retry_at=time.time()+max(300, retry_after_seconds(error) or 0) if transient else None)
+                packet.update(lyric_request_error(error, 300))
             path.write_text(json.dumps(packet, ensure_ascii=False)+'\n')
     return json.loads(path.read_text())
 
@@ -284,7 +360,7 @@ def fetch_published_lyrics(song, source_title, cache, duration=None):
     queries = list(dict.fromkeys([' '.join((title, names(song['artist'])[-1])), title]))
     try:
         old = json.loads(path.read_text())
-        if old.get('retry_at') is not None and old['retry_at'] <= time.time():
+        if lyric_retry_due(dict(old.get('report') or {}, retry_at=old.get('retry_at')), 'line_music', cache):
             (cache.directory/(stage+'.json')).unlink(missing_ok=True)
     except (OSError, ValueError, TypeError):
         pass
@@ -295,9 +371,10 @@ def fetch_published_lyrics(song, source_title, cache, duration=None):
             try:
                 attempted, rejected = [], []
                 for query in queries:
-                    response = read_document('https://music-tw.line.me/api/search/v4/track.json?'+urlencode(
-                        dict(query=query, start=1, display=30, sort='RELEVANCE')),
-                        headers={'CHANNEL-ID': '1581655766'})
+                    url = 'https://music-tw.line.me/api/search/v4/track.json?'+urlencode(
+                        dict(query=query, start=1, display=30, sort='RELEVANCE'))
+                    response = cached_lyric_request('line_music', url, cache,
+                        lambda: read_document(url, headers={'CHANNEL-ID': '1581655766'}))
                     rows = response['response']['result']['tracks']
                     if not isinstance(rows, list) or len(rows) > 30 or any(not isinstance(r, dict) for r in rows):
                         raise ValueError('Invalid published lyric response')
@@ -310,12 +387,9 @@ def fetch_published_lyrics(song, source_title, cache, duration=None):
                 report['rejected_candidates'] = rejected
                 packet = dict(lines=lines, report=report, query_results=attempted)
             except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
-                status = getattr(getattr(error, 'response', None), 'status_code', None)
-                transient = isinstance(error, httpx.TransportError) or status == 429 or (status or 0) >= 500
-                packet = dict(lines=None, report=dict(status='unavailable', provider='line_music',
-                    error=type(error).__name__, http_status=status, rejected_candidates=rejected),
-                    query_results=attempted,
-                    retry_at=time.time()+max(30, retry_after_seconds(error) or 0) if transient else None)
+                report = lyric_request_error(error)
+                packet = dict(lines=None, report=dict(report, provider='line_music', rejected_candidates=rejected),
+                    query_results=attempted, retry_at=report.get('retry_at'))
             path.write_text(json.dumps(packet, ensure_ascii=False)+'\n')
     packet = json.loads(path.read_text())
     return packet['lines'], dict(packet['report'], **({'retry_at':packet['retry_at']} if packet.get('retry_at') else {}))
@@ -337,12 +411,11 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
         evidence = {key: metadata.get(key) for key in ('title', 'track', 'artist', 'artists', 'uploader')}
         evidence['description_lines'] = [dict(number=i+1, text=line) for i, line in enumerate(description_lines)]
         from openai import OpenAIError
-        known_identity = bool(song['artist'] and (metadata.get('track') or
-                              song['title'] != metadata.get('title') or request.get('title') and request.get('artist')))
-        def read_description():
+        preserve_title = bool(request.get('title') or metadata.get('track'))
+        def read_description(resolve_identity=()):
             nonlocal metadata_error
             try:
-                packet = (dict(parsed=None) if known_identity and not description.strip() else
+                packet = (dict(parsed=None) if not resolve_identity and not description.strip() else
                           extract_song_metadata(evidence, model, cache))
                 parsed = SongText.model_validate(packet['parsed']) if packet['parsed'] is not None else None
             except (OpenAIError, ValueError) as error:
@@ -350,9 +423,10 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 parsed = None
             if parsed is None:
                 return None
-            if not known_identity:
-                song.update(title=request.get('title') or metadata.get('track') or parsed.title or song['title'],
-                            artist=song['artist'] or parsed.artist)
+            if 'title' in resolve_identity:
+                song['title'] = parsed.title or song['title']
+            if 'artist' in resolve_identity:
+                song['artist'] = song['artist'] or parsed.artist
             selected = parsed.lyric_line_numbers
             if not selected or selected != sorted(set(selected)) or not all(1 <= i <= len(description_lines) for i in selected):
                 return None
@@ -364,14 +438,7 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 language=song.get('language') or text_language(''.join(text)), url=request['url'],
                 text_sha256=hashlib.sha256('\n'.join(text).encode()).hexdigest())
         from .lyric_consensus import fetch_lyric_consensus
-        if known_identity:
-            # The description remains a full vote; it need not delay other sources.
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                pending = pool.submit(read_description)
-                lines, report = fetch_lyric_consensus(song, metadata, duration, cache, pending.result)
-        else:
-            candidate = read_description()
-            lines, report = fetch_lyric_consensus(song, metadata, duration, cache, candidate)
+        lines, report = fetch_lyric_consensus(song, metadata, duration, cache, read_description, preserve_title)
         if metadata_error:
             report = dict(report, metadata_error=metadata_error)
         (cache.root/'lyrics-first-lookup.json').write_text(json.dumps(report, ensure_ascii=False)+'\n')

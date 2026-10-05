@@ -21,7 +21,7 @@ def check_three(source, lead, backing_vocals, instrumental):
     }
 
 
-def build(existing, estimate, output, video=None, *, source_pcm=None):
+def build(existing, estimate, output, video=None, *, source_pcm=None, karaoke_preview=True):
     existing, estimate, output = (Path(p).resolve() for p in (existing, estimate, output))
     if output.exists():
         raise FileExistsError(f'Preserve existing output: {output}')
@@ -57,9 +57,12 @@ def build(existing, estimate, output, video=None, *, source_pcm=None):
     peak = max(float(np.max(np.abs(a))) for a in (*tracks.values(), source, karaoke))
     gain = min(1., .84/max(peak, 1e-12))
     temporary_mix = output/'.karaoke-mix.wav'
-    sf.write(temporary_mix, karaoke, rate, subtype='FLOAT')
-    gain, previews = encode_previews({**{name: output/f'{name}.wav' for name in tracks},
-                                     'karaoke': temporary_mix}, output, gain, len(source), source.shape[1])
+    if karaoke_preview or video:
+        sf.write(temporary_mix, karaoke, rate, subtype='FLOAT')
+    preview_inputs = {name: output/f'{name}.wav' for name in tracks}
+    if karaoke_preview:
+        preview_inputs['karaoke'] = temporary_mix
+    gain, previews = encode_previews(preview_inputs, output, gain, len(source), source.shape[1])
     video_record = None
     if video:
         video = Path(video).resolve()
@@ -74,7 +77,7 @@ def build(existing, estimate, output, video=None, *, source_pcm=None):
             'source_sha256': sha(video), 'sha256': sha(output/'karaoke.mp4'),
             'command': command, 'full_decode_passed': True,
             'video': 'Stream copy of the existing hard-cut, aligned-subtitle render'}
-    temporary_mix.unlink()
+    temporary_mix.unlink(missing_ok=True)
     manifest = {'schema_version': 1, 'source': spec,
         'existing_package': {'path': str(existing), 'manifest_sha256': sha(existing/'manifest.json')},
         'lead_estimate': {'path': str(estimate), 'sha256': sha(estimate), **resampling},
@@ -121,9 +124,11 @@ if __name__ == '__main__':
     create.add_argument('--output', type=Path, required=True)
     create.add_argument('--video', type=Path)
     create.add_argument('--source-pcm', type=Path)
+    create.add_argument('--no-karaoke-preview', action='store_true')
     check = sub.add_parser('verify')
     check.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    result = (build(args.existing, args.lead_estimate, args.output, args.video, source_pcm=args.source_pcm)
+    result = (build(args.existing, args.lead_estimate, args.output, args.video, source_pcm=args.source_pcm,
+                    karaoke_preview=not args.no_karaoke_preview)
               if args.command == 'build' else verify(args.output))
     print(json.dumps(result, indent=2))

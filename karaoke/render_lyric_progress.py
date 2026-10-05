@@ -96,7 +96,7 @@ def main():
     parser.add_argument('--video-only', action='store_true', help='Render the picture before final audio is ready')
     parser.add_argument('--cues', type=Path, required=True)
     parser.add_argument('--song-info', type=Path,
-                        help='JSON with title, optional original_artist and version for opening credits')
+                        help='JSON with title, optional artist and version for opening credits')
     parser.add_argument('--start', type=float, default=0.)
     parser.add_argument('--duration', type=float, required=True)
     parser.add_argument('--mode', choices=['word', 'underline', 'static'], default='word')

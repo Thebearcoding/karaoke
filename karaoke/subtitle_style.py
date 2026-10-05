@@ -176,9 +176,9 @@ def song_intro_image(info, width=1280, style=DEFAULT_STYLE):
     scale = width/TOKENS['reference_width']
     image = Image.new('RGBA', (width, round(spec['height']*scale)))
     rows = [(title, 0, 240, spec['title_size'], spec['title_minimum_size'], 40, 2)]
-    artist = info.get('original_artist', '').strip()
+    artist = (info.get('artist') or info.get('original_artist') or '').strip()
     if artist:
-        rows.append((f'原唱 · {artist}', 242, 72, spec['artist_size'], 24, 22, 1))
+        rows.append((f'演唱 · {artist}', 242, 72, spec['artist_size'], 24, 22, 1))
     version = info.get('version', '').strip()
     if version:
         rows.append((version, 310, 52, spec['version_size'], 20, 18, 1))

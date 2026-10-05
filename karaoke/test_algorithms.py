@@ -1456,6 +1456,37 @@ class AlignmentIntegrity(unittest.TestCase):
                 self.assertEqual(recovered, original)
                 self.assertFalse(report['accepted'])
 
+    def test_changed_line_uses_local_audio_before_a_whole_block_retry(self):
+        from copy import deepcopy
+        from unittest.mock import Mock
+        lines = ['one line', 'two lines', 'three lines', 'four lines', 'five lines']
+        good = dict(segments=[dict(text=text, start=i*3+1., end=i*3+2., words=[
+            dict(word=word, start=i*3+1.+j*.5, end=i*3+1.5+j*.5)
+            for j, word in enumerate(text.split())]) for i, text in enumerate(lines)])
+        original = deepcopy(good)
+        original['segments'][2]['words'][0]['word'] = 'wrong'
+        calls = []
+        def align(begin, end, text, **options):
+            calls.append((begin, end, text))
+            candidate = deepcopy(good)
+            candidate['segments'] = candidate['segments'][1:4]
+            for segment in candidate['segments']:
+                for word in segment['words']:
+                    word['start'] -= begin
+                    word['end'] -= begin
+            return candidate
+        full = Mock(return_value=good)
+        repaired, report = recover_changed_text(original, lines, 16., full, align=align)
+        self.assertEqual(repaired, good)
+        self.assertEqual(calls, [(3.4, 11.6, '\n'.join(lines[1:4]))])
+        full.assert_not_called()
+        self.assertTrue(report['accepted'])
+        self.assertEqual(report['original_result'], original)
+        full.reset_mock()
+        repaired, report = recover_changed_text(original, lines, 16., full, align=lambda *a, **k: None)
+        self.assertEqual(repaired, good)
+        full.assert_called_once_with()
+
     def test_rejected_alignment_retains_raw_evidence_without_publishing_captions(self):
         import json
         import shutil
@@ -1475,7 +1506,7 @@ class AlignmentIntegrity(unittest.TestCase):
             (root/'jobs.json').write_text(json.dumps([dict(audio=str(root/'audio.wav'),
                 lyrics=str(root/'lyrics.json'), output=str(root/'alignment'))]))
             with patch('stable_whisper.load_model', return_value=model), patch(
-                    'align_lyrics_whisper.sha', return_value='test-model-hash'), patch('sys.argv',
+                    'align_lyrics_whisper.sha', return_value='test-model-hash') as hash_file, patch('sys.argv',
                     ['align', '--jobs', str(root/'jobs.json'), '--device', 'cpu']):
                 with self.assertRaisesRegex(ValueError, 'exactly cover'):
                     main()
@@ -1484,6 +1515,7 @@ class AlignmentIntegrity(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'exactly cover'):
                     main()
             self.assertEqual(model.transcribe.call_count, 1)
+            self.assertEqual(sum(Path(call.args[0]).suffix == '.pt' for call in hash_file.call_args_list), 2)
             self.assertEqual(json.loads((root/'alignment/raw.json').read_text())[0]['result'], result)
             self.assertEqual(json.loads((root/'alignment/units.json').read_text())[0]['text'], 'extra word')
             self.assertFalse((root/'alignment/cues.json').exists())
@@ -1578,6 +1610,42 @@ class AlignmentIntegrity(unittest.TestCase):
         self.assertEqual(repairs[0]['selected_block'], 0)
         self.assertEqual(repairs[0]['lines'], [2, 2])
         self.assertEqual(raw[1]['result']['segments'][0]['words'][0]['end'], 5.)
+
+    def test_missing_line_does_not_prevent_reusing_a_complete_context_prediction(self):
+        from copy import deepcopy
+        lines = ['first', 'middle', 'last']
+        def segment(text, start):
+            return dict(text=text, words=[dict(word=text,start=start,end=start+.5)])
+        missing = dict(range=[0,3],context=[0,3],source_range=[0.,6.],result=dict(segments=[
+            segment('first',1.),dict(text='middle',words=[]),segment('last',5.)]))
+        context = dict(range=[0,0],context=[0,3],source_range=[0.,6.],result=dict(segments=[
+            segment(text,start) for text,start in zip(lines,[1.,3.,5.])]))
+        original = deepcopy(missing)
+        cues, stitched, repairs = stitch_blocks(lines,[missing,context],6.,'English')
+        self.assertEqual([c['start'] for c in cues],[1.,3.,5.])
+        self.assertEqual(missing,original)
+        self.assertTrue(repairs)
+        words, report = build_progress(cues,stitched,'English')
+        self.assertFalse(report['fallback_lines'])
+        self.assertEqual([c['units'][0]['text'] for c in words],lines)
+
+    def test_missing_line_can_be_recovered_inside_measured_context(self):
+        lines = ['alpha','bravo','charlie','delta','echo','foxtrot']
+        good = [dict(text=text,words=[dict(word=text,start=float(i+1),end=i+1.5)]) for i,text in enumerate(lines)]
+        raw = dict(range=[0,6],context=[0,6],source_range=[0.,8.],result=dict(segments=[
+            dict(text=s['text'],words=[]) if i==2 else s for i,s in enumerate(good)]))
+        for succeeds in (True,False):
+            with self.subTest(succeeds=succeeds):
+                def align(begin,end,text,**options):
+                    if not succeeds:return None
+                    return dict(segments=[dict(text=s['text'],words=[dict(w,start=w['start']-begin,end=w['end']-begin)
+                        for w in s['words']]) for s in good if s['text'] in text.splitlines()])
+                cues, stitched, repairs = stitch_blocks(lines,[raw],8.,'English',align)
+                self.assertEqual(cues[2]['status'],'candidate' if succeeds else 'unresolved_timing')
+                if succeeds:
+                    self.assertEqual([c['start'] for c in cues],list(map(float,range(1,7))))
+                else:
+                    self.assertEqual(stitched[0]['result'],raw['result'])
 
     def test_crossing_block_boundary_uses_one_complete_joint_prediction(self):
         lines = ['first tail', 'second line', 'last phrase']

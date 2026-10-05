@@ -5,7 +5,6 @@ import functools
 import hashlib
 from itertools import combinations
 import json
-import os
 from pathlib import Path
 import re
 import time
@@ -13,10 +12,8 @@ import unicodedata
 from urllib.parse import urlencode
 
 from opencc import OpenCC
-import httpx
 import requests
 
-from .job_schema import retry_after_seconds
 from . import lyric_lookup as lookup
 from .song_sources import transcript_lines
 from .source_captions import read_document
@@ -55,14 +52,14 @@ def compare_lyrics(candidates):
 
 def fetch_additional_lyrics(provider, song, metadata, cache, duration=None):
     """Read source-bound Music lyrics or an identity-matched NetEase release."""
-    if not song.get('title') or not song.get('artist'):
+    if provider != 'youtube_music' and (not song.get('title') or not song.get('artist')):
         return None, dict(provider=provider, status='missing_identity')
     if provider == 'youtube_music' and not re.fullmatch(r'[A-Za-z0-9_-]{11}', metadata.get('id') or ''):
         return None, dict(provider=provider, status='missing_video_identity')
     path, stage = cache.root/(provider+'-lyrics.json'), 'fetch_'+provider+'_lyrics'
     try:
         previous = json.loads(path.read_text())
-        if previous.get('retry_at') is not None and previous['retry_at'] <= time.time():
+        if lookup.lyric_retry_due(previous.get('report') or {}, provider, cache):
             (cache.directory/(stage+'.json')).unlink(missing_ok=True)
     except (OSError, ValueError, TypeError):
         pass
@@ -71,11 +68,12 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None):
                      code=[Path(__file__), Path(__file__).with_name('lyric_lookup.py'),
                            Path(__file__).with_name('source_captions.py')]) as reused:
         if not reused:
+            recording_identity = {}
             try:
                 if provider == 'netease':
                     query = ' '.join(lookup.names(song[k])[-1] for k in ('title','artist'))
-                    packet = read_document('https://music.163.com/api/cloudsearch/pc?'+urlencode(
-                        dict(s=query, type=1, limit=30, offset=0)), timeout=10)
+                    url = 'https://music.163.com/api/cloudsearch/pc?'+urlencode(dict(s=query, type=1, limit=30, offset=0))
+                    packet = lookup.cached_lyric_request(provider, url, cache, lambda: read_document(url, timeout=10))
                     if packet.get('code') != 200:
                         raise ValueError('NetEase lyric search rejected the request')
                     rows = [dict(trackId=r['id'], trackTitle=r['name'],
@@ -84,8 +82,8 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None):
                     def lyrics(row):
                         if not str(row['trackId']).isdigit():
                             return None
-                        data = read_document('https://music.163.com/api/song/lyric?'+urlencode(
-                            dict(id=row['trackId'], lv=-1, kv=-1, tv=-1)), timeout=10)
+                        url = 'https://music.163.com/api/song/lyric?'+urlencode(dict(id=row['trackId'], lv=-1, kv=-1, tv=-1))
+                        data = lookup.cached_lyric_request(provider, url, cache, lambda: read_document(url, timeout=10))
                         return data.get('lrc', {}).get('lyric')
                     lines, report = lookup.published_candidate(rows, song, metadata.get('title'),
                         read_lyrics=lyrics, allow_recording_mismatch=True, duration=duration)
@@ -98,19 +96,28 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None):
                         session.request = functools.partial(session.request, timeout=10)
                         session.hooks['response'].append(lambda response, *a, **kw: response.raise_for_status())
                         music = YTMusic(requests_session=session)
-                        listing = music.get_watch_playlist(videoId=video, limit=1)
+                        listing = lookup.cached_lyric_request(provider, dict(video_id=video, method='watch'), cache,
+                            lambda: music.get_watch_playlist(videoId=video, limit=1))
                         if not listing['tracks'] or listing['tracks'][0]['videoId'] != video:
                             raise ValueError('Music lyrics refer to another recording')
-                        result = music.get_lyrics(listing['lyrics']) if listing.get('lyrics') else None
+                        track = listing['tracks'][0]
+                        recording_identity = dict(title=track.get('title') or '', video_id=video,
+                            artist=' · '.join(a['name'] for a in track.get('artists', []) if a.get('name')))
+                        result = (lookup.cached_lyric_request(provider,
+                            dict(video_id=video, method='lyrics', browse_id=listing['lyrics']), cache,
+                            lambda: music.get_lyrics(listing['lyrics'])) if listing.get('lyrics') else None)
                     text = (result or {}).get('lyrics')
                     if text is not None and (not isinstance(text, str) or len(text) > 30000):
                         raise ValueError('Invalid Music lyric text')
-                    lines, excluded = lookup.published_lyric_lines(text or '', song['title'], [song['artist']])
+                    title = song.get('title') or track.get('title') or ''
+                    artist = song.get('artist') or recording_identity['artist']
+                    lines, excluded = lookup.published_lyric_lines(text or '', title, [artist])
                     language = song.get('language') or lookup.text_language('\n'.join(lines))
                     lines = transcript_lines(dict(text='\n'.join(lines)), language) if language else None
                     if lines and (len(lines) > 1000 or any(len(line) > 200 or '[' in line or ']' in line for line in lines)):
                         raise ValueError('Invalid Music lyric lines')
                     report = dict(status='candidate' if lines else 'unavailable', language=language,
+                        recording_identity=recording_identity,
                         url='https://music.youtube.com/watch?v='+video, source_credit=(result or {}).get('source'),
                         text_sha256=hashlib.sha256((text or '').encode()).hexdigest(), excluded_credit_lines=excluded,
                         provider_timestamps_used=False)
@@ -118,19 +125,16 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None):
                     report['publisher'] = next((p for p in ('lyricfind','musixmatch') if p in credit), 'youtube')
                 result = dict(lines=lines, report=dict(report, provider=provider))
             except Exception as error:
-                response = getattr(error, 'response', None)
-                status = getattr(response, 'status_code', None)
-                transient = isinstance(error, (httpx.TransportError, requests.ConnectionError, requests.Timeout)) or status == 429 or (status or 0) >= 500
-                retry_at = time.time()+max(30, retry_after_seconds(error) or 0) if transient else None
-                result = dict(lines=None, report=dict(provider=provider, status='unavailable',
-                    error=type(error).__name__, http_status=status, retry_at=retry_at), retry_at=retry_at)
+                report = lookup.lyric_request_error(error)
+                result = dict(lines=None, report=dict(report, provider=provider,
+                    recording_identity=recording_identity), retry_at=report.get('retry_at'))
             path.write_text(json.dumps(result, ensure_ascii=False)+'\n')
     result = json.loads(path.read_text())
     return result['lines'], result['report']
 
 
-def fetch_lyric_consensus(song, metadata, duration, cache, description=None):
-    """Five possible routes, queried together; unavailable sources never vote."""
+def fetch_lyric_consensus(song, metadata, duration, cache, description=None, preserve_title=False):
+    """Resolve source identity before name searches; unavailable sources never vote."""
     def lrclib():
         packet = lookup.fetch_lyrics(song, cache.root/'download/source.info.json', cache)
         lines, report = lookup.lyric_candidate(packet, song, None, duration,
@@ -139,33 +143,39 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None):
     sources = [('line_music', lambda: lookup.fetch_published_lyrics(song, metadata.get('title'), cache, duration)), ('lrclib', lrclib),
                ('netease', lambda: fetch_additional_lyrics('netease', song, metadata, cache, duration)),
                ('youtube_music', lambda: fetch_additional_lyrics('youtube_music', song, metadata, cache, duration))]
+    prefetched = {}
     def fetch(source):
         name, request = source
-        hold = cache.root.parent/'lyric-provider-backoff'/f'{name}.json'
-        previous = {}
-        try:
-            previous = json.loads(hold.read_text())
-            if previous.get('requires_access') or previous.get('retry_at', 0) > time.time():
-                return None, previous
-        except (OSError, ValueError, TypeError):
-            pass
+        if name in prefetched:
+            return prefetched[name]
         try:
             lines, report = request()
-            if report.get('http_status') in (401, 429):
-                status = report['http_status']
-                pending = dict(report, provider=name, requires_access=status == 401,
-                    retry_at=max(previous.get('retry_at') or 0, report.get('retry_at') or time.time()+30))
-                hold.parent.mkdir(parents=True, exist_ok=True)
-                temporary = hold.with_suffix(f'.{os.getpid()}.{time.time_ns()}.tmp')
-                temporary.write_text(json.dumps(pending)+'\n')
-                temporary.replace(hold)
             return lines, dict(report, provider=name)
         except Exception as error:
             return None, dict(provider=name, status='unavailable', error=type(error).__name__)
-    with ThreadPoolExecutor(max_workers=len(sources)) as pool:
+    raw_title = not preserve_title and not metadata.get('track') and song.get('title') == metadata.get('title')
+    recording = {}
+    if not song.get('artist') or not song.get('title') or raw_title:
+        source = next(source for source in sources if source[0] == 'youtube_music')
+        prefetched['youtube_music'] = fetch(source)
+        # Identity remains useful when this provider has no lyrics. Reuse the
+        # same response, then let name-based providers search confirmed metadata.
+        recording = prefetched['youtube_music'][1].get('recording_identity') or {}
+        if not recording.get('video_id') or recording['video_id'] != metadata.get('id'):
+            recording = {}
+        for key in ('title', 'artist'):
+            if recording.get(key) and (not song.get(key) or key == 'title' and raw_title):
+                song[key] = recording[key]
+    missing_identity = [key for key in ('title', 'artist') if not song.get(key) or
+        key == 'title' and raw_title and song[key] == metadata.get('title') and not recording.get('title')]
+    if callable(description) and missing_identity:
+        # Only unresolved identity needs the model before name-based queries.
+        description = description(missing_identity)
+    with ThreadPoolExecutor(max_workers=len(sources)+1) as pool:
+        pending = pool.submit(description) if callable(description) else None
         results = list(pool.map(fetch, sources))
-    if callable(description):
-        description = description()
+        if pending is not None:
+            description = pending.result()
     if description:
         results.append(description)
     candidates = [(lines, report) for lines, report in results if lines]
