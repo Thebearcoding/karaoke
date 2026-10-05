@@ -1063,10 +1063,11 @@ def test_lyric_rate_limit_is_shared_between_jobs_without_blocking_other_sources(
     ('词：林林', '曲：林林', '第一小提琴：乐手', '混音师：工程师'),
     ('Lyrics: Writer', 'Music: Composer', 'Guitar: Player', 'Mixed by: Engineer'),
     ('專輯：春天', '歌曲：晚風 (Album Version)', '作詞：林林', '作曲：林林')])
-def test_published_lyrics_remove_credit_blocks_but_keep_sung_titles_and_colons(credits):
+@pytest.mark.parametrize('heading', ['晚風', '晚風-林林', '晚風 - 林林', '晚風—林林', '晚風 – 林林'])
+def test_published_lyrics_remove_credit_blocks_but_keep_sung_titles_and_colons(credits, heading):
     from karaoke.lyric_lookup import published_candidate, published_lyric_lines
     body = ['晚風', '我说：继续往前走', '晚風']
-    raw = '\n'.join(['晚風', *credits[:2], *body, credits[2], 'A Player', credits[3]])
+    raw = '\n'.join([heading, *credits[:2], *body, credits[2], 'A Player', credits[3]])
     row = dict(trackId=123, trackTitle='晚風', artists=[dict(artistName='林林')],
                album=dict(albumTitle='春天'), lyrics=raw)
     lines, report = published_candidate([row], dict(title='晚風', artist='林林'), '')
@@ -1074,6 +1075,21 @@ def test_published_lyrics_remove_credit_blocks_but_keep_sung_titles_and_colons(c
     assert report['excluded_credit_lines'] == [1, 2, 3, 7, 8, 9]
     assert report['text_sha256'] == hashlib.sha256(raw.encode()).hexdigest()
     assert published_lyric_lines('\n'.join(body), '晚風') == (body, [])
+
+
+@pytest.mark.parametrize('heading', ['晚風-林林', '晚風 — 林林', '晚風-林林\n詞：林林\n曲：林林'])
+def test_title_artist_credit_is_not_a_lyric_candidate(heading):
+    from karaoke.lyric_lookup import published_candidate, published_lyric_lines, lyric_candidate
+    song = dict(title='晚風', artist='林林')
+    row = dict(trackId=123, trackTitle='晚風', artists=[dict(artistName='林林')],
+        album=dict(albumTitle='春天'), lyrics=heading)
+    assert published_candidate([row], song, '')[0] is None
+    body = ['晚風', '我说：继续往前走', '晚風']
+    assert published_candidate([row, dict(row, lyrics='\n'.join(body))], song, '')[0] == body
+    assert published_lyric_lines('晚風', '晚風', ['林林'])[0] == ['晚風']
+    packet = dict(status='ok', results=[dict(id=123, trackName='晚風', artistName='林林',
+        albumName='春天', duration=300, instrumental=False, plainLyrics=heading)])
+    assert lyric_candidate(packet, song, None, 300, allow_recording_mismatch=True)[0] is None
 
 
 @pytest.mark.parametrize('credit', ['音频助理', '音頻工程師', '录音助理', 'Audio Engineer', 'Assistant Engineer'])

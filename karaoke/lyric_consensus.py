@@ -103,7 +103,7 @@ def fetch_additional_lyrics(provider, song, metadata, cache):
                     text = (result or {}).get('lyrics')
                     if text is not None and (not isinstance(text, str) or len(text) > 30000):
                         raise ValueError('Invalid Music lyric text')
-                    lines, excluded = lookup.published_lyric_lines(text or '', song['title'])
+                    lines, excluded = lookup.published_lyric_lines(text or '', song['title'], [song['artist']])
                     language = song.get('language') or lookup.text_language('\n'.join(lines))
                     lines = transcript_lines(dict(text='\n'.join(lines)), language) if language else None
                     if lines and (len(lines) > 1000 or any(len(line) > 200 or '[' in line or ']' in line for line in lines)):

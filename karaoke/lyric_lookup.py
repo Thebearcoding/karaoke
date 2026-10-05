@@ -147,7 +147,7 @@ def text_language(text):
     return None
 
 
-def published_lyric_lines(text, title):
+def published_lyric_lines(text, title, artists=()):
     """Remove explicit credit headers/footers before wrapping published lyrics."""
     converter = OpenCC('t2s')
     credit = re.compile(r'^(?:歌名|歌曲|词|曲|词曲|作词|作曲|编曲|演唱|专辑|发行日|制作人|监制|'
@@ -167,16 +167,23 @@ def published_lyric_lines(text, title):
         if line:
             rows.append((i, line))
     is_credit = lambda line: bool(credit.match(converter.convert(unicodedata.normalize('NFKC', line))))
+    artist_ids = set().union(*(identity(artist) for artist in artists))
+    def title_artist(line):
+        return any(identity(line[:match.start()], title=True) & identity(title, title=True) and
+                   (identity(line[match.end():]) | identity(re.split(r'[（(]', line[match.end():])[0])) & artist_ids
+                   for match in re.finditer(r'[-–—]', line))
     first = 0
     while first < len(rows):
         line = rows[first][1]
-        if is_credit(line) or (identity(line) & identity(title) and
+        if is_credit(line) or ((identity(line) & identity(title) or title_artist(line)) and
                 first+1 < len(rows) and is_credit(rows[first+1][1])):
             first += 1
         else:
             break
     stop = next((i for i in range(first, len(rows)) if is_credit(rows[i][1])), len(rows))
     body = rows[first:stop]
+    if len(body) == 1 and title_artist(body[0][1]):
+        return [], sorted(metadata+[i for i, _ in rows])
     marker = re.sub(r'[^\w]', '', converter.convert(''.join(line for _, line in body))).casefold()
     if marker in {'纯音乐请欣赏', '纯音乐请您欣赏', '此歌曲为没有填词的纯音乐请您欣赏',
                   '暂无歌词', '暂无该歌曲歌词', '歌词暂未提供', 'nolyricsavailable',
@@ -232,7 +239,7 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
             text = read_lyrics(row)
         if not isinstance(text, str) or not text.strip() or len(text) > 30000:
             continue
-        lines, excluded = published_lyric_lines(text, title)
+        lines, excluded = published_lyric_lines(text, title, artists)
         language = song.get('language') or text_language('\n'.join(lines))
         if not lines or language is None or any('[' in line or ']' in line for line in lines):
             continue
@@ -415,12 +422,7 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
             raw_text = row['plainLyrics']
             if not isinstance(raw_text, str) or not raw_text.strip() or len(raw_text) > 30000:
                 continue
-            clean_lines, excluded = published_lyric_lines(raw_text, row['trackName'])
-            if len(clean_lines) == 1:
-                heading = re.split(r'\s+[-–—]\s+', clean_lines[0], maxsplit=1)
-                if (len(heading) == 2 and identity(heading[0], title=True) & identity(row['trackName'], title=True)
-                        and identity(re.split(r'[（(]', heading[1])[0]) & identity(row['artistName'])):
-                    continue
+            clean_lines, excluded = published_lyric_lines(raw_text, row['trackName'], [row['artistName']])
             text = '\n'.join(clean_lines)
             if not text or re.search(r'\[[^\]\n]+\]', text):
                 continue
