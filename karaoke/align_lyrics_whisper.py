@@ -188,7 +188,7 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
 
 
 def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
-                          force_global=False, max_alignment_attempts=24):
+                          force_global=False, max_alignment_attempts=24, recovery_contexts=None):
     """Use recognition only to locate failed lyrics, never as replacement text."""
     from anchors_from_asr import anchors_from_words
     from lyric_progress import partial_alignment_cues
@@ -222,6 +222,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
     if global_recovery:
         windows = [(first, stop, block['source_range'][0], block['source_range'][1])]
     result, reports, budget = deepcopy(block), [], max_alignment_attempts
+    contexts = [] if recovery_contexts is None else recovery_contexts
     for left, right, begin, end in windows[:8]:
         report = dict(context=[left, right], source_range=[begin, end], global_localization=global_recovery,
                       accepted_lines=[], attempts=[])
@@ -243,7 +244,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         anchors = anchors_from_words(lines[left:right], words, language, allow_missing=True)
         if global_recovery:
             report['recognition_anchors'] = anchors
-            anchors = recovery_anchors(anchors, cues[left:right], {i-left for i in bad})
+            anchors = recovery_anchors(anchors)
         report['anchors'] = anchors
         if not any(a['status'] == 'candidate' for a in anchors):
             report['reason'] = 'insufficient_recognition_support'
@@ -267,7 +268,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                     mislocalized.add(i+left)
             targets.update(mislocalized)
         report['contradicted_lines'] = sorted(i+1 for i in mislocalized)
-        proposed, replaced, contexts = deepcopy(result), [], []
+        proposed, replaced = deepcopy(result), []
         try:
             blocks = alignment_blocks(anchors, audio)
         except ValueError:
@@ -275,6 +276,11 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             continue
         for start, stop_line, cf, cs, ab, ae in blocks:
             selected = targets.intersection(range(start+left, stop_line+left))
+            if selected and global_recovery:
+                # An unrecognized run can drift together while every old line
+                # remains superficially valid. Repair its shared acoustic core;
+                # independently recognized neighbouring lines stay read-only.
+                selected.update(i+left for i in range(start, stop_line) if anchors[i]['status'] != 'candidate')
             if ae-ab > 45 and all(anchors[i]['status'] == 'candidate' for i in (start, stop_line-1)):
                 # A long neighbouring intro must not suppress an otherwise
                 # well-localized verse. Its core still needs acoustic alignment.
@@ -293,7 +299,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             if not selected or not 0 < ae-ab <= limit or budget <= 0:
                 continue
             budget -= 1
-            attempt = dict(lines=[start+left+1, stop_line+left], source_range=[ab, ae])
+            attempt = dict(lines=[start+left+1, stop_line+left], context=[cf+left, cs+left], source_range=[ab, ae])
             report['attempts'].append(attempt)
             try:
                 candidate = align_candidate(align, ab, ae, '\n'.join(lines[cf+left:cs+left]), gap_padding=None,
@@ -310,12 +316,9 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 continue
             part = dict(range=[start+left, stop_line+left], context=[cf+left, cs+left],
                         source_range=[ab, ae], result=candidate)
-            if valid_recovery(candidate, lines[cf+left:cs+left], ae-ab):
-                # Keep the joint context prediction for later boundary repair;
-                # another window's core can disagree with this valid overlap.
-                contexts.append(dict(part, range=[start+left, start+left]))
-            fresh = partial_alignment_cues(lines, [part], duration, language)
-            for i in sorted(selected):
+            fresh = partial_alignment_cues(lines, [dict(part, range=part['context'])], duration, language)
+            supported = set()
+            for i in range(cf+left, cs+left):
                 cue, anchor = fresh[i], anchors[i-left]
                 if cue['status'] != 'candidate':
                     continue
@@ -328,6 +331,12 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                     low, high = before[-1]['start'] if before else ab, after[0]['end'] if after else ae
                     if not (before or after) or not low <= cue['start'] < cue['end'] <= high:
                         continue
+                supported.add(i)
+            if len(supported) == cs-cf and valid_recovery(candidate, lines[cf+left:cs+left], ae-ab):
+                # A reusable context must meet the same independent location
+                # checks as a direct replacement, not merely contain all text.
+                contexts.append(dict(part, range=[start+left, start+left]))
+            for i in sorted(selected & supported):
                 segment = deepcopy(candidate['segments'][i-cf-left])
                 for word in segment['words']:
                     for key in ('start', 'end'):
@@ -348,7 +357,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             return fresh
 
         fresh = ordered(proposed)
-        if fresh is None:
+        if fresh is None or any(fresh[i]['status'] != 'candidate' for i in range(*block['range'])):
             def reconcile(begin, end, text, **options):
                 nonlocal budget
                 if budget <= 0:
@@ -356,7 +365,8 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 budget -= 1
                 return align(begin, end, text, **options)
             try:
-                _, selected, repairs = stitch_blocks(lines, [proposed, *contexts], duration, language, reconcile)
+                _, selected, repairs = stitch_blocks(lines, [proposed, *contexts], duration, language,
+                                                      reconcile if fresh is None else None)
                 report['boundary_reconciliations'] = repairs
                 for selected_block in selected:
                     for i in range(*selected_block['range']):
@@ -410,13 +420,14 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         # Apparently valid neighbours can squeeze missing lyrics into a window
         # that never contained them. Broaden once, sharing the remaining budget.
         result = recover_with_local_asr(result, lines, audio, language, recognize, align,
-                                       force_global=True, max_alignment_attempts=budget)
+                                       force_global=True, max_alignment_attempts=budget, recovery_contexts=contexts)
         reports.extend(result.get('asr_localizations', []))
     result['asr_localizations'] = reports
+    result['recovery_contexts'] = contexts
     return result
 
 
-def recovery_anchors(recognized, previous, invalid):
+def recovery_anchors(recognized):
     """An omitted refrain makes its text match ambiguous, not its old time wrong."""
     anchors = deepcopy(recognized)
     repeats = {}
@@ -427,18 +438,8 @@ def recovery_anchors(recognized, previous, invalid):
             for i in indexes:
                 anchors[i] = dict(anchors[i], status='ambiguous_repeat', start=None, end=None)
                 anchors[i].pop('search_start', None)
-    # Only independent recognized neighbours bound this search. Previously
-    # aligned lines must not bootstrap one another into trusted evidence.
-    recognized = deepcopy(anchors)
-    for i, anchor in enumerate(anchors):
-        cue = previous[i]
-        if anchor['status'] == 'candidate' or i in invalid or cue['status'] != 'candidate':
-            continue
-        before = [a for a in recognized[:i] if a['status'] == 'candidate']
-        after = [a for a in recognized[i+1:] if a['status'] == 'candidate']
-        if before and after and before[-1]['end'] <= cue['start'] < cue['end'] <= after[0]['start']:
-            anchors[i] = dict(anchor, start=cue['start'], end=cue['end'], status='candidate',
-                              source='preserved_acoustic_search_bound')
+    # Old alignment predictions remain available for reuse, but must never
+    # become independent evidence for narrowing another line's search window.
     return anchors
 
 
@@ -553,20 +554,15 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
     raw_blocks = list(raw_blocks)
 
     def prediction_for(block):
+        from lyric_progress import partial_alignment_cues
         first, stop = block['context']
         offset = block['source_range'][0]
         segments = block['result']['segments']
-        units = [dict(text=w['word'], start=round(offset+w['start'], 3),
-                      end=round(offset+w['end'], 3)) for s in segments for w in s['words']]
-        try:
-            cues = lyric_cues(lines[first:stop], units, duration)
-        except ValueError:
-            # A missing line is what the boundary repair must resolve, not a
-            # reason to discard every other prediction before trying it.
-            from lyric_progress import partial_alignment_cues
-            if len(segments) != stop-first:
-                raise
-            cues = partial_alignment_cues(lines, [dict(block, range=[first,stop])], duration, language)[first:stop]
+        if len(segments) != stop-first:
+            raise ValueError('Alignment segments do not match their lyric context')
+        # Use the same per-line text, timing and collapsed-phrase checks as
+        # localization; missing lines may be repaired, not silently accepted.
+        cues = partial_alignment_cues(lines, [dict(block, range=[first,stop])], duration, language)[first:stop]
         prediction = {}
         for index, (cue, segment) in enumerate(zip(cues, segments), first):
             try:
@@ -845,8 +841,9 @@ def main():
         # Keep the acoustic evidence even when stitching rejects text or times.
         (output/'raw.json').write_text(json.dumps(raw_blocks, ensure_ascii=False, indent=2, default=json_number)+'\n')
         (output/'units.json').write_text(json.dumps(units, ensure_ascii=False, indent=2, default=json_number)+'\n')
+        contexts = [context for block in raw_blocks for context in block.pop('recovery_contexts', [])]
         cues, raw_blocks, boundary_repairs = stitch_blocks(
-            lyrics['lines'], raw_blocks, duration, lyrics['language'], align_audio)
+            lyrics['lines'], [*raw_blocks, *contexts], duration, lyrics['language'], align_audio)
         (output/'raw.json').write_text(json.dumps(raw_blocks, ensure_ascii=False, indent=2, default=json_number)+'\n')
         for block in raw_blocks:
             for i in range(*block['range']):

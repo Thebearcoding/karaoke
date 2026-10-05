@@ -1614,7 +1614,7 @@ def test_direct_alignment_defers_unanchored_or_oversized_repairs(far_neighbour):
         'requires_coarse_localization' if far_neighbour else 'no_measured_neighbour')
 
 
-@pytest.mark.parametrize('failure', [None, 'wrong_words', 'outside_window', 'no_speech', 'boundary_overlap', 'collapsed', 'empty_attention', 'oom'])
+@pytest.mark.parametrize('failure', [None, 'wrong_words', 'outside_window', 'outside_anchor', 'no_speech', 'boundary_overlap', 'collapsed', 'empty_attention', 'oom'])
 def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neighbours(failure):
     from copy import deepcopy
     from karaoke.align_lyrics_whisper import recover_with_local_asr
@@ -1643,6 +1643,7 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
                   for line,t in zip(lines,starts)]
         if failure == 'wrong_words':result[1]['words'][0]['word'] = 'invented'
         if failure == 'outside_window':result[1]['words'][0]['end'] = end-begin+10
+        if failure == 'outside_anchor':result[1]['words'][0].update(start=7.-begin,end=7.8-begin)
         if failure == 'collapsed':result[1]['words'][0]['end'] = result[1]['words'][0]['start']+.06
         return dict(segments=result)
     if failure == 'oom':
@@ -1668,6 +1669,48 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
         for t,s in zip(lines,starts)]))
     assert recover_with_local_asr(good,lines,np.zeros(12*16000),'English',
         lambda *a:pytest.fail('A complete alignment ran ASR'),align) is good
+
+
+def test_isolated_missing_lines_preserve_budget_for_global_localization():
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines, missing = ['line'+str(i) for i in range(30)], {3,9,15,21}
+    starts = [i*3.+1 for i in range(30)]
+    segments = [dict(words=[dict(word=t,start=s,end=s+(0 if i in missing else .8))])
+                for i,(t,s) in enumerate(zip(lines,starts))]
+    block = dict(range=[0,30],context=[0,30],source_range=[0.,100.],result=dict(segments=segments))
+    recognition, alignment = [], []
+    def recognize(begin,end):
+        recognition.append((begin,end))
+        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+.8-begin)
+            for i,(t,s) in enumerate(zip(lines,starts)) if i not in missing and begin<=s and s+.8<=end])])
+    def align(begin,end,text,**options):
+        alignment.append((begin,end,text))
+        return None
+    result = recover_with_local_asr(block,lines,np.zeros(100*16000),'English',recognize,align)
+    assert (0.,100.) in recognition and len(alignment) <= 24
+    assert result['result'] == block['result']
+
+
+def test_local_recognition_keeps_context_predictions_through_global_retry():
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines, starts = ['alpha', 'bravo', 'charlie', 'delta', 'omega'], [1.,4.,8.,12.,16.]
+    segments = [dict(words=[dict(word=t,start=s,end=s+(0 if i in (1,3) else .8))])
+                for i,(t,s) in enumerate(zip(lines,starts))]
+    block = dict(range=[0,5],context=[0,5],source_range=[0.,20.],result=dict(segments=segments))
+    def recognize(begin,end):
+        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+.8-begin)
+            for t,s in zip(lines[:3],starts[:3])])] if end < 10 else [])
+    def align(begin,end,text,**options):
+        if text.splitlines() != lines[:3]:
+            return None
+        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+.8-begin)])
+                             for t,s in zip(lines[:3],starts[:3])])
+    result = recover_with_local_asr(block,lines,np.zeros(20*16000),'English',recognize,align)
+    assert any(r['global_localization'] for r in result['asr_localizations'])
+    assert result['result']['segments'][1]['words'][0] == dict(word='bravo',start=4.,end=4.8)
+    assert result['result']['segments'][3] == segments[3]
+    assert len(result['recovery_contexts']) == 1
+    assert result['recovery_contexts'][0]['context'] == [0,3]
 
 
 def test_local_recognition_broadens_once_when_old_neighbours_miss_the_verse():
@@ -1715,13 +1758,13 @@ def test_incomplete_refrain_recognition_cannot_overwrite_bounded_acoustic_alignm
             for line,t in zip(selected,starts[offset:])])
     result = recover_with_local_asr(block,lines,np.zeros(30*16000),'English',recognize,align,force_global=True)
     assert block == original
-    assert result['result']['segments'][1] == segments[1]
-    assert result['result']['segments'][3] == segments[3]
+    assert result['result']['segments'][1]['words'] == segments[1]['words']
+    assert result['result']['segments'][3]['words'] == segments[3]['words']
     assert result['result']['segments'][5]['words'][0] == dict(word='missing',start=18.,end=18.8)
     assert result['result']['segments'][2]['words'][0] == dict(word='la la',start=8.,end=8.8)
     report = result['asr_localizations'][0]
     assert report['contradicted_lines'] == ([3] if drifted_middle else [])
-    assert [report['anchors'][i]['source'] for i in (1,3)] == ['preserved_acoustic_search_bound']*2
+    assert [report['anchors'][i]['status'] for i in (1,3)] == ['ambiguous_repeat']*2
 
 
 def test_ambiguous_refrains_need_independent_bounds_and_cannot_bootstrap_them():
@@ -1729,12 +1772,32 @@ def test_ambiguous_refrains_need_independent_bounds_and_cannot_bootstrap_them():
     from karaoke.align_lyrics_whisper import recovery_anchors
     recognized = [dict(text=t, start=s, end=e, status='candidate' if s is not None else 'unresolved_text')
         for t,s,e in [('echo',1.,2.),('echo',None,None),('omega',20.,21.)]]
-    previous = [dict(text=t, start=s, end=s+1, status='candidate')
-        for t,s in [('echo',1.),('echo',10.),('omega',20.)]]
     original = deepcopy(recognized)
-    anchors = recovery_anchors(recognized,previous,set())
+    anchors = recovery_anchors(recognized)
     assert recognized == original
     assert [a['status'] for a in anchors] == ['ambiguous_repeat','ambiguous_repeat','candidate']
+
+
+def test_unrecognized_run_does_not_use_its_drifted_times_as_search_bounds():
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines, starts = ['alpha', 'la la', 'na na', 'ta ta', 'omega'], [1., 4., 7., 10., 15.]
+    def segment(text, start, length=.8):
+        return dict(words=[dict(word=text, start=start, end=start+length)])
+    segments = [segment(t,s,0 if i==2 else .8) for i,(t,s) in enumerate(zip(lines,[1.,10.,12.,13.,15.]))]
+    block = dict(range=[0,5], context=[0,5], source_range=[0.,20.], result=dict(segments=segments))
+    calls = []
+    def recognize(begin,end):
+        return dict(segments=[dict(words=[dict(word=lines[i], start=starts[i], end=starts[i]+.8) for i in (0,4)])])
+    def align(begin,end,text,**options):
+        calls.append((begin,end,text))
+        assert begin < 1 and end > 15  # Old, drifted neighbouring predictions cannot crop the real phrase away.
+        return dict(segments=[segment(t,s-begin) for t,s in zip(lines,starts)])
+    result = recover_with_local_asr(block,lines,np.zeros(20*16000),'English',recognize,align,force_global=True)
+    assert len(calls) == 1
+    assert result['result']['segments'][0] == segments[0] and result['result']['segments'][-1] == segments[-1]
+    assert [s['words'][0]['start'] for s in result['result']['segments']] == starts
+    assert result['asr_localizations'][0]['accepted_lines'] == [2,3,4]
+    assert result['recovery_contexts']
 
 
 @pytest.mark.parametrize('prefix', ['recognized', 'scattered', 'too_short'])
