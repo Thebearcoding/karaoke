@@ -98,7 +98,8 @@ function renderLibrary() {
   $('submit-song').innerHTML = `${isURL ? '点歌' : '搜索'} ${icon('arrow')}`;
   const search = isURL ? '' : query.toLocaleLowerCase();
   const songs = library.filter(song => (!search || search.split(/\s+/).every(word => `${song.title} ${song.artist}`.toLocaleLowerCase().includes(word))) &&
-    (search || filter === 'all' || (filter === 'ready' ? ['completed', 'video_evicted'].includes(song.status) : song.language === filter)));
+    (search || filter === 'all' || (filter === 'ready' ? ['completed', 'video_evicted'].includes(song.status) :
+      filter === 'other' ? song.language && !['Chinese', 'English', 'Japanese', 'Korean'].includes(song.language) : song.language === filter)));
   const preparedView = filter === 'ready' && !search;
   const missingVideo = songs.filter(song => song.status === 'video_evicted').length;
   $('library-count').textContent = preparedView && missingVideo
