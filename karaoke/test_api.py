@@ -1039,6 +1039,26 @@ def test_exact_lyric_agreement_from_other_performances_does_not_override_current
     assert report['crosscheck']['unselected_agreeing_sources'] == [0, 1]
 
 
+def test_equally_supported_lyrics_choose_closest_whole_text_before_provider_priority(tmp_path, monkeypatch):
+    from karaoke import lyric_consensus as module
+    from karaoke.stage_cache import StageCache
+    body = ('Stars above the quiet shore and every night we sing and walk along the road back home again '
+            'The morning brings another chance to find a melody that keeps us close together as the seasons turn')
+    texts = {'line_music': [body.replace('quiet', 'distant').replace('night', 'day')],
+             'youtube_music': [body], 'netease': [body.replace('Stars', 'Lights')]}
+    monkeypatch.setattr(module.lookup, 'fetch_published_lyrics', lambda *a:
+        (texts['line_music'], dict(provider='line_music', language='English')))
+    monkeypatch.setattr(module.lookup, 'fetch_lyrics', lambda *a: dict(status='unavailable'))
+    monkeypatch.setattr(module, 'fetch_additional_lyrics', lambda provider, *a:
+        (texts[provider], dict(provider=provider, language='English')))
+    lines, report = module.fetch_lyric_consensus(dict(title='Evening',artist='Singer'), {}, 30, StageCache(tmp_path))
+    assert lines == texts['youtube_music']
+    assert report['crosscheck']['selection'] == 'similarity_support'
+    assert len(report['crosscheck']['supporting_sources']) == 3
+    assert all(p['similarity'] >= .9 for p in report['crosscheck']['comparisons'])
+    assert report['crosscheck']['status'] == 'conflicting'  # Similarity is not exact agreement.
+
+
 def test_netease_lyrics_reject_other_recordings_and_strip_lrc_metadata(tmp_path, monkeypatch):
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
@@ -1474,6 +1494,53 @@ def test_local_recognition_broadens_once_when_old_neighbours_miss_the_verse():
     assert len(windows)==2 and windows[0][1]<10 and windows[1]==(0.,60.)
     assert result['asr_localizations'][-1]['accepted_lines']==[1,2,3]
     assert [s['words'][0]['start'] for s in result['result']['segments']]==starts
+
+
+@pytest.mark.parametrize('omitted_repeat', [1, 3])
+@pytest.mark.parametrize('drifted_middle', [False, True])
+def test_incomplete_refrain_recognition_cannot_overwrite_bounded_acoustic_alignment(omitted_repeat, drifted_middle):
+    from copy import deepcopy
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines = ['alpha', 'sing again', 'la la', 'sing again', 'bravo', 'missing', 'charlie']
+    starts = [1., 5., 8., 12., 15., 18., 21.]
+    segments = [dict(words=[dict(word=text, start=t, end=t+.8)]) for text,t in zip(lines,starts)]
+    segments[5]['words'][0]['end'] = 18.
+    if drifted_middle:
+        segments[2]['words'][0].update(start=28., end=29.)
+    block = dict(range=[0,7], context=[0,7], source_range=[0.,30.], result=dict(segments=segments))
+    original = deepcopy(block)
+    def recognize(begin, end):
+        # The intervening scat and one refrain are absent. Text alone cannot
+        # tell which occurrence the single recognized refrain belongs to.
+        return dict(segments=[dict(words=[dict(word=text, start=t, end=t+.8)
+            for i,(text,t) in enumerate(zip(lines,starts)) if i not in (2, omitted_repeat)])])
+    def align(begin, end, text, **options):
+        selected = text.splitlines()
+        offset = next(i for i in range(len(lines)) if lines[i:i+len(selected)] == selected)
+        return dict(segments=[dict(words=[dict(word=line, start=t-begin, end=t+.8-begin)])
+            for line,t in zip(selected,starts[offset:])])
+    result = recover_with_local_asr(block,lines,np.zeros(30*16000),'English',recognize,align,force_global=True)
+    assert block == original
+    assert result['result']['segments'][1] == segments[1]
+    assert result['result']['segments'][3] == segments[3]
+    assert result['result']['segments'][5]['words'][0] == dict(word='missing',start=18.,end=18.8)
+    assert result['result']['segments'][2]['words'][0] == dict(word='la la',start=8.,end=8.8)
+    report = result['asr_localizations'][0]
+    assert report['contradicted_lines'] == ([3] if drifted_middle else [])
+    assert [report['anchors'][i]['source'] for i in (1,3)] == ['preserved_acoustic_search_bound']*2
+
+
+def test_ambiguous_refrains_need_independent_bounds_and_cannot_bootstrap_them():
+    from copy import deepcopy
+    from karaoke.align_lyrics_whisper import recovery_anchors
+    recognized = [dict(text=t, start=s, end=e, status='candidate' if s is not None else 'unresolved_text')
+        for t,s,e in [('echo',1.,2.),('echo',None,None),('omega',20.,21.)]]
+    previous = [dict(text=t, start=s, end=s+1, status='candidate')
+        for t,s in [('echo',1.),('echo',10.),('omega',20.)]]
+    original = deepcopy(recognized)
+    anchors = recovery_anchors(recognized,previous,set())
+    assert recognized == original
+    assert [a['status'] for a in anchors] == ['ambiguous_repeat','ambiguous_repeat','candidate']
 
 
 @pytest.mark.parametrize('prefix', ['recognized', 'scattered', 'too_short'])

@@ -202,16 +202,26 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None):
             # Similarity only selects a whole candidate; differences stay soft
             # failures and are never reported as exact agreement or accuracy.
             support = [{i} for i in range(len(candidates))]
+            similarities = [{} for _ in candidates]
             for comparison in review['comparisons']:
                 if comparison['similarity'] >= .9:
                     a, b = comparison['sources']
                     support[a].add(b)
                     support[b].add(a)
+                    for i, j in ((a,b),(b,a)):
+                        own = candidates[i][1].get('publisher') or candidates[i][1]['provider']
+                        peer = candidates[j][1].get('publisher') or candidates[j][1]['provider']
+                        if j in eligible and peer != own:
+                            similarities[i][peer] = max(similarities[i].get(peer, 0), comparison['similarity'])
             votes = [len({candidates[i][1].get('publisher') or candidates[i][1]['provider'] for i in group & eligible})
                      for group in support]
             if max(votes[i] for i in eligible) >= 3:
-                index = min(eligible, key=lambda i: (-votes[i], preferred.index(candidates[i][1]['provider'])))
+                # Equally supported versions can still differ in completeness.
+                # Prefer the closest whole text, counting each publisher once.
+                agreement = [sum(s.values())/len(s) if s else 0 for s in similarities]
+                index = min(eligible, key=lambda i: (-votes[i], -agreement[i], preferred.index(candidates[i][1]['provider'])))
                 review['supporting_sources'] = sorted(support[index] & eligible)
+                review['supporting_similarity'] = agreement[index]
                 selection = 'similarity_support'
         lines, selected = candidates[index]
         if review['status'] == 'corroborated' and index not in review['agreeing_sources']:

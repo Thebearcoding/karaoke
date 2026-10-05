@@ -231,6 +231,9 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                  for w in s.get('words') or [] if np.isfinite([w['start'], w['end']]).all()
                  and 0 <= w['start'] < w['end'] <= end-begin+.001]
         anchors = anchors_from_words(lines[left:right], words, language, allow_missing=True)
+        if global_recovery:
+            report['recognition_anchors'] = anchors
+            anchors = recovery_anchors(anchors, cues[left:right], {i-left for i in bad})
         report['anchors'] = anchors
         if not any(a['status'] == 'candidate' for a in anchors):
             report['reason'] = 'insufficient_recognition_support'
@@ -401,6 +404,32 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         reports.extend(result.get('asr_localizations', []))
     result['asr_localizations'] = reports
     return result
+
+
+def recovery_anchors(recognized, previous, invalid):
+    """An omitted refrain makes its text match ambiguous, not its old time wrong."""
+    anchors = deepcopy(recognized)
+    repeats = {}
+    for i, anchor in enumerate(anchors):
+        repeats.setdefault(normalized(anchor['text']).casefold(), []).append(i)
+    for indexes in repeats.values():
+        if 0 < sum(anchors[i]['status'] == 'candidate' for i in indexes) < len(indexes):
+            for i in indexes:
+                anchors[i] = dict(anchors[i], status='ambiguous_repeat', start=None, end=None)
+                anchors[i].pop('search_start', None)
+    # Only independent recognized neighbours bound this search. Previously
+    # aligned lines must not bootstrap one another into trusted evidence.
+    recognized = deepcopy(anchors)
+    for i, anchor in enumerate(anchors):
+        cue = previous[i]
+        if anchor['status'] == 'candidate' or i in invalid or cue['status'] != 'candidate':
+            continue
+        before = [a for a in recognized[:i] if a['status'] == 'candidate']
+        after = [a for a in recognized[i+1:] if a['status'] == 'candidate']
+        if before and after and before[-1]['end'] <= cue['start'] < cue['end'] <= after[0]['start']:
+            anchors[i] = dict(anchor, start=cue['start'], end=cue['end'], status='candidate',
+                              source='preserved_acoustic_search_bound')
+    return anchors
 
 
 def recover_skipped_repeats(result, duration, align):
