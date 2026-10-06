@@ -117,6 +117,33 @@ test('stems begin together; mode and volume changes do not restart or seek', asy
   assert.ok(p.gains.every(g=>g.gain.value===0));assert.deepEqual(p.sources,originalSources);
 });
 
+test('opening pre-roll holds video and all stems on a future shared start; pause and seek cancel it', async () => {
+  const p=setup(), ticks=[];
+  p.onTick=value=>ticks.push(value);
+  p.pitchFactory=async()=>({input:{},latency:.12,setPitch(){},start(){},stop(){}});
+  await p.unlock(); await p.load(song);
+  const start={...state,position:0,started_at:103.369};
+  p.apply(start,clockOffset());
+  const sources=[...p.sources], audible=p.audibleWhen;
+  assert.ok(Math.abs(audible-13.369)<.01);
+  assert.ok(sources.every(s=>Math.abs(s.started[0]+.12-audible)<1e-9 && s.started[1]===0));
+  frame(); assert.equal(p.video.paused,true); assert.ok(ticks.at(-1)<-3.3);
+  p.apply({...start,levels:{lead_vocals:.5}},clockOffset());
+  assert.deepEqual(p.sources,sources); assert.equal(p.audibleWhen,audible);
+  p.context.currentTime=audible-.01; frame(); assert.equal(p.video.paused,true);
+  p.context.currentTime=audible; frame(); assert.equal(p.video.paused,false);
+  assert.ok(Math.abs(ticks.at(-1))<1e-9); assert.equal(p.video.currentTime,0);
+  p.apply({...start,started_at:107.},clockOffset());
+  const waiting=[...p.sources]; frame(); assert.equal(p.video.paused,true);
+  p.apply({...start,playing:false,started_at:null},clockOffset());
+  assert.ok(waiting.every(s=>s.stopped)); assert.equal(p.anchor,null); assert.equal(ticks.at(-1),0);
+  p.apply({...state,position:5},clockOffset());
+  assert.ok(p.sources.every(s=>Math.abs(s.started[1]-5)<.01));
+  await p.load({...song,id:'two'});
+  assert.equal(p.anchor,null); assert.equal(p.video.paused,true);
+  p.clear();
+});
+
 test('seek and pause stop all previous sources; end notification fires once', async () => {
   const ended=[];const p=setup(id=>ended.push(id));await p.unlock();await p.load(song);
   p.apply(state,clockOffset());const previous=[...p.sources];
@@ -150,7 +177,7 @@ test('live key changes affect the common mix without restarting; video follows a
   await p.unlock();await p.load(song);p.apply(state,clockOffset());
   const sources=[...p.sources], anchor=p.anchor, initial=p.video.currentTime;
   assert.ok(p.gains.every(g=>g.target===p.pitchChain.input));
-  assert.equal(starts[0],sources[0].started[0]+.12);
+  assert.ok(Math.abs(starts[0]-sources[0].started[0]-.12)<1e-9);
   p.apply({...state,pitch_semitones:3},clockOffset());
   p.apply({...state,pitch_semitones:-2,levels:{instrumental:.7,backing_vocals:.5,lead_vocals:.3}},clockOffset());
   assert.deepEqual(p.sources,sources);assert.equal(p.anchor,anchor);

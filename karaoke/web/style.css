@@ -33,3 +33,5 @@
 
 .music-kind{padding:0 6px;border:1px solid #52432b;border-radius:3px;background:var(--gold-soft);color:var(--gold)}
 .search-more{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;min-height:108px;padding:24px 0;color:var(--muted);font-size:12px}.search-more button{min-height:44px;padding:8px 22px;border:1px solid var(--line);border-radius:6px;color:var(--gold)}.search-more button:hover{background:var(--gold-soft)}.search-more button:disabled{opacity:.55}
+
+.opening-countdown{position:absolute;inset:0;width:100%;height:100%;background:#050705;pointer-events:none}

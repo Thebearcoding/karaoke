@@ -1,5 +1,5 @@
 {
-  "version": 8,
+  "version": 9,
   "default_style": "cinema_focus",
   "reference_width": 1280,
   "strip_height": 200,
@@ -17,7 +17,7 @@
     "version_size": 24
   },
   "countdown": {
-    "minimum_silence_seconds": 8,
+    "minimum_silence_seconds": 4,
     "dots": 3,
     "step_seconds": 1,
     "settle_seconds": 1,

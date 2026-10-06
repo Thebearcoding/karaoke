@@ -21,13 +21,17 @@ class Caption:
         self.color = ImageColor.getrgb(STYLES[style].get('progress_color', '#efd29a'))
         self.starts = [u['start'] for u in cue.get('units', [])]
         self.cache = {}
+        spec = TOKENS['countdown']
+        self.countdown_geometry = dict(radius=spec['radius'], spacing=spec['spacing'],
+            color=STYLES[style].get('progress_color', '#efd29a'),
+            y=max(spec['radius']+3, min(c['top'] for c in self.layout['characters'])-spec['above_text']))
 
     def countdown(self, remaining, total):
         """Fixed dot positions above the lyric; exhausted dots become faint rings."""
-        spec = TOKENS['countdown']
+        spec = self.countdown_geometry
         image = Image.new('RGBA', self.base.size)
         draw = ImageDraw.Draw(image)
-        y = max(spec['radius']+3, min(c['top'] for c in self.layout['characters'])-spec['above_text'])
+        y = spec['y']
         for index in range(total):
             x = image.width/2+(index-(total-1)/2)*spec['spacing']
             radius = spec['radius']
@@ -225,6 +229,11 @@ def main():
         'format=duration:stream=codec_type,width,height', '-of', 'json', str(args.output)]))
     if abs(float(probe['format']['duration'])-args.duration) > .1:
         raise ValueError('Incorrect rendered duration')
+    opening = None
+    if countdown and countdown[0]['start'] < 0:
+        geometry = Caption(cues[0], args.style, args.language).countdown_geometry
+        opening = dict(countdown[0], **geometry, width=width, height=720)
+        opening['y'] += 720-main_height-args.bottom_margin
     report = {'command': command, 'seconds': time.perf_counter()-started, 'start': args.start,
         'duration': args.duration, 'mode': args.mode, 'style': args.style, 'style_version': TOKENS['version'],
         'style_parameters': STYLES[args.style],
@@ -235,6 +244,7 @@ def main():
         'next_line_enabled': args.next_line,
         'read_ahead_strategy': 'Current and next lines visible; advance at sung onsets, with white preparation during long-gap countdowns',
         'song_intro': intro,
+        'opening_countdown': opening,
         'countdown': {'enabled': args.countdown, 'events': countdown,
                       'minimum_silence_seconds': TOKENS['countdown']['minimum_silence_seconds'],
                       'policy': 'Three one-second dot steps, then empty rings held for one second before the acoustic onset'},

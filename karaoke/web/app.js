@@ -481,6 +481,8 @@ function updateTransport() {
 
 function updateCover() {
   const song = current();
+  if (player.anchor === null || player.entry?.id !== song?.id || remote)
+    $('opening-countdown').setAttribute('hidden', '');
   $('screen-cover').hidden = Boolean(song?.status === 'completed' && !loading && !loadError && !remote && player.unlocked && player.ready);
   $('screen-status').textContent = remote ? '遥控模式' : loadError || (!song ? '请先点歌' : song.status !== 'completed' ? statusText(song) : loading ? '加载音轨…' : '');
   $('screen-status').hidden = !$('screen-status').textContent || song?.status === 'running';
@@ -489,8 +491,25 @@ function updateCover() {
 }
 
 function updateTime(position) {
-  if (!seeking) $('seek').value = position;
-  $('current-time').textContent = time(position);
+  if (!seeking) $('seek').value = Math.max(0, position);
+  $('current-time').textContent = time(Math.max(0, position));
+  const opening = current()?.opening_countdown;
+  const overlay = $('opening-countdown');
+  const visible = position < 0 && opening && state.playing && player.anchor !== null && !remote;
+  overlay.toggleAttribute('hidden', !visible);
+  if (visible) {
+    const remaining = Math.max(0, Math.min(opening.dots,
+      Math.ceil((opening.onset-opening.settle_seconds-position)/opening.step_seconds-1e-9)));
+    overlay.setAttribute('viewBox', `0 0 ${opening.width} ${opening.height}`);
+    // Match the frozen first frame's rendered dots; the video takes over at t=0.
+    overlay.replaceChildren(...Array.from({length:opening.dots}, (_, i) => {
+      const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      for (const [name, value] of Object.entries({cx:opening.width/2+(i-(opening.dots-1)/2)*opening.spacing,
+        cy:opening.y, r:opening.radius, fill:i >= opening.dots-remaining ? opening.color : 'transparent',
+        stroke:i >= opening.dots-remaining ? opening.color : '#f6f4eca0', 'stroke-width':2})) dot.setAttribute(name, value);
+      return dot;
+    }));
+  }
   updateCover();
 }
 

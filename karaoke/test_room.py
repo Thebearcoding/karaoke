@@ -64,6 +64,43 @@ def test_poster_survives_cleanup_and_browsing_does_not_refresh_lru(tmp_path):
         assert song['poster'] is None and song['job_id'] is None
 
 
+def test_opening_countdown_waits_for_ready_and_keeps_original_song_clock(tmp_path, monkeypatch):
+    now = [100.]
+    monkeypatch.setattr('karaoke.room.time.time', lambda: now[0])
+    app = create_app(tmp_path, version='test')
+    store = app.state.store
+    job = ready_job(store)
+    opening = dict(start=-3.369, onset=.631, dots=3, step_seconds=1., settle_seconds=1.)
+    job['result']['quality'] = dict(opening_countdown=opening)
+    store.update(job['id'], result=job['result'])
+    with TestClient(app) as client:
+        entry = client.post('/v1/room/entries', json={'job_id':job['id']}).json()['entries'][0]
+        assert entry['opening_countdown'] == opening
+        def command(action, **args):
+            return client.post('/v1/room/commands', json=dict(action=action, entry_id=entry['id'], **args)).json()
+        waiting = command('play')
+        assert waiting['started_at'] is None and waiting['position'] == 0
+        playing = command('ready')
+        assert playing['started_at'] == pytest.approx(103.369)
+        assert command('ready')['started_at'] == playing['started_at']
+        now[0] = 102.
+        assert app.state.room.position(app.state.room.read()) == 0
+        paused = command('pause')
+        assert paused['position'] == 0 and paused['started_at'] is None
+        command('play')
+        assert command('ready')['started_at'] == pytest.approx(105.369)
+        now[0] = 106.
+        assert command('pause')['position'] == pytest.approx(.631)
+        command('play')
+        assert command('ready')['started_at'] == 106.  # Resuming never inserts time into the song.
+        command('seek', position=6.)
+        assert command('pause')['position'] == 6.
+        command('play')
+        assert command('ready')['started_at'] == 106.
+        assert command('seek', position=0.)['started_at'] is None
+        assert command('ready')['started_at'] == pytest.approx(109.369)
+
+
 def test_playlist_duplicate_song_order_and_stale_end_event(tmp_path):
     app = create_app(tmp_path, worker_command=fake_worker, version='test')
     job = ready_job(app.state.store)

@@ -210,8 +210,8 @@ def read_ahead_state(cues, instant):
     return current, following if following < len(cues) else None
 
 
-def countdown_events(cues, minimum_silence=8., dots=3, step_seconds=1., settle_seconds=1.):
-    """Find vocal entries after long silence, using sung ends rather than line holds."""
+def countdown_events(cues, minimum_silence=4., dots=3, step_seconds=1., settle_seconds=1.):
+    """Prepare the opening and long vocal gaps; a negative start needs playback pre-roll."""
     duration = dots*step_seconds+settle_seconds
     if dots < 1 or step_seconds <= 0 or settle_seconds < 0 or minimum_silence < duration:
         raise ValueError('Countdown must fit inside the minimum vocal gap')
@@ -224,7 +224,7 @@ def countdown_events(cues, minimum_silence=8., dots=3, step_seconds=1., settle_s
             onset, end = unit['start'], unit['end']
             if not (math.isfinite(onset) and math.isfinite(end) and 0 <= onset < end):
                 raise ValueError('Countdown requires valid acoustic intervals')
-            if onset-previous_end >= minimum_silence:
+            if (line == 0 and index == 0) or onset-previous_end >= minimum_silence:
                 events.append(dict(line=line, unit=index, start=onset-duration,
                                    onset=onset, previous_end=previous_end,
                                    dots=dots, step_seconds=step_seconds, settle_seconds=settle_seconds))

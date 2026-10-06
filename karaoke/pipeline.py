@@ -1092,7 +1092,8 @@ class Pipeline:
     def render_picture(self, result):
         subtitles = self.output/result.get('artifacts', {}).get('subtitles', {}).get('path', 'cues.json')
         picture = self.output/'captioned-picture.mp4'
-        with self.checkpoints.stage('render_picture', inputs=[self.video, subtitles], outputs=[picture],
+        with self.checkpoints.stage('render_picture', inputs=[self.video, subtitles],
+                outputs=[picture, picture.with_suffix('.render.json')],
                 config={**{key: result[key] for key in ('title', 'artist', 'language', 'duration_seconds')},
                         'implementation': inspect.getsource(type(self).render_picture)},
                 code=[ROOT/p for p in ('render_lyric_progress.py', 'render_subtitles.py', 'subtitles.py',
@@ -1122,6 +1123,10 @@ class Pipeline:
     def render_uncached(self, result):
         import soundfile as sf
         picture = self.render_picture(result)
+        presentation = json.loads(picture.with_suffix('.render.json').read_text())
+        result.setdefault('quality', {}).update(
+            countdown_events=presentation['countdown']['events'],
+            opening_countdown=presentation['opening_countdown'])
         paths = {name: self.output/a['path'] for name, a in result['artifacts'].items()}
         instrumental, rate = sf.read(paths['instrumental'], dtype='float32', always_2d=True)
         if result['mv_audio'] == 'instrumental_backing':

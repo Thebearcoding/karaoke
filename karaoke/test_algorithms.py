@@ -104,10 +104,25 @@ class SubtitleIntegrity(unittest.TestCase):
                 dict(start=11., end=30., units=[dict(start=12., end=13.), dict(start=24., end=25.)])]
         events = countdown_events(cues)
         self.assertEqual([(e['line'], e['unit'], e['start'], e['onset']) for e in events],
-                         [(1, 0, 8., 12.), (1, 1, 20., 24.)])
+                         [(0, 0, -4., 0.), (1, 0, 8., 12.), (1, 1, 20., 24.)])
         # A long note is not a long silence even when its onset was long ago.
-        self.assertEqual(countdown_events([dict(units=[dict(start=0., end=9.),
-                                                       dict(start=10., end=11.)])]), [])
+        sustained = countdown_events([dict(units=[dict(start=0., end=9.), dict(start=10., end=11.)])])
+        self.assertEqual([event['onset'] for event in sustained], [0.])
+
+    def test_countdown_covers_short_openings_and_four_second_gaps_without_moving_lyrics(self):
+        from copy import deepcopy
+        for onset in (0., .631, 3.9, 4., 7.9):
+            with self.subTest(onset=onset):
+                cues = [dict(units=[dict(start=onset, end=onset+1.),
+                                   dict(start=onset+5., end=onset+6.),
+                                   dict(start=onset+9.99, end=onset+11.)])]
+                original = deepcopy(cues)
+                events = countdown_events(cues)
+                self.assertEqual([event['onset'] for event in events], [onset, onset+5.])
+                for event in events:
+                    for i, count in enumerate((3, 2, 1, 0)):
+                        self.assertEqual(countdown_state(events, event['start']+i+.5)[1], count)
+                self.assertEqual(cues, original)
 
     def test_countdown_prepares_first_entry_and_tracks_seeking(self):
         cues = [dict(units=[dict(start=10., end=12.)])]

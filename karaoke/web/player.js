@@ -44,7 +44,9 @@ export class Player {
       if (this.anchor !== null && this.context.state === 'running') {
         this.pump();
         if (this.anchor === null) { requestAnimationFrame(tick); return; }
-        const position = Math.min(this.scheduledUntil, Math.max(this.startPosition, this.context.currentTime - this.anchor));
+        const elapsed = this.context.currentTime - this.anchor;
+        const position = Math.min(this.scheduledUntil,
+          this.startPosition === 0 ? elapsed : Math.max(this.startPosition, elapsed));
         if (this.videoPending && this.context.currentTime >= this.audibleWhen) {
           this.videoPending = false;
           const signature = this.signature;
@@ -53,7 +55,7 @@ export class Player {
             this.stop(); this.unlocked = false; this.onTick(position);
           });
         }
-        this.syncVideo(position);
+        this.syncVideo(Math.max(0, position));
         this.onTick(position);
         if (position >= this.entry.duration - 0.025) {
           const id = this.entry.id;
@@ -227,8 +229,8 @@ export class Player {
     if (!this.hasAudio(position)) { this.onBuffering?.(position, state.started_at); return; }
     this.signature = signature;
     this.startedAt = state.started_at;
-    const when = this.context.currentTime + 0.02;
-    this.audibleWhen = when + (this.pitchChain?.latency || 0);
+    const delay = Math.max(0, state.started_at - (Date.now()/1000 + clockOffset));
+    this.audibleWhen = this.context.currentTime + Math.max(delay, 0.02 + (this.pitchChain?.latency || 0));
     this.startPosition = position;
     this.anchor = this.audibleWhen - position;
     this.nextWindow = this.stream.index(position);

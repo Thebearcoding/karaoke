@@ -4889,6 +4889,9 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
         assert set(restored['video_restore']['timings']) == {'verify_video', 'render', 'mux_video'}
         assert (folder/'mv.mp4').stat().st_size > 2048
         assert restored['artifacts']['mv']['sha256'] == file_hash(folder/'mv.mp4')
+        opening = restored['quality']['opening_countdown']
+        assert opening['start'] == -3.5 and opening['onset'] == .5
+        assert opening['dots'] == 3 and 0 < opening['y'] < opening['height']
         # Splitting picture encoding from audio muxing must not change either
         # decoded stream compared with the established all-at-once renderer.
         mixed = folder/'expected-mix.wav'

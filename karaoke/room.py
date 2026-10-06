@@ -134,6 +134,7 @@ class Room:
                     else featured.get('poster')), lyrics_need_review=result.get('quality', {}).get(
                 'lyrics_provenance', {}).get('needs_review', False),
             lyrics_unavailable=result.get('quality', {}).get('playback_fallback', {}).get('subtitle_mode') == 'unavailable',
+            opening_countdown=result.get('quality', {}).get('opening_countdown'),
             artifacts={key: f"/v1/jobs/{job['id']}/artifacts/{key}"
                        for key in result.get('artifacts', {})})
 
@@ -234,7 +235,7 @@ class Room:
                 raise HTTPException(409, '还没有正在播放的歌')
             duration = self.describe(current)['duration']
             state.update(position=min(command.position, max(0, duration-.05)),
-                         started_at=time.time() if state['started_at'] else None)
+                         started_at=time.time() if state['started_at'] and command.position > 0 else None)
         elif action == 'buffering':
             # A delayed request from before a seek/pause must not rewind this
             # song or restart its clock. Mix/volume revisions are independent.
@@ -246,7 +247,9 @@ class Room:
         elif action == 'ready':
             if current and self.describe(current)['status'] == 'completed' and state['playing']:
                 if state['started_at'] is None:
-                    state['started_at'] = time.time()
+                    opening = self.describe(current)['opening_countdown'] or {}
+                    delay = max(0., -opening.get('start', 0.)) if state['position'] == 0 else 0.
+                    state['started_at'] = time.time()+delay
         elif action in ('next', 'select'):
             if action == 'next':
                 state['entries'] = [e for e in state['entries'] if e['id'] != state['current_id']]
