@@ -46,6 +46,7 @@ class AddSong(BaseModel):
     title: str | None = Field(default=None, max_length=200)
     source_title: str | None = Field(default=None, max_length=500)
     force: bool = False
+    if_absent: bool = False
 
 
 class Updates:
@@ -202,6 +203,19 @@ class Room:
         if bool(request.url) == bool(request.job_id):
             raise HTTPException(422, '请提供视频链接或已准备好的歌曲')
         state = self.read()
+        if request.if_absent:
+            if request.job_id:
+                requested = self.store.read(request.job_id)
+                url = requested['input']['url'] if requested else None
+            else:
+                try:
+                    url = JobRequest(url=request.url).url
+                except ValueError as error:
+                    raise HTTPException(422, '请输入有效的 YouTube 或 Bilibili 单个视频链接') from error
+            for entry in state['entries']:
+                job = self.store.read(entry['job_id'])
+                if job and job['input']['url'] == url:
+                    return self.snapshot()
         if len(state['entries']) >= 100:
             raise HTTPException(409, '歌单最多保留 100 首，请先移除一些歌曲')
         if request.job_id:

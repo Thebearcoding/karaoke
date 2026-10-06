@@ -264,6 +264,26 @@ test('view history restores nested catalogues, reloads and forward navigation wi
   assert.doesNotThrow(()=>unavailable.save()); assert.equal(unavailable.back(),false);
 });
 
+test('each tab restores its own search and navigation after another tab changes theirs', () => {
+  function tab(value) {
+    const history = {state:null,replaceState(next){this.state=structuredClone(next);}};
+    const local = {value,history};
+    local.navigation = createViewHistory(history,()=>local.value,next=>{local.value=next;});
+    return local;
+  }
+  const alice = tab({query:'Lemon',videoSource:'songs',searchOrder:'popular',scroll:340,queueTab:'upcoming'});
+  const bob = tab({query:'周杰伦',videoSource:'artists',searchOrder:'relevance',scroll:90,queueTab:'history'});
+  alice.navigation.save(); bob.navigation.save();
+  alice.value.query='First Love'; alice.value.scroll=700; alice.navigation.save();
+  for (const local of [alice,bob]) {
+    local.value={};
+    const reloaded=createViewHistory(local.history,()=>local.value,next=>{local.value=next;});
+    assert.equal(reloaded.restore(),true);
+  }
+  assert.deepEqual(alice.value,{query:'First Love',videoSource:'songs',searchOrder:'popular',scroll:700,queueTab:'upcoming'});
+  assert.deepEqual(bob.value,{query:'周杰伦',videoSource:'artists',searchOrder:'relevance',scroll:90,queueTab:'history'});
+});
+
 test('default puts songs before albums and lowers live songs without removing results or changing other sorts', () => {
   const titles = ['A (Live)', 'Studio', 'The One and Only', 'B LIVE at Wembley', 'C 现场版',
     'Alive', 'Live and Let Die', 'D【LIVE】', 'E ライブ', 'Another studio', 'F Live | Tour'];

@@ -1,4 +1,5 @@
 import { Player } from './player.js';
+import { isStaleRoomSnapshot } from './room-state.js';
 import { createVideoSearch, createViewHistory, previewURL, searchLibrary, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
 
 const $ = id => document.getElementById(id);
@@ -373,8 +374,8 @@ async function addVideo(song, {title, repeat = false} = {}) {
   try {
     const cached = library.find(item => queueKey(item) === key && item.job_id);
     const previous = new Set(state.entries.map(entry => entry.id));
-    const updated = await request('/v1/room/entries', cached ? {job_id:cached.job_id} :
-      {url:song.url, ...(title !== undefined ? {title} : {source_title:song.title})});
+    const updated = await request('/v1/room/entries', {if_absent:!repeat, ...(cached ? {job_id:cached.job_id} :
+      {url:song.url, ...(title !== undefined ? {title} : {source_title:song.title})})});
     acceptState(updated);
     if ($('video-preview').open) $('video-preview').close();
     const added = updated.entries.find(entry => !previous.has(entry.id) && queueKey(entry) === key);
@@ -626,7 +627,7 @@ async function syncPlayback() {
 }
 
 function acceptState(updated) {
-  if (updated.revision < state.revision) return;
+  if (isStaleRoomSnapshot(updated, state)) return;
   state = updated;
   clockOffset = state.server_time - Date.now()/1000;
   library = updated.library || [];
@@ -810,7 +811,18 @@ $('storage-form').onsubmit = async event => {
 };
 $('seek').oninput = () => { seeking = true; $('current-time').textContent = time(Number($('seek').value)); };
 $('seek').onchange = async () => { await command('seek', {position:Number($('seek').value)}); seeking = false; };
-$('volume').oninput = () => { player.setVolume(Number($('volume').value)); $('volume-value').textContent = Math.round(player.volume*100); };
+$('volume').oninput = () => {
+  player.setVolume(Number($('volume').value));
+  $('volume-value').textContent = Math.round(player.volume*100);
+  try { sessionStorage.setItem('karaokeVolume', player.volume); } catch {}
+};
+try {
+  const saved = sessionStorage.getItem('karaokeVolume'), volume = Number(saved);
+  if (saved !== null && Number.isFinite(volume) && volume >= 0 && volume <= 1) {
+    $('volume').value = volume;
+    $('volume').oninput();
+  }
+} catch {}
 $('mute').onclick = () => { $('volume').value = player.volume ? 0 : 0.8; $('volume').oninput(); };
 async function fullscreen() {
   switchView('player');

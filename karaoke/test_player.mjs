@@ -1,6 +1,17 @@
 import test, {beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import {Player} from './web/player.js';
+import {isStaleRoomSnapshot} from './web/room-state.js';
+
+test('late HTTP replies cannot undo a newer room command or same-revision progress update', () => {
+  const current = {revision:4,server_time:100,entries:[{status:'completed'}]};
+  assert.equal(isStaleRoomSnapshot({revision:3,server_time:101},current),true);
+  assert.equal(isStaleRoomSnapshot({revision:4,server_time:99,entries:[{status:'running'}]},current),true);
+  assert.equal(isStaleRoomSnapshot({revision:4,server_time:101},current),false);
+  assert.equal(isStaleRoomSnapshot(current,current),false);
+  assert.equal(isStaleRoomSnapshot({revision:5,server_time:99},current),false);
+  assert.equal(isStaleRoomSnapshot({revision:0,server_time:100},{revision:0}),false);
+});
 
 let frame;
 globalThis.requestAnimationFrame = callback => { frame = callback; };

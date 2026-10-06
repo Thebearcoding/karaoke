@@ -128,6 +128,50 @@ def test_playlist_duplicate_song_order_and_stale_end_event(tmp_path):
         assert client.post('/v1/room/commands', json={'action':'reorder','order':[ids[2],ids[2]]}).status_code == 422
 
 
+def test_two_clients_share_queue_without_lost_adds_or_accidental_duplicates(tmp_path):
+    import httpx
+
+    app = create_app(tmp_path, version='test')
+    jobs = [ready_job(app.state.store, url) for url in
+            (URL, 'https://www.youtube.com/watch?v=abcdefghijk', 'https://www.youtube.com/watch?v=12345678901')]
+
+    async def check():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url='http://test') as alice, \
+                httpx.AsyncClient(transport=transport, base_url='http://test') as bob:
+            first, same = await asyncio.gather(
+                alice.post('/v1/room/entries', json={'job_id':jobs[0]['id'], 'if_absent':True}),
+                bob.post('/v1/room/entries', json={'url':'https://youtu.be/n5sjpCQhTDk?t=10', 'if_absent':True}))
+            assert first.status_code == same.status_code == 201
+            initial = first.json()
+            assert len(initial['entries']) == 1
+            assert same.json()['entries'] == initial['entries']
+            added = await asyncio.gather(*[
+                client.post('/v1/room/entries', json={'job_id':job['id'], 'if_absent':True})
+                for client, job in zip((alice, bob), jobs[1:])])
+            assert all(response.status_code == 201 for response in added)
+            for client in (alice, bob):
+                snapshot = (await client.get('/v1/room')).json()
+                assert len(snapshot['entries']) == 3
+                assert snapshot['entries'][0]['job_id'] == jobs[0]['id']
+                assert {e['job_id'] for e in snapshot['entries']} == {job['id'] for job in jobs}
+            stale = await alice.post('/v1/room/commands', json={
+                'action':'reorder', 'order':[e['id'] for e in initial['entries']], 'revision':initial['revision']})
+            assert stale.status_code == 409
+            await asyncio.gather(
+                alice.post('/v1/room/commands', json={'action':'levels','levels':{'lead_vocals':.3}}),
+                bob.post('/v1/room/commands', json={'action':'levels','levels':{'backing_vocals':.6}}))
+            for client in (alice, bob):
+                snapshot = (await client.get('/v1/room')).json()
+                assert len(snapshot['entries']) == 3
+                assert snapshot['levels'] == dict(instrumental=1, backing_vocals=.6, lead_vocals=.3)
+            repeat = await bob.post('/v1/room/entries', json={'job_id':jobs[0]['id'], 'if_absent':False})
+            assert repeat.status_code == 201
+            assert len(repeat.json()['entries']) == 4
+            assert repeat.json()['entries'][-1]['id'] != initial['entries'][0]['id']
+    asyncio.run(check())
+
+
 def test_sung_history_keeps_performances_newest_first_across_restart_and_requeue(tmp_path, monkeypatch):
     now = [100.]
     monkeypatch.setattr('karaoke.room.time.time', lambda: now[0])
