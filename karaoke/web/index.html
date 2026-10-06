@@ -23,10 +23,15 @@
     <symbol id="i-up" viewBox="0 0 24 24"><path d="m6 14 6-6 6 6"/></symbol>
     <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 10 6 6 6-6"/></symbol>
     <symbol id="i-restart" viewBox="0 0 24 24"><path d="M4 10a8 8 0 1 1 0 5M4 4v6h6"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
   </svg>
 
   <header class="topbar">
     <a class="brand" href="/" aria-label="余音首页"><span class="brand-mark"><i></i><i></i><i></i><i></i></span><strong>余音</strong></a>
+    <form id="add-form" class="search-form" role="search">
+      <div class="search-box"><svg class="icon"><use href="#i-search"/></svg><input id="song-input" type="text" autocomplete="off" maxlength="2048" enterkeyhint="search" aria-label="搜索歌名、歌手或粘贴视频链接" placeholder="搜索歌名、歌手，或粘贴链接"><button id="submit-song" type="submit">搜索 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
+      <label class="optional-title" id="title-row" hidden>歌名 <input id="title-input" maxlength="200" placeholder="可选"></label>
+    </form>
     <nav class="navigation" aria-label="主要导航">
       <button data-view="library" class="selected">点歌台</button>
       <button data-view="player">正在播放 <span id="playing-dot" hidden></span></button>
@@ -37,11 +42,11 @@
 
   <main class="workspace">
     <section class="main-panel" id="library-view" aria-label="点歌台">
-      <div class="intro"><h1>今晚，唱点什么<span>。</span></h1></div>
-      <form id="add-form" class="search-form">
-        <div class="search-box"><svg class="icon"><use href="#i-search"/></svg><input id="song-input" type="text" autocomplete="off" maxlength="2048" enterkeyhint="search" aria-label="搜索歌名、歌手或粘贴视频链接" placeholder="搜歌名，或找一位喜欢的歌手"><button class="primary" id="submit-song" type="submit">搜索 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
-        <label class="optional-title" id="title-row" hidden>歌名 <input id="title-input" maxlength="200" placeholder="可选"></label>
-      </form>
+      <section id="home-discovery" class="home-discovery" aria-label="从演唱记录选歌" hidden>
+        <div class="section-heading"><h2>最近唱过</h2><button id="show-history" class="text-button">全部已唱 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
+        <div id="recent-songs" class="recent-songs"></div>
+        <div id="frequent-artists" class="frequent-artists"></div>
+      </section>
       <section id="video-results" class="video-results" aria-label="选歌结果" hidden>
         <div class="section-heading search-heading"><div><h2 id="search-heading">搜索结果</h2><div id="search-status" class="search-status" role="status"></div></div><button class="text-button" id="clear-search">返回曲库</button></div>
         <div class="search-controls">
@@ -57,10 +62,13 @@
         <div id="search-more" class="search-more" hidden><p id="search-more-status" role="status"></p><button id="search-more-button" class="text-button" hidden>加载更多</button></div>
       </section>
       <section id="local-library">
-      <div class="section-heading"><h2 id="library-heading">曲库</h2><span id="library-count"></span></div>
+      <div class="section-heading"><h1 id="library-heading">曲库</h1><span id="library-count"></span></div>
       <div class="filters" role="group" aria-label="筛选歌曲"><button data-filter="all" class="selected">全部</button><button data-filter="ready">已准备</button><button data-filter="Chinese">华语</button><button data-filter="English">英语</button><button data-filter="Japanese">日语</button><button data-filter="Korean">韩语</button><button data-filter="other">小语种</button></div>
-      <div class="song-grid" id="song-grid" aria-live="polite"></div>
-      <div class="search-empty" id="search-empty" hidden><h3>还没有歌曲</h3></div>
+      <div class="search-list home-list" id="library-list" role="table" aria-label="本地歌曲列表">
+        <div class="music-columns" role="row"><span class="music-rank" role="columnheader">#</span><span class="music-song" role="columnheader">歌曲</span><span class="music-credits" role="columnheader">歌手</span><span class="music-album" role="columnheader">专辑</span><span class="music-plays" role="columnheader">播放量</span><span class="music-duration" role="columnheader">时长</span><span class="music-actions" role="columnheader">点歌</span><span class="music-alternative" role="columnheader">找 MV</span></div>
+        <div class="music-list" id="song-grid" role="rowgroup"></div>
+      </div>
+      <div class="search-empty" id="search-empty" hidden><h3>还没有歌曲</h3><p>搜一首喜欢的歌，开始唱。</p></div>
       </section>
     </section>
 

@@ -140,6 +140,21 @@ export function filterSongs(songs, query) {
   return songs.filter(song => terms.every(term => normalize(`${song.title} ${song.artist}`).includes(term)));
 }
 
+export function historySuggestions(history) {
+  const recent = new Map(), artists = new Map();
+  const ordered = [...history].sort((a,b) => b.finished_at-a.finished_at);
+  for (const song of ordered) {
+    const key = queueKey(song);
+    if (key && !recent.has(key)) recent.set(key, song);
+    const name = (song.artist || '').trim();
+    if (!name) continue;
+    const artistKey = name.normalize('NFKC').toLocaleLowerCase();
+    if (!artists.has(artistKey)) artists.set(artistKey, {name, count:0, lastSung:song.finished_at});
+    artists.get(artistKey).count++;
+  }
+  return {recent:[...recent.values()], artists:[...artists.values()].sort((a,b) => b.count-a.count || b.lastSung-a.lastSung)};
+}
+
 export function searchLibrary(library, query) {
   return filterSongs(library, query)
     .sort((a,b) => Number(b.status === 'completed')-Number(a.status === 'completed'))

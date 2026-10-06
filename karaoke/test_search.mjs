@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createVideoSearch, createViewHistory, previewURL, searchLibrary, filterSongs, visibleResults, playCount, orderResults, queueKey, queuePosition} from './web/search.js';
+import {createVideoSearch, createViewHistory, previewURL, searchLibrary, filterSongs, visibleResults, playCount, orderResults, queueKey, queuePosition, historySuggestions} from './web/search.js';
 
 function setup() {
   const requests = [], snapshots = [];
@@ -41,6 +41,26 @@ test('history search matches song and artist while preserving performance order 
   assert.deepEqual(filterSongs(songs,'tk'), [songs[1]]);
   assert.deepEqual(filterSongs(songs,'missing'), []);
   assert.equal(songs[0].id,'recent');
+});
+
+test('home suggestions use the latest performance of each source and count actual artist performances', () => {
+  const songs = [
+    {id:'old',url:'https://youtu.be/abcdefghijk',title:'Old title',artist:'ＴＫ',finished_at:10},
+    {id:'cover',url:'https://www.youtube.com/watch?v=12345678901',title:'Same title',artist:'Cover artist',finished_at:30},
+    {id:'latest',url:'https://music.youtube.com/watch?v=abcdefghijk',title:'Same title',artist:'TK',finished_at:50},
+    {id:'other',url:'https://youtu.be/00000000000',title:'Other',artist:'Another artist',finished_at:40},
+    {id:'unknown',url:'https://youtu.be/11111111111',title:'Unknown',artist:'',finished_at:20},
+  ];
+  const original = structuredClone(songs);
+  const result = historySuggestions(songs);
+  assert.deepEqual(result.recent.map(s => s.id), ['latest','other','cover','unknown']);
+  assert.deepEqual(result.artists, [
+    {name:'TK',count:2,lastSung:50},
+    {name:'Another artist',count:1,lastSung:40},
+    {name:'Cover artist',count:1,lastSung:30},
+  ]);
+  assert.deepEqual(songs, original);
+  assert.deepEqual(historySuggestions([]), {recent:[],artists:[]});
 });
 
 test('search calls only YouTube and preserves every returned result in order', async () => {
