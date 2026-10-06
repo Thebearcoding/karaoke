@@ -246,9 +246,10 @@ class Pipeline:
                 language = 'English' if english else json.loads((self.output/'lyrics.json').read_text())['language']
                 directory = {'Chinese': 'mandarin', 'Japanese': 'japanese', 'English': 'english'}[language]
                 weights = sorted((ROOT/'models/alignment/sofa'/directory).rglob('*.ckpt'))
+                if name == 'align_context':
+                    weights.append(ROOT/'models/alignment/mms/model.pt')
                 if name == 'align_context' and language != 'English' and any(c.isascii() and c.isalpha()
                         for line in json.loads((self.output/'lyrics.json').read_text()).get('lines', []) for c in line):
-                    weights.append(ROOT/'models/alignment/mms/model.pt')
                     weights.extend(p for p in (ROOT/'models/alignment/sofa/english').rglob('*')
                                    if p.suffix in ('.ckpt', '.ptsd', '.yaml') or p.name == 'dict.txt')
                     code = code+[ROOT/p for p in ['align_english_sofa.py', *english_code]]
@@ -256,7 +257,6 @@ class Pipeline:
                     if g2p.is_file():
                         code = code+[g2p]
                 if name == 'align_context' and language == 'Chinese':
-                    weights.append(ROOT/'models/alignment/mms/model.pt')
                     weights.extend(p for p in (ROOT/'models/alignment/qwen3-forced-aligner-0.6b').glob('*')
                                    if p.suffix in ('.safetensors', '.json', '.txt'))
                     config['qwen_python'] = os.getenv('KARAOKE_QWEN_PYTHON', sys.executable)

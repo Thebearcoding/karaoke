@@ -293,6 +293,87 @@ class SubtitleIntegrity(unittest.TestCase):
             units, _ = protect_units(cue, candidate, 'Chinese')
             self.assertEqual(units[0]['start'], onset)
 
+    def test_first_word_gap_only_flags_candidates_including_short_lines(self):
+        from cjk_recovery import first_word_gap
+        for starts, flagged in [([1.], False), ([1., 1.4, 1.8], False),
+                                ([1., 1.9, 2.1, 2.3], True), ([1., 4.], True),
+                                ([1., 1.9, 2.8], False), ([1., 1., 2.], False),
+                                ([1., float('nan'), 3.], False)]:
+            with self.subTest(starts=starts):
+                self.assertEqual(first_word_gap(dict(units=[dict(start=t) for t in starts])) is not None, flagged)
+
+    def test_first_word_repair_requires_acoustic_agreement_and_preserves_held_notes(self):
+        from copy import deepcopy
+        from unittest.mock import patch
+        from cjk_recovery import recover_first_words
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4,
+                        minimum_relative_rms=.03, context_padding_seconds=[.35, .6, 1.])
+        original = [dict(text='甲乙丙', aligned_start=1., aligned_end=4.8, units=[
+            dict(first=i, stop=i+1, text=t, start=a, end=b, timing_source='prior_word_fallback')
+            for i, t, a, b in [(0, '甲', 1., 4.), (1, '乙', 4., 4.4), (2, '丙', 4.4, 4.8)]])]
+        for mode in ('valid', 'held_note', 'missing', 'disagree', 'silent', 'wrong_text', 'crossing'):
+            with self.subTest(mode=mode):
+                start = 1. if mode == 'held_note' else 4.1 if mode == 'crossing' else 3.5
+                candidate = dict(first=0, stop=1, text='丁' if mode == 'wrong_text' else '甲', start=start, end=4.5)
+                raw = [dict(line=1, attempts=[dict(units=[candidate]) for _ in range(3)])]
+                calls = []
+                def witness(cue, wave, *, language):
+                    calls.append(language)
+                    if mode == 'missing':
+                        raise ValueError('independent model unavailable')
+                    return [[dict(candidate, start=start+.01)], [dict(candidate, start=start+(.3 if mode == 'disagree' else .02))]]
+                class Model:
+                    def infer(self, audio, begin, units, cue):
+                        return dict(units=[candidate])
+                saved = deepcopy(original)
+                with patch('cjk_recovery.spoken_units', return_value=[]):
+                    result, reports = recover_first_words(original, np.full(44100*6, 0. if mode == 'silent' else .1),
+                        Model(), witness, protocol, 'Chinese', raw)
+                self.assertEqual(original, saved)
+                self.assertEqual(result[0]['units'][1:], original[0]['units'][1:])
+                if mode == 'valid':
+                    self.assertEqual(result[0]['units'][0]['start'], 3.5)
+                    self.assertEqual(result[0]['units'][0]['end'], 4.)
+                    self.assertTrue(reports[0]['accepted'])
+                else:
+                    self.assertEqual(result, original)
+                    self.assertFalse(reports[0]['accepted'])
+                if mode == 'held_note':
+                    self.assertFalse(calls)
+
+    def test_first_word_retry_uses_neighbor_lyrics_and_supports_kana_groups(self):
+        from copy import deepcopy
+        from unittest.mock import patch
+        from cjk_recovery import recover_first_words
+        original = [dict(text='前', units=[dict(first=0, stop=1, text='前', start=.1, end=.7)]),
+                    dict(text='あいう', aligned_start=1., aligned_end=4.8, units=[
+                        dict(first=0, stop=1, text='あ', start=1., end=4.),
+                        dict(first=1, stop=2, text='い', start=4., end=4.4),
+                        dict(first=2, stop=3, text='う', start=4.4, end=4.8)]),
+                    dict(text='後', units=[dict(first=0, stop=1, text='後', start=5., end=5.5)])]
+        raw = [dict(line=2, attempts=[dict(units=[dict(original[1]['units'][0], start=t)]) for t in [3.1, 3.4, 3.7]])]
+        calls = []
+        class Model:
+            def infer(self, audio, begin, units, cue):
+                calls.append((cue['text'], begin, len(audio)))
+                self_units = [dict(u, start=3.5, end=3.8) if u['text'] == 'あ' else dict(u) for u in cue['units']]
+                return dict(units=self_units)
+        def witness(cue, wave, *, language):
+            self.assertEqual(language, 'Japanese')
+            return [[dict(cue['units'][0], start=3.51, end=3.8)] for _ in range(2)]
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4,
+                        minimum_relative_rms=.03, context_padding_seconds=[.35, .6, 1.])
+        saved = deepcopy(original)
+        with patch('cjk_recovery.spoken_units', return_value=[]):
+            result, reports = recover_first_words(original, np.full(44100*6, .1), Model(), witness, protocol, 'Japanese', raw)
+        self.assertEqual(original, saved)
+        self.assertTrue(all(c[0] == '前 あいう 後' for c in calls))
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(result[1]['units'][0]['start'], 3.5)
+        self.assertEqual(result[1]['units'][1:], original[1]['units'][1:])
+        self.assertEqual(result[::2], original[::2])
+        self.assertEqual([a['accepted'] for a in reports[0]['attempts']], [False, True])
+
     def test_cross_model_recovery_preserves_foreign_words_and_rejects_unverified_changes(self):
         import copy
         from unittest.mock import patch
@@ -497,6 +578,12 @@ class SubtitleIntegrity(unittest.TestCase):
                 witness(cue, voice)
                 self.assertEqual([n for n, _ in observed], [48000, 48000])
                 self.assertTrue(all(mean > .2 for _, mean in observed))
+                tokens = []
+                witness.bundle.get_tokenizer = lambda: lambda words: tokens.append(words) or words
+                japanese = witness(dict(cue, text='君が笑う'), voice, language='Japanese')
+                self.assertEqual(tokens, [['*', 'kimi', 'ga', 'wara', 'u', '*']]*2)
+                self.assertEqual([(u['first'], u['stop'], u['text']) for u in japanese[0]],
+                                 [(0, 1, '君'), (1, 2, 'が'), (2, 3, '笑'), (3, 4, 'う')])
 
     def test_joint_recovery_rechecks_stale_neighbor_without_moving_foreign_words(self):
         from cjk_recovery import recover_context_groups

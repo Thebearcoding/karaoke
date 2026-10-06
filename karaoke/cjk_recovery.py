@@ -17,7 +17,7 @@ class AcousticWitness:
         self.original_audio, self.device = original_audio, device
         self.bundle = self.model = None
 
-    def __call__(self, cue, wave):
+    def __call__(self, cue, wave, *, language='Chinese'):
         import torch
         import torchaudio
         from pypinyin import lazy_pinyin
@@ -28,12 +28,28 @@ class AcousticWitness:
             self.bundle = torchaudio.pipelines.MMS_FA
             self.model = self.bundle.get_model(dl_kwargs={'model_dir': str(weights.parent),
                                                           'progress': False}).to(self.device).eval()
-        spans = list(highlight_spans(cue['text'], 'Chinese'))
-        syllables = lazy_pinyin(chinese_pronunciation_text(cue['text']), errors=lambda value: list(value))
-        if len(syllables) != len(cue['text']):
-            raise ValueError('Independent pronunciation changes character positions')
-        tokens = [re.sub("[^a-z']", '', ''.join(syllables[a:b]).lower()) for a, b in spans]
-        if not all(tokens):
+        if language == 'Japanese':
+            units = spoken_units(cue['text'], language)
+            spans = [(u['first'], u['stop']) for u in units]
+            # Use the phrase pronunciation, not isolated kanji readings. The
+            # acoustic model remains independent of SOFA's timing prediction.
+            phones = [p for u in units for p in u['phones']]
+            roman = [(phones[i+1][0] if p == 'cl' and i+1 < len(phones) else p).lower()
+                     for i, p in enumerate(phones)]
+            tokens, offset = [], 0
+            for unit in units:
+                stop = offset+len(unit['phones'])
+                tokens.append(''.join(roman[offset:stop]))
+                offset = stop
+        elif language == 'Chinese':
+            spans = list(highlight_spans(cue['text'], language))
+            syllables = lazy_pinyin(chinese_pronunciation_text(cue['text']), errors=lambda value: list(value))
+            if len(syllables) != len(cue['text']):
+                raise ValueError('Independent pronunciation changes character positions')
+            tokens = [re.sub("[^a-z']", '', ''.join(syllables[a:b]).lower()) for a, b in spans]
+        else:
+            raise ValueError('Unsupported independent pronunciation language')
+        if not tokens or not all(tokens):
             raise ValueError('Unsupported independent pronunciation')
         left, right = cue.get('audio_bounds', (0., len(wave)/44100))
         begin, end = max(left, 0., cue['aligned_start']-.6), min(right, len(wave)/44100, cue['aligned_end']+.6)
@@ -60,9 +76,10 @@ class AcousticWitness:
         return result
 
 
-def corroborated_group(group, predictions, witnesses, wave, bounds, protocol):
+def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *, spans=None):
     """Return measured boundaries only when all views independently agree."""
-    expected = [(group['first']+a, group['first']+b) for a, b in highlight_spans(group['text'], 'Chinese')]
+    expected = spans if spans is not None else [
+        (group['first']+a, group['first']+b) for a, b in highlight_spans(group['text'], 'Chinese')]
     signature = lambda units: [(u['first'], u['stop']) for u in units]
     if (len(predictions) != 3 or len(witnesses) != 2 or not expected
             or any(signature(v) != expected for v in [*predictions, *witnesses])
@@ -110,6 +127,97 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol):
     for left, right in zip(result, result[1:]):
         left['end'] = min(left['end'], right['start'])
     return result, 'agreement across phonetic contexts, original and separated audio'
+
+
+def first_word_gap(cue):
+    """Screen unusually long first highlights; duration alone proves no error."""
+    gaps = np.diff([u['start'] for u in cue.get('units', [])])
+    if not len(gaps) or not np.isfinite(gaps).all() or np.any(gaps <= 0):
+        return None
+    typical = float(np.median(gaps[1:])) if len(gaps) > 1 else None
+    if gaps[0] >= 2 or (typical and gaps[0] >= .8 and gaps[0] >= 2.5*typical):
+        return dict(seconds=float(gaps[0]), other_median_seconds=typical)
+    return None
+
+
+def recover_first_words(cues, wave, model, witness, protocol, language, raw):
+    """Recheck suspect coarse anchors instead of treating them as ground truth."""
+    result, reports = deepcopy(cues), []
+    by_line = {r['line']: r['attempts'] for r in raw}
+    for index, cue in enumerate(result):
+        gap = first_word_gap(cue)
+        if gap is None:
+            continue
+        group = cue['units'][0]
+        report = dict(line=index+1, gap=gap, previous=group['start'], accepted=False, attempts=[])
+        reports.append(report)
+        if group.get('timing_source') == 'repeated_lyric_audio':
+            report['reason'] = 'preserve existing independent repeated-audio recovery'
+            continue
+
+        def select(views):
+            return [[u for u in view if (u['first'], u['stop']) == (group['first'], group['stop'])]
+                    for view in views]
+
+        predictions = select([a['units'] for a in by_line.get(index+1, []) if 'units' in a])
+        if (len(predictions) != 3 or any(len(v) != 1 for v in predictions)
+                or np.median([v[0]['start'] for v in predictions])-group['start']
+                <= protocol['maximum_change_seconds']):
+            report['reason'] = 'no consistent later candidate; preserve possible held note'
+            continue
+        bounds = [result[index-1]['units'][-1]['end'] if index else 0., cue['units'][1]['start']]
+        try:
+            if cue['aligned_end']-cue['aligned_start'] > 30:
+                raise ValueError('First-word recovery context exceeds 30 seconds')
+            independent = select(witness(cue, wave, language=language))
+            report.update(witnesses=independent, bounds=bounds)
+
+            def check(predictions, scope):
+                replacement, reason = corroborated_group(group, predictions, independent, wave,
+                    bounds, protocol, spans=[(group['first'], group['stop'])])
+                # Recovery only delays this suspect onset. It does not shorten
+                # held notes to a fixed duration or move the following word.
+                if replacement and replacement[0]['start'] <= group['start']:
+                    replacement, reason = None, 'candidate does not correct an early onset'
+                report['attempts'].append(dict(scope=scope, predictions=predictions,
+                                               accepted=replacement is not None, reason=reason))
+                return replacement
+
+            replacement = check(predictions, 'line')
+            if replacement is None:
+                # A crop can contain the previous lyric's tail. Supply its text
+                # as context so the aligner cannot assign it to this first word.
+                text, anchors, offset = '', [], 0
+                for neighbor in range(max(0, index-1), min(len(result), index+2)):
+                    if neighbor == index:
+                        offset = len(text)
+                    line = result[neighbor]
+                    anchors.extend(dict(u, first=u['first']+len(text), stop=u['stop']+len(text))
+                                   for u in line['units'])
+                    text += line['text']+' '
+                context = dict(text=text.strip(), units=anchors,
+                               aligned_start=anchors[0]['start'], aligned_end=anchors[-1]['end'])
+                if context['aligned_end']-context['aligned_start'] > 30:
+                    raise ValueError('Neighbouring first-word context exceeds 30 seconds')
+                parsed = spoken_units(context['text'], language)
+                predictions, windows = [], []
+                for pad in protocol['context_padding_seconds']:
+                    begin = max(0., context['aligned_start']-pad)
+                    end = min(len(wave)/44100, context['aligned_end']+pad)
+                    prediction = model.infer(wave[round(begin*44100):round(end*44100)], begin, parsed, context)
+                    predictions.append([dict(u, first=u['first']-offset, stop=u['stop']-offset)
+                                        for u in prediction['units']])
+                    windows.append([begin, end])
+                report['neighbor_windows'] = windows
+                replacement = check(select(predictions), 'neighboring_lyrics')
+            if replacement:
+                cue['units'][0] = dict(group, **{k: replacement[0][k] for k in ('start', 'end', 'timing_source')})
+                report.update(accepted=True, proposed=cue['units'][0]['start'])
+            else:
+                report['reason'] = 'independent acoustic evidence did not agree'
+        except (ValueError, RuntimeError, OSError) as error:
+            report['reason'] = str(error)
+    return result, reports
 
 
 def latin_recovery_groups(cue):

@@ -74,14 +74,14 @@ cp karaoke/dependencies/english-alignment.json karaoke/research/word-onset-2026-
 | 中日文歌曲中英文词组的复核（可选） | [SOFA English tgm_en_v100](https://github.com/spicytigermeat/LabelMakr/releases/download/tgm_en_v100/tgm_en_v100.zip) | 解压到 `karaoke/models/alignment/sofa/english/`，保留 `tgm_en_v100/` 子目录及其字典、G2P 文件 |
 | Whisper 粗对齐 | stable-whisper 自动下载 | `karaoke/models/alignment/whisper/` |
 | 可选本地批量 ASR | `Systran/faster-whisper-large-v3`（完整 CTranslate2 模型） | `KARAOKE_WHISPER_MODEL` |
-| 中文合并字组的独立声学复核（可选） | [MMS_FA](https://dl.fbaipublicfiles.com/mms/torchaudio/ctc_alignment_mling_uroman/model.pt) | `karaoke/models/alignment/mms/model.pt` |
+| 合并字组及中日文提前句首的独立声学复核（可选） | [MMS_FA](https://dl.fbaipublicfiles.com/mms/torchaudio/ctc_alignment_mling_uroman/model.pt) | `karaoke/models/alignment/mms/model.pt` |
 | 中文残余字组的后备复核（可选） | [Qwen3 ForcedAligner 0.6B](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B/tree/c7cbfc2048c462b0d63a45797104fc9db3ad62b7) | `karaoke/models/alignment/qwen3-forced-aligner-0.6b/` |
 
 权重和压缩包的校验值分别记录在 [separation.json](karaoke/dependencies/separation.json)、[sofa-mandarin.json](karaoke/dependencies/sofa-mandarin.json)、[sofa-japanese.json](karaoke/dependencies/sofa-japanese.json)。`separation.json` 也保留了早期对照模型的来源；正式流程只需要 F 和 Anvuew。可用 `shasum -a 256 文件路径` 核对下载内容。上游若更新了 `main` 对应的文件，应以这里记录的 SHA-256 判断是否还是同一个模型。
 
 这些模型和上游源码遵循各自的许可。仓库只保存调用代码、配置和来源，不重新分发其权重或第三方源码。
 
-MMS_FA 的校验值见 [mms-alignment.json](karaoke/dependencies/mms-alignment.json)。它复核仍然合并的中文字组，以及中日文歌曲中纯英文句的合并词组：分别对原音和分离人声对齐，再与 SOFA 的三个上下文结果比较。运行中不自动下载该模型；缺少权重会保留原结果与原因，不能把未能拆开的字词标成通过。没有问题的字词不调用它。
+MMS_FA 的校验值见 [mms-alignment.json](karaoke/dependencies/mms-alignment.json)。它复核仍然合并的中文字组、中日文歌曲中纯英文句的合并词组，以及疑似提前过久的中日文句首：分别对原音和分离人声对齐，再与 SOFA 的三个上下文结果比较。运行中不自动下载该模型；缺少权重会保留原结果与原因，不能把未能拆开的字词标成通过。没有问题的字词不调用它。
 
 英文词组复核还需要 LabelMakr 的 G2P 源文件，放到
 `karaoke/research/word-onset-2026-09-18/labelmakr/models/g2p_model.py`。
