@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, {beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import {Player} from './web/player.js';
 
@@ -27,6 +27,8 @@ function setup(onEnd=()=>{}) {
   return new Player(video,()=>{},onEnd);
 }
 const clockOffset = () => 100-Date.now()/1000;
+// The wall clock and simulated AudioContext advance only when the test asks.
+beforeEach(t => t.mock.method(Date, 'now', () => 100_000));
 
 test('a paused video loads its first frame before playback is requested', async () => {
   const p=setup(); p.video.preload='metadata';
@@ -115,6 +117,10 @@ test('stems begin together; mode and volume changes do not restart or seek', asy
   assert.deepEqual(p.gains.map(g=>g.gain.value),[.8,0,.2]);
   p.apply({...state,levels:{instrumental:0,backing_vocals:0,lead_vocals:0}},clockOffset());
   assert.ok(p.gains.every(g=>g.gain.value===0));assert.deepEqual(p.sources,originalSources);
+  p.apply({...state,started_at:98},clockOffset());
+  assert.equal(p.video.currentTime,5);
+  assert.ok(p.sources.every(s=>s.started[1]===5));
+  p.clear();
 });
 
 test('opening pre-roll holds video and all stems on a future shared start; pause and seek cancel it', async () => {
