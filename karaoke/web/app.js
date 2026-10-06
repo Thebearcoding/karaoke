@@ -25,11 +25,17 @@ const navigation = createViewHistory(history, () => ({query:$('song-input').valu
 const current = () => state.entries.find(e => e.id === state.current_id);
 const effectiveLevels = () => ({...state.levels, ...sendingLevels, ...pendingLevels});
 
+function renderRange(input) {
+  const span = Number(input.max) - Number(input.min);
+  input.style.setProperty('--range-fill', `${span > 0 ? 100 * (Number(input.value) - Number(input.min)) / span : 0}%`);
+}
+
 function renderMixer() {
   const levels = effectiveLevels();
   player.setLevels(levels);
   document.querySelectorAll('[data-level]').forEach(input => {
     input.value = levels[input.dataset.level];
+    renderRange(input);
     const percentage = `${Math.round(Number(input.value)*100)}%`;
     $(`value-${input.dataset.level}`).textContent = percentage;
     input.setAttribute('aria-valuetext', percentage);
@@ -557,6 +563,7 @@ function updateCover() {
 
 function updateTime(position) {
   if (!seeking) $('seek').value = Math.max(0, position);
+  renderRange($('seek'));
   $('current-time').textContent = time(Math.max(0, position));
   const opening = current()?.opening_countdown;
   const overlay = $('opening-countdown');
@@ -809,9 +816,10 @@ $('storage-form').onsubmit = async event => {
   } catch (error) { toast(error.message); }
   finally { $('storage-save').disabled = false; }
 };
-$('seek').oninput = () => { seeking = true; $('current-time').textContent = time(Number($('seek').value)); };
+$('seek').oninput = () => { renderRange($('seek')); seeking = true; $('current-time').textContent = time(Number($('seek').value)); };
 $('seek').onchange = async () => { await command('seek', {position:Number($('seek').value)}); seeking = false; };
 $('volume').oninput = () => {
+  renderRange($('volume'));
   player.setVolume(Number($('volume').value));
   $('volume-value').textContent = Math.round(player.volume*100);
   try { sessionStorage.setItem('karaokeVolume', player.volume); } catch {}
@@ -823,6 +831,7 @@ try {
     $('volume').oninput();
   }
 } catch {}
+renderRange($('volume'));
 $('mute').onclick = () => { $('volume').value = player.volume ? 0 : 0.8; $('volume').oninput(); };
 async function fullscreen() {
   switchView('player');
