@@ -84,11 +84,6 @@
         <button class="screen-exit icon-button" id="exit-fullscreen" aria-label="退出全屏"><svg class="icon"><use href="#i-full"/></svg></button>
       </div>
       <div id="fullscreen-progress" class="fullscreen-progress"></div>
-      <div class="stem-mixer" role="group" aria-label="分别调节音轨音量">
-        <label class="stem-control" for="level-instrumental"><span>伴奏</span><output id="value-instrumental" for="level-instrumental">100%</output><input id="level-instrumental" data-level="instrumental" type="range" min="0" max="1" step="0.01" value="1" aria-label="伴奏音量"></label>
-        <label class="stem-control" for="level-backing_vocals"><span>伴唱</span><output id="value-backing_vocals" for="level-backing_vocals">100%</output><input id="level-backing_vocals" data-level="backing_vocals" type="range" min="0" max="1" step="0.01" value="1" aria-label="伴唱音量"></label>
-        <label class="stem-control" for="level-lead_vocals"><span>主唱</span><output id="value-lead_vocals" for="level-lead_vocals">0%</output><input id="level-lead_vocals" data-level="lead_vocals" type="range" min="0" max="1" step="0.01" value="0" aria-label="主唱音量"></label>
-      </div>
       </div>
     </section>
 
@@ -126,6 +121,11 @@
         <div class="pitch-control" role="group" aria-label="升降调"><button id="pitch-down" aria-label="降半音" title="降半音">♭</button><button id="pitch-reset" aria-label="恢复原调" title="恢复原调"><span id="pitch-value">原调</span></button><button id="pitch-up" aria-label="升半音" title="升半音">♯</button></div>
       </div>
       <div class="volume-control"><button id="mute" class="icon-button" aria-label="静音"><svg class="icon"><use href="#i-volume"/></svg></button><input id="volume" type="range" min="0" max="1" step="0.01" value="0.8" aria-label="音量"><span id="volume-value">80</span></div>
+    </div>
+    <div class="stem-mixer" id="stem-mixer" role="group" aria-label="分别调节音轨音量">
+      <label class="stem-control" for="level-instrumental"><span>伴奏</span><output id="value-instrumental" for="level-instrumental">100%</output><input id="level-instrumental" data-level="instrumental" type="range" min="0" max="1" step="0.01" value="1" aria-label="伴奏音量"></label>
+      <label class="stem-control" for="level-backing_vocals"><span>伴唱</span><output id="value-backing_vocals" for="level-backing_vocals">100%</output><input id="level-backing_vocals" data-level="backing_vocals" type="range" min="0" max="1" step="0.01" value="1" aria-label="伴唱音量"></label>
+      <label class="stem-control" for="level-lead_vocals"><span>主唱</span><output id="value-lead_vocals" for="level-lead_vocals">0%</output><input id="level-lead_vocals" data-level="lead_vocals" type="range" min="0" max="1" step="0.01" value="0" aria-label="主唱音量"></label>
     </div>
   </footer>
   <dialog id="video-preview" class="video-preview" aria-labelledby="preview-title">

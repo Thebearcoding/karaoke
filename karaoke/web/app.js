@@ -835,11 +835,13 @@ $('exit-fullscreen').onclick = fullscreen;
 const seekRow = $('seek').closest('.seek-row');
 const seekHome = seekRow.parentElement;
 const transportTools = $('transport-tools'), toolsHome = transportTools.parentElement;
+const stemMixer = $('stem-mixer'), mixerHome = stemMixer.parentElement;
 document.addEventListener('fullscreenchange', () => {
   const fullscreen = document.fullscreenElement === $('player-stage');
   const target = fullscreen ? $('fullscreen-progress') : seekHome;
   target.append(seekRow);
   (fullscreen ? $('screen-tools') : toolsHome).prepend(transportTools);
+  (fullscreen ? $('player-stage') : mixerHome).append(stemMixer);
 });
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') document.querySelectorAll('.entry-menu[open]').forEach(menu => { menu.open = false; menu.querySelector('summary').focus(); });
@@ -850,7 +852,9 @@ document.addEventListener('keydown', event => {
   if (event.key.toLowerCase() === 'f') fullscreen();
 });
 window.addEventListener('resize', () => switchView(view));
-new ResizeObserver(([entry]) => document.documentElement.style.setProperty('--header-height', `${entry.target.getBoundingClientRect().height}px`)).observe(document.querySelector('.topbar'));
+for (const [selector, variable] of [['.topbar', '--header-height'], ['.transport', '--transport-height']]) {
+  new ResizeObserver(([entry]) => document.documentElement.style.setProperty(variable, `${entry.target.getBoundingClientRect().height}px`)).observe(document.querySelector(selector));
+}
 history.scrollRestoration = 'manual';
 window.addEventListener('popstate', event => navigation.restore(event.state));
 window.addEventListener('pagehide', () => navigation.save());
