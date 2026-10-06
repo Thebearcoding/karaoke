@@ -25,7 +25,7 @@ API 的依赖文件只安装服务依赖。新检出请按[安装说明](../SETU
 | 接口 | 用途 |
 |---|---|
 | `GET /v1/library` | 列出已知歌曲，实际文件完整时才标记为已准备 |
-| `GET /v1/room` | 当前歌曲、播放位置和已点顺序 |
+| `GET /v1/room` | 当前歌曲、播放位置、待唱 `entries` 和倒序演唱记录 `history` |
 | `POST /v1/room/entries` | 传入 `{ "url": "..." }` 点新歌，或 `{ "job_id": "..." }` 复用已准备歌曲 |
 | `POST /v1/room/commands` | `play`、`pause`、`seek`、`next`、`select`、`remove`、`reorder`、`mix`、`ready`、`retry` |
 | `GET /v1/room/events` | 推送 `event: room`；空闲时只发连接保活注释 |
@@ -33,6 +33,8 @@ API 的依赖文件只安装服务依赖。新检出请按[安装说明](../SETU
 | `POST /v1/storage` | `{ "limit_gib": 10 }` 修改并持久化上限，返回新的房间快照 |
 
 `pause`、`seek`、`next`、`ready` 必须带 `entry_id`，防止旧播放器事件影响新歌曲。`reorder` 传入完整的 `order` ID 数组，可带 `revision` 拒绝过期操作；当前歌曲保持首位。`mix` 接受 `instrumental`（纯伴奏）、`karaoke`（伴奏＋伴唱）、`original`（三轨一起播放）。
+
+`history` 与房间一起持久化并通过 SSE 推送，最新唱过的排在前面。每次演唱保存独立的条目 ID、任务 ID、来源 URL、歌名、歌手、语言、时长、封面和 Unix 秒时间 `played_at` / `finished_at`。开始播放后切歌、结束或移除当前歌曲才归档；加载、开场倒计时或准备中直接跳过不归档。`select` 会将已经唱过的当前歌曲归档，尚未开唱的旧当前歌曲仍保留在待唱队列。历史不参与预处理排序、队列容量或缓存保护；再点仍通过标准 `POST /v1/room/entries`，创建新的队列条目并复用可用任务。
 
 `POST /v1/room/entries` 也接受 `force: true`，与 URL 一起使用时完整重做该视频，用于最终版本的整曲回归；普通点歌和失败重试默认复用缓存。此参数不改变房间队列容量。
 

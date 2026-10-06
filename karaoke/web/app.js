@@ -1,5 +1,5 @@
 import { Player } from './player.js';
-import { createVideoSearch, createViewHistory, previewURL, searchLibrary, playCount, orderResults } from './search.js';
+import { createVideoSearch, createViewHistory, previewURL, searchLibrary, filterSongs, playCount, orderResults } from './search.js';
 
 const $ = id => document.getElementById(id);
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -9,7 +9,8 @@ const remote = new URLSearchParams(location.search).get('remote') === '1';
 const stages = {download:'下载音频', download_video:'下载视频', verify_video:'校验视频', decode_audio:'提取音频', decode_native:'准备音频母版', separate_music:'分离伴奏', separate_lead:'分离主唱', package_two_stems:'整理音轨', package_three_stems:'整理音轨', resample_vocals:'整理人声', transcribe:'识别歌词', prepare_lyrics:'整理歌词', align_words:'对齐歌词', align_phonemes:'对齐起唱时间', align_repeats:'检查重复段落', align_context:'校准字幕', render:'生成字幕画面', mux_video:'合成字幕 MV'};
 let state = {entries:[], current_id:null, playing:false, position:0, started_at:null, mix:'karaoke', levels:{instrumental:1,backing_vocals:1,lead_vocals:0}, revision:0};
 let library = [], filter = 'all', view = 'library', clockOffset = 0, readySent = null, loading = false, loadError = '', seeking = false;
-let toastTimer, librarySignature = '', queueSignature = '';
+let toastTimer, librarySignature = '', queueSignature = '', historySignature = '';
+let queueTab = 'upcoming';
 let pendingLevels = {}, sendingLevels = {}, levelTimer = null, levelsBusy = false;
 let levelRequest = Promise.resolve();
 let pitchRequest = Promise.resolve();
@@ -18,7 +19,8 @@ let videoSource = 'songs', searchOrder = 'relevance', searchSnapshot = null, cat
 const addingVideos = new Set();
 const videoSearch = createVideoSearch(renderVideoResults, fetch, query => searchLibrary(library, query));
 const navigation = createViewHistory(history, () => ({query:$('song-input').value, title:$('title-input').value,
-  filter, view, videoSource, searchOrder, catalogueSelection, search:videoSearch.snapshot(), scroll:scrollY}), restoreView);
+  filter, view, queueTab, historyQuery:$('history-query').value,
+  videoSource, searchOrder, catalogueSelection, search:videoSearch.snapshot(), scroll:scrollY}), restoreView);
 const current = () => state.entries.find(e => e.id === state.current_id);
 const effectiveLevels = () => ({...state.levels, ...sendingLevels, ...pendingLevels});
 
@@ -102,6 +104,9 @@ function restoreView(saved) {
   filter = saved.filter || 'all';
   videoSource = saved.videoSource || 'songs';
   searchOrder = saved.searchOrder || 'relevance';
+  queueTab = saved.queueTab === 'history' ? 'history' : 'upcoming';
+  $('history-query').value = saved.historyQuery || '';
+  renderQueue();
   catalogueSelection = saved.catalogueSelection || null;
   searchQuery = saved.search ? saved.query.trim() : '';
   document.querySelectorAll('[data-filter]').forEach(button => button.classList.toggle('selected', button.dataset.filter === filter));
@@ -422,6 +427,14 @@ function updatePreparationSlots(container, songs) {
 }
 
 function renderQueue() {
+  document.querySelectorAll('[data-queue-tab]').forEach(button => {
+    const selected = button.dataset.queueTab === queueTab;
+    button.setAttribute('aria-selected', String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  });
+  $('upcoming-panel').hidden = queueTab !== 'upcoming';
+  $('history-panel').hidden = queueTab !== 'history';
+  renderHistory();
   const signature = JSON.stringify([state.entries.map(({stage_progress, active_stages, ...entry}) => entry), state.current_id, state.playing]);
   $('queue-count').textContent = String(state.entries.length).padStart(2,'0');
   $('nav-count').textContent = state.entries.length;
@@ -442,6 +455,26 @@ function renderQueue() {
       ${entry.poster ? `<img class="entry-art" src="${escape(entry.poster)}" alt="">` : `<span class="entry-art">♪</span>`}
       <div class="entry-info"><h3 class="entry-title">${escape(entry.title)}</h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || (entry.url.includes('bili') ? 'Bilibili 视频' : 'YouTube 视频'))}</p>${preparationElapsedHTML(entry)}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : `<p class="entry-status ${preparing ? 'preparing' : entry.status === 'failed' ? 'failed' : ''}">${escape(statusText(entry))}</p>`}</div>
       <div class="entry-tools">${entry.status === 'failed' ? `<button data-action="retry">重试</button>` : ''}${!active ? `<button data-action="select">${icon('play')}现在唱</button><button data-action="up" aria-label="上移：${escape(entry.title)}" ${i <= (state.current_id ? 1 : 0) ? 'disabled' : ''}>${icon('up')}</button><button data-action="down" aria-label="下移：${escape(entry.title)}" ${i === state.entries.length-1 ? 'disabled' : ''}>${icon('down')}</button>` : ''}<button data-action="remove" aria-label="移除：${escape(entry.title)}">${icon('trash')}</button></div></article>`;
+  }).join('');
+}
+
+function renderHistory() {
+  const history = state.history || [];
+  const songs = filterSongs(history, $('history-query').value);
+  $('history-count').textContent = String(history.length).padStart(2,'0');
+  $('history-empty').hidden = songs.length > 0;
+  $('history-empty').querySelector('h3').textContent = history.length ? '没有找到匹配的已唱歌曲' : '还没有唱过的歌';
+  const posters = new Map(library.map(song => [song.url, song.poster]));
+  const signature = JSON.stringify(songs.map(song => [song, posters.get(song.url)]));
+  if (signature === historySignature) return;
+  historySignature = signature;
+  const date = new Intl.DateTimeFormat('zh-CN', {month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit'});
+  $('history-list').innerHTML = songs.map((song, index) => {
+    const poster = posters.get(song.url);
+    return `<article class="queue-entry history-entry" data-history-entry="${escape(song.id)}"><span class="entry-number">${String(index+1).padStart(2,'0')}</span>
+      ${poster ? `<img class="entry-art" src="${escape(poster)}" alt="">` : `<span class="entry-art">♪</span>`}
+      <div class="entry-info"><h3 class="entry-title">${escape(song.title)}</h3><p class="entry-artist">${escape(song.artist)}</p></div>
+      <div class="entry-tools"><time datetime="${new Date(song.finished_at*1000).toISOString()}">${escape(date.format(song.finished_at*1000))}</time><button data-repeat-song ${song.url ? '' : 'disabled'} aria-label="再点：${escape(song.title)}">${icon('plus')}再点</button></div></article>`;
   }).join('');
 }
 
@@ -670,6 +703,25 @@ $('queue-list').onclick = async event => {
     await command(action, {entry_id:id});
     if (action === 'select') switchView('player');
   }
+};
+for (const button of document.querySelectorAll('[data-queue-tab]')) {
+  button.onclick = () => { queueTab = button.dataset.queueTab; renderQueue(); navigation.save(); };
+  button.onkeydown = event => {
+    if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 'upcoming' : event.key === 'End' ? 'history' : queueTab === 'upcoming' ? 'history' : 'upcoming';
+    const tab = $(`${next}-tab`);
+    tab.click(); tab.focus();
+  };
+}
+$('history-query').oninput = () => { renderHistory(); navigation.save(); };
+$('history-list').onclick = async event => {
+  const button = event.target.closest('[data-repeat-song]');
+  if (!button || button.disabled) return;
+  const song = state.history.find(song => song.id === button.closest('[data-history-entry]').dataset.historyEntry);
+  button.disabled = true;
+  try { await addVideo(song); }
+  finally { button.disabled = false; }
 };
 $('play-toggle').onclick = togglePlay;
 for (const [id, step] of [['pitch-down', -1], ['pitch-up', 1], ['pitch-reset', null]]) {

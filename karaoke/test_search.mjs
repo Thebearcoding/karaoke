@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createVideoSearch, createViewHistory, previewURL, searchLibrary, visibleResults, playCount, orderResults} from './web/search.js';
+import {createVideoSearch, createViewHistory, previewURL, searchLibrary, filterSongs, visibleResults, playCount, orderResults} from './web/search.js';
 
 function setup() {
   const requests = [], snapshots = [];
@@ -9,6 +9,19 @@ function setup() {
   return {search, requests, snapshots};
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
+
+test('history search matches song and artist while preserving performance order and repeat performances', () => {
+  const songs = [
+    {id:'recent',title:'Ｌｅｍｏｎ',artist:'米津玄師'},
+    {id:'other',title:'Unravel',artist:'TK'},
+    {id:'earlier',title:'Lemon',artist:'米津玄師',status:'completed'},
+  ];
+  assert.deepEqual(filterSongs(songs,' lemon 米津 '), [songs[0],songs[2]]);
+  assert.deepEqual(filterSongs(songs,''), songs);
+  assert.deepEqual(filterSongs(songs,'tk'), [songs[1]]);
+  assert.deepEqual(filterSongs(songs,'missing'), []);
+  assert.equal(songs[0].id,'recent');
+});
 
 test('search calls only YouTube and preserves every returned result in order', async () => {
   const {search, requests, snapshots} = setup();

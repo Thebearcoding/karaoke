@@ -85,9 +85,20 @@
     </section>
 
     <aside class="queue-panel" id="queue-panel" aria-label="已点歌单">
-      <div class="queue-header"><h2>已点 <span id="queue-count">00</span></h2><span class="queue-badge" id="queue-badge" hidden></span></div>
-      <div id="queue-list" class="queue-list"></div>
-      <div id="queue-empty" class="queue-empty"><div class="queue-empty-lines"><i></i><i></i><i></i></div><h3>还没点歌</h3></div>
+      <div class="queue-header"><div class="queue-tabs" role="tablist" aria-label="待唱与已唱">
+        <button id="upcoming-tab" data-queue-tab="upcoming" role="tab" aria-selected="true" aria-controls="upcoming-panel">待唱 <span id="queue-count">00</span></button>
+        <button id="history-tab" data-queue-tab="history" role="tab" aria-selected="false" aria-controls="history-panel" tabindex="-1">已唱 <span id="history-count">00</span></button>
+      </div></div>
+      <section id="upcoming-panel" class="queue-content" role="tabpanel" aria-labelledby="upcoming-tab">
+        <span class="queue-badge" id="queue-badge" hidden></span>
+        <div id="queue-list" class="queue-list"></div>
+        <div id="queue-empty" class="queue-empty"><div class="queue-empty-lines"><i></i><i></i><i></i></div><h3>还没点歌</h3></div>
+      </section>
+      <section id="history-panel" class="queue-content" role="tabpanel" aria-labelledby="history-tab" hidden>
+        <label class="history-search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="history-query" type="search" placeholder="搜索已唱的歌名或歌手" aria-label="搜索已唱的歌名或歌手" autocomplete="off"></label>
+        <div id="history-list" class="queue-list"></div>
+        <div id="history-empty" class="queue-empty"><div class="queue-empty-lines"><i></i><i></i><i></i></div><h3>还没有唱过的歌</h3></div>
+      </section>
       <div class="queue-foot"><a id="remote-link" href="/?remote=1" target="_blank" rel="noopener">遥控点歌 ↗</a></div>
       <details class="storage-panel">
         <summary><span>本地缓存</span><span id="storage-usage">正在读取</span></summary>

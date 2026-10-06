@@ -4,11 +4,12 @@ import sys
 import time
 
 from fastapi.testclient import TestClient
+from fastapi import HTTPException
 import pytest
 
 from karaoke.api import Store, Worker, create_app
 from karaoke.job_schema import JobRequest
-from karaoke.room import AddSong, RoomCommand, Updates
+from karaoke.room import AddSong, Room, RoomCommand, Updates
 from karaoke.test_api import URL, cache_fixture, fake_worker, finished
 
 
@@ -125,6 +126,94 @@ def test_playlist_duplicate_song_order_and_stale_end_event(tmp_path):
         assert stale.status_code == 409
         assert client.get('/v1/room').json()['current_id'] == ids[2]
         assert client.post('/v1/room/commands', json={'action':'reorder','order':[ids[2],ids[2]]}).status_code == 422
+
+
+def test_sung_history_keeps_performances_newest_first_across_restart_and_requeue(tmp_path, monkeypatch):
+    now = [100.]
+    monkeypatch.setattr('karaoke.room.time.time', lambda: now[0])
+    app = create_app(tmp_path, version='test')
+    room, store = app.state.room, app.state.store
+    job = ready_job(store)
+    first = room.add(AddSong(job_id=job['id']))['entries'][0]
+    second = room.add(AddSong(job_id=job['id']))['entries'][1]
+    room.command(RoomCommand(action='play'))
+    room.command(RoomCommand(action='ready', entry_id=first['id']))
+    now[0] = 105.
+    room.command(RoomCommand(action='next', entry_id=first['id']))
+    room.command(RoomCommand(action='ready', entry_id=second['id']))
+    now[0] = 110.
+    room.pause_on_shutdown()
+    now[0] = 115.
+    done = room.command(RoomCommand(action='next', entry_id=second['id']))
+
+    assert done['entries'] == [] and done['current_id'] is None
+    assert [entry['id'] for entry in done['history']] == [second['id'], first['id']]
+    assert [entry['played_at'] for entry in done['history']] == [105., 100.]
+    assert [entry['finished_at'] for entry in done['history']] == [115., 105.]
+    assert all(entry['title'] == 'Test song' and entry['artist'] == 'Singer' and entry['url'] == URL
+               for entry in done['history'])
+    assert job['id'] not in store.cache.protected(store.list())
+    with pytest.raises(HTTPException) as stale:
+        room.command(RoomCommand(action='next', entry_id=second['id']))
+    assert stale.value.status_code == 409
+
+    restored = Room(store, app.state.worker, 'test', Updates())
+    assert restored.snapshot()['history'] == done['history']
+    again = restored.add(AddSong(job_id=job['id']))
+    assert again['history'] == done['history']
+    assert again['entries'][0]['id'] not in (first['id'], second['id'])
+    assert again['entries'][0]['job_id'] == job['id'] and len(store.list()) == 1
+    restored.command(RoomCommand(action='remove', entry_id=again['entries'][0]['id']))
+    store.update(job['id'], status='evicted', result=None, song_info={})
+    assert restored.snapshot()['history'] == done['history']
+
+
+@pytest.mark.parametrize('mode', ['loading', 'unprepared', 'opening', 'paused_opening', 'seek_without_play'])
+def test_unplayed_entries_do_not_enter_sung_history(tmp_path, monkeypatch, mode):
+    now = [100.]
+    monkeypatch.setattr('karaoke.room.time.time', lambda: now[0])
+    app = create_app(tmp_path, version='test')
+    room, store = app.state.room, app.state.store
+    job = ready_job(store)
+    job['result']['quality'] = dict(opening_countdown=dict(start=-4.))
+    store.update(job['id'], result=job['result'], status='queued' if mode == 'unprepared' else 'completed')
+    entry = room.add(AddSong(job_id=job['id']))['entries'][0]
+    room.command(RoomCommand(action='play'))
+    if mode in ('opening', 'paused_opening', 'unprepared'):
+        room.command(RoomCommand(action='ready', entry_id=entry['id']))
+    now[0] = 101.
+    if mode == 'paused_opening':
+        room.command(RoomCommand(action='pause', entry_id=entry['id']))
+        now[0] = 110.
+    if mode == 'seek_without_play':
+        room.command(RoomCommand(action='seek', entry_id=entry['id'], position=5.))
+    done = room.command(RoomCommand(action='next', entry_id=entry['id']))
+    assert done['entries'] == [] and done['history'] == []
+
+
+def test_select_archives_sung_current_and_keeps_unplayed_entries_in_queue(tmp_path, monkeypatch):
+    now = [100.]
+    monkeypatch.setattr('karaoke.room.time.time', lambda: now[0])
+    app = create_app(tmp_path, version='test')
+    room, store = app.state.room, app.state.store
+    job = ready_job(store)
+    for _ in range(3):
+        room.add(AddSong(job_id=job['id']))
+    first, second, third = room.read()['entries']
+    room.command(RoomCommand(action='play'))
+    room.command(RoomCommand(action='ready', entry_id=first['id']))
+    now[0] = 101.
+    selected = room.command(RoomCommand(action='select', entry_id=second['id']))
+    assert [e['id'] for e in selected['entries']] == [second['id'], third['id']]
+    assert [e['id'] for e in selected['history']] == [first['id']]
+    selected = room.command(RoomCommand(action='select', entry_id=third['id']))
+    assert [e['id'] for e in selected['entries']] == [third['id'], second['id']]
+    assert [e['id'] for e in selected['history']] == [first['id']]
+    room.command(RoomCommand(action='ready', entry_id=third['id']))
+    now[0] = 102.
+    removed = room.command(RoomCommand(action='remove', entry_id=third['id']))
+    assert [e['id'] for e in removed['history']] == [third['id'], first['id']]
+    assert removed['current_id'] == second['id']
 
 
 def test_soak_adds_all_cases_to_room_and_only_removes_finished_owned_entries(tmp_path):

@@ -134,10 +134,14 @@ export function createViewHistory(history, capture, apply) {
   return {save, push, restore, back};
 }
 
-export function searchLibrary(library, query) {
+export function filterSongs(songs, query) {
   const normalize = text => String(text || '').normalize('NFKC').toLocaleLowerCase();
   const terms = normalize(query).trim().split(/\s+/);
-  return library.filter(song => terms.every(term => normalize(`${song.title} ${song.artist}`).includes(term)))
+  return songs.filter(song => terms.every(term => normalize(`${song.title} ${song.artist}`).includes(term)));
+}
+
+export function searchLibrary(library, query) {
+  return filterSongs(library, query)
     .sort((a,b) => Number(b.status === 'completed')-Number(a.status === 'completed'))
     .map(song => ({...song, provider:'local', thumbnail:song.poster, uploader:song.artist}));
 }

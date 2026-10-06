@@ -79,7 +79,7 @@ class Room:
         self.store, self.worker, self.version, self.updates = store, worker, version, updates
         with store.connect() as db:
             db.execute('CREATE TABLE IF NOT EXISTS room (id INTEGER PRIMARY KEY, state TEXT NOT NULL)')
-            initial = dict(entries=[], current_id=None, playing=False, position=0,
+            initial = dict(entries=[], history=[], current_id=None, playing=False, position=0,
                            started_at=None, mix='karaoke', revision=0)
             db.execute('INSERT OR IGNORE INTO room VALUES (1, ?)', (json.dumps(initial),))
 
@@ -88,6 +88,7 @@ class Room:
             state = json.loads(db.execute('SELECT state FROM room WHERE id=1').fetchone()[0])
         state.setdefault('levels', PRESETS.get(state['mix'], PRESETS['karaoke']).copy())
         state.setdefault('pitch_semitones', 0)
+        state.setdefault('history', [])
         return state
 
     def save(self, state):
@@ -109,8 +110,27 @@ class Room:
     def pause_on_shutdown(self):
         state = self.read()
         if state['playing']:
+            self.mark_played(state)
             state.update(position=self.position(state), playing=False, started_at=None)
             self.save(state)
+
+    @staticmethod
+    def mark_played(state):
+        # Loading and the opening count-in are not an actual performance.
+        if state['playing'] and state['started_at'] is not None and time.time() > state['started_at']:
+            current = next((e for e in state['entries'] if e['id'] == state['current_id']), None)
+            if current:
+                current.setdefault('played_at', state['started_at'])
+
+    def remember_song(self, state, entry):
+        if not entry or 'played_at' not in entry:
+            return False
+        song = self.describe(entry)
+        state['history'].insert(0, dict(
+            {key: song.get(key) for key in ('id', 'job_id', 'url', 'title', 'artist', 'language',
+                                            'duration', 'poster', 'played_at')},
+            finished_at=time.time()))
+        return True
 
     def describe(self, entry, job=None):
         if job is None:
@@ -221,6 +241,7 @@ class Room:
             raise HTTPException(409, '已经切换到另一首歌')
         if action in ('select', 'remove', 'retry') and entry is None:
             raise HTTPException(404, '歌曲已从歌单移除')
+        self.mark_played(state)
         if action == 'play':
             if current is None and state['entries']:
                 state['current_id'] = state['entries'][0]['id']
@@ -252,14 +273,19 @@ class Room:
                     state['started_at'] = time.time()+delay
         elif action in ('next', 'select'):
             if action == 'next':
+                self.remember_song(state, current)
                 state['entries'] = [e for e in state['entries'] if e['id'] != state['current_id']]
                 entry = state['entries'][0] if state['entries'] else None
             else:
+                if current != entry and self.remember_song(state, current):
+                    state['entries'].remove(current)
                 state['entries'].remove(entry)
                 state['entries'].insert(0, entry)
             state.update(current_id=entry['id'] if entry else None, position=0,
                          started_at=None, playing=bool(entry))
         elif action == 'remove':
+            if entry == current:
+                self.remember_song(state, current)
             state['entries'].remove(entry)
             if entry == current:
                 following = state['entries'][0] if state['entries'] else None
