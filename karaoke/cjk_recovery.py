@@ -140,6 +140,92 @@ def first_word_gap(cue):
     return None
 
 
+def relocalize_fallback_lines(cues, wave, model, witness, protocol, language):
+    """Replace a mislocated coarse prefix, without claiming word-level accuracy."""
+    result, reports = deepcopy(cues), []
+    for index, cue in enumerate(result):
+        if (not cue.get('units') or language not in ('Chinese', 'Japanese')
+                or re.search(r'[a-zA-Z0-9]', cue['text'])
+                or not all(u.get('timing_source') == 'prior_word_fallback' for u in cue['units'])):
+            continue
+        report = dict(line=index+1, accepted=False)
+        reports.append(report)
+        try:
+            if cue['aligned_end']-cue['aligned_start'] > 30:
+                raise ValueError('Coarse relocation context exceeds 30 seconds')
+            observed = witness(cue, wave, language=language)
+            report['witnesses'] = observed
+            parsed = spoken_units(cue['text'], language)
+            signature = lambda units: [(u['first'], u['stop'], u['text']) for u in units]
+            if not parsed or len(observed) != 2 or any(signature(v) != signature(parsed) for v in observed):
+                raise ValueError('Incomplete coarse localization evidence')
+            bounds = [result[index-1]['units'][-1]['end'] if index else 0.,
+                      result[index+1]['units'][0]['start'] if index+1 < len(result) else len(wave)/44100]
+            if any(not np.isfinite([u['start'], u['end']]).all()
+                   or not bounds[0] <= u['start'] < bounds[1] or not u['start'] < u['end'] <= len(wave)/44100
+                   for view in observed for u in view):
+                raise ValueError('Coarse localization crosses neighbouring lyrics')
+            start = min(v[0]['start'] for v in observed)
+            if start-cue['units'][0]['start'] <= protocol['maximum_change_seconds']:
+                report['reason'] = 'no independently localized later phrase'
+                continue
+            # These are search bounds, not replacement timestamps. CTC has no
+            # old word priors, so it can disprove an onset in the preceding gap.
+            end = max(v[-1]['end'] for v in observed)
+            context = dict(cue, aligned_start=start, aligned_end=end)
+            predictions, windows = [], []
+            for pad in protocol['context_padding_seconds']:
+                begin, stop = max(bounds[0], start-pad), min(bounds[1], end+pad)
+                prediction = model.infer(wave[round(begin*44100):round(stop*44100)], begin,
+                                         parsed, context, decoder='ctc')
+                predictions.append(prediction['units'])
+                windows.append([begin, stop])
+            report.update(predictions=predictions, windows=windows)
+            anchor, reason = corroborated_group(parsed[0], [v[:1] for v in predictions],
+                [v[:1] for v in observed], wave, bounds, protocol,
+                spans=[(parsed[0]['first'], parsed[0]['stop'])])
+            if anchor is None:
+                raise ValueError(reason)
+
+            # Grow only until the new prefix fits before the next old word.
+            # Both original and vocal audio must support every coarse onset.
+            for old_stop in range(1, len(cue['units'])+1):
+                stop = cue['units'][old_stop-1]['stop']
+                prefix = [dict(u, timing_source='prior_word_fallback',
+                               localization_source='mms_original_and_vocals')
+                          for u in observed[0] if u['stop'] <= stop]
+                if not prefix or prefix[-1]['stop'] != stop:
+                    continue
+                limit = cue['units'][old_stop]['start'] if old_stop < len(cue['units']) else bounds[1]
+                if prefix[-1]['start'] >= limit-.015:
+                    continue
+                if any(abs(a['start']-b['start']) > .1 for a, b in zip(observed[0][:len(prefix)], observed[1][:len(prefix)])):
+                    raise ValueError('Original and vocal coarse onsets disagree')
+                prefix[0] = dict(anchor[0], timing_source='cross_model_ctc')
+                floor = max(1e-5, protocol['minimum_relative_rms']*float(np.sqrt(np.mean(wave**2))))
+                for left, right in zip(prefix, [*prefix[1:], dict(start=limit)]):
+                    left['end'] = min(left['end'], right['start'])
+                    if left['end'] <= left['start'] or right['start']-left['start'] < .015:
+                        raise ValueError('Coarse relocation has invalid word order')
+                    piece = wave[round(left['start']*44100):round(min(left['end'], left['start']+.035)*44100)]
+                    if not len(piece) or not np.isfinite(piece).all() or float(np.sqrt(np.mean(piece**2))) <= floor:
+                        raise ValueError('Coarse relocation lacks audible vocal support')
+                candidate = dict(cue, units=prefix+cue['units'][old_stop:])
+                if highlight_coverage_errors([candidate], language):
+                    raise ValueError('Coarse relocation changed lyric coverage')
+                cue['units'] = candidate['units']
+                cue.update(start=cue['units'][0]['start'], aligned_start=cue['units'][0]['start'])
+                report.update(accepted=True, replaced_old_units=old_stop,
+                              relocated_units=len(prefix), verified_onset=anchor[0]['start'],
+                              word_accuracy=None)
+                break
+            if not report['accepted']:
+                raise ValueError('No bounded coarse prefix fits the existing lyrics')
+        except (ValueError, RuntimeError, OSError) as error:
+            report['reason'] = str(error)
+    return result, reports
+
+
 def recover_first_words(cues, wave, model, witness, protocol, language, raw):
     """Recheck suspect coarse anchors instead of treating them as ground truth."""
     result, reports = deepcopy(cues), []

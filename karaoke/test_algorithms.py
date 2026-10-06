@@ -293,6 +293,56 @@ class SubtitleIntegrity(unittest.TestCase):
             units, _ = protect_units(cue, candidate, 'Chinese')
             self.assertEqual(units[0]['start'], onset)
 
+    def test_failed_phrase_relocalizes_only_the_corroborated_coarse_prefix(self):
+        from copy import deepcopy
+        from unittest.mock import patch
+        from cjk_recovery import relocalize_fallback_lines
+        text = 'あいうえお'
+        parsed = [dict(first=i, stop=i+1, text=c, phones=['a']) for i, c in enumerate(text)]
+        old = [dict(u, start=a, end=b, timing_source='prior_word_fallback')
+               for u, a, b in zip(parsed, [1., 1.2, 1.4, 4.5, 5.], [1.2, 1.4, 2., 4.9, 5.5])]
+        original = [dict(text=text, start=1., end=5.5, aligned_start=1., aligned_end=5.5, units=old)]
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4,
+                        minimum_relative_rms=.03, context_padding_seconds=[.35, .6, 1.])
+        for mode in ('valid', 'later_disagreement', 'already_located', 'one_view', 'text_mismatch',
+                     'prefix_disagreement', 'window_disagreement', 'silent', 'silent_word', 'invalid', 'empty'):
+            with self.subTest(mode=mode):
+                times = [1., 1.2, 1.4, 4.5, 5.] if mode == 'already_located' else [3., 3.2, 3.6, 4.5, 5.]
+                measured = [dict(u, start=t, end=t+.15) for u, t in zip(parsed, times)]
+                views = [deepcopy(measured), deepcopy(measured)]
+                if mode == 'one_view': views.pop()
+                if mode == 'text_mismatch': views[1][0]['text'] = 'ん'
+                if mode == 'prefix_disagreement': views[1][1]['start'] += .11
+                if mode == 'later_disagreement': views[1][-1]['start'] -= .2
+                if mode == 'invalid': views[1][0]['start'] = float('nan')
+                if mode == 'empty': views = [[], []]
+                calls = []
+                class Model:
+                    def infer(self, audio, begin, units, cue, *, decoder):
+                        calls.append((begin, len(audio), decoder))
+                        offset = .2 if mode == 'window_disagreement' and len(calls) == 1 else 0.
+                        return dict(units=[dict(u, start=u['start']+offset, end=u['end']+offset,
+                            timing_evidence='ctc_event', emission_end=u['start']+offset+.04) for u in measured])
+                wave = np.full(44100*6, 0. if mode == 'silent' else .1)
+                if mode == 'silent_word': wave[round(3.2*44100):round(3.3*44100)] = 0.
+                saved = deepcopy(original)
+                with patch('cjk_recovery.spoken_units', return_value=[] if mode == 'empty' else parsed):
+                    result, reports = relocalize_fallback_lines(original, wave, Model(),
+                        lambda *args, **kwargs: views, protocol, 'Japanese')
+                self.assertEqual(original, saved)
+                if mode in ('valid', 'later_disagreement'):
+                    self.assertTrue(reports[0]['accepted'])
+                    self.assertEqual(reports[0]['replaced_old_units'], 3)
+                    self.assertEqual(result[0]['units'][3:], old[3:])
+                    self.assertEqual([u['start'] for u in result[0]['units'][:3]], [3., 3.2, 3.6])
+                    self.assertEqual(result[0]['units'][0]['timing_source'], 'cross_model_ctc')
+                    self.assertEqual(result[0]['units'][1]['timing_source'], 'prior_word_fallback')
+                    self.assertEqual(len(set(calls)), 3)
+                else:
+                    self.assertFalse(reports[0]['accepted'])
+                    self.assertEqual(result, original)
+                if mode == 'already_located': self.assertFalse(calls)
+
     def test_first_word_gap_only_flags_candidates_including_short_lines(self):
         from cjk_recovery import first_word_gap
         for starts, flagged in [([1.], False), ([1., 1.4, 1.8], False),
