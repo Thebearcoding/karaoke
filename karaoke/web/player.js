@@ -170,9 +170,15 @@ export class Player {
     this.video.load();
   }
 
+  matches(entry) {
+    return Boolean(entry && this.key === entry.id && this.entry?.job_id === entry.job_id &&
+      ['mv', 'instrumental', 'backing_vocals', 'lead_vocals'].every(
+        name => this.entry.artifacts[name] === entry.artifacts[name]));
+  }
+
   async load(entry, position = 0) {
     const generation = this.loadGeneration = (this.loadGeneration || 0) + 1;
-    if (this.key === entry.id) {
+    if (this.matches(entry)) {
       const stream = this.stream;
       try {
         await this.loading;

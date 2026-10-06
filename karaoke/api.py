@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 
 from .cache import CacheFull, GIB, SongCache, can_restore_video
 from .job_schema import JobRequest
-from .room import AddSong, Room, RoomCommand, Updates
+from .room import AddSong, Room, RoomCommand, Updates, artifact_url
 from .video_search import SearchCursorExpired, VideoSearch
 
 
@@ -477,7 +477,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
         result['status_url'] = str(request.url_for('get_job', job_id=doc['id']))
         if result['result']:
             for name, artifact in result['result']['artifacts'].items():
-                artifact['url'] = str(request.url_for('get_artifact', job_id=doc['id'], name=name))
+                artifact['url'] = str(request.base_url).rstrip('/') + artifact_url(doc['id'], name, artifact)
                 artifact.pop('path', None)
         return result
 
@@ -587,7 +587,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
         return public_job(doc, request)
 
     @app.get('/v1/jobs/{job_id}/artifacts/{name}', name='get_artifact')
-    async def get_artifact(job_id: UUID, name: str):
+    async def get_artifact(job_id: UUID, name: str, v: str | None = None):
         doc = store.read(str(job_id))
         if doc is None:
             raise HTTPException(404, 'Unknown job')
@@ -600,12 +600,15 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
         artifact = doc['result']['artifacts'].get(name)
         if artifact is None:
             raise HTTPException(404, 'Unknown artifact')
+        if v is not None and v != artifact.get('sha256'):
+            raise HTTPException(409, '歌曲文件已更新，请重新加载')
         folder = store.root/str(job_id)
         path = (folder/artifact['path']).resolve()
         if not path.is_relative_to(folder) or not path.is_file():
             raise HTTPException(404, 'Artifact is unavailable')
         return LeasedFileResponse(path, cache=store.cache, job_id=str(job_id),
                             record_access=name != 'poster',
+                            headers={'Cache-Control': 'private, max-age=31536000, immutable' if v else 'no-cache'},
                             media_type=mimetypes.guess_type(path.name)[0] or 'application/octet-stream',
                             filename=path.name, content_disposition_type='inline')
 

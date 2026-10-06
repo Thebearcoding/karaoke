@@ -403,7 +403,7 @@ function previewVideo(song) {
   const cached = library.find(item => item.url === song.url && item.status === 'completed' && item.job_id);
   if (cached) {
     const video = document.createElement('video');
-    video.src = `/v1/jobs/${cached.job_id}/artifacts/mv`;
+    video.src = cached.artifacts.mv;
     video.controls = true;
     video.preload = 'metadata';
     $('preview-player').replaceChildren(video);
@@ -609,15 +609,15 @@ async function syncPlayback() {
     if (!state.playing || !state.started_at) player.stop();
     const position = state.position + (state.playing && state.started_at ?
       Math.max(0, Date.now()/1000 + clockOffset - state.started_at) : 0);
-    if (state.playing && state.started_at && player.unlocked && (player.key !== song.id || !player.hasAudio(position))) {
+    if (state.playing && state.started_at && player.unlocked && (!player.matches(song) || !player.hasAudio(position))) {
       player.stop();
       player.onBuffering(position, state.started_at, song.id);
       return;
     }
-    loading = !player.hasAudio(position) || player.key !== song.id;
+    loading = !player.hasAudio(position) || !player.matches(song);
     updateCover();
     await player.load(song, position);
-    if (state.current_id !== song.id || state.revision !== revision) return;
+    if (state.current_id !== song.id || state.revision !== revision || !player.matches(song)) return;
     loading = false; loadError = '';
     if (state.playing && !state.started_at && player.unlocked && readySent !== song.id) {
       readySent = song.id;

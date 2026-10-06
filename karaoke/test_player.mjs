@@ -188,6 +188,48 @@ test('a late download from the previous selection cannot replace current audio',
   p.clear();assert.equal(p.entry,null);assert.equal(p.ready,false);
 });
 
+test('a repaired asset reloads the same song; metadata updates keep the current media', async () => {
+  const p=setup(); await p.unlock(); await p.load(song); p.apply(state,clockOffset());
+  try {
+    const initialStream=p.stream, initialSources=[...p.sources];
+    const renamed={...song,title:'Updated title',artifacts:{...song.artifacts,poster:'new-cover.jpg'}};
+    assert.equal(p.matches(renamed),true);
+    await p.load(renamed,3);
+    assert.equal(p.stream,initialStream); assert.deepEqual(p.sources,initialSources);
+    for (const artifact of ['mv','lead_vocals']) {
+      const repaired={...p.entry,artifacts:{...p.entry.artifacts,[artifact]:`${artifact}?v=repaired`}};
+      const previous=p.stream, playing=[...p.sources];
+      assert.equal(p.matches(repaired),false);
+      await p.load(repaired,3);
+      assert.ok(previous.signal.aborted); assert.notEqual(p.stream,previous);
+      assert.ok(playing.every(source=>source.stopped));
+      assert.equal(p.video.src,repaired.artifacts.mv);
+      assert.equal(p.matches(repaired),true);
+      p.apply({...state,playing:false,started_at:null},clockOffset());
+      assert.equal(p.video.currentTime,3); assert.equal(p.video.paused,true);
+      p.apply(state,clockOffset());
+      assert.deepEqual(p.gains.map(g=>g.gain.value),[1,1,0]);
+    }
+  } finally { p.clear(); }
+});
+
+test('late loading of an old file version cannot replace a repaired version of the same song', async () => {
+  const p=setup(), pending=[], originalFetch=globalThis.fetch;
+  await p.unlock();
+  globalThis.fetch=url=>new Promise(resolve=>pending.push(()=>resolve({ok:true,json:async()=>metadata,arrayBuffer:async()=>url})));
+  const old=p.load(song);
+  try {
+    const stale=p.stream;
+    globalThis.fetch=originalFetch;
+    const repaired={...song,artifacts:{...song.artifacts,mv:'video.mp4?v=repaired'}};
+    await p.load(repaired,3);
+    pending.forEach(resolve=>resolve()); await old;
+    assert.ok(stale.signal.aborted);
+    assert.equal(p.matches(song),false); assert.equal(p.matches(repaired),true);
+    assert.equal(p.video.src,repaired.artifacts.mv); assert.equal(p.ready,true);
+  } finally { globalThis.fetch=originalFetch; pending.forEach(resolve=>resolve()); p.clear(); }
+});
+
 test('live key changes affect the common mix without restarting; video follows audible time', async () => {
   const p=setup(), shifts=[], starts=[];
   p.pitchFactory=async () => ({input:{},latency:.12,setPitch(value){shifts.push(value);},start(when){starts.push(when);},stop(){}});

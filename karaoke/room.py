@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import time
 from typing import Literal
+from urllib.parse import urlencode
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -17,6 +18,11 @@ PRESETS = {
     'karaoke': dict(instrumental=1., backing_vocals=1., lead_vocals=0.),
     'original': dict(instrumental=1., backing_vocals=1., lead_vocals=1.),
 }
+
+
+def artifact_url(job_id, name, artifact):
+    url = f'/v1/jobs/{job_id}/artifacts/{name}'
+    return url + ('?' + urlencode({'v': artifact['sha256']}) if artifact.get('sha256') else '')
 
 
 class StemLevels(BaseModel):
@@ -139,6 +145,8 @@ class Room:
         if job is None:
             return dict(**entry, title='歌曲已不可用', artist='', status='failed', artifacts={})
         result, inputs = job.get('result') or {}, job['input']
+        artifacts = {key: artifact_url(job['id'], key, value)
+                     for key, value in result.get('artifacts', {}).items()}
         song_info = job.get('song_info') or {}
         featured = next((s for s in self.featured() if s['url'] == inputs['url']), {})
         return dict(**entry,
@@ -150,14 +158,13 @@ class Room:
             preparation_started_at=job.get('started_at') if job['status'] == 'running' else None,
             language=inputs.get('language') or result.get('language') or song_info.get('language') or featured.get('language', ''),
             error=job.get('error'), duration=result.get('duration_seconds') or song_info.get('duration_seconds', 0),
-            poster=(f"/v1/jobs/{job['id']}/artifacts/poster"
-                    if (job['status'] == 'completed' or job.get('restore_video')) and 'poster' in result.get('artifacts', {})
+            poster=(artifacts['poster']
+                    if (job['status'] == 'completed' or job.get('restore_video')) and 'poster' in artifacts
                     else featured.get('poster')), lyrics_need_review=result.get('quality', {}).get(
                 'lyrics_provenance', {}).get('needs_review', False),
             lyrics_unavailable=result.get('quality', {}).get('playback_fallback', {}).get('subtitle_mode') == 'unavailable',
             opening_countdown=result.get('quality', {}).get('opening_countdown'),
-            artifacts={key: f"/v1/jobs/{job['id']}/artifacts/{key}"
-                       for key in result.get('artifacts', {})})
+            artifacts=artifacts)
 
     def snapshot(self):
         state = self.read()
@@ -193,7 +200,7 @@ class Room:
                 songs.append(song)
                 by_url[url] = song
             song.update({key: info[key] for key in ('title', 'artist', 'url', 'language', 'duration',
-                'poster', 'status', 'active_stages', 'stage_progress', 'preparation_started_at', 'error')})
+                'poster', 'status', 'active_stages', 'stage_progress', 'preparation_started_at', 'error', 'artifacts')})
             song['job_id'] = job['id'] if ready or job.get('restore_video') or job['status'] in ('queued', 'running') else None
             if job['status'] == 'completed' and not ready:
                 song.update(status='evicted', poster=None)

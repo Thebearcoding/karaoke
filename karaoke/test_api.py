@@ -91,7 +91,7 @@ def test_submission_outputs_cache_and_range_requests(tmp_path):
         job = finished(client, job_id)
         assert job['status'] == 'completed'
         artifact = job['result']['artifacts']['mv']
-        assert 'path' not in artifact and artifact['url'].endswith('/artifacts/mv')
+        assert 'path' not in artifact and artifact['url'].endswith('/artifacts/mv?v=' + artifact['sha256'])
         response = client.get(artifact['url'], headers={'Range': 'bytes=2-5'})
         assert response.status_code == 206 and response.content == b'2345'
         assert client.get(f'/v1/jobs/{job_id}/artifacts/request.json').status_code == 404

@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import sys
 import time
@@ -51,7 +52,7 @@ def test_poster_survives_cleanup_and_browsing_does_not_refresh_lru(tmp_path):
     with TestClient(app) as client:
         song = next(s for s in client.get('/v1/library').json()['songs'] if s['job_id'] == job['id'])
         poster = song['poster']
-        assert poster == f"/v1/jobs/{job['id']}/artifacts/poster"
+        assert poster == f"/v1/jobs/{job['id']}/artifacts/poster?v=fixture"
         response = client.get(poster)
         assert response.status_code == 200 and response.content == b'cover'
         assert response.headers['content-type'] == 'image/jpeg'
@@ -63,6 +64,40 @@ def test_poster_survives_cleanup_and_browsing_does_not_refresh_lru(tmp_path):
         assert client.get(poster).status_code == 410
         song = next(s for s in client.get('/v1/library').json()['songs'] if s['id'] == job['id'])
         assert song['poster'] is None and song['job_id'] is None
+
+
+def test_repaired_media_changes_urls_without_changing_room_or_other_artifacts(tmp_path):
+    app = create_app(tmp_path, version='test')
+    store = app.state.store
+    job = ready_job(store)
+    with TestClient(app) as client:
+        before = client.post('/v1/room/entries', json={'job_id':job['id']}).json()
+        entry = before['entries'][0]
+        old_url = entry['artifacts']['mv']
+        assert client.get(old_url).content == b'media'
+        updated = b'fixed'
+        (tmp_path/job['id']/'mv').write_bytes(updated)
+        job['result']['artifacts']['mv']['sha256'] = hashlib.sha256(updated).hexdigest()
+        store.update(job['id'], result=job['result'])
+        after = client.get('/v1/room').json()
+        repaired = after['entries'][0]
+        new_url = repaired['artifacts']['mv']
+        assert new_url != old_url
+        assert repaired['id'] == entry['id'] and repaired['job_id'] == job['id']
+        assert {k:after[k] for k in ('revision','playing','position','levels')} == {
+            k:before[k] for k in ('revision','playing','position','levels')}
+        assert {k:v for k,v in repaired['artifacts'].items() if k != 'mv'} == {
+            k:v for k,v in entry['artifacts'].items() if k != 'mv'}
+        song = next(s for s in after['library'] if s['job_id'] == job['id'])
+        assert song['artifacts']['mv'] == new_url
+        public = client.get(f"/v1/jobs/{job['id']}").json()['result']['artifacts']['mv']
+        assert public['url'].endswith(new_url)
+        response = client.get(new_url, headers={'Range':'bytes=1-3'})
+        assert response.status_code == 206 and response.content == b'ixe'
+        assert 'immutable' in response.headers['cache-control']
+        assert client.get(old_url, headers={'Range':'bytes=1-3'}).status_code == 409
+        legacy = client.get(new_url.split('?')[0])
+        assert legacy.content == updated and legacy.headers['cache-control'] == 'no-cache'
 
 
 def test_opening_countdown_waits_for_ready_and_keeps_original_song_clock(tmp_path, monkeypatch):
