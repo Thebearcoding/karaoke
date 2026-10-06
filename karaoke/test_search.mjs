@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createVideoSearch, createViewHistory, previewURL, searchLibrary, filterSongs, visibleResults, playCount, orderResults} from './web/search.js';
+import {createVideoSearch, createViewHistory, previewURL, searchLibrary, filterSongs, visibleResults, playCount, orderResults, queueKey, queuePosition} from './web/search.js';
 
 function setup() {
   const requests = [], snapshots = [];
@@ -9,6 +9,26 @@ function setup() {
   return {search, requests, snapshots};
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
+
+test('queued feedback follows source identity and room order, including unprepared songs', () => {
+  const song = {url:'https://www.youtube.com/watch?v=abcdefghijk', title:'Original title', job_id:'job'};
+  const other = {url:'https://www.youtube.com/watch?v=12345678901', title:song.title, status:'queued'};
+  const queue = [other, {...song, title:'Translated title', status:'running'}];
+  assert.equal(queuePosition(song,queue),2);
+  assert.equal(queuePosition(song,[queue[1],queue[0]]),1);
+  assert.equal(queuePosition(song,[other]),0);
+  assert.equal(queuePosition({job_id:'job'},queue),2);
+  for (const url of ['https://youtu.be/abcdefghijk?t=20', 'https://m.youtube.com/watch?v=abcdefghijk&list=album',
+    'https://music.youtube.com/watch?v=abcdefghijk', 'https://www.youtube.com/shorts/abcdefghijk',
+    'https://www.youtube.com/embed/abcdefghijk']) {
+    assert.equal(queuePosition({url},queue),2);
+  }
+  assert.equal(queuePosition({url:'https://youtube.com.attacker.test/watch?v=abcdefghijk'},queue),0);
+  assert.equal(queuePosition({title:song.title},queue),0);
+  assert.equal(queuePosition(song,[...queue, song]),2);
+  assert.equal(queueKey(song),queueKey({...song, title:'Different title'}));
+  assert.equal(queue[0],other);
+});
 
 test('history search matches song and artist while preserving performance order and repeat performances', () => {
   const songs = [

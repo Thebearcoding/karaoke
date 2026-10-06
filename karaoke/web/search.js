@@ -146,6 +146,24 @@ export function searchLibrary(library, query) {
     .map(song => ({...song, provider:'local', thumbnail:song.poster, uploader:song.artist}));
 }
 
+// Match the source, not its title: translated titles and URL aliases share a queue entry.
+export function queueKey(song) {
+  try {
+    const url = new URL(song.url);
+    const host = url.hostname.replace(/^(www|m|music)\./, '');
+    const id = host === 'youtu.be' ? url.pathname.slice(1) : host === 'youtube.com'
+      ? url.searchParams.get('v') || url.pathname.match(/^\/(?:shorts|embed)\/([^/]+)/)?.[1] : null;
+    if (/^[\w-]{11}$/.test(id || '')) return `youtube:${id}`;
+  } catch { /* A known job can still be queued without a source URL. */ }
+  return song.url || (song.job_id ? `job:${song.job_id}` : null);
+}
+
+export function queuePosition(song, entries) {
+  const key = queueKey(song);
+  return entries.findIndex(entry => (key && queueKey(entry) === key) ||
+    (song.job_id && entry.job_id === song.job_id)) + 1;
+}
+
 export function visibleResults(songs, source) {
   return songs.filter(song => song.provider === source);
 }

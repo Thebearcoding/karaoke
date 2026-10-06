@@ -1,5 +1,5 @@
 import { Player } from './player.js';
-import { createVideoSearch, createViewHistory, previewURL, searchLibrary, filterSongs, playCount, orderResults } from './search.js';
+import { createVideoSearch, createViewHistory, previewURL, searchLibrary, filterSongs, playCount, orderResults, queueKey, queuePosition } from './search.js';
 
 const $ = id => document.getElementById(id);
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -142,13 +142,14 @@ function renderLibrary() {
       return `<article class="song-card" data-card="${escape(song.id)}">
     <div class="song-poster">${song.poster ? `<img src="${escape(song.poster)}" alt="" loading="lazy">` : `<span class="poster-initial">${escape(song.title.slice(0,1))}</span>`}
       <span class="poster-duration">${time(song.duration)}</span>
-      <button class="add-song" data-song="${escape(song.id)}" aria-label="点歌：${escape(song.title)}" title="点歌">${icon('plus')}</button></div>
+      <button class="add-song" data-song="${escape(song.id)}" aria-label="点歌：${escape(song.title)}" title="点歌">${icon('plus')}</button><span class="queued-status" hidden></span></div>
     <div class="song-detail"><h3>${escape(song.title)}</h3><div class="song-info-row"><span class="song-artist">${escape(song.artist)}</span>${preparationElapsedHTML(song)}${label ? `<span class="${ready ? 'ready-label' : 'prepare-label'}">${label}</span>` : ''}</div>${song.status === 'running' ? `<div class="preparation-slot">${preparationHTML(song)}</div>` : ''}</div></article>`;
     }).join('');
   } else {
     updatePreparationSlots($('song-grid'), songs);
   }
   $('search-empty').hidden = songs.length > 0;
+  updateAddButtons();
 }
 
 function renderVideoResults(providers) {
@@ -215,7 +216,7 @@ function renderVideoResults(providers) {
     button.classList.toggle('selected', selected);
     button.setAttribute('aria-pressed', String(selected));
   });
-  updateVideoButtons();
+  updateAddButtons();
   navigation.save();
 }
 
@@ -289,15 +290,29 @@ function changeSearchMode(mode, query) {
   window.scrollTo(0, 0);
 }
 
-function updateVideoButtons() {
-  document.querySelectorAll('[data-add-video], #preview-add').forEach(button => {
-    const song = button.id === 'preview-add' ? previewSong : searchSongs[button.dataset.addVideo];
+function updateAddButtons() {
+  document.querySelectorAll('[data-add-video], [data-song], #preview-add, #submit-song').forEach(button => {
+    const form = button.id === 'submit-song';
+    const song = form ? {url:$('song-input').value.trim(), title:$('title-input').value.trim()} :
+      button.id === 'preview-add' ? previewSong : button.hasAttribute('data-song')
+        ? library.find(item => item.id === button.dataset.song) : searchSongs[button.dataset.addVideo];
     if (!song) return;
-    const queued = state.entries.some(entry => entry.url === song.url);
-    const adding = addingVideos.has(song.url);
-    button.disabled = queued || adding || song.available === false;
-    const label = button.querySelector('span') || button;
-    label.textContent = queued ? '已点 ✓' : adding ? '点歌中…' : song.available === false ? '暂不可用' : '点歌';
+    if (form && !/^https?:\/\//i.test(song.url)) { button.disabled = false; button.classList.remove('is-queued'); button.removeAttribute('aria-label'); return; }
+    const position = queuePosition(song, state.entries), adding = addingVideos.has(queueKey(song));
+    const label = position ? `已加入 · 第${position}首` : adding ? '点歌中…' : song.available === false ? '暂不可用' : '点歌';
+    button.disabled = Boolean(position || adding || song.available === false);
+    button.classList.toggle('is-queued', position > 0);
+    button.setAttribute('aria-label', `${label}：${song.title || song.url}`);
+    if (button.hasAttribute('data-song')) {
+      button.innerHTML = icon(position ? 'check' : 'plus');
+      button.title = label;
+      const status = button.parentElement.querySelector('.queued-status');
+      status.hidden = !position && !adding;
+      status.textContent = label;
+    } else {
+      (button.querySelector('span') || button).textContent = label;
+      button.querySelector('svg')?.toggleAttribute('hidden', position > 0 || adding);
+    }
   });
   document.querySelectorAll('.music-availability').forEach(label => {
     const song = searchSongs[label.closest('[data-result]').dataset.result];
@@ -339,20 +354,26 @@ function editSearch() {
   if (!composing) searchTimer = setTimeout(searchVideos, 700);
 }
 
-async function addVideo(song) {
-  if (!song || addingVideos.has(song.url)) return;
-  addingVideos.add(song.url); updateVideoButtons();
+async function addVideo(song, {title, repeat = false} = {}) {
+  if (!song || addingVideos.has(queueKey(song)) || (!repeat && queuePosition(song, state.entries)) || song.available === false) return;
+  const key = queueKey(song);
+  addingVideos.add(key); updateAddButtons();
   $('preview-error').hidden = true;
   try {
-    const cached = library.find(item => item.url === song.url && item.job_id);
-    acceptState(await request('/v1/room/entries', cached ? {job_id:cached.job_id} : {url:song.url, source_title:song.title}));
+    const cached = library.find(item => queueKey(item) === key && item.job_id);
+    const previous = new Set(state.entries.map(entry => entry.id));
+    const updated = await request('/v1/room/entries', cached ? {job_id:cached.job_id} :
+      {url:song.url, ...(title !== undefined ? {title} : {source_title:song.title})});
+    acceptState(updated);
     if ($('video-preview').open) $('video-preview').close();
-    toast('已点歌');
+    const added = updated.entries.find(entry => !previous.has(entry.id) && queueKey(entry) === key);
+    const position = added ? updated.entries.findIndex(entry => entry.id === added.id)+1 : queuePosition(song, updated.entries);
+    toast(`已加入${position ? ` · 第${position}首` : ''}`);
   } catch (error) {
     toast(error.message);
     $('preview-error').textContent = error.message;
     $('preview-error').hidden = false;
-  } finally { addingVideos.delete(song.url); updateVideoButtons(); }
+  } finally { addingVideos.delete(key); updateAddButtons(); }
 }
 
 function previewVideo(song) {
@@ -369,7 +390,7 @@ function previewVideo(song) {
     video.preload = 'metadata';
     $('preview-player').replaceChildren(video);
     $('video-preview').showModal();
-    updateVideoButtons();
+    updateAddButtons();
     return;
   }
   const iframe = document.createElement('iframe');
@@ -379,7 +400,7 @@ function previewVideo(song) {
   iframe.allowFullscreen = true;
   iframe.referrerPolicy = 'strict-origin-when-cross-origin';
   $('preview-player').replaceChildren(iframe);
-  updateVideoButtons();
+  updateAddButtons();
   $('video-preview').showModal();
 }
 
@@ -491,7 +512,6 @@ function updateTransport() {
   $('play-toggle').setAttribute('aria-label', state.playing && (remote || player.unlocked) ? '暂停' : '播放');
   $('play-toggle').disabled = state.entries.length === 0;
   document.querySelectorAll('[data-next]').forEach(button => button.disabled = skipping || !state.current_id);
-  $('restart').disabled = !song;
   $('transport-restart').disabled = !song;
   $('seek').disabled = !song || song.status !== 'completed';
   $('seek').max = song?.duration || 1;
@@ -603,7 +623,7 @@ function acceptState(updated) {
   videoSearch.refreshLocal();
   $('screen-preparation').innerHTML = preparationHTML(current());
   renderQueue(); updateTransport(); renderStorage();
-  updateVideoButtons();
+  updateAddButtons();
   if (!player.anchor) updateTime(state.position);
   syncPlayback();
 }
@@ -672,22 +692,13 @@ $('add-form').onsubmit = async event => {
   if (composing) return;
   const url = $('song-input').value.trim();
   if (!/^https?:\/\//i.test(url)) { searchVideos(); if (!url) $('song-input').focus(); return; }
-  $('submit-song').disabled = true;
-  try {
-    acceptState(await request('/v1/room/entries', {url, title:$('title-input').value.trim() || null}));
-    $('song-input').value = ''; $('title-input').value = ''; editSearch();
-    toast('已点歌');
-  } catch (error) { toast(error.message); }
-  finally { $('submit-song').disabled = false; }
+  await addVideo({url}, {title:$('title-input').value.trim() || null});
 };
 $('song-grid').onclick = async event => {
   const button = event.target.closest('[data-song]');
-  if (!button) return;
+  if (!button || button.disabled) return;
   const song = library.find(s => s.id === button.dataset.song);
-  button.disabled = true;
-  try { acceptState(await request('/v1/room/entries', song.job_id ? {job_id:song.job_id} : {url:song.url,title:song.title})); toast(`《${song.title}》已点歌`); }
-  catch (error) { toast(error.message); }
-  finally { button.disabled = false; }
+  await addVideo(song, {title:song.title});
 };
 $('queue-list').onclick = async event => {
   const button = event.target.closest('[data-action]');
@@ -720,7 +731,7 @@ $('history-list').onclick = async event => {
   if (!button || button.disabled) return;
   const song = state.history.find(song => song.id === button.closest('[data-history-entry]').dataset.historyEntry);
   button.disabled = true;
-  try { await addVideo(song); }
+  try { await addVideo(song, {repeat:true}); }
   finally { button.disabled = false; }
 };
 $('play-toggle').onclick = togglePlay;
@@ -744,7 +755,7 @@ async function nextSong() {
 }
 document.querySelectorAll('[data-next]').forEach(button => button.onclick = nextSong);
 $('now-song').onclick = () => switchView('player');
-for (const id of ['restart','transport-restart']) $(id).onclick = () => command('seek', {position:0});
+$('transport-restart').onclick = () => command('seek', {position:0});
 document.querySelectorAll('[data-mix]').forEach(button => button.onclick = async () => {
   clearTimeout(levelTimer); levelTimer = null; pendingLevels = {};
   await levelRequest;
@@ -775,12 +786,15 @@ async function fullscreen() {
 }
 $('fullscreen').onclick = fullscreen;
 $('exit-fullscreen').onclick = fullscreen;
-// Move the same timeline so fullscreen keeps its clock, seek handlers and state.
+// Move the same controls so fullscreen keeps their handlers and state.
 const seekRow = $('seek').closest('.seek-row');
 const seekHome = seekRow.parentElement;
+const transportTools = $('transport-tools'), toolsHome = transportTools.parentElement;
 document.addEventListener('fullscreenchange', () => {
-  const target = document.fullscreenElement === $('player-stage') ? $('fullscreen-progress') : seekHome;
+  const fullscreen = document.fullscreenElement === $('player-stage');
+  const target = fullscreen ? $('fullscreen-progress') : seekHome;
   target.append(seekRow);
+  (fullscreen ? $('screen-tools') : toolsHome).prepend(transportTools);
 });
 document.addEventListener('keydown', event => {
   if ($('video-preview').open) return;
