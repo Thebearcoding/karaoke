@@ -225,6 +225,11 @@ class Pipeline:
                               ['repeated-lyrics'], alignment_code['align_repeats']),
             'align_context': (['music-separation/song/vocals.wav', 'source-44100.wav', 'ordered-cues.json', 'context-jobs.json'],
                               ['context'], alignment_code['align_context']),
+            'validate_timing': (['music-separation/song/vocals.wav', 'source-44100.wav', 'timing-input.json', 'lyrics.json'],
+                                ['timing-checked'], [ROOT/p for p in common+phonemes+
+                                ['timing_validation.py', 'cjk_recovery.py', 'align_english_sofa.py',
+                                 'align_english_onsets.py',
+                                 'experiments/cjk-onsets-v003/protocol.json']]),
         }
         if name not in specs:
             return None
@@ -232,6 +237,14 @@ class Pipeline:
         if name in ('package_two_stems', 'package_three_stems') and '--source-pcm' in command:
             inputs = [*inputs, 'source-native.wav', 'source-native.json']
         config = dict(command=[str(a) for a in command])
+        if name == 'validate_timing':
+            from .timing_validation import acoustic_model_files
+            constraints = self.output/'timing-constraints.json'
+            if constraints.is_file():
+                inputs = [*inputs, 'timing-constraints.json']
+            weights = acoustic_model_files(ROOT)
+            config['weights'] = [(str(p), p.stat().st_size, p.stat().st_mtime_ns)
+                                 for p in weights if p.is_file()]
         if name in ('separate_music', 'separate_lead'):
             model = 'vocals_mel_band_roformer' if name == 'separate_music' else 'karaoke_bs_roformer_anvuew'
             code = code+[ROOT/f'models/pretrained/{model}.yaml']
@@ -333,7 +346,7 @@ class Pipeline:
         """Different songs overlap stages, but share each expensive model lane."""
         directory = os.getenv('KARAOKE_STAGE_LOCK_DIR')
         lane = ('separation' if name.startswith('separate_') else
-                'alignment' if name == 'transcribe' or name.startswith('align_') else
+                'alignment' if name in ('transcribe', 'validate_timing') or name.startswith('align_') else
                 'render' if name == 'render' else
                 'mux' if name in ('mux_video', 'verify_video') else
                 'packaging' if name.startswith('package_') else
@@ -442,6 +455,8 @@ class Pipeline:
                 if name == 'align_words' and any(message in diagnostic for message in (
                         'Empty alignment audio', 'FFmpeg failed to read "[]"')):
                     raise StageFailure(name, '歌词对齐失败：歌词时间范围内没有有效音频，请检查歌词与视频版本')
+                if name == 'validate_timing' and 'contradicted acoustic onsets' in diagnostic:
+                    raise StageFailure(name, '部分字幕时间仍与实际演唱冲突；音轨和局部修复诊断已保留')
                 raise StageFailure(name, f'{name} 阶段失败；具体错误已保存在任务日志中')
             succeeded = True
         except subprocess.TimeoutExpired as error:
@@ -957,6 +972,9 @@ class Pipeline:
                     text_error = error
             if text_error is not None:
                 lyrics = self.playback_fallback(metadata, duration, text_error)
+            # This gate is intentionally outside the fallback catch: a fallback
+            # must not resurrect a timestamp contradicted by acoustic evidence.
+            self.validate_alignment(lyrics, duration)
             render_info = dict(title=lyrics['title'], artist=lyrics['artist'], language=lyrics['language'],
                                duration_seconds=duration)
             def prepare_picture():
@@ -994,6 +1012,33 @@ class Pipeline:
     def artifact_record(self, path):
         file = self.output/path
         return dict(path=str(path), bytes=file.stat().st_size, sha256=file_hash(file))
+
+    def validate_alignment(self, lyrics, duration):
+        from .timing_validation import validate_timeline
+        cues = json.loads((self.output/'cues.json').read_text())
+        write_json(self.output/'timing-input.json', cues)
+        self.run('validate_timing', [sys.executable, ROOT/'timing_validation.py',
+            '--input', self.output/'timing-input.json', '--lyrics', self.output/'lyrics.json',
+            '--audio', self.vocals, '--original', self.output/'source-44100.wav',
+            '--output', self.output/'timing-checked', '--device', self.device])
+        checked = json.loads((self.output/'timing-checked/cues.json').read_text())
+        report = json.loads((self.output/'timing-checked/report.json').read_text())
+        try:
+            validate_timeline(checked, lyrics['lines'], duration, report['constraints'], lyrics['language'])
+        except ValueError as error:
+            raise StageFailure('validate_timing', '字幕时间校验失败；局部修复诊断已保留') from error
+        quality = json.loads((self.output/'quality.json').read_text())
+        quality.update(lines=len(checked), units=sum(len(c['units']) for c in checked),
+            timing_review=dict(reviewed_lines=len(report['lines']),
+                onset_constraints=report['constraints'], unresolved=report['unresolved'],
+                report_sha256=file_hash(self.output/'timing-checked/report.json'),
+                repaired_ranges=sum(r['accepted'] for line in report['lines'] for r in line['repairs']),
+                unverified_lines=[r['line'] for r in report['lines'] if r['status']=='unverified']),
+            onset_accuracy=None)
+        quality['fallback_units'] = sum(u.get('timing_source') == 'prior_word_fallback'
+                                       for c in checked for u in c['units'])
+        write_json(self.output/'cues.json', checked)
+        write_json(self.output/'quality.json', quality)
 
     def playback_fallback(self, metadata, duration, error):
         """Keep singing available without presenting unverified word times as valid."""

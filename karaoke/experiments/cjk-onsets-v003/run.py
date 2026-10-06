@@ -239,14 +239,6 @@ def process(job, model, protocol):
         witness = witness or AcousticWitness(job['original_audio'], model.device)
         cues, latin_repairs = recover_latin_groups(cues, wave, witness, protocol)
         all_units = [u for c in cues for u in c['units']]
-    first_word_repairs = []
-    coarse_relocations = []
-    if witness is not None:
-        from cjk_recovery import recover_first_words, relocalize_fallback_lines
-        cues, coarse_relocations = relocalize_fallback_lines(cues, wave, model, witness, protocol, job['language'])
-        cues, first_word_repairs = recover_first_words(cues, wave, model, witness, protocol,
-                                                       job['language'], raw)
-        all_units = [u for c in cues for u in c['units']]
     for cue in cues:
         cue.update(start=cue['units'][0]['start'], end=cue['units'][-1]['end'])
     cues, presentation = presentation_cues(cues, job['duration'], lead=0., tail=0., bridge_gap=0.)
@@ -257,8 +249,6 @@ def process(job, model, protocol):
         changed_at_least_50ms=sum(abs(d['final']-d['previous']) >= .05 for d in changes),
         preserved_repeat_units=sum(u.get('timing_source') == 'repeated_lyric_audio' for u in all_units),
         accepted_window_units=sum(u.get('timing_source') == 'singing_window_consensus' for u in all_units),
-        repaired_first_words=sum(r['accepted'] for r in first_word_repairs),
-        relocalized_coarse_lines=sum(r['accepted'] for r in coarse_relocations),
         repaired_character_units=sum(u.get('timing_source') == 'singing_context_characters' for u in all_units),
         corroborated_character_units=sum(u.get('timing_source') in ('cross_model_phonemes', 'cross_model_ctc')
             and any('\u3400' <= c <= '\u9fff' for c in u['text']) for u in all_units),
@@ -273,8 +263,6 @@ def process(job, model, protocol):
     write(output/'character-repairs.json', character_repairs)
     write(output/'verified-repairs.json', verified_repairs)
     write(output/'latin-repairs.json', latin_repairs)
-    write(output/'first-word-repairs.json', first_word_repairs)
-    write(output/'coarse-relocations.json', coarse_relocations)
     write(output/'report.json', report)
     print(json.dumps(report, ensure_ascii=False), flush=True)
     return report

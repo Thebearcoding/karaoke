@@ -129,7 +129,8 @@ def ctc_word_units(logits, units, vocab, begin, frame_seconds):
         if not parts:
             raise ValueError('CTC alignment omitted a displayed word')
         start, end = begin+parts[0].start*frame_seconds, begin+parts[-1].end*frame_seconds
-        result.append(dict(unit, start=start, end=end, emission_end=end, timing_evidence='ctc_event'))
+        result.append(dict(unit, start=start, end=end, emission_end=end,
+                           acoustic_end=None, timing_evidence='ctc_event'))
     # A CTC pulse is evidence for an event, not an estimate of sung duration.
     # Display holds use the next measured onset, never evenly split a group.
     for left, right in zip(result, result[1:]):

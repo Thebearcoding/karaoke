@@ -210,6 +210,16 @@ def read_ahead_state(cues, instant):
     return current, following if following < len(cues) else None
 
 
+def acoustic_end(unit):
+    """Display holds and CTC pulses do not measure the end of singing."""
+    if 'acoustic_end' in unit:
+        return unit['acoustic_end']
+    if (unit.get('timing_evidence') == 'ctc_event' or unit.get('display_end_source')
+            or unit.get('timing_source') == 'linear_fallback'):
+        return None
+    return unit['end']
+
+
 def countdown_events(cues, minimum_silence=4., dots=3, step_seconds=1., settle_seconds=1.):
     """Prepare the opening and long vocal gaps; a negative start needs playback pre-roll."""
     duration = dots*step_seconds+settle_seconds
@@ -221,14 +231,15 @@ def countdown_events(cues, minimum_silence=4., dots=3, step_seconds=1., settle_s
         units = cue.get('units') or [{'start': cue.get('aligned_start', cue['start']),
                                      'end': cue.get('aligned_end', cue['end'])}]
         for index, unit in enumerate(units):
-            onset, end = unit['start'], unit['end']
-            if not (math.isfinite(onset) and math.isfinite(end) and 0 <= onset < end):
+            onset, end = unit['start'], acoustic_end(unit)
+            if not (math.isfinite(onset) and onset >= 0 and (end is None or
+                    math.isfinite(end) and onset < end)):
                 raise ValueError('Countdown requires valid acoustic intervals')
-            if (line == 0 and index == 0) or onset-previous_end >= minimum_silence:
+            if (line == 0 and index == 0) or previous_end is not None and onset-previous_end >= minimum_silence:
                 events.append(dict(line=line, unit=index, start=onset-duration,
                                    onset=onset, previous_end=previous_end,
                                    dots=dots, step_seconds=step_seconds, settle_seconds=settle_seconds))
-            previous_end = max(previous_end, end)
+            previous_end = None if end is None else max(previous_end or 0., end)
     return events
 
 

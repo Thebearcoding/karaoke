@@ -293,136 +293,79 @@ class SubtitleIntegrity(unittest.TestCase):
             units, _ = protect_units(cue, candidate, 'Chinese')
             self.assertEqual(units[0]['start'], onset)
 
-    def test_failed_phrase_relocalizes_only_the_corroborated_coarse_prefix(self):
+    def test_timing_contract_relocates_the_minimum_span_and_never_resurrects_old_times(self):
         from copy import deepcopy
-        from unittest.mock import patch
-        from cjk_recovery import relocalize_fallback_lines
+        from timing_validation import reconcile_timing, timing_violations, validate_timeline
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
         text = 'あいうえお'
-        parsed = [dict(first=i, stop=i+1, text=c, phones=['a']) for i, c in enumerate(text)]
-        old = [dict(u, start=a, end=b, timing_source='prior_word_fallback')
-               for u, a, b in zip(parsed, [1., 1.2, 1.4, 4.5, 5.], [1.2, 1.4, 2., 4.9, 5.5])]
-        original = [dict(text=text, start=1., end=5.5, aligned_start=1., aligned_end=5.5, units=old)]
-        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4,
-                        minimum_relative_rms=.03, context_padding_seconds=[.35, .6, 1.])
-        for mode in ('valid', 'later_disagreement', 'already_located', 'one_view', 'text_mismatch',
-                     'prefix_disagreement', 'window_disagreement', 'silent', 'silent_word', 'invalid', 'empty'):
+        old = [dict(first=i, stop=i+1, text=c, start=a, end=b, timing_source='prior_word_fallback')
+               for i,(c,a,b) in enumerate(zip(text,[1.,1.2,1.4,4.5,5.],[1.2,1.4,2.,4.9,5.5]))]
+        original = [dict(text=text,start=1.,end=5.5,aligned_start=1.,aligned_end=5.5,units=old)]
+        for mode in ('valid','suffix_disagreement','one_view','text_mismatch','prefix_disagreement',
+                     'window_disagreement','silent','silent_neighbor','invalid','held_note','quiet_voice'):
             with self.subTest(mode=mode):
-                times = [1., 1.2, 1.4, 4.5, 5.] if mode == 'already_located' else [3., 3.2, 3.6, 4.5, 5.]
-                measured = [dict(u, start=t, end=t+.15) for u, t in zip(parsed, times)]
-                views = [deepcopy(measured), deepcopy(measured)]
-                if mode == 'one_view': views.pop()
-                if mode == 'text_mismatch': views[1][0]['text'] = 'ん'
-                if mode == 'prefix_disagreement': views[1][1]['start'] += .11
-                if mode == 'later_disagreement': views[1][-1]['start'] -= .2
-                if mode == 'invalid': views[1][0]['start'] = float('nan')
-                if mode == 'empty': views = [[], []]
-                calls = []
-                class Model:
-                    def infer(self, audio, begin, units, cue, *, decoder):
-                        calls.append((begin, len(audio), decoder))
-                        offset = .2 if mode == 'window_disagreement' and len(calls) == 1 else 0.
-                        return dict(units=[dict(u, start=u['start']+offset, end=u['end']+offset,
-                            timing_evidence='ctc_event', emission_end=u['start']+offset+.04) for u in measured])
-                wave = np.full(44100*6, 0. if mode == 'silent' else .1)
-                if mode == 'silent_word': wave[round(3.2*44100):round(3.3*44100)] = 0.
-                saved = deepcopy(original)
-                with patch('cjk_recovery.spoken_units', return_value=[] if mode == 'empty' else parsed):
-                    result, reports = relocalize_fallback_lines(original, wave, Model(),
-                        lambda *args, **kwargs: views, protocol, 'Japanese')
-                self.assertEqual(original, saved)
-                if mode in ('valid', 'later_disagreement'):
-                    self.assertTrue(reports[0]['accepted'])
-                    self.assertEqual(reports[0]['replaced_old_units'], 3)
-                    self.assertEqual(result[0]['units'][3:], old[3:])
-                    self.assertEqual([u['start'] for u in result[0]['units'][:3]], [3., 3.2, 3.6])
-                    self.assertEqual(result[0]['units'][0]['timing_source'], 'cross_model_ctc')
-                    self.assertEqual(result[0]['units'][1]['timing_source'], 'prior_word_fallback')
-                    self.assertEqual(len(set(calls)), 3)
+                times = [1.,1.2,1.4,4.5,5.] if mode=='held_note' else [3.,3.2,3.6,4.5,5.]
+                measured = [dict(u,start=t,end=t+.15) for u,t in zip(old,times)]
+                views = [deepcopy(measured),deepcopy(measured)]
+                if mode=='one_view': views.pop()
+                if mode=='text_mismatch': views[1][0]['text']='ん'
+                if mode=='prefix_disagreement':
+                    views[1][1]['start']+=.2
+                    views[1][1]['end']+=.2
+                if mode=='suffix_disagreement': views[1][-1]['start']-=.2
+                if mode=='invalid': views[1][0]['start']=float('nan')
+                predictions = [[dict(u,timing_evidence='ctc_event',emission_end=u['start']+.04)
+                                for u in measured] for _ in range(3)]
+                if mode=='window_disagreement':
+                    for u in predictions[0]:u.update(start=u['start']+.12,end=u['end']+.12,emission_end=u['emission_end']+.12)
+                wave=np.full(44100*6,0. if mode=='silent' else 1e-6 if mode=='quiet_voice' else .1)
+                wave[44100:44100*3]=0. if mode!='held_note' else .1
+                if mode=='silent_neighbor':wave[round(3.2*44100):round(3.4*44100)]=0.
+                result,report=reconcile_timing(original,wave,lambda *a,**k:views,
+                    lambda *a:predictions,protocol,'Japanese')
+                self.assertEqual(original[0]['units'],old)
+                if mode in ('valid','suffix_disagreement'):
+                    self.assertEqual([u['start'] for u in result[0]['units']],times)
+                    self.assertEqual([u['start'] for u in result[0]['units'][3:]],[4.5,5.])
+                    self.assertFalse(report['unresolved'])
+                    self.assertTrue(timing_violations(original,report['constraints']))
+                    # Even a later model agreeing with the stale prior cannot
+                    # make the preserved contradiction disappear.
+                    again,checked=reconcile_timing(original,wave,lambda *a,**k:[old,old],
+                        lambda *a:[],protocol,'Japanese',report['constraints'])
+                    self.assertTrue(checked['unresolved'])
+                    with self.assertRaisesRegex(ValueError,'contradicted'):
+                        validate_timeline(again,[text],6,checked['constraints'])
+                elif mode in ('prefix_disagreement','silent_neighbor'):
+                    self.assertTrue(report['unresolved'])
                 else:
-                    self.assertFalse(reports[0]['accepted'])
-                    self.assertEqual(result, original)
-                if mode == 'already_located': self.assertFalse(calls)
+                    self.assertEqual([u['start'] for u in result[0]['units']],[u['start'] for u in old])
+                    self.assertFalse(report['constraints'])
 
-    def test_first_word_gap_only_flags_candidates_including_short_lines(self):
-        from cjk_recovery import first_word_gap
-        for starts, flagged in [([1.], False), ([1., 1.4, 1.8], False),
-                                ([1., 1.9, 2.1, 2.3], True), ([1., 4.], True),
-                                ([1., 1.9, 2.8], False), ([1., 1., 2.], False),
-                                ([1., float('nan'), 3.], False)]:
-            with self.subTest(starts=starts):
-                self.assertEqual(first_word_gap(dict(units=[dict(start=t) for t in starts])) is not None, flagged)
-
-    def test_first_word_repair_requires_acoustic_agreement_and_preserves_held_notes(self):
+    def test_timing_contract_checks_middle_words_and_all_languages(self):
         from copy import deepcopy
-        from unittest.mock import patch
-        from cjk_recovery import recover_first_words
-        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4,
-                        minimum_relative_rms=.03, context_padding_seconds=[.35, .6, 1.])
-        original = [dict(text='甲乙丙', aligned_start=1., aligned_end=4.8, units=[
-            dict(first=i, stop=i+1, text=t, start=a, end=b, timing_source='prior_word_fallback')
-            for i, t, a, b in [(0, '甲', 1., 4.), (1, '乙', 4., 4.4), (2, '丙', 4.4, 4.8)]])]
-        for mode in ('valid', 'held_note', 'missing', 'disagree', 'silent', 'wrong_text', 'crossing'):
-            with self.subTest(mode=mode):
-                start = 1. if mode == 'held_note' else 4.1 if mode == 'crossing' else 3.5
-                candidate = dict(first=0, stop=1, text='丁' if mode == 'wrong_text' else '甲', start=start, end=4.5)
-                raw = [dict(line=1, attempts=[dict(units=[candidate]) for _ in range(3)])]
-                calls = []
-                def witness(cue, wave, *, language):
-                    calls.append(language)
-                    if mode == 'missing':
-                        raise ValueError('independent model unavailable')
-                    return [[dict(candidate, start=start+.01)], [dict(candidate, start=start+(.3 if mode == 'disagree' else .02))]]
-                class Model:
-                    def infer(self, audio, begin, units, cue):
-                        return dict(units=[candidate])
-                saved = deepcopy(original)
-                with patch('cjk_recovery.spoken_units', return_value=[]):
-                    result, reports = recover_first_words(original, np.full(44100*6, 0. if mode == 'silent' else .1),
-                        Model(), witness, protocol, 'Chinese', raw)
-                self.assertEqual(original, saved)
-                self.assertEqual(result[0]['units'][1:], original[0]['units'][1:])
-                if mode == 'valid':
-                    self.assertEqual(result[0]['units'][0]['start'], 3.5)
-                    self.assertEqual(result[0]['units'][0]['end'], 4.)
-                    self.assertTrue(reports[0]['accepted'])
-                else:
-                    self.assertEqual(result, original)
-                    self.assertFalse(reports[0]['accepted'])
-                if mode == 'held_note':
-                    self.assertFalse(calls)
+        from timing_validation import reconcile_timing
+        protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
+        for language,text in [('Chinese','甲乙丙'),('Japanese','あいう'),('English','one two three')]:
+            with self.subTest(language=language):
+                spans=[(0,1),(1,2),(2,3)] if language!='English' else [(0,3),(4,7),(8,13)]
+                units=[dict(first=a,stop=b,text=text[a:b],start=t,end=t+.2,timing_source='singing_phonemes')
+                       for (a,b),t in zip(spans,[.2,1.,4.])]
+                cues=[dict(text=text,start=.2,end=4.2,aligned_start=.2,aligned_end=4.2,units=units)]
+                observed=deepcopy(units);observed[1].update(start=3.,end=3.3)
+                result,report=reconcile_timing(cues,np.ones(44100*5)*.1,lambda *a,**k:[observed,observed],
+                    lambda *a:[observed]*3,protocol,language)
+                self.assertEqual([u['start'] for u in result[0]['units']],[.2,3.,4.])
+                self.assertFalse(report['unresolved'])
+                self.assertEqual(len(report['constraints']),1)
 
-    def test_first_word_retry_uses_neighbor_lyrics_and_supports_kana_groups(self):
-        from copy import deepcopy
-        from unittest.mock import patch
-        from cjk_recovery import recover_first_words
-        original = [dict(text='前', units=[dict(first=0, stop=1, text='前', start=.1, end=.7)]),
-                    dict(text='あいう', aligned_start=1., aligned_end=4.8, units=[
-                        dict(first=0, stop=1, text='あ', start=1., end=4.),
-                        dict(first=1, stop=2, text='い', start=4., end=4.4),
-                        dict(first=2, stop=3, text='う', start=4.4, end=4.8)]),
-                    dict(text='後', units=[dict(first=0, stop=1, text='後', start=5., end=5.5)])]
-        raw = [dict(line=2, attempts=[dict(units=[dict(original[1]['units'][0], start=t)]) for t in [3.1, 3.4, 3.7]])]
-        calls = []
-        class Model:
-            def infer(self, audio, begin, units, cue):
-                calls.append((cue['text'], begin, len(audio)))
-                self_units = [dict(u, start=3.5, end=3.8) if u['text'] == 'あ' else dict(u) for u in cue['units']]
-                return dict(units=self_units)
-        def witness(cue, wave, *, language):
-            self.assertEqual(language, 'Japanese')
-            return [[dict(cue['units'][0], start=3.51, end=3.8)] for _ in range(2)]
-        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4,
-                        minimum_relative_rms=.03, context_padding_seconds=[.35, .6, 1.])
-        saved = deepcopy(original)
-        with patch('cjk_recovery.spoken_units', return_value=[]):
-            result, reports = recover_first_words(original, np.full(44100*6, .1), Model(), witness, protocol, 'Japanese', raw)
-        self.assertEqual(original, saved)
-        self.assertTrue(all(c[0] == '前 あいう 後' for c in calls))
-        self.assertEqual(len(calls), 3)
-        self.assertEqual(result[1]['units'][0]['start'], 3.5)
-        self.assertEqual(result[1]['units'][1:], original[1]['units'][1:])
-        self.assertEqual(result[::2], original[::2])
-        self.assertEqual([a['accepted'] for a in reports[0]['attempts']], [False, True])
+    def test_countdown_uses_singing_offsets_and_does_not_invent_them_from_ctc(self):
+        # The first word stays visible until the next word, but its singing
+        # has ended. Extending the display must not erase a real vocal gap.
+        units=[dict(start=1.,end=9.,acoustic_end=2.),dict(start=9.,end=10.,acoustic_end=10.)]
+        self.assertEqual([e['onset'] for e in countdown_events([dict(units=units)])],[1.,9.])
+        units[0]=dict(start=1.,end=9.,emission_end=1.05,timing_evidence='ctc_event')
+        self.assertEqual([e['onset'] for e in countdown_events([dict(units=units)])],[1.])
 
     def test_cross_model_recovery_preserves_foreign_words_and_rejects_unverified_changes(self):
         import copy

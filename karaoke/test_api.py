@@ -2669,7 +2669,7 @@ def test_download_selects_720p_without_reducing_audio_quality(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize('mode', ['full', 'audio', 'playback_audio'])
-@pytest.mark.parametrize('failure', ['transcribe', 'prepare_lyrics', 'align_words', 'align_phonemes', 'no_subtitles', 'separate_lead', 'package_three_stems', 'overlap', 'dependency_overlap', 'render_overlap', 'video_overlap'])
+@pytest.mark.parametrize('failure', ['transcribe', 'prepare_lyrics', 'align_words', 'align_phonemes', 'no_subtitles', 'separate_lead', 'package_three_stems', 'validate_timing', 'overlap', 'dependency_overlap', 'render_overlap', 'video_overlap'])
 def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(tmp_path, monkeypatch, mode, failure):
     import soundfile as sf
     audio_only, strict = mode != 'full', mode == 'audio'
@@ -2738,6 +2738,11 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
         fail('align_words')
         fail('align_phonemes')
     monkeypatch.setattr(pipeline, 'align', align)
+    validated = []
+    def validate(*args):
+        validated.append(True)
+        fail('validate_timing')
+    monkeypatch.setattr(pipeline, 'validate_alignment', validate)
     monkeypatch.setattr(pipeline, 'render_picture', lambda result: picture_started.set())
     def promote(metadata, source):
         assert alignment_started.wait(5), 'Alignment waited for the picture download'
@@ -2750,7 +2755,7 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
         if failure == 'dependency_overlap':
             assert sf.info(tmp_path/'vocals-16k.wav').samplerate == 16000
             assert (tmp_path/'vocals-asr.mp3').exists() == strict
-    elif strict or failure in ('separate_lead', 'package_three_stems', 'no_subtitles'):
+    elif strict or failure in ('separate_lead', 'package_three_stems', 'no_subtitles', 'validate_timing'):
         with pytest.raises(StageFailure) as caught:
             pipeline.execute()
         assert not (tmp_path/'result.json').exists()
@@ -2774,6 +2779,7 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
         assert ('mv' in result['artifacts']) == (not audio_only)
         assert result['shared_preview_gain'] == .8
         assert (tmp_path/'audio-result.json').exists() == audio_only
+        assert validated == [True], 'Playback fallback bypassed the common timing gate'
 
 
 @pytest.mark.parametrize('change', [None, 'url', 'metadata', 'code', 'lyrics_source'])
@@ -2902,6 +2908,31 @@ def test_playback_fallback_preserves_other_lines_highlights(tmp_path, bad):
     assert quality['playback_fallback']['unhighlighted_lines'] == []
     assert quality['playback_fallback']['word_alignment_passed'] is False
     assert quality['onset_accuracy'] is None
+
+
+@pytest.mark.parametrize('old_time', [True, False])
+def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success_flag(tmp_path, monkeypatch, old_time):
+    pipeline = Pipeline(dict(url=URL), tmp_path, device='cpu')
+    lyrics = dict(lines=['hello'], language='English')
+    cue = dict(text='hello', start=1., end=5., units=[dict(text='hello', first=0, stop=5, start=1., end=5.)])
+    (tmp_path/'cues.json').write_text(json.dumps([cue]))
+    (tmp_path/'quality.json').write_text('{}')
+    def run(*args):
+        output=tmp_path/'timing-checked';output.mkdir()
+        checked=json.loads(json.dumps(cue))
+        if not old_time:checked['units'][0]['start']=4.
+        (output/'cues.json').write_text(json.dumps([checked]))
+        (output/'report.json').write_text(json.dumps(dict(lines=[],unresolved=[],constraints=[
+            dict(line=1,text='hello',first=0,stop=5,start_min=3.6,start_max=4.4,onset=4.)])))
+    monkeypatch.setattr(pipeline,'run',run)
+    if old_time:
+        with pytest.raises(StageFailure, match='字幕时间校验失败'):
+            pipeline.validate_alignment(lyrics,6)
+        assert json.loads((tmp_path/'cues.json').read_text())==[cue]
+    else:
+        pipeline.validate_alignment(lyrics,6)
+        assert json.loads((tmp_path/'cues.json').read_text())[0]['units'][0]['start']==4.
+        assert len(json.loads((tmp_path/'quality.json').read_text())['timing_review']['onset_constraints'])==1
 
 
 def test_playback_fallback_recovers_each_phrase_from_available_stages(tmp_path):
@@ -3089,9 +3120,10 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
     monkeypatch.setattr(pipeline, 'run', run_stage)
     monkeypatch.setattr(pipeline, 'prepare_text', lambda *args: dict(title='Example',artist='',language='English'))
     monkeypatch.setattr(pipeline, 'align', lambda *args: stages.append('align'))
+    monkeypatch.setattr(pipeline, 'validate_alignment', lambda *args: stages.append('validate_timing'))
     monkeypatch.setattr(pipeline, 'render_video', lambda *args: pytest.fail('Audio-only test rendered a video'))
     result=pipeline.execute()
-    assert {'separate_music','separate_lead','package_three_stems','align'}<=set(stages)
+    assert {'separate_music','separate_lead','package_three_stems','align','validate_timing'}<=set(stages)
     assert result['validation_scope']=='audio_and_lyrics' and 'mv' not in result['artifacts']
     assert not (folder/'result.json').exists()
     evidence=verify_outputs(None,'',tmp_path,{'id':'job'},audio_only=True)

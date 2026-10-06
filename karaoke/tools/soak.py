@@ -248,6 +248,13 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False, playback_po
         raise ValueError('No usable subtitles; audio and diagnostics retained')
     units = [u for cue in cues for u in cue['units']]
     duration = result['duration_seconds']
+    review = result.get('quality', {}).get('timing_review')
+    if review is not None:
+        from karaoke.timing_validation import validate_timeline
+        lyrics = json.loads((folder/'lyrics.json').read_text())
+        validate_timeline(cues, lyrics['lines'], duration, review['onset_constraints'], result['language'])
+        if review['unresolved']:
+            raise ValueError('Unresolved acoustic timing contradictions')
     if any(not 0 <= c['start'] < c['end'] <= duration+.05 for c in cues):
         raise ValueError('Invalid subtitle phrase intervals')
     if (not units and not playback_policy) or any(not 0 <= u['start'] < u['end'] <= duration+.05 for u in units):
@@ -595,7 +602,8 @@ def record_failure(attempt, job, folder):
                     'prepared-lyrics.json', 'playback-warning.json', 'lyrics-first-lookup.json',
                     'published-lyrics.json', 'lyric-lookup.json', 'song-metadata.json',
                     'audio-result.json', 'result.json', 'lyric-coverage-validation.json',
-                    'lyric-repeat-validation.json', 'highlight-validation.json'):
+                    'lyric-repeat-validation.json', 'highlight-validation.json',
+                    'timing-checked/*.json', 'timing-constraints.json', 'timing-input.json'):
         for path in folder.glob(pattern):
             try:
                 if path.stat().st_size <= 2*1024**2:
