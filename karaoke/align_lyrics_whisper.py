@@ -337,6 +337,17 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                     local = recovery_anchors(anchors_from_words(lines[cf+left:cs+left],
                         recognized_words(ab, response, ae), language, allow_missing=True))
                     regional.update(recognition=response, anchors=local)
+                    chunks = int(np.ceil((ae-ab)/20))
+                    if (ae-ab > 30 and budget >= chunks+cost and
+                            not any(local[i-cf]['status']=='candidate' for i in range(start, stop_line))):
+                        # Retrying the same leading 30-second decoder context
+                        # cannot recover a verse it skipped. Overlap shorter
+                        # views and retain only each view's central region.
+                        budget -= chunks
+                        words, views = recognize_in_windows(recognize, ab, ae, chunks)
+                        local = recovery_anchors(anchors_from_words(lines[cf+left:cs+left],
+                            words, language, allow_missing=True))
+                        regional.update(overlapping_recognition=views, anchors=local)
                     recovered = [i for i in range(start, stop_line) if local[i-cf]['status'] == 'candidate']
                     if recovered:
                         refined = list(anchors)
@@ -476,6 +487,24 @@ def recognized_words(begin, response, end):
              for w in s.get('words') or [] if np.isfinite([w['start'], w['end']]).all()
              and 0 <= w['start'] < w['end'] <= end-begin+.001]
     return words
+
+
+def recognize_in_windows(recognize, begin, end, chunks):
+    """Keep overlapping recognition context without duplicating its words."""
+    words, reports = [], []
+    edges = np.linspace(begin, end, chunks+1)
+    for left, right in zip(edges, edges[1:]):
+        start, stop = max(begin, left-5), min(end, right+5)
+        report = dict(source_range=[start, stop], retained_range=[left, right])
+        reports.append(report)
+        try:
+            response = recognize(start, stop)
+            report['recognition'] = response
+            words.extend(w for w in recognized_words(start, response, stop)
+                         if left <= (w['start']+w['end'])/2 < right)
+        except ValueError as error:
+            report['error'] = str(error)
+    return sorted(words, key=lambda w: (w['start'], w['end'])), reports
 
 
 def recovery_anchors(recognized):
