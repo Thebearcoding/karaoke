@@ -937,6 +937,8 @@ class Pipeline:
 
     def align_candidates(self, lyrics, metadata, duration):
         from .lyric_consensus import alternative_lyric_candidates
+        from .lyric_lookup import published_lyric_lines
+        from .subtitles import normalized
         packet = lyrics.get('provenance', {}).get('lyric_lookup', {}) if not self.strict_audio else {}
         path = self.output/'lyric-crosscheck.json'
         if not self.strict_audio and 'candidate_texts' not in packet:
@@ -944,10 +946,25 @@ class Pipeline:
                 packet = json.loads(path.read_text())
             except (OSError, ValueError):
                 packet = {}
-        candidates = [lyrics, *alternative_lyric_candidates(lyrics, packet)]
+        candidates, seen = [], set()
+        for candidate in [lyrics, *alternative_lyric_candidates(lyrics, packet)]:
+            if candidate.get('provenance', {}).get('kind') == 'online_lyric_text':
+                lines, excluded = published_lyric_lines('\n'.join(candidate['lines']),
+                                                       candidate['title'], [candidate['artist']])
+                if excluded:
+                    provenance = candidate['provenance']
+                    candidate = dict(candidate, lines=lines, provenance=dict(provenance,
+                        lyric_lookup=dict(provenance.get('lyric_lookup', {}),
+                            excluded_cached_credit_lines=excluded)))
+            key = normalized(''.join(candidate['lines'])).casefold()
+            if key and key not in seen:
+                candidates.append(candidate)
+                seen.add(key)
+        if not candidates:
+            raise StageFailure('lyrics', '未找到可用的歌词正文')
         attempts = []
         for index, candidate in enumerate(candidates):
-            if index:
+            if index or candidate is not lyrics:
                 self.aligned_cues = None
                 self.alignment_outputs.clear()
                 write_json(self.output/'lyrics.json', candidate)

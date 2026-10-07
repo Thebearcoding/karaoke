@@ -1709,7 +1709,8 @@ def test_music_cached_body_survives_duration_changes_and_other_song_backoff(tmp_
     ('詞：林林', '曲：林林', '弦樂編寫：樂手', '錄音師：工程師'),
     ('词：林林', '曲：林林', '第一小提琴：乐手', '混音师：工程师'),
     ('Lyrics: Writer', 'Music: Composer', 'Guitar: Player', 'Mixed by: Engineer'),
-    ('專輯：春天', '歌曲：晚風 (Album Version)', '作詞：林林', '作曲：林林')])
+    ('專輯：春天', '歌曲：晚風 (Album Version)', '作詞：林林', '作曲：林林'),
+    ('OA/OC: A Writer / B Writer', 'ＯＰ：A Publisher', 'SP: B Publisher', 'Publisher: C Publisher')])
 @pytest.mark.parametrize('heading', ['晚風', '晚風-林林', '晚風 - 林林', '晚風—林林', '晚風 – 林林'])
 def test_published_lyrics_remove_credit_blocks_but_keep_sung_titles_and_colons(credits, heading):
     from karaoke.lyric_lookup import published_candidate, published_lyric_lines
@@ -2239,6 +2240,53 @@ def test_isolated_recovery_reuses_localization_across_long_instrumentals(edge, f
     else:
         assert not calls and proof['reason'] == 'requires_coarse_localization'
         assert result['result'] == block['result']
+
+
+@pytest.mark.parametrize('fault', [None, 'first_window_fails', 'budget', 'unlocated_split'])
+@pytest.mark.parametrize('ending', [False, True])
+def test_isolated_recovery_splits_long_runs_at_measured_phrase_boundaries(fault, ending):
+    from copy import deepcopy
+    from karaoke.align_lyrics_whisper import recover_unresolved_lines
+    lines = ['Before', 'First chorus', 'Second chorus', 'First verse', 'Second verse', 'After']
+    starts = [5., 20., 24., 75., 79., 95.]
+    segments = [dict(text=t, words=[dict(word=t, start=s, end=s+1.)] if i in (0,5) else [])
+                for i,(t,s) in enumerate(zip(lines, starts))]
+    anchors = [dict(text=lines[i], status='candidate', start=starts[i], end=starts[i]+2.) for i in range(1,5)]
+    if fault == 'unlocated_split':
+        for anchor in anchors[1:3]:
+            anchor.update(status='unresolved_text', start=None, end=None)
+    if ending:
+        lines, segments = lines[:-1], segments[:-1]
+    block = dict(context=[0,len(lines)], range=[0,len(lines)], source_range=[0.,100.], result=dict(segments=segments),
+                 asr_localizations=[dict(context=[1,5], anchors=anchors)])
+    original, calls = deepcopy(block), []
+    def align(begin, end, text, **options):
+        calls.append((begin,end,text.splitlines()))
+        if fault == 'first_window_fails' and len(calls)==1:
+            return None
+        return dict(segments=[dict(text=line, words=[dict(word=word,
+            start=starts[lines.index(line)]+.2+j*.5-begin,
+            end=starts[lines.index(line)]+.5+j*.5-begin) for j,word in enumerate(line.split())])
+            for line in text.splitlines()])
+    result = recover_unresolved_lines(block, lines, 100., 'English', align, isolated=True,
+                                      max_attempts=1 if fault=='budget' else 8)
+    assert block == original
+    assert result['result']['segments'][0] == segments[0]
+    if not ending:
+        assert result['result']['segments'][5] == segments[5]
+    if fault == 'unlocated_split':
+        assert not calls and result['result'] == block['result']
+        return
+    assert calls[0] == (19.4,26.6,lines[1:3])
+    assert len(calls) == (1 if fault=='budget' else 2)
+    if fault != 'budget':
+        assert calls[1] == (74.4,81.6,lines[3:5])
+    for i in range(1,5):
+        words = result['result']['segments'][i]['words']
+        accepted = not (fault=='first_window_fails' and i<3 or fault=='budget' and i>=3)
+        assert bool(words) == accepted
+        if accepted:
+            assert words[0]['start'] == pytest.approx(starts[i]+.2)
 
 
 @pytest.mark.parametrize('far_neighbour', [False, True])
@@ -3761,7 +3809,7 @@ def test_prepared_lyrics_preserve_provenance_and_reject_different_inputs(tmp_pat
 
 
 @pytest.mark.parametrize('mode', ['success', 'other_recording', 'all_fail', 'resource_failure', 'stale', 'supplied', 'soft',
-                                'missing_language', 'null_language'])
+                                'missing_language', 'null_language', 'cached_credits', 'primary_credits', 'credits_only'])
 @pytest.mark.parametrize('prepared', [False, True])
 def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeypatch, mode, prepared):
     from karaoke.lyric_lookup import prepared_lyrics_identity
@@ -3778,6 +3826,12 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
         packet['crosscheck']['sources'][1]['recording_mismatches'] = ['duration']
     if mode == 'missing_language': packet['crosscheck']['sources'][1].pop('language')
     if mode == 'null_language': packet['crosscheck']['sources'][1]['language'] = None
+    if mode == 'cached_credits': packet['candidate_texts'][1] = ['OP: A Publisher', *alternative]
+    if mode == 'primary_credits':
+        lyrics['lines'] = packet['candidate_texts'][0] = ['OA/OC: A Writer', *primary]
+    if mode == 'credits_only':
+        lyrics['lines'] = packet['candidate_texts'][0] = ['OP: A Publisher']
+        packet['candidate_texts'][1:3] = [['SP: A Publisher'], ['OA/OC: A Writer']]
     if mode == 'stale':packet['candidate_texts'][0] = ['Old lyrics']
     prepared_path = None
     if prepared:
@@ -3810,11 +3864,11 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
         (tmp_path/'cues.json').write_text(json.dumps(cues))
         if failing:raise ValueError('Unresolved alignment')
     monkeypatch.setattr(pipeline, 'align', align)
-    if mode in ('success', 'other_recording', 'soft', 'missing_language', 'null_language'):
+    if mode in ('success', 'other_recording', 'soft', 'missing_language', 'null_language', 'cached_credits', 'primary_credits'):
         selected, error = pipeline.align_candidates(lyrics, {}, 6.)
         assert selected['lines'] == (primary if mode=='soft' else alternative)
         assert calls == ([primary] if mode=='soft' else [primary,alternative])
-        if mode in ('success', 'other_recording', 'missing_language', 'null_language'):
+        if mode in ('success', 'other_recording', 'missing_language', 'null_language', 'cached_credits', 'primary_credits'):
             from karaoke.tools.playback_sweep import soft_failures
             quality=json.loads((tmp_path/'quality.json').read_text())
             assert soft_failures(dict(quality=quality), {}) == [dict(module='lyrics',
@@ -3827,7 +3881,7 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
             assert json.loads((tmp_path/'lyrics.json').read_text())['lines']==alternative
     else:
         with pytest.raises(StageFailure):pipeline.align_candidates(lyrics, {}, 6.)
-        assert calls == ([primary,alternative] if mode=='all_fail' else [primary])
+        assert calls == ([] if mode=='credits_only' else [primary,alternative] if mode=='all_fail' else [primary])
 
 
 @pytest.mark.parametrize('overlap', [.02, .1, .16, .32, .75])
@@ -4218,7 +4272,8 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
         if name.startswith('separate_'):
             assert command[command.index('--batch-size')+1] == '4'
     monkeypatch.setattr(pipeline, 'run', run_stage)
-    monkeypatch.setattr(pipeline, 'prepare_text', lambda *args: dict(title='Example',artist='',language='English'))
+    monkeypatch.setattr(pipeline, 'prepare_text', lambda *args: dict(
+        title='Example', artist='', language='English', lines=['Hello']))
     monkeypatch.setattr(pipeline, 'align', lambda *args: stages.append('align'))
     monkeypatch.setattr(pipeline, 'validate_alignment', lambda *args: stages.append('validate_timing'))
     monkeypatch.setattr(pipeline, 'render_video', lambda *args: pytest.fail('Audio-only test rendered a video'))

@@ -235,7 +235,8 @@ def published_lyric_lines(text, title, artists=()):
         r'弦乐(?:编写|编曲)?|(?:人声|配唱|伴唱|主唱|合唱|童声|合声|和声|和音)(?:编写|编曲|编配|制作|录音)?(?:人|师|指导)?|钢琴|吉他|贝斯|鼓|'
         r'(?:第[一二三四\d]+)?(?:小提琴|中提琴|大提琴)|录音(?:师|助理)?|混音(?:师)?|母带(?:工程师)?|音频(?:助理|工程师)|'
         r'title|artist|album|composer|lyricist|producer|lyrics|music|written by|produced by|'
-        r'guitar|bass|drums|piano|strings|recorded by|mixed by|mastered by|audio engineer|assistant engineer)\s*[：:]', re.I)
+        r'guitar|bass|drums|piano|strings|recorded by|mixed by|mastered by|audio engineer|assistant engineer|'
+        r'[OS]P|O[AC](?:\s*/\s*O[AC])?|publisher|copyright)\s*[：:]', re.I)
     rows, metadata, timestamps = [], [], {}
     for i, line in enumerate(text.splitlines(), 1):
         line = html.unescape(line).strip()

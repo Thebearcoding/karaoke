@@ -145,15 +145,13 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
         report = dict(lines=[begin_line+1, end_line], context=[call_left, call_right],
                       source_range=[begin, end], accepted=False, isolated=isolated)
         reports.append(report)
-        if left == begin_line and right == end_line:
-            report['reason'] = 'no_measured_neighbour'
-            continue
-        if isolated and end-begin > 45:
+        has_neighbour = left < begin_line or right > end_line
+        if isolated and (end-begin > 45 or not has_neighbour):
             # A long intro/outro must not discard localization already paid
             # for. Reuse independent text anchors only as a narrower search
             # window, still inside the preserved neighbouring phrase bounds.
             for localization in reversed(block.get('asr_localizations', [])):
-                first_anchor, stop_anchor = localization['context']
+                first_anchor, stop_anchor = localization.get('context', (0, 0))
                 if not first_anchor <= begin_line < end_line <= stop_anchor:
                     continue
                 anchors = localization.get('anchors', [])[begin_line-first_anchor:end_line-first_anchor]
@@ -170,11 +168,34 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
                         any(a['start'] >= b['start'] for a, b in zip(located, located[1:]))):
                     continue
                 low, high = max(begin, anchors[0]['start']-.6), min(end, max(a['end'] for a in located)+.6)
+                if high-low > 45:
+                    # A contiguous failure can span several real phrases and
+                    # an instrumental. Split at an independently located gap;
+                    # each piece still uses the same retry budget and checks.
+                    cuts = []
+                    for cut in range(1, len(anchors)):
+                        if any(a['status'] != 'candidate' for a in anchors[cut-1:cut+1]):
+                            continue
+                        prefix_end = max(a['end'] for a in anchors[:cut] if a['status'] == 'candidate')
+                        gap = anchors[cut]['start']-prefix_end
+                        if gap >= 0 and 0 < min(end, prefix_end+.6)-low <= 45:
+                            cuts.append((gap, cut, min(end, anchors[cut]['start'], prefix_end+.6)))
+                    if cuts:
+                        _, cut, high = max(cuts)
+                        original_stop = end_line
+                        end_line = call_right = right = begin_line+cut
+                        bad[:0] = range(end_line, original_stop)
+                        anchors = anchors[:cut]
+                        report.update(lines=[begin_line+1, end_line], context=[call_left, call_right],
+                                      split_from_lines=[begin_line+1, original_stop])
                 if 0 < high-low <= 45:
                     report.update(unlocalized_range=[begin, end], search_anchors=deepcopy(anchors))
                     begin, end = low, high
                     report['source_range'] = [begin, end]
                     break
+        if not has_neighbour and 'search_anchors' not in report:
+            report['reason'] = 'no_measured_neighbour'
+            continue
         if not 0 <= begin < end <= duration+.001 or end-begin > 45:
             report['reason'] = 'requires_coarse_localization'
             continue
