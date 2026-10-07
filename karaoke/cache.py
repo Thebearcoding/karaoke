@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import time
 from uuid import UUID
 
@@ -80,7 +81,7 @@ class SongCache:
         for parent, _, names in os.walk(folder, followlinks=False):
             for name in names:
                 try:
-                    total += (Path(parent)/name).lstat().st_size
+                    total += os.stat(os.path.join(parent, name), follow_symlinks=False).st_size
                 except FileNotFoundError:  # A running worker may have just removed a temporary file.
                     pass
         return total
@@ -107,10 +108,20 @@ class SongCache:
                     source.get('input_url', source.get('url')) != job['input']['url'] or
                     not all((folder/p).is_file() and not (folder/p).is_symlink() for p in required)):
                 return set()
-            return required | {'request.json'} | {
-                p.relative_to(folder).as_posix() for p in folder.rglob('*') if p.is_file() and not p.is_symlink()
-                and (p.suffix == '.log' or (p.suffix == '.json' and p.stat().st_size <= 2*1024**2
-                                          and p.name not in ('result.json', 'audio-result.json')))}
+            keep = required | {'request.json'}
+            for parent, _, names in os.walk(folder, followlinks=False):
+                for name in names:
+                    is_log = name.endswith('.log')
+                    if not is_log and (not name.endswith('.json') or name in ('result.json', 'audio-result.json')):
+                        continue
+                    path = os.path.join(parent, name)
+                    try:
+                        info = os.stat(path, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISREG(info.st_mode) and (is_log or info.st_size <= 2*1024**2):
+                        keep.add(os.path.relpath(path, folder))
+            return keep
         except (OSError, ValueError, KeyError):
             return set()
 
@@ -191,8 +202,13 @@ class SongCache:
         retained = {}
         for job in candidates:
             folder = self.folder(job['id'])
-            retained[job['id']] = sum(min((folder/name).stat().st_size, 65536) if name.endswith('.log')
-                else (folder/name).stat().st_size for name in self.source_files(job) if (folder/name).is_file())
+            retained[job['id']] = 0
+            for name in self.source_files(job):
+                try:
+                    size = os.stat(os.path.join(folder, name), follow_symlinks=False).st_size
+                except FileNotFoundError:
+                    continue
+                retained[job['id']] += min(size, 65536) if name.endswith('.log') else size
         # Exhaust cheap-to-rebuild video before discarding any computed audio/timings.
         for job in candidates:
             if self.within_limit(used + reserve) and free >= self.minimum_free + reserve:

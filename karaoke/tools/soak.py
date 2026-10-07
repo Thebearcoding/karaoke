@@ -372,10 +372,20 @@ def run_probe(client, base, folder, command, *, resume_preparation=None, session
                     output = reader.submit(read_output)
                 while True:
                     session.check(folder)
-                    storage = client.get(base+'/v1/storage').raise_for_status().json()
-                    if (storage['limit_bytes'] is not None and storage['used_bytes'] > storage['limit_bytes']) or not storage['can_prepare']:
-                        raise ValueError('Focused probe reached the shared cache or free-space limit')
-                    health = client.get(base+'/health').raise_for_status().json()
+                    for attempt in range(2):
+                        try:
+                            storage = client.get(base+'/v1/storage').raise_for_status().json()
+                            if (storage['limit_bytes'] is not None and storage['used_bytes'] > storage['limit_bytes']) or not storage['can_prepare']:
+                                raise ValueError('Focused probe reached the shared cache or free-space limit')
+                            health = client.get(base+'/health').raise_for_status().json()
+                            break
+                        except httpx.TransportError as error:
+                            if attempt:
+                                raise
+                            log.write(f'Probe monitor retry after {type(error).__name__}\n'.encode())
+                            log.flush()
+                            time.sleep(.2)
+                            session.check(folder)
                     if store is None and (not health.get('preparation_paused') or health.get('running_job')):
                         raise ValueError('Preparation resumed during the focused probe')
                     if output is not None and output.done():

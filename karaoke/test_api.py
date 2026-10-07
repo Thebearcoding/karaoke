@@ -6029,6 +6029,13 @@ def test_offline_cache_keeps_sources_when_reclaiming_computed_audio(tmp_path, mo
     (folder/'source.json').write_text(json.dumps(dict(
         url=URL, sha256=source_sha, audio_only=audio_only, duration=10)))
     (folder/'alignment.json').write_text('{"reason":"unresolved"}')
+    nested = folder/'diagnostics'
+    nested.mkdir()
+    (nested/'keep.json').write_text('{}')
+    (nested/'oversized.json').write_bytes(b'x'*(2*1024**2+1))
+    outside = tmp_path/'outside.json'
+    outside.write_text('{"unmanaged":true}')
+    (nested/'linked.json').symlink_to(outside)
     (folder/'worker.log').write_bytes(b'x'*100000)
     (folder/'working.wav').write_bytes(b'x'*(2*1024**2))
     error = dict(code='align_words_failed') if status == 'failed' else None
@@ -6045,6 +6052,9 @@ def test_offline_cache_keeps_sources_when_reclaiming_computed_audio(tmp_path, mo
     assert file_hash(source) == source_sha
     assert not (folder/'working.wav').exists()
     assert (folder/'alignment.json').read_text() == '{"reason":"unresolved"}'
+    assert (nested/'keep.json').read_text() == '{}'
+    assert not (nested/'oversized.json').exists() and not (nested/'linked.json').exists()
+    assert outside.read_text() == '{"unmanaged":true}'
     assert (folder/'worker.log').stat().st_size == 65536
     saved = store.read(job['id'])
     assert saved['status'] == 'source_ready' and saved['error'] == error
@@ -7813,7 +7823,7 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
     assert manifest.read_bytes() == original_manifest
 
 
-@pytest.mark.parametrize('budget', ['normal', 'quota_full', 'unlimited', 'disk_full'])
+@pytest.mark.parametrize('budget', ['normal', 'quota_full', 'unlimited', 'disk_full', 'transient_disconnect', 'disconnected'])
 def test_probe_session_overlaps_children_and_stops_them_together(tmp_path, budget):
     from concurrent.futures import ThreadPoolExecutor
     import httpx
@@ -7824,11 +7834,16 @@ def test_probe_session_overlaps_children_and_stops_them_together(tmp_path, budge
         folder.mkdir()
         (folder/'checkpoint').write_bytes(b'keep')
     pids = [folder/'pid' for folder in folders]
+    disconnected = False
     def respond(request):
+        nonlocal disconnected
         if request.url.path == '/health':
             data = dict(preparation_paused=True, running_job=None)
         elif request.url.path == '/v1/storage':
             both = all(p.exists() for p in pids)
+            if both and (budget == 'disconnected' or (budget == 'transient_disconnect' and not disconnected)):
+                disconnected = True
+                raise httpx.ReadError('Connection reset by peer', request=request)
             data = dict(used_bytes=200 if both else 20,
                 limit_bytes=None if budget in ('unlimited', 'disk_full') else 100 if budget == 'quota_full' else 1000,
                 can_prepare=not (budget == 'disk_full' and both))
@@ -7847,8 +7862,9 @@ def test_probe_session_overlaps_children_and_stops_them_together(tmp_path, budge
             futures = [pool.submit(run_probe, client, 'http://test', folder, command(folder), session=session)
                        for folder in folders]
             for future in futures:
-                if budget in ('quota_full', 'disk_full'):
-                    with pytest.raises(ValueError, match='cache or free-space|infrastructure failure'):
+                if budget in ('quota_full', 'disk_full', 'disconnected'):
+                    expected = (ValueError, httpx.ReadError) if budget == 'disconnected' else ValueError
+                    with pytest.raises(expected, match='cache or free-space|infrastructure failure|Connection reset'):
                         future.result(timeout=10)
                 else:
                     assert future.result(timeout=10) == 0
@@ -7857,5 +7873,7 @@ def test_probe_session_overlaps_children_and_stops_them_together(tmp_path, budge
         with pytest.raises(ProcessLookupError):
             os.kill(int(pid.read_text()), 0)
     assert all((folder/'checkpoint').read_bytes() == b'keep' for folder in folders)
+    if budget == 'transient_disconnect':
+        assert any('Probe monitor retry after ReadError' in (folder/'probe.log').read_text() for folder in folders)
     with pytest.raises(ValueError, match='does not own'):
         session.check(folders[0])
