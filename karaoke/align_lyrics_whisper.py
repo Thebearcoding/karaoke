@@ -304,6 +304,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                     ae = min(ae, ab+90)
             if not selected:
                 continue
+            region = (start, stop_line, cf, cs, ab, ae)
             attempt = dict(lines=[start+left+1, stop_line+left], context=[cf+left, cs+left], source_range=[ab, ae])
             report['attempts'].append(attempt)
             # Independent anchors can enclose a verse plus an instrumental
@@ -336,14 +337,14 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 except ValueError as error:
                     attempt['original_mix_alignment'] = dict(error=str(error), accepted=False)
             if (budget >= cost+1 and
-                    not relocalized.intersection(range(start, stop_line)) and
+                    region not in relocalized and
                     all(anchors[i]['status'] != 'candidate' for i in range(start, stop_line)) and
                     (not global_recovery or ab > begin+.001 or ae < end-.001) and
                     not valid_recovery(candidate, lines[cf+left:cs+left], ae-ab)):
                 # A recognition pass can skip a quiet verse. Revisit
                 # only its independently bounded region before forcing text
                 # through the same failed attention path again.
-                relocalized.update(range(start, stop_line))
+                relocalized.add(region)
                 budget -= 1
                 regional = dict(context=[cf+left, cs+left], source_range=[ab, ae])
                 attempt['regional_localization'] = regional
@@ -352,17 +353,6 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                     local = recovery_anchors(anchors_from_words(lines[cf+left:cs+left],
                         recognized_words(ab, response, ae), language, allow_missing=True))
                     regional.update(recognition=response, anchors=local)
-                    chunks = int(np.ceil((ae-ab)/20))
-                    if (ae-ab > 30 and budget >= chunks+cost and
-                            any(local[i-cf]['status']!='candidate' for i in range(start, stop_line))):
-                        # A partly recognized passage still has missing lyrics.
-                        # Overlap shorter views instead of repeating its leading
-                        # decoder context; retain only each view's central region.
-                        budget -= chunks
-                        words, views = recognize_in_windows(recognize, ab, ae, chunks)
-                        local = recovery_anchors(anchors_from_words(lines[cf+left:cs+left],
-                            words, language, allow_missing=True))
-                        regional.update(overlapping_recognition=views, anchors=local)
                     missing = [i for i in range(start, stop_line) if local[i-cf]['status'] != 'candidate']
                     if missing and localize is not None and budget >= cost+2:
                         # Recognition may omit real words. A second aligner can
@@ -380,6 +370,16 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                                     local[i-cf] = located[i-cf]
                         except ValueError as error:
                             regional['acoustic_error'] = str(error)
+                    chunks = int(np.ceil((ae-ab)/20))
+                    if (ae-ab > 30 and budget >= chunks+cost and
+                            not any(local[i-cf]['status']=='candidate' for i in range(start, stop_line))):
+                        # Try short recognition only when known-text acoustic
+                        # localization did not produce a narrower region.
+                        budget -= chunks
+                        words, views = recognize_in_windows(recognize, ab, ae, chunks)
+                        local = recovery_anchors(anchors_from_words(lines[cf+left:cs+left],
+                            words, language, allow_missing=True))
+                        regional.update(overlapping_recognition=views, anchors=local)
                     recovered = [i for i in range(start, stop_line) if local[i-cf]['status'] == 'candidate']
                     if recovered:
                         refined = list(anchors)
@@ -558,7 +558,10 @@ def acoustic_line_anchors(lines, views, begin, end):
         anchor = dict(text=line, start=None, end=None, status='unresolved_text')
         if all(s and normalized(''.join(u['text'] for u in s)) == normalized(line) for s in spans):
             starts, ends = [s[0]['start'] for s in spans], [s[-1]['end'] for s in spans]
-            if max(starts)-min(starts) <= .4 and max(ends)-min(ends) <= .4:
+            # Agreement locates the entry. A sustained tail may differ between
+            # mixture and separated audio: keep its full union as search room,
+            # never use either endpoint as a published word/phrase timing.
+            if max(starts)-min(starts) <= .4:
                 anchor.update(start=min(starts), end=max(ends), status='candidate', source='dual_audio_acoustic_search')
         anchors.append(anchor)
         offset += len(line)+1
@@ -960,14 +963,29 @@ def main():
             blocks = alignment_blocks(anchors, audio)
         started = time.perf_counter()
         raw_blocks, units, language_detections = [], [], []
-        acoustic = acoustic_audio = acoustic_hash = None
+        acoustic = acoustic_audio = acoustic_hash = singing = None
         def localize_audio(start, stop, text):
-            nonlocal acoustic, acoustic_audio, acoustic_hash
+            nonlocal acoustic, acoustic_audio, acoustic_hash, singing
             from cjk_recovery import AcousticWitness
             from scipy.signal import resample_poly
+            if acoustic_audio is None:
+                acoustic_audio = resample_poly(audio, 441, 160).astype('float32')
+            if lyrics['language'] == 'Chinese':
+                from align_lyric_phonemes import SingingAligner
+                from phoneme_progress import spoken_units
+                if singing is None:
+                    singing = SingingAligner('Chinese', args.device)
+                info = sf.info(job['original_audio'])
+                mixture, rate = sf.read(job['original_audio'], start=round(start*info.samplerate),
+                    stop=round(stop*info.samplerate), dtype='float32', always_2d=True)
+                divisor = np.gcd(rate, 44100)
+                mixture = resample_poly(mixture.mean(axis=1), 44100//divisor, rate//divisor)
+                units = spoken_units(text, 'Chinese')
+                views = [singing.infer(clip, start, units, None, decoder='ctc')['units'] for clip in
+                    (acoustic_audio[round(start*44100):round(stop*44100)], mixture)]
+                return dict(model='SOFA_CTC', model_sha256=sha(singing.checkpoint), views=views)
             if acoustic is None:
                 acoustic = AcousticWitness(job['original_audio'], args.device)
-                acoustic_audio = resample_poly(audio, 441, 160).astype('float32')
             cue = dict(text=text, aligned_start=start, aligned_end=stop, audio_bounds=[start, stop])
             views = acoustic(cue, acoustic_audio, language=lyrics['language'])
             if acoustic_hash is None:

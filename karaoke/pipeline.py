@@ -264,6 +264,8 @@ class Pipeline:
                 arguments = [str(a) for a in command]
                 model = arguments[arguments.index('--model')+1] if '--model' in arguments else 'large-v3-turbo'
                 weights = [ROOT/f'models/alignment/whisper/{model}.pt', ROOT/'models/alignment/mms/model.pt']
+                if json.loads((self.output/'lyrics.json').read_text())['language'] == 'Chinese':
+                    weights.extend(sorted((ROOT/'models/alignment/sofa/mandarin').rglob('*.ckpt')))
             else:
                 language = 'English' if english else json.loads((self.output/'lyrics.json').read_text())['language']
                 directory = {'Chinese': 'mandarin', 'Japanese': 'japanese', 'English': 'english'}[language]

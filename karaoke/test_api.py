@@ -678,7 +678,7 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     calls.clear()
     models[1].write_bytes(b'updated Mandarin model')
     prepare()
-    assert calls == ['align_phonemes', 'align_context']
+    assert calls == ['align_words', 'align_phonemes', 'align_context']
     calls.clear()
     models[0].write_bytes(b'updated Whisper model')
     prepare()
@@ -2501,7 +2501,7 @@ def test_failed_global_alignment_relocalizes_only_the_independently_bounded_regi
         assert result['result']==original['result']
 
 
-@pytest.mark.parametrize('support', ['complete', 'partial', 'missing', 'unavailable', 'acoustic', 'acoustic_partial',
+@pytest.mark.parametrize('support', ['complete', 'partial', 'missing', 'unavailable', 'acoustic', 'acoustic_partial', 'acoustic_tail',
                                      'acoustic_disagrees', 'acoustic_invalid', 'acoustic_unavailable'])
 def test_failed_long_recognition_uses_bounded_overlapping_context_without_duplicating_words(support):
     from karaoke.align_lyrics_whisper import recover_with_local_asr
@@ -2536,6 +2536,8 @@ def test_failed_long_recognition_uses_bounded_overlapping_context_without_duplic
             offset+=len(t)+1
         shift=2 if support=='acoustic_disagrees' else .1
         second=[dict(w,start=w['start']+shift,end=w['end']+shift) for w in words]
+        if support=='acoustic_tail':
+            second=[dict(w,end=w['end']+1.) for w in second]
         if support=='acoustic_invalid':
             second[1]['text']='Unrelated words'
         if support=='acoustic_partial':
@@ -2544,11 +2546,14 @@ def test_failed_long_recognition_uses_bounded_overlapping_context_without_duplic
     result=recover_with_local_asr(block,lines,np.zeros(120*16000),'English',recognize,align,
                                  force_global=True,max_alignment_attempts=24,
                                  localize=localize if support.startswith('acoustic') else None)
-    assert narrow and len(narrow)<=5
+    if support in ('acoustic','acoustic_partial','acoustic_tail'):
+        assert not narrow  # Known-text localization succeeded; no need to transcribe again.
+    else:
+        assert narrow and len(narrow)<=5
     assert all(a[1]>b[0] for a,b in zip(narrow,narrow[1:]))
     assert result['result']['segments'][0]==original[0]
     assert len(acoustic_calls)==int(support.startswith('acoustic'))
-    if support in ('complete','partial','acoustic','acoustic_partial'):
+    if support in ('complete','partial','acoustic','acoustic_partial','acoustic_tail'):
         assert [s['words'][0]['start'] for s in result['result']['segments']]==starts
         assert result['asr_localizations'][0]['accepted_lines']==[2,3]
         assert all(s['words'][0]['end']>s['words'][0]['start'] for s in result['result']['segments'])
