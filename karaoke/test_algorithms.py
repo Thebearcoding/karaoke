@@ -406,6 +406,39 @@ class SubtitleIntegrity(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, 'contradicted'):
                         validate_timeline(result, ['甲乙', '丙'], 6, report['constraints'], 'Chinese')
 
+    def test_uncertain_displacement_rechecks_context_without_assigning_hint_times(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing
+        protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
+        units=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
+               for i,(c,t) in enumerate(zip('甲乙',[1.,4.]))]
+        cue=dict(text='甲乙',start=1.,end=4.2,units=units)
+        for mode in ('recovered','still_disagrees','one_bad_view','held_note','bad_prediction','no_support'):
+            with self.subTest(mode=mode):
+                calls=[]
+                def witness(context,*args,**kwargs):
+                    calls.append(context['aligned_start'])
+                    self.assertEqual(context['units'][0]['start'],1.)
+                    first,second=(3.,3.14) if len(calls)==1 or mode=='still_disagrees' else (3.02,3.06)
+                    if mode=='one_bad_view':first=1.
+                    if mode=='held_note':first,second=1.,1.02
+                    return [[dict(units[0],start=t,end=t+.2),dict(units[1])] for t in (first,second)]
+                predictions=[[dict(units[0],start=3.04,end=3.24),dict(units[1])] for _ in range(3)]
+                if mode=='bad_prediction':predictions[0][0].update(start=3.2,end=3.4)
+                wave=np.ones(44100*5)*(.0 if mode=='no_support' else .1)
+                result,report=reconcile_timing([cue],wave,witness,lambda *a:deepcopy(predictions),
+                                                protocol,'Chinese')
+                self.assertEqual(calls,[1.] if mode in ('one_bad_view','held_note') else [1.,3.])
+                self.assertEqual(cue['units'][0]['start'],1.)
+                self.assertEqual(result[0]['units'][1],dict(units[1],acoustic_end=4.2))
+                if mode=='recovered':
+                    self.assertEqual(result[0]['units'][0]['start'],3.04)
+                    self.assertEqual(report['lines'][-1]['context_retry'],[3.,4.2])
+                    self.assertFalse(report['unresolved'])
+                else:
+                    self.assertEqual(result[0]['units'][0]['start'],1.)
+                    self.assertFalse(report['constraints'])
+
     def test_internal_merged_word_reobserves_a_stale_phrase_window_once(self):
         from copy import deepcopy
         from timing_validation import reconcile_timing, validate_timeline

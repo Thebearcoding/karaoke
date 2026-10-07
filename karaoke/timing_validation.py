@@ -64,6 +64,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
     """
     from cjk_recovery import corroborated_group
     result, reports, ledger = deepcopy(cues), [], deepcopy(list(constraints))
+    context_hints = {}
     for cue in result:
         cue.setdefault('aligned_start', cue['start'])
         cue.setdefault('aligned_end', cue['end'])
@@ -98,6 +99,19 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                        a['start'] >= b['start'] for v in views for a,b in zip(v,v[1:])):
                 raise ValueError('Acoustic localization crosses neighbouring lyrics')
             old = {u['first']:u for u in cue['units']}
+            # Coarse localization need not meet the final onset tolerance to
+            # justify another observation. Two nearby estimates can both
+            # exclude an old time while differing by more than 100 ms.
+            if _retry_context and any(a['first'] in old
+                    and .1 < abs(a['start']-b['start']) <= protocol['maximum_change_seconds']
+                    and (old[a['first']]['start'] < min(a['start'],b['start'])-protocol['maximum_change_seconds']
+                         or old[a['first']]['start'] > max(a['start'],b['start'])+protocol['maximum_change_seconds'])
+                    for a,b in zip(*views)):
+                begin, end = min(v[0]['start'] for v in views), max(v[-1]['end'] for v in views)
+                if (0 < end-begin <= 30 and
+                        max(abs(begin-cue['aligned_start']),abs(end-cue['aligned_end'])) > protocol['maximum_change_seconds']):
+                    context_hints[index] = [begin,end]
+                    report['context_hint'] = [begin,end]
             suspects = [a for a,b in zip(*views) if a['first'] in old
                         and abs(a['start']-b['start']) <= .1
                         and abs(old[a['first']]['start']-a['start']) > protocol['maximum_change_seconds']]
@@ -206,7 +220,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             report['reason']=str(error)
     if _retry_context:
         retry = deepcopy(result)
-        windows = {}
+        windows = dict(context_hints)
         for violation in timing_violations(result, ledger):
             proof = violation['proof']
             index = proof['line']-1
@@ -236,6 +250,8 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                     windows[index] = [begin, end]
                     cue.update(aligned_start=begin, aligned_end=end)
         if windows:
+            for index, (begin,end) in windows.items():
+                retry[index].update(aligned_start=begin,aligned_end=end)
             retry, reviewed = reconcile_timing(retry, wave, witness, predict, protocol, language, ledger,
                                                _retry_context=False, _review_lines=windows)
             for index in windows:
