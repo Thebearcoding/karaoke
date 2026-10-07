@@ -7578,7 +7578,7 @@ def test_playback_survey_records_source_disagreements_and_actual_provider_failur
 @pytest.mark.parametrize('hard_code', ['separate_music_failed', 'subtitles_failed'])
 @pytest.mark.parametrize('has_full_mv', [False, True])
 @pytest.mark.parametrize('targeted', [False, True])
-@pytest.mark.parametrize('mode', ['serial', 'parallel', 'cache_limited', 'pause'])
+@pytest.mark.parametrize('mode', ['serial', 'parallel', 'cache_limited', 'pause', 'skip_large'])
 def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monkeypatch, hard_code, has_full_mv, targeted, mode):
     from contextlib import nullcontext
     from karaoke.tools import playback_sweep as sweep
@@ -7614,7 +7614,8 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
     counter_lock = threading.Lock()
     active, maximum = 0, 0
     peak = app.state.store.cache.limit if mode == 'cache_limited' else 1024**2
-    monkeypatch.setattr(sweep, 'working_bytes', lambda *a:peak)
+    monkeypatch.setattr(sweep, 'working_bytes', lambda store, case:
+        store.cache.limit if mode == 'skip_large' and case['url'] == cases[1]['url'] else peak)
     def process(client, base, folder, command, **kwargs):
         nonlocal active, maximum
         with counter_lock:
@@ -7622,7 +7623,7 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
             active += 1
             maximum = max(active, maximum)
             number = len(calls)
-        if mode in ('parallel', 'pause') and number <= 2:
+        if mode in ('parallel', 'pause', 'skip_large') and number <= 2:
             barrier.wait(timeout=5)
             if mode == 'pause':
                 report.with_suffix('.pause').touch()
@@ -7653,13 +7654,16 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
         sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=requested, concurrency=1 if mode == 'serial' else 2)
         assert len(calls) == (2 if targeted or mode == 'pause' else 3)
         assert set(calls[1:]) == set(source_jobs[2:] if targeted else source_jobs[1:2] if mode == 'pause' else source_jobs[1:])
-        assert maximum == (2 if mode in ('parallel', 'pause') else 1)
+        assert maximum == (2 if mode in ('parallel', 'pause', 'skip_large') else 1)
+        if mode == 'skip_large' and not targeted:
+            assert calls[1:] == [source_jobs[2], source_jobs[1]]
         assert (calls[0] != source_jobs[0]) == has_full_mv
         if has_full_mv:
             assert app.state.store.read(source_jobs[0])['status'] == 'completed'
         assert [e['id'] for e in api.get('/v1/room').json()['entries']] == [e['id'] for e in user_queue]
         result = json.loads(report.read_text())
         assert result['fixed_selection_size'] == 3
+        assert [c['url'] for c in result['cases']] == (requested or [c['url'] for c in cases])
         assert result['summary']['outcomes'] == (dict(clean=1,soft_fail=1) if targeted else
             dict(clean=1,hard_fail=1,pending=1) if mode == 'pause' else dict(clean=1,hard_fail=1,soft_fail=1))
         assert result['summary']['hard_failures'] == ({} if targeted else {hard_code:1})

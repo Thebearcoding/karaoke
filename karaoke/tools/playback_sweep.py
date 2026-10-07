@@ -133,7 +133,7 @@ def working_bytes(store, case):
             # Six native float64 files + two temporary int24 previews; five
             # stereo float32 separation files; compressed previews/local clips.
             return math.ceil(duration*(rate*channels*54 + 44100*2*20 + 256000) + 64*1024**2)
-        except (OSError, ValueError, KeyError, IndexError, ZeroDivisionError, subprocess.SubprocessError):
+        except (OSError, ValueError, TypeError, KeyError, IndexError, ZeroDivisionError, subprocess.SubprocessError):
             return None  # Unknown size runs alone, with the ordinary live monitor.
     return None
 
@@ -169,8 +169,7 @@ def run_once(manifest, data_dir, report, prepared_dir, base, *, case_urls=(), co
         store = Store(data_dir)
         state_lock = threading.RLock()
         pending, peaks = {}, {}
-        remaining = iter(c for c in state['cases'] if not c['audio_attempts'])
-        next_case = next(remaining, None)
+        remaining = [c for c in state['cases'] if not c['audio_attempts']]
 
         def run_case(case, packet_path, packet):
             started = time.perf_counter()
@@ -252,7 +251,7 @@ def run_once(manifest, data_dir, report, prepared_dir, base, *, case_urls=(), co
         with ProbeSession(data_dir) as session, ThreadPoolExecutor(max_workers=concurrency) as pool:
             state['concurrency'] = concurrency
             try:
-                while next_case is not None or pending:
+                while remaining or pending:
                     for future in list(pending):
                         if future.done():
                             future.result()
@@ -262,50 +261,52 @@ def run_once(manifest, data_dir, report, prepared_dir, base, *, case_urls=(), co
                     if client.get(base+'/health').raise_for_status().json()['pipeline_version'] != version:
                         session.cancelled.set()
                         raise ValueError('Pipeline changed during the one-pass survey')
-                    if next_case is not None and len(pending) < concurrency:
-                        case = next_case
-                        packet_path = prepared_dir/(hashlib.sha256(case['url'].encode()).hexdigest()+'.json')
+                    if remaining and len(pending) < concurrency:
                         with state_lock:
                             old_wait = (state.get('waiting_for_lyrics'), state.get('waiting_for_cache'))
-                            can_start = packet_path.exists()
                             state.pop('waiting_for_lyrics', None)
                             state.pop('waiting_for_cache', None)
-                            if not can_start:
-                                state['waiting_for_lyrics'] = case['url']
-                                if (prepared_dir/'aborted.json').exists():
-                                    break
-                            if concurrency > 1 and can_start and case['url'] not in peaks:
-                                peaks[case['url']] = working_bytes(store, case)
-                            peak = peaks.get(case['url'])
-                            if can_start and pending:
+                            available = None
+                            if pending:
                                 sizes = []
                                 for active, estimate in pending.values():
                                     attempt = (active['audio_attempts'] or [{}])[-1]
                                     size = store.cache.size(data_dir/attempt['job_id']) if attempt.get('job_id') else 0
                                     sizes.append((estimate, size))
-                                # Read storage after sizes: ongoing writes must over-reserve,
-                                # not make remaining growth look smaller than it really is.
+                                # Read storage after sizes so ongoing writes over-reserve.
                                 storage = client.get(base+'/v1/storage').raise_for_status().json()
                                 reserved = sum(max(0, (estimate or storage['limit_bytes'])-size)
-                                               for estimate, size in sizes)
-                                growth = reserved+(peak or storage['limit_bytes'])+store.cache.headroom
-                                can_start = (peak is not None and storage['protected_bytes']+growth <= storage['limit_bytes']
-                                             and storage['free_bytes'] >= store.cache.minimum_free+growth)
-                                if not can_start:
-                                    state['waiting_for_cache'] = case['url']
-                            if can_start:
+                                               for estimate, size in sizes)+store.cache.headroom
+                                available = min(storage['limit_bytes']-storage['protected_bytes']-reserved,
+                                                storage['free_bytes']-store.cache.minimum_free-reserved)
+                            admitted = False
+                            for case in remaining:
+                                packet_path = prepared_dir/(hashlib.sha256(case['url'].encode()).hexdigest()+'.json')
+                                if not packet_path.exists():
+                                    state.setdefault('waiting_for_lyrics', case['url'])
+                                    continue
+                                if concurrency > 1 and case['url'] not in peaks:
+                                    peaks[case['url']] = working_bytes(store, case)
+                                peak = peaks.get(case['url'])
+                                if pending and (peak is None or peak > available):
+                                    state.setdefault('waiting_for_cache', case['url'])
+                                    continue
                                 packet = json.loads(packet_path.read_text())
                                 future = pool.submit(run_case, case, packet_path, packet)
                                 pending[future] = (case, peak)
-                                next_case = next(remaining, None)
-                            if can_start or old_wait != (state.get('waiting_for_lyrics'), state.get('waiting_for_cache')):
+                                remaining.remove(case)
+                                admitted = True
+                                break
+                            if admitted or old_wait != (state.get('waiting_for_lyrics'), state.get('waiting_for_cache')):
                                 state.update(summary=summarize(state['cases']), updated_at=stamp())
                                 save(report, state)
-                        if can_start:
+                        if admitted:
                             continue
+                        if not pending and (prepared_dir/'aborted.json').exists():
+                            break
                     if pending:
                         wait(pending, timeout=1, return_when=FIRST_COMPLETED)
-                    elif next_case is not None:
+                    elif remaining:
                         time.sleep(1)
                 # A pause stops admission; already-started songs finish normally.
                 # Infrastructure cancellation is observed by every probe monitor.
