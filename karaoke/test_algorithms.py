@@ -521,6 +521,70 @@ class SubtitleIntegrity(unittest.TestCase):
                         self.assertEqual([u['start'] for u in result[0]['units']],[1.5,2.5,4.5])
                     self.assertEqual(result[0]['units'][-1]['start'],old[-1]['start'])
 
+    def test_timing_repair_keeps_the_evidence_support_contract(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        cue = dict(text='but hey', start=1., end=3.3, units=[
+            dict(first=0, stop=4, text='but ', start=1., end=1.3),
+            dict(first=4, stop=7, text='hey', start=3., end=3.3)])
+        measured = [dict(first=0, stop=3, text='but', start=2., end=2.2),
+                    dict(first=4, stop=7, text='hey', start=3., end=3.3)]
+        for mode in ('phonetic', 'ctc', 'silent'):
+            with self.subTest(mode=mode):
+                wave = np.ones(44100*4)*.1
+                wave[2*44100:round((2.2 if mode=='silent' else 2.05)*44100)] = 0.
+                predictions = [deepcopy(measured) for _ in range(3)]
+                if mode == 'ctc':
+                    for view in predictions:
+                        for u in view:
+                            u.update(timing_evidence='ctc_event', emission_end=u['start']+.02)
+                result, report = reconcile_timing([cue], wave,
+                    lambda *a, **k: [measured, measured], lambda *a: predictions,
+                    protocol, 'English', _retry_context=False)
+                self.assertEqual(result[0]['units'][-1], dict(cue['units'][-1], acoustic_end=3.3))
+                if mode == 'phonetic':
+                    self.assertEqual(result[0]['units'][0]['start'], 2.)
+                    self.assertFalse(report['unresolved'])
+                    validate_timeline(result, [cue['text']], 4., report['constraints'], 'English')
+                else:
+                    self.assertEqual(result[0]['units'][0]['start'], 1.)
+                self.assertEqual(cue['units'][0]['start'], 1.)
+
+    def test_merged_timing_repair_reuses_corroborated_interior_onsets(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        cue = dict(text='甲乙丙丁', start=.2, end=5., units=[
+            dict(first=0, stop=1, text='甲', start=.2, end=.4),
+            dict(first=1, stop=4, text='乙丙丁', start=4.5, end=5., timing_source='prior_word_fallback')])
+        measured = [dict(first=i, stop=i+1, text=c, start=t, end=t+.2)
+                    for i, (c,t) in enumerate(zip(cue['text'], [.2,2.,3.04,4.]))]
+        measured[2]['end'] = 3.06
+        for mode in ('corroborated', 'silent', 'context_disagreement'):
+            with self.subTest(mode=mode):
+                wave = np.ones(44100*6)*.1
+                wave[round(3.04*44100):round(3.06*44100)] = 0.
+                predictions = [deepcopy(measured) for _ in range(3)]
+                for view in predictions:
+                    view[2].update(start=3., end=3.2)
+                if mode == 'silent':
+                    wave[3*44100:round(3.2*44100)] = 0.
+                if mode == 'context_disagreement':
+                    predictions[0][2].update(start=3.15, end=3.3)
+                result, report = reconcile_timing([cue], wave,
+                    lambda *a, **k: [measured, measured], lambda *a: predictions,
+                    protocol, 'Chinese', _retry_context=False)
+                if mode == 'corroborated':
+                    self.assertEqual([u['start'] for u in result[0]['units']], [.2,2.,3.,4.])
+                    self.assertFalse(report['unresolved'])
+                    self.assertEqual([p['first'] for p in report['constraints']], [1])
+                    validate_timeline(result, [cue['text']], 6., report['constraints'], 'Chinese')
+                else:
+                    self.assertEqual(result[0]['units'][1]['start'], 4.5)
+                    self.assertTrue(report['unresolved'])
+                self.assertEqual(len(cue['units']), 2)
+
     def test_playback_timing_can_close_a_tail_group_without_inventing_a_next_onset(self):
         from copy import deepcopy
         from timing_validation import reconcile_timing, validate_timeline

@@ -99,17 +99,20 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             predictions = predict(cue, views, bounds, review_language)
             report['predictions'] = predictions
             confirmed = {}
-            for group in suspects:
+            for group in views[0]:
                 choose = lambda vs: [[u for u in v if (u['first'],u['stop'])==(group['first'],group['stop'])] for v in vs]
                 replacement, reason = corroborated_group(group, choose(predictions), choose(views), wave,
                     bounds, protocol, spans=[(group['first'],group['stop'])])
                 if replacement is None:
-                    report.setdefault('unconfirmed', []).append(dict(first=group['first'],reason=reason))
+                    if group in suspects:
+                        report.setdefault('unconfirmed', []).append(dict(first=group['first'],reason=reason))
                     continue
                 replacement = dict(replacement[0], timing_source='cross_model_ctc' if
                     replacement[0].get('timing_evidence')=='ctc_event' else 'cross_model_phonemes',
                     acoustic_end=acoustic_end(replacement[0]))
                 confirmed[group['first']] = replacement
+                if group not in suspects:
+                    continue
                 start = replacement['start']
                 # The broad interval rejects grossly displaced older candidates;
                 # it is a localization constraint, not a word-accuracy score.
@@ -118,6 +121,11 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                     start_max=start+protocol['maximum_change_seconds'],onset=start)
                 if proof not in ledger:ledger.append(proof)
             for first, anchor in sorted(confirmed.items()):
+                # A merged old token can contain several measured words. Use
+                # all corroborated words inside its replacement, but only a
+                # displaced old onset initiates an edit or a new constraint.
+                if not any(g['first']==first for g in suspects):
+                    continue
                 units = cue['units']
                 hits = [i for i,u in enumerate(units) if u['first']<=first<u['stop']]
                 if not hits:continue
@@ -152,11 +160,19 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                     limit=units[hi]['start'] if hi<len(units) else bounds[1]
                     for unit,following in zip(members,[*members[1:],dict(start=limit)]):
                         unit['end']=min(unit['end'],following['start'])
-                        piece=wave[round(unit['start']*44100):round(min(unit['end'],unit['start']+.035)*44100)]
+                        # Recheck the clipped interval using the same support
+                        # contract as corroborated_group. A phonetic word can
+                        # begin with a quiet closure before its voiced part.
+                        support_end=min(unit['end'],unit['start']+.035)
+                        if unit['first'] in confirmed and unit.get('timing_evidence')!='ctc_event':
+                            support_end=unit['end']
+                        piece=wave[round(unit['start']*44100):round(support_end*44100)]
                         if unit['end']<=unit['start'] or following['start']-unit['start']<.015:
                             reason='invalid local word order'
                         if not len(piece) or not np.isfinite(piece).all() or float(np.sqrt(np.mean(piece**2)))<=floor:
                             reason='replacement lacks audible vocal support'
+                            report.setdefault('unsupported_spans', []).append(dict(
+                                first=unit['first'], stop=unit['stop'], start=unit['start'], end=unit['end']))
                 attempt=dict(first=units[lo]['first'],stop=units[hi-1]['stop'],accepted=reason is None,reason=reason)
                 report['repairs'].append(attempt)
                 if reason is not None:continue
