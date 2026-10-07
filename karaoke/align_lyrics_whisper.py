@@ -20,6 +20,7 @@ from whisper.timing import dtw_cpu
 from lyric_progress import map_words
 from subtitles import lyric_cues, normalized, presentation_cues, write_captions
 from stage_progress import progress_items, report_progress
+from local_asr import detect_whisper_language
 
 
 def sha(path):
@@ -841,14 +842,12 @@ def main():
 
             def align_audio(start, stop, text, **options):
                 clip = audio[round(start*16000):round(stop*16000)]
-                alignment_language = language
+                selected_language = language
                 if options.pop('detect_language', False):
-                    import whisper
-                    mel = whisper.log_mel_spectrogram(whisper.pad_or_trim(clip), n_mels=model.dims.n_mels).to(model.device)
-                    _, probabilities = model.detect_language(mel)
-                    alignment_language = max(probabilities, key=probabilities.get)
-                    language_detections.append(dict(source_range=[start, stop], language=alignment_language))
-                aligned = model.align(clip, text, language=alignment_language,
+                    detected, probes = detect_whisper_language(model, clip)
+                    selected_language = detected or language
+                    language_detections.append(dict(source_range=[start, stop], language=selected_language, probes=probes))
+                aligned = model.align(clip, text, language=selected_language,
                     original_split=True, regroup=False, token_step=80, max_word_dur=options.pop('max_word_dur', 4.),
                     word_dur_factor=options.pop('word_dur_factor', 3.), nonspeech_skip=5., suppress_silence=True,
                     dynamic_heads=options.pop('dynamic_heads', args.dynamic_heads), verbose=None, **options)
@@ -868,14 +867,17 @@ def main():
                 path = output.parent/'asr-requests'/(key+'.json')
                 path.parent.mkdir(exist_ok=True)
                 with StageCache(output.parent).stage(key, inputs=[job['audio']], outputs=[path], config=config,
-                        code=[Path(inspect.getfile(StageCache))]) as reused:
+                        code=[Path(inspect.getfile(StageCache)), Path(inspect.getfile(detect_whisper_language))]) as reused:
                     if not reused:
                         report_progress(detail='定位未对齐的唱段')
-                        recognized = model.transcribe(audio[round(start*16000):round(stop*16000)],
-                            language=None, temperature=0, condition_on_previous_text=False,
+                        clip = audio[round(start*16000):round(stop*16000)]
+                        detected, probes = detect_whisper_language(model, clip) if stop-start > 30 else (None, [])
+                        recognized = model.transcribe(clip,
+                            language=detected, temperature=0, condition_on_previous_text=False,
                             word_timestamps=True, regroup=False, verbose=None,
                             fp16=args.device == 'cuda')
-                        path.write_text(json.dumps(recognized.to_dict(), ensure_ascii=False, default=json_number)+'\n')
+                        response = dict(recognized.to_dict(), language_detection=probes)
+                        path.write_text(json.dumps(response, ensure_ascii=False, default=json_number)+'\n')
                 return dict(json.loads(path.read_text()), localization_cache=dict(file=path.name, reused=reused))
 
             lines = lyrics['lines'][context_first:context_stop]

@@ -40,21 +40,7 @@ def cached_recognition(client, audio, request, output):
 def recording_language(model, audio):
     """Keep a long instrumental intro from choosing the whole song's language."""
     import whisper
-    from whisper.audio import N_SAMPLES, SAMPLE_RATE
-    samples = whisper.load_audio(str(audio))
-    starts = [0] if len(samples) <= N_SAMPLES else sorted({
-        round(max(0, min(len(samples)-N_SAMPLES, len(samples)*fraction-N_SAMPLES/2)))
-        for fraction in (.25, .5, .75)})
-    windows = []
-    for start in starts:
-        clip = whisper.pad_or_trim(samples[start:start+N_SAMPLES])
-        mel = whisper.log_mel_spectrogram(clip, n_mels=model.dims.n_mels).to(model.device)
-        _, probabilities = model.detect_language(mel)
-        code = max(probabilities, key=probabilities.get)
-        windows.append(dict(start=start/SAMPLE_RATE, end=min(start+N_SAMPLES, len(samples))/SAMPLE_RATE,
-                            language=code, probability=probabilities[code]))
-    code, count = Counter(window['language'] for window in windows).most_common(1)[0]
-    selected = code if count > len(windows)/2 else None
+    selected, windows = local_asr.detect_whisper_language(model, whisper.load_audio(str(audio)))
     return selected, dict(windows=windows, selected=selected)
 
 
@@ -71,7 +57,7 @@ def cached_local_recognition(audio, language, output, *, weights=None):
     path = output.parent/'asr-requests'/('local-'+key+'.json')
     path.parent.mkdir(exist_ok=True)
     with StageCache(output.parent).stage('local_asr_'+key, inputs=[audio, weights],
-                                        outputs=[path], config=config) as reused:
+                                        outputs=[path], config=config, code=[Path(local_asr.__file__)]) as reused:
         if not reused:
             import torch
             import whisper

@@ -687,6 +687,7 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     for filename, affected in (
             ('cjk_recovery.py', ['align_context']),
             ('align_lyric_phonemes.py', ['align_phonemes', 'align_context']),
+            ('local_asr.py', ['align_words', 'transcribe']),
             ('align_lyrics_whisper.py', ['align_words'])):
         path = code/filename
         path.write_bytes(path.read_bytes()+b'updated')

@@ -43,13 +43,8 @@ def transcribe(model, samples, language, batch_size):
     duration, window = len(samples)/16000, 30*16000
     detection = []
     if language == 'auto':
-        starts = [0] if len(samples) <= window else sorted({
-            round(max(0, min(len(samples)-window, len(samples)*f-window/2))) for f in (.25, .5, .75)})
-        for start in starts:
-            code, probability, _ = model.detect_language(audio=samples[start:start+window], vad_filter=False)
-            detection.append(dict(start=start/16000, language=code, probability=probability))
-        code, count = Counter(d['language'] for d in detection).most_common(1)[0]
-        language = code if count > len(detection)/2 else None
+        language, detection = detect_audio_language(samples,
+            lambda clip: model.detect_language(audio=clip, vad_filter=False)[:2])
     else:
         language = {'Chinese': 'zh', 'Japanese': 'ja', 'English': 'en'}[song_language(language)]
     # Do not let a speech VAD remove quiet singing. Every sample belongs to a
@@ -67,6 +62,31 @@ def transcribe(model, samples, language, batch_size):
         segments=segments, words=[w for s in segments for w in s['words'] or []],
         local_inference=dict(language_detection=detection, windows=windows,
                              batch_size=batch_size, vad_filter=False))
+
+
+def detect_audio_language(samples, detect):
+    """Use interior audio samples so an intro cannot pick the whole song's language."""
+    if not len(samples):
+        raise ValueError('Language detection input is empty')
+    window, detection = 30*16000, []
+    starts = [0] if len(samples) <= window else sorted({
+        round(max(0, min(len(samples)-window, len(samples)*f-window/2))) for f in (.25, .5, .75)})
+    for start in starts:
+        code, probability = detect(samples[start:start+window])
+        detection.append(dict(start=start/16000, end=min(start+window,len(samples))/16000,
+                              language=code, probability=probability))
+    code, count = Counter(d['language'] for d in detection).most_common(1)[0]
+    return (code if count > len(detection)/2 else None), detection
+
+
+def detect_whisper_language(model, samples):
+    import whisper
+    def detect(clip):
+        mel = whisper.log_mel_spectrogram(whisper.pad_or_trim(clip), n_mels=model.dims.n_mels).to(model.device)
+        _, probabilities = model.detect_language(mel)
+        code = max(probabilities, key=probabilities.get)
+        return code, probabilities[code]
+    return detect_audio_language(samples, detect)
 
 
 def cached_recognition(audio, language, output):

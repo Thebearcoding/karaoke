@@ -201,7 +201,7 @@ class Pipeline:
     def stage_spec(self, name, command):
         """Explicit inputs/outputs prevent a downstream fix from discarding upstream work."""
         common = ['subtitles.py', 'lyric_progress.py', 'stage_progress.py']
-        whisper = ['align_lyrics_whisper.py', 'anchors_from_asr.py', 'stage_cache.py']
+        whisper = ['align_lyrics_whisper.py', 'anchors_from_asr.py', 'stage_cache.py', 'local_asr.py']
         phonemes = ['align_lyric_phonemes.py', 'phoneme_progress.py']
         english_code = [*whisper, 'align_english_onsets.py', 'onset_consensus.py', 'word_onset_metrics.py']
         english = str(ROOT/'align_english_onsets.py') in [str(a) for a in command]

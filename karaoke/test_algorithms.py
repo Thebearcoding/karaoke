@@ -1634,7 +1634,7 @@ class AlignmentIntegrity(unittest.TestCase):
             return SimpleNamespace(to_dict=lambda: dict(segments=segments))
         def transcribe(samples, language, **options):
             nonlocal recognized
-            recognized = language is None
+            recognized = language in (None, 'de')
             begin = float(samples[0])
             words = [dict(word=line if recognized else 'コム', start=start-begin, end=start+.8-begin)
                      for line, start in zip(lines, starts)]
@@ -1658,6 +1658,7 @@ class AlignmentIntegrity(unittest.TestCase):
             cues = json.loads((root/'alignment/cues.json').read_text())
             self.assertEqual([c['text'] for c in cues], lines)
             np.testing.assert_allclose([c['start'] for c in cues], starts, atol=.001)
+
             model.transcribe.assert_not_called()
             self.assertEqual(json.loads((root/'alignment/run.json').read_text())['local_alignment_languages'][0]['language'], 'de')
             # If direct retries still fail, recognition detects the crop language
@@ -1673,6 +1674,24 @@ class AlignmentIntegrity(unittest.TestCase):
             cues = json.loads((root/'alignment/cues.json').read_text())
             self.assertEqual([c['text'] for c in cues], lines)
             np.testing.assert_allclose([c['start'] for c in cues], starts, atol=.001)
+
+            # A long localization must not inherit an intro's language. The
+            # existing local-ASR policy votes across interior audio windows.
+            starts[:] = [31., 65., 100.]
+            recognized = False
+            sf.write(root/'audio.wav', np.arange(120*16000)/16000, 16000, subtype='FLOAT')
+            shutil.rmtree(root/'alignment')
+            model._buffers = {'alignment_heads': None}
+            model.transcribe.reset_mock()
+            model.detect_language.side_effect = [(None, {code: 1.}) for code in ('en', 'de', 'de')]
+            with patch('stable_whisper.load_model', return_value=model), patch(
+                    'align_lyrics_whisper.sha', return_value='test-model-hash'), patch('sys.argv',
+                    ['align', '--jobs', str(root/'jobs.json'), '--device', 'cpu']):
+                main()
+            self.assertEqual(model.transcribe.call_args.kwargs['language'], 'de')
+            cues = json.loads((root/'alignment/cues.json').read_text())
+            np.testing.assert_allclose([c['start'] for c in cues], starts, atol=.001)
+            self.assertEqual([c['text'] for c in cues], lines)
 
     def test_rejected_alignment_retains_raw_evidence_without_publishing_captions(self):
         import json
