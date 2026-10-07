@@ -148,6 +148,28 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
         if left == begin_line and right == end_line:
             report['reason'] = 'no_measured_neighbour'
             continue
+        if isolated and end-begin > 45:
+            # A long intro/outro must not discard localization already paid
+            # for. Reuse independent text anchors only as a narrower search
+            # window, still inside the preserved neighbouring phrase bounds.
+            for localization in reversed(block.get('asr_localizations', [])):
+                first_anchor, stop_anchor = localization['context']
+                if not first_anchor <= begin_line < end_line <= stop_anchor:
+                    continue
+                anchors = localization.get('anchors', [])[begin_line-first_anchor:end_line-first_anchor]
+                if (len(anchors) != end_line-begin_line or any(
+                        a['status'] != 'candidate' or normalized(a['text']) != normalized(line) or
+                        not np.isfinite([a['start'], a['end']]).all() or
+                        not begin <= a['start'] < a['end'] <= end
+                        for a, line in zip(anchors, lines[begin_line:end_line])) or
+                        any(a['start'] >= b['start'] for a, b in zip(anchors, anchors[1:]))):
+                    continue
+                low, high = max(begin, anchors[0]['start']-.6), min(end, max(a['end'] for a in anchors)+.6)
+                if 0 < high-low <= 45:
+                    report.update(unlocalized_range=[begin, end], search_anchors=deepcopy(anchors))
+                    begin, end = low, high
+                    report['source_range'] = [begin, end]
+                    break
         if not 0 <= begin < end <= duration+.001 or end-begin > 45:
             report['reason'] = 'requires_coarse_localization'
             continue

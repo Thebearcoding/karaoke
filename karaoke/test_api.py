@@ -2129,7 +2129,8 @@ def test_isolated_gap_recovery_keeps_both_neighbours_and_prior_diagnostics(failu
     if failure == 'missing_neighbour':
         segments[0]['words']=segments[2]['words']=[]
     block = dict(context=[0,3], range=[0,3], source_range=[0.,10.], result=dict(segments=segments),
-                 line_recoveries=[dict(accepted=False,reason='earlier_context_failure')])
+                 line_recoveries=[dict(accepted=True,lines=[2,2],isolated=False)],
+                 asr_localizations=[dict(contradicted_lines=[2],accepted_lines=[])])
     original = deepcopy(block)
     calls=[]
     def align(begin,end,text,**options):
@@ -2163,6 +2164,9 @@ def test_isolated_gap_recovery_keeps_both_neighbours_and_prior_diagnostics(failu
     assert len(calls) == (0 if failure == 'missing_neighbour' else 1)
     assert result['result']['segments'][0] == segments[0]
     assert result['result']['segments'][2] == segments[2]
+    from karaoke.pipeline import alignment_recovery_summary
+    assert alignment_recovery_summary([result])['unresolved_localization_lines'] == (
+        [] if failure in (None,'acoustic') else [2])
     if failure in (None,'acoustic'):
         assert [w['start'] for w in result['result']['segments'][1]['words']] == [3.,4.,5.]
         if failure == 'acoustic':
@@ -2193,6 +2197,47 @@ def test_isolated_recovery_uses_recording_edge_only_as_an_audio_search_bound(edg
     assert result['result']['segments'][1-bad]==segments[1-bad]
     measured_start=result['result']['segments'][bad]['words'][0]['start']+10.
     assert measured_start==calls[0][0]+1.  # The model's onset, never the crop edge.
+
+
+@pytest.mark.parametrize('edge', ['opening', 'ending'])
+@pytest.mark.parametrize('fault', [None, 'changed_text', 'ambiguous_repeat', 'outside_neighbour', 'missing_anchor', 'no_anchors'])
+def test_isolated_recovery_reuses_localization_across_long_instrumentals(edge, fault):
+    from copy import deepcopy
+    from karaoke.align_lyrics_whisper import recover_unresolved_lines
+    lines = ['First phrase', 'Middle phrase', 'Last phrase']
+    first, stop = (0, 2) if edge == 'opening' else (1, 3)
+    segments = [dict(text=t, words=[]) for t in lines]
+    neighbour = 2 if edge == 'opening' else 0
+    segments[neighbour]['words'] = [dict(word=lines[neighbour], start=70. if edge=='opening' else 1.,
+                                        end=71. if edge=='opening' else 2.)]
+    anchors = [dict(status='candidate', text=lines[i], start=20.+3*j, end=21.+3*j)
+               for j,i in enumerate(range(first, stop))]
+    if fault == 'changed_text':anchors[0]['text'] = 'Another phrase'
+    if fault == 'ambiguous_repeat':anchors[0]['status'] = 'ambiguous_repeat'
+    if fault == 'outside_neighbour':anchors[0].update(start=5., end=6.)
+    if fault == 'missing_anchor':anchors.pop()
+    localization = dict(context=[first, stop], anchors=anchors)
+    if fault == 'no_anchors':localization.pop('anchors')
+    block = dict(context=[0,3], range=[0,3], source_range=[10.,160.], result=dict(segments=segments),
+                 asr_localizations=[localization])
+    original = deepcopy(block)
+    calls = []
+    def align(begin, end, text, **options):
+        calls.append((begin, end, text))
+        return dict(segments=[dict(text=line, words=[dict(word=w, start=1.+i*2+j, end=1.4+i*2+j)
+             for j,w in enumerate(line.split())]) for i,line in enumerate(text.splitlines())])
+    result = recover_unresolved_lines(block, lines, 170., 'English', align, isolated=True)
+    assert block == original
+    assert result['result']['segments'][neighbour] == segments[neighbour]
+    proof = result['line_recoveries'][-1]
+    if fault is None:
+        assert calls == [(19.4,24.6,'\n'.join(lines[first:stop]))]
+        assert proof['accepted']
+        assert proof['search_anchors'] == anchors
+        assert result['result']['segments'][first]['words'][0]['start']+10. == pytest.approx(20.4)
+    else:
+        assert not calls and proof['reason'] == 'requires_coarse_localization'
+        assert result['result'] == block['result']
 
 
 @pytest.mark.parametrize('far_neighbour', [False, True])

@@ -155,6 +155,12 @@ def alignment_recovery_summary(raw):
             unresolved.update(owned.intersection(report.get('contradicted_lines', [])))
             unresolved.difference_update(owned.intersection(report['accepted_lines']))
             recovered.update(owned.intersection(report['accepted_lines']))
+        # Isolated recovery runs after localization and replaces the rejected
+        # prediction. Its accepted result must retire that prediction's failure,
+        # while earlier/failed attempts cannot clear a later contradiction.
+        unresolved.difference_update(i for report in block.get('line_recoveries', [])
+            if report['accepted'] and report.get('isolated')
+            for i in range(report['lines'][0], report['lines'][1]+1) if i in owned)
         stitched = owned.intersection(block.get('stitch_recovered_lines', []))
         unresolved.difference_update(stitched)
         recovered.update(stitched)
