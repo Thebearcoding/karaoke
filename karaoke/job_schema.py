@@ -23,7 +23,13 @@ def download_backoff(url, directory=None, *, until=0):
     path = folder/(provider+'.retry.json')
 
     def read():
-        return json.loads(path.read_text()) if path.exists() else 0
+        try:
+            deadline = json.loads(path.read_text())
+        except FileNotFoundError:
+            return 0
+        if type(deadline) not in (int, float) or not math.isfinite(deadline) or deadline < 0:
+            raise ValueError(f'Invalid {provider} download backoff')
+        return deadline
 
     if not until:
         return read()

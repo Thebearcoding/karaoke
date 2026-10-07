@@ -234,7 +234,7 @@ with httpx.Client(timeout=30) as client:
         print(name, artifact['url'])
 ```
 
-`GET /v1/jobs?limit=20` 列出近期任务；`GET /health` 返回队列和正在处理的任务。
+`GET /v1/jobs?limit=20` 列出近期任务；`GET /health` 返回队列和正在处理的任务。持久退避记录或任务读取失败时，调度器保留对应任务、继续处理其他可运行任务；健康状态为 `degraded`，`dispatch_blocked_jobs` 列出受影响的任务 ID。损坏记录不按零退避处理，修复记录后自动继续。单条无效进度消息记入日志，不终止计算；最终产物校验仍照常执行。
 
 ## 自动歌词与质量边界
 

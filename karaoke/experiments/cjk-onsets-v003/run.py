@@ -182,7 +182,7 @@ def process(job, model, protocol):
     all_units = [u for c in cues for u in c['units']]
     while True:
         bad = {j for i in range(len(all_units)-1)
-               if all_units[i+1]['start']-all_units[i]['start'] < .015-1e-9
+               if all_units[i+1]['start'] <= all_units[i]['start']
                for j in (i, i+1)}
         changed = [i for i in bad if all_units[i]['start'] != old_units[i]['start']]
         if not changed:

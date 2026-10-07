@@ -53,6 +53,40 @@ def finished(client, job_id):
     raise AssertionError('Worker did not finish')
 
 
+@pytest.mark.parametrize('bad_state', ['{', '[]', 'true', 'NaN', '-1'])
+def test_corrupt_provider_backoff_does_not_kill_dispatch_or_bypass_hold(tmp_path, bad_state):
+    app = create_app(tmp_path, worker_command=fake_worker, version='test')
+    (tmp_path/'preparation.pause').touch()
+    folder = tmp_path/'stage-locks'; folder.mkdir()
+    state = folder/'youtube.retry.json'; state.write_text(bad_state)
+    with TestClient(app) as client:
+        blocked = client.post('/v1/jobs', json={'url':URL}).json()['id']
+        other = client.post('/v1/jobs', json={'url':'https://www.bilibili.com/video/BV1bK411W797'}).json()['id']
+        (tmp_path/'preparation.pause').unlink()
+        assert finished(client, other)['status'] == 'completed'
+        assert client.get('/v1/jobs/'+blocked).json()['status'] == 'queued'
+        health = client.get('/health').json()
+        assert health['status'] == 'degraded' and blocked in health['dispatch_blocked_jobs']
+        assert not app.state.worker.dispatcher.done() and state.read_text() == bad_state
+        state.write_text(json.dumps(time.time()-.1))
+        assert finished(client, blocked)['status'] == 'completed'
+        assert client.get('/health').json()['status'] == 'ok'
+
+
+def test_bad_progress_messages_preserve_the_worker_and_valid_result(tmp_path):
+    def command(folder):
+        worker = fake_worker(folder)
+        messages = ['{', 'null', '[]', '{"song_info":[]}', '{"active_stages":null}',
+                    json.dumps(dict(song_info=dict(title='Kept metadata')))]
+        worker[2] = '\n'.join('print('+repr('KARAOKE_PROGRESS '+m)+', flush=True)' for m in messages)+'\n'+worker[2]
+        return worker
+    with TestClient(create_app(tmp_path, worker_command=command, version='test')) as client:
+        job_id = client.post('/v1/jobs', json={'url':URL}).json()['id']
+        job = finished(client, job_id)
+        assert job['status'] == 'completed' and job['song_info']['title'] == 'Kept metadata'
+        assert client.get(f'/v1/jobs/{job_id}/artifacts/mv').content == b'0123456789'
+
+
 @pytest.mark.parametrize('value,expected', [
     ('https://youtu.be/n5sjpCQhTDk?t=30', URL),
     ('https://www.youtube.com/watch?v=n5sjpCQhTDk&list=anything', URL),
@@ -1587,6 +1621,63 @@ def test_published_lyric_html_entities_keep_the_source_words():
         'You\u00a0&\u00a0me', "We'll sing"]
 
 
+@pytest.mark.parametrize('status', [None, 401, 403, 429, 503])
+def test_one_bad_lyric_candidate_does_not_discard_other_releases(status):
+    import httpx
+    from karaoke.lyric_lookup import published_candidate
+    row = dict(trackTitle='Evening', artists=[dict(artistName='Singer')], album=dict(albumTitle='Album'))
+    rows = [None, dict(row, trackId=1), dict(row, trackId=2)]
+    calls = []
+    def read(item):
+        calls.append(item['trackId'])
+        if item['trackId'] == 1:
+            if status:
+                response = httpx.Response(status, request=httpx.Request('GET','https://example.com/lyrics'))
+                response.raise_for_status()
+            raise TimeoutError('One release timed out')
+        return 'Morning sunshine [again]\nEverybody sings along'
+    if status in (401,403,429):
+        with pytest.raises(httpx.HTTPStatusError):
+            published_candidate(rows, dict(title='Evening',artist='Singer'), '', read_lyrics=read)
+        assert calls == [1]
+    else:
+        lines, report = published_candidate(rows, dict(title='Evening',artist='Singer'), '', read_lyrics=read)
+        assert lines == ['Morning sunshine [again]','Everybody sings along'] and calls == [1,2]
+        assert report['rejected_candidates'][0]['track_id'] == '1'
+
+
+def test_published_lyrics_parse_lrc_repetitions_without_reusing_their_timestamps():
+    from karaoke.lyric_lookup import published_lyric_lines
+    text = '[ar:Singer]\n[Chorus]\n[00:01.00][00:03.00]First [again]\n[00:02.00]Middle\n[00:04.00]Last'
+    lines, excluded = published_lyric_lines(text, 'Evening')
+    assert lines == ['First [again]', 'Middle', 'First [again]', 'Last']
+    assert excluded == [1,2]
+    # Do not guess the positions of missing timestamped repetitions.
+    with pytest.raises(ValueError, match='fully timed'):
+        published_lyric_lines('[00:01][00:03]First\nUnplaced verse', 'Evening')
+
+
+@pytest.mark.parametrize('provider', ['line_music','lrclib'])
+def test_lyric_result_pages_keep_valid_rows_beyond_expected_page_size(tmp_path, monkeypatch, provider):
+    from karaoke import lyric_lookup
+    from karaoke.stage_cache import StageCache
+    song = dict(title='Evening', artist='Singer')
+    metadata = tmp_path/'song.json'; metadata.write_text(json.dumps(song))
+    body = 'Morning sunshine finds the door\nEverybody sings once more'
+    if provider == 'line_music':
+        row = dict(trackId=1,trackTitle='Evening',artists=[dict(artistName='Singer')],
+                   album=dict(albumTitle='Album'),lyrics=body)
+        response = dict(response=dict(result=dict(tracks=[None]*35+[row])))
+        monkeypatch.setattr(lyric_lookup,'read_document',lambda *a,**k:response)
+        lines, report = lyric_lookup.fetch_published_lyrics(song,'',StageCache(tmp_path))
+        assert lines == body.splitlines() and report['status'] == 'candidate'
+    else:
+        response = [None]+[dict(id=i,trackName='Evening',artistName='Singer',plainLyrics=body) for i in range(105)]
+        monkeypatch.setattr(lyric_lookup,'read_document',lambda *a,**k:response)
+        result = lyric_lookup.fetch_lyrics(song,metadata,StageCache(tmp_path))
+        assert result['status'] == 'ok' and len(result['results']) == 105
+
+
 @pytest.mark.parametrize('change', [dict(trackTitle='別的歌'), dict(artists=[dict(artistName='別人')]),
     dict(album=dict(albumTitle='Live')), dict(album=dict(albumTitle='Remix')), dict(artists=None),
     dict(lyrics=None), dict(lyrics='歌名：晚風'), dict(lyrics='專輯：春天\n歌曲：晚風\n作詞：林林'),
@@ -2721,7 +2812,7 @@ def test_empty_alignment_error_identifies_the_failed_stage(tmp_path):
     assert caught.value.stage == 'align_words'
 
 
-def test_poster_uses_thumbnail_or_video_frame_and_failure_is_optional(tmp_path):
+def test_poster_uses_thumbnail_or_video_frame_and_failure_is_optional(tmp_path, monkeypatch):
     from PIL import Image
     thumbnail = tmp_path/'thumbnail.jpg'
     video = tmp_path/'video.mp4'
@@ -2752,6 +2843,16 @@ def test_poster_uses_thumbnail_or_video_frame_and_failure_is_optional(tmp_path):
                 assert blue > 240 and red < 10
             assert not create_poster(tmp_path/'missing.mp4', tmp_path/'absent.jpg')
             assert not (tmp_path/'absent.jpg').exists()
+            for malformed in ({'url':'invalid'}, 123, ['invalid']):
+                assert create_poster(video, poster, thumbnail=malformed, seconds=0)
+            from pathlib import Path
+            unlink = Path.unlink
+            def deny_optional_cleanup(path, *args, **kwargs):
+                if path.name == '.poster.tmp.jpg':
+                    raise PermissionError('cleanup unavailable')
+                return unlink(path, *args, **kwargs)
+            monkeypatch.setattr(Path, 'unlink', deny_optional_cleanup)
+            assert create_poster(video, poster, seconds=0)
         finally:
             server.shutdown()
             thread.join()
@@ -3336,8 +3437,8 @@ def test_intro_fits_long_metadata_without_truncating_lyrics(monkeypatch, long_cr
         assert accepted == [info['title'], '演唱 · '+info['artist'], info['version']]
 
 
-@pytest.mark.parametrize('info', ['{invalid', '{}', json.dumps(dict(title='\U0010ffff'))])
-def test_auxiliary_intro_and_long_preview_cannot_abort_valid_lyric_video(tmp_path, info):
+@pytest.mark.parametrize('info', ['{invalid', '{}', json.dumps(dict(title='\U0010ffff')), 'font_failure'])
+def test_auxiliary_intro_and_long_preview_cannot_abort_valid_lyric_video(tmp_path, info, monkeypatch):
     from pathlib import Path
     source, output = tmp_path/'source.mp4', tmp_path/'output.mp4'
     subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=320x180:r=30:d=0.4',
@@ -3346,11 +3447,17 @@ def test_auxiliary_intro_and_long_preview_cannot_abort_valid_lyric_video(tmp_pat
                  units=[dict(first=0, stop=len(text), start=i*.2, end=(i+1)*.2)])
             for i, text in enumerate(['Hello', '星'*42])]
     (tmp_path/'cues.json').write_text(json.dumps(cues))
+    import karaoke.render_lyric_progress as renderer
+    if info == 'font_failure':
+        info = json.dumps(dict(title='Example'))
+        def broken_font(*args, **kwargs):
+            raise StopIteration('Optional font not found')
+        monkeypatch.setattr(renderer, 'song_intro_image', broken_font)
     (tmp_path/'info.json').write_text(info)
-    subprocess.run([sys.executable, str(Path(__file__).with_name('render_lyric_progress.py')),
+    monkeypatch.setattr(sys, 'argv', [str(Path(__file__).with_name('render_lyric_progress.py')),
         '--video', str(source), '--cues', str(tmp_path/'cues.json'), '--song-info', str(tmp_path/'info.json'),
-        '--language', 'Japanese', '--duration', '0.4', '--bottom-margin', '96', '--output', str(output)],
-        check=True, capture_output=True)
+        '--language', 'Japanese', '--duration', '0.4', '--bottom-margin', '32', '--output', str(output)])
+    renderer.main()
     report = json.loads(output.with_suffix('.render.json').read_text())
     assert report['song_intro']['status'] == 'omitted' and report['song_intro']['reason']
     assert report['shown_lines'] == [1, 2] and report['decode_check'] == 'passed'
@@ -3387,6 +3494,30 @@ def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatc
     assert caption.frame(2., 'word').getpixel((25, 5)) == white
     assert caption.frame(3., 'static').getpixel((5, 5)) == white
     assert len(caption.cache) <= 3
+
+
+@pytest.mark.parametrize('spaced', [False, True])
+def test_long_lyric_pages_preserve_all_text_and_only_switch_at_measured_onsets(spaced):
+    import copy
+    from karaoke.render_lyric_progress import Caption
+    text = '春日暖阳照过山川河流'*16
+    if spaced:
+        text = '（ '+' '.join(text)+' ）'
+    cue = dict(text=text, units=[dict(first=i, stop=i+1, text=c, start=1+i*.2, end=1.2+i*.2)
+                                  for i,c in enumerate(text) if c.isalnum()])
+    before = copy.deepcopy(cue)
+    caption = Caption(cue,'cinema_focus','Chinese')
+    assert len(caption.pages) > 1 and cue == before
+    assert ''.join(p.cue['text'] for p in caption.pages) == text
+    assert [u['start'] for p in caption.pages for u in p.cue['units']] == [u['start'] for u in cue['units']]
+    for i,page in enumerate(caption.pages):
+        start = page.starts[0]
+        assert caption.frame(start,'word').tobytes() == page.frame(start,'word').tobytes()
+        if i:
+            assert caption.frame(start-.001,'word').tobytes() == caption.pages[i-1].frame(start-.001,'word').tobytes()
+    assert caption.frame(0,'word').tobytes() == caption.pages[0].base.tobytes()
+    second = caption.pages[1]
+    assert caption.frame(0,'word',page_at=second.starts[0]).tobytes() == second.base.tobytes()
 
 
 def test_playback_fallback_keeps_unverified_asr_draft_out_of_subtitles(tmp_path):
@@ -3804,7 +3935,7 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
     assert recovered['id'] != first and recovered['status'] == 'queued'
 
 
-@pytest.mark.parametrize('cache_state', ['valid', 'missing', 'corrupt', 'different_source'])
+@pytest.mark.parametrize('cache_state', ['valid', 'missing', 'corrupt', 'different_source', 'bad_json', 'bad_metadata', 'missing_field'])
 def test_offline_pipeline_requires_verified_source_without_downloading(tmp_path, monkeypatch, cache_state):
     monkeypatch.setenv('KARAOKE_REQUIRE_CACHED_SOURCE', '1')
     pipeline = Pipeline(dict(url=URL), tmp_path, audio_only=True)
@@ -3817,6 +3948,12 @@ def test_offline_pipeline_requires_verified_source_without_downloading(tmp_path,
             url=URL if cache_state != 'different_source' else 'https://www.youtube.com/watch?v=00000000000',
             sha256=file_hash(pipeline.source) if cache_state != 'corrupt' else 'wrong',
             duration=10, audio_only=True)))
+        if cache_state == 'bad_json':
+            (tmp_path/'source.json').write_text('{')
+        elif cache_state == 'bad_metadata':
+            (tmp_path/'download/source.info.json').write_text('[]')
+        elif cache_state == 'missing_field':
+            (tmp_path/'source.json').write_text(json.dumps(dict(url=URL)))
     if cache_state == 'valid':
         assert pipeline.download() == ({}, 10)
     else:
@@ -3824,6 +3961,77 @@ def test_offline_pipeline_requires_verified_source_without_downloading(tmp_path,
             pipeline.download()
     if cache_state != 'missing':
         assert pipeline.source.read_bytes() == b'cached source'
+
+
+@pytest.mark.parametrize('broken_file', ['source.json','download/source.info.json'])
+def test_invalid_download_metadata_is_rebuilt_without_reusing_wrong_source(tmp_path, monkeypatch, broken_file):
+    pipeline = Pipeline(dict(url=URL),tmp_path,audio_only=True)
+    (tmp_path/'download').mkdir()
+    pipeline.source.write_bytes(b'old source')
+    (tmp_path/'source.json').write_text(json.dumps(dict(url=URL,sha256=file_hash(pipeline.source),duration=2)))
+    (tmp_path/'download/source.info.json').write_text('{}')
+    (tmp_path/broken_file).write_text('{')
+    calls = []
+    def download(*args,**kwargs):
+        calls.append('download')
+        pipeline.source.write_bytes(b'new source')
+        (tmp_path/'download/source.info.json').write_text(json.dumps(dict(title='New source',duration=2)))
+    monkeypatch.setattr(pipeline,'run',download)
+    monkeypatch.setattr('karaoke.pipeline.subprocess.check_output',lambda *a,**k:json.dumps(
+        dict(streams=[dict(codec_type='audio')],format=dict(duration=2))).encode())
+    assert pipeline.download()[1] == 2
+    assert pipeline.download()[1] == 2 and calls == ['download']
+    assert pipeline.source.read_bytes() == b'new source'
+    assert json.loads((tmp_path/'download-cache-error.json').read_text())['error'] == 'JSONDecodeError'
+
+
+def test_context_refinement_keeps_tightly_spaced_but_ordered_baseline(tmp_path, monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    import soundfile as sf
+    from timing_validation import validate_timeline
+    spec = importlib.util.spec_from_file_location('context_audit', Path(__file__).parent/'experiments/cjk-onsets-v003/run.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    cue = dict(text='あい', start=.1, end=.6, aligned_start=.1, aligned_end=.6, status='candidate', units=[
+        dict(text='あ',first=0,stop=1,start=.1,end=.11),dict(text='い',first=1,stop=2,start=.11,end=.6)])
+    (tmp_path/'cues.json').write_text(json.dumps([cue]))
+    sf.write(tmp_path/'audio.wav',np.ones(44100)*.01,44100)
+    protocol=json.loads((Path(__file__).parent/'experiments/cjk-onsets-v003/protocol.json').read_text())
+    def unavailable(*args,**kwargs):raise ValueError('Optional refinement unavailable')
+    monkeypatch.setattr(module,'fixed_units',unavailable)
+    module.process(dict(song='audit',cues=str(tmp_path/'cues.json'),audio=str(tmp_path/'audio.wav'),
+        output=str(tmp_path/'result'),duration=1.,language='Japanese'),SimpleNamespace(checkpoint='test'),protocol)
+    actual=json.loads((tmp_path/'result/cues.json').read_text())
+    validate_timeline(actual,['あい'],1.,language='Japanese')
+    assert [u['start'] for u in actual[0]['units']] == [.1,.11]
+
+
+@pytest.mark.parametrize('problem', ['source_hash','shape','nan','extra'])
+def test_separation_contract_survives_optimized_python(tmp_path, problem):
+    script = '''
+import json,sys
+from pathlib import Path
+import numpy as np
+import soundfile as sf
+from karaoke.benchmark_neural import run_cases,sha
+root=Path(sys.argv[1]); problem=sys.argv[2]
+x=np.ones((441,2),dtype=np.float32)*.1
+source=root/'source.wav'; sf.write(source,x,44100,subtype='FLOAT')
+manifest=root/'cases.json'
+manifest.write_text(json.dumps([dict(id='song',input=str(source),input_sha256='bad' if problem=='source_hash' else sha(source))]))
+def infer(audio):
+    a=audio.copy(); b=audio.copy(); extras={}
+    if problem=='shape': a=a[:-1]
+    if problem=='nan': a[0,0]=np.nan
+    if problem=='extra': extras['other']=audio[:-1]
+    return a,b,extras
+try: run_cases(infer,root/'output',{},manifest)
+except ValueError as error: print(json.dumps(dict(rejected=str(error))))
+else: print(json.dumps(dict(rejected=False)))
+'''
+    result = subprocess.run([sys.executable,'-O','-c',script,str(tmp_path),problem],
+                            text=True,capture_output=True,check=True)
+    assert json.loads(result.stdout)['rejected']
 
 
 def test_roformer_batches_preserve_window_boundaries_and_partial_tail():
@@ -6730,6 +6938,14 @@ def test_playback_survey_records_source_disagreements_and_actual_provider_failur
     packet['lookup']['recording_mismatches'] = ['duration', 'live_performance']
     assert soft_failures({},packet) == [dict(module='lyrics', code='lyric_recording_mismatch',
         provider='line_music', reasons=['duration', 'live_performance'])]
+    del packet['lookup']['recording_mismatches']
+    recovered = dict(provider='line_music', status='candidate', rejected_candidates=[
+        dict(reason='candidate_unavailable', track_id='123', error='ReadTimeout'),
+        dict(reason='text_too_short', track_id='456')])
+    packet['lookup']['published_lookup'] = recovered
+    crosscheck['sources'] = [recovered]
+    assert soft_failures({},packet) == [dict(module='lyrics', code='lyric_candidate_unavailable',
+        provider='line_music', track_id='123', http_status=None, error_type='ReadTimeout')]
 
 
 @pytest.mark.parametrize('hard_code', ['separate_music_failed', 'subtitles_failed'])

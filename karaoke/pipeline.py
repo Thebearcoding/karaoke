@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 import inspect
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -120,7 +121,7 @@ def create_poster(source, output, *, thumbnail=None, seconds=30):
     """Cache the video thumbnail, falling back to a frame; artwork is optional."""
     output = Path(output)
     temporary = output.with_name('.poster.tmp.jpg')
-    candidates = [(thumbnail, [])] if thumbnail and thumbnail.startswith(('https://', 'http://')) else []
+    candidates = [(thumbnail, [])] if isinstance(thumbnail, str) and thumbnail.startswith(('https://', 'http://')) else []
     candidates.append((source, ['-ss', str(seconds)]))
     for media, options in candidates:
         try:
@@ -131,10 +132,13 @@ def create_poster(source, output, *, thumbnail=None, seconds=30):
             if result.returncode == 0 and temporary.is_file() and temporary.stat().st_size:
                 temporary.replace(output)
                 return True
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        except Exception:
+            logging.getLogger(__name__).warning('Optional poster could not be created', exc_info=True)
         finally:
-            temporary.unlink(missing_ok=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                logging.getLogger(__name__).warning('Optional poster temporary file could not be removed', exc_info=True)
     return False
 
 
@@ -496,11 +500,19 @@ class Pipeline:
         cached = self.output/'source.json'
         if cached.exists() and self.source.is_file() and (self.output/'download/source.info.json').is_file():
             started = time.perf_counter()
-            source = json.loads(cached.read_text())
-            if source.get('input_url', source['url']) == self.request['url'] and source['sha256'] == file_hash(self.source):
+            try:
+                source = json.loads(cached.read_text())
+                metadata = json.loads((self.output/'download/source.info.json').read_text())
+                valid = (isinstance(source, dict) and isinstance(metadata, dict)
+                    and source.get('input_url', source.get('url')) == self.request['url']
+                    and source['sha256'] == file_hash(self.source)
+                    and type(source['duration']) in (int, float) and math.isfinite(source['duration']))
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                valid = False
+                write_json(self.output/'download-cache-error.json', dict(error=type(error).__name__, reason=str(error)))
+            if valid:
                 if not 0 < source['duration'] <= self.max_duration+1:
                     raise StageFailure('download', '缓存视频超过当前时长上限')
-                metadata = json.loads((self.output/'download/source.info.json').read_text())
                 self.source_metadata_ready()
                 if source.get('audio_only') and not self.audio_only and not self.audio_first:
                     metadata = self.promote_video(metadata, source)

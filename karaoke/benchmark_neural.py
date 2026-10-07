@@ -73,19 +73,23 @@ def run_cases(infer, output, metadata, cases_path=EXPERIMENT/'inputs.json'):
     (output/'model.json').write_text(json.dumps(metadata, indent=2)+'\n')
     for case in json.loads(cases_path.read_text()):
         x, rate = sf.read(case['input'], dtype='float32', always_2d=True)
-        assert rate == 44100 and sha(case['input']) == case['input_sha256']
+        if rate != 44100 or sha(case['input']) != case['input_sha256']:
+            raise ValueError('Separation input rate or source hash differs from its manifest')
         started = time.perf_counter()
         separated = infer(x)
         backing, vocals = separated[:2]
         extra_stems = separated[2] if len(separated) == 3 else {}
         elapsed = time.perf_counter()-started
-        assert backing.shape == vocals.shape == x.shape
-        assert np.isfinite(backing).all() and np.isfinite(vocals).all()
+        if backing.shape != x.shape or vocals.shape != x.shape:
+            raise ValueError('Separation outputs must preserve the input shape')
+        if not np.isfinite(backing).all() or not np.isfinite(vocals).all():
+            raise ValueError('Separation outputs contain non-finite samples')
         folder = output/case['id']; folder.mkdir()
         for label, wave in [('backing', backing), ('vocals', vocals)]:
             sf.write(folder/f'{label}.wav', wave, rate, subtype='FLOAT')
         for label, wave in extra_stems.items():
-            assert wave.shape == x.shape and np.isfinite(wave).all()
+            if wave.shape != x.shape or not np.isfinite(wave).all():
+                raise ValueError(f'Invalid additional model output: {label}')
             sf.write(folder/f'model-{label}.wav', wave, rate, subtype='FLOAT')
         row = {'id': case['id'], 'seconds': elapsed, 'rtf': elapsed/(len(x)/rate),
                'sum_reconstruction_snr_db': snr(x, x-backing-vocals),
@@ -125,7 +129,8 @@ def main():
     import torch
     from audio_separator.separator import Separator
     from audio_separator.separator.architectures import mdxc_separator
-    assert version('audio-separator') == '0.44.5', 'Inspected local implementation version required'
+    if version('audio-separator') != '0.44.5':
+        raise ValueError('Inspected audio-separator 0.44.5 implementation required')
     if os.getenv('KARAOKE_EVENTS_STDOUT') == '1':
         # This pinned implementation uses tqdm only around its inference loop.
         mdxc_separator.tqdm = progress_items
@@ -164,7 +169,8 @@ def main():
         separator.download_model_files = local_model
     separator.load_model(model_filename=args.model)
     instance = separator.model_instance
-    assert instance.is_roformer and separator.torch_device.type == device
+    if not instance.is_roformer or separator.torch_device.type != device:
+        raise ValueError('Loaded separator model or device differs from the requested configuration')
     cfg = instance.model_data_cfgdict
     chunk = int(cfg.model.stft_hop_length)*(int(cfg.inference.dim_t)-1)
     # The inspected local 0.44.5 implementation treats `overlap` as HOP seconds,

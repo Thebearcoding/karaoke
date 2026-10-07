@@ -256,6 +256,7 @@ class Worker:
             raise ValueError('Preparation concurrency must be positive or None')
         self.concurrency = concurrency
         self.queue, self.processes = asyncio.Queue(), {}
+        self.dispatch_errors = {}
 
     @property
     def current(self):
@@ -285,8 +286,11 @@ class Worker:
             retry = job.get('download_retry') or {}
             if job.get('status') == 'queued' and retry.get('room_managed') and job_id not in rank:
                 self.store.update(job_id, status='failed', download_retry={**retry, 'next_retry_at': None})
+                self.dispatch_errors.pop(job_id, None)
             elif job.get('status') == 'queued':
                 self.queue.put_nowait(job_id)
+            else:
+                self.dispatch_errors.pop(job_id, None)
 
     def in_room(self, job_id):
         with self.store.connect() as db:
@@ -349,12 +353,23 @@ class Worker:
                 await asyncio.sleep(.2)
             for _ in range(self.queue.qsize()):
                 job_id = self.queue.get_nowait()
-                job = self.store.read(job_id)
+                try:
+                    job = self.store.read(job_id)
+                    deadline = (max((job.get('download_retry') or {}).get('next_retry_at') or 0,
+                        download_backoff(job['input']['url'], self.store.root/'stage-locks'))
+                        if (job or {}).get('status') == 'queued' else 0)
+                except Exception as error:
+                    reason = type(error).__name__+': '+str(error)
+                    if self.dispatch_errors.get(job_id) != reason:
+                        logging.getLogger(__name__).exception('Cannot dispatch job %s; retaining it in the queue', job_id)
+                    self.dispatch_errors[job_id] = reason
+                    self.queue.put_nowait(job_id)
+                    self.queue.task_done()
+                    continue
+                self.dispatch_errors.pop(job_id, None)
                 if (job or {}).get('status') != 'queued':
                     self.queue.task_done()
                     continue
-                deadline = max((job.get('download_retry') or {}).get('next_retry_at') or 0,
-                    download_backoff(job['input']['url'], self.store.root/'stage-locks'))
                 if deadline > time.time():
                     self.queue.put_nowait(job_id)
                     self.queue.task_done()
@@ -455,7 +470,15 @@ class Worker:
                 log.write(line)
                 log.flush()
                 if line.startswith(b'KARAOKE_PROGRESS '):
-                    progress = json.loads(line[len(b'KARAOKE_PROGRESS '):])
+                    try:
+                        progress = json.loads(line[len(b'KARAOKE_PROGRESS '):])
+                        shapes = dict(active_stages=list, stage_progress=dict, timings=dict, song_info=dict)
+                        if not isinstance(progress, dict) or any(
+                                key in progress and not isinstance(progress[key], shape) for key, shape in shapes.items()):
+                            raise ValueError('Invalid progress fields')
+                    except (ValueError, TypeError, UnicodeError):
+                        logging.getLogger(__name__).warning('Job %s: ignored malformed progress event', job_id)
+                        continue
                     self.store.update(job_id, **{key: progress[key]
                         for key in ('active_stages', 'stage_progress', 'timings', 'song_info') if key in progress})
             await process.wait()
@@ -550,7 +573,9 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
 
     @app.get('/health')
     async def health():
-        return dict(status='ok', queued=worker.queue.qsize(), running_job=worker.current,
+        failed = bool(worker.dispatch_errors) or worker.dispatcher.done()
+        return dict(status='degraded' if failed else 'ok', queued=worker.queue.qsize(), running_job=worker.current,
+                    dispatch_blocked_jobs=list(worker.dispatch_errors),
                     running_jobs=list(worker.processes), preparation_concurrency=worker.concurrency,
                     preparation_paused=(store.root/'preparation.pause').exists(),
                     pipeline_version=version, device=os.getenv('KARAOKE_DEVICE', 'auto'))

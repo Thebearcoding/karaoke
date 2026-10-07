@@ -742,10 +742,12 @@ def refine_chinese_onsets(cues, raw_blocks, audio, language):
         offset = block['source_range'][0]
         context = block['context'][0]
         segments = block['result']['segments']
-        assert len(segments) == block['context'][1]-context
+        if len(segments) != block['context'][1]-context:
+            raise ValueError('Alignment segment count differs from its lyric context')
         for i in range(*block['range']):
             segment = segments[i-context]
-            assert normalized(segment['text']) == normalized(cues[i]['text'])
+            if normalized(segment['text']) != normalized(cues[i]['text']):
+                raise ValueError('Alignment refinement changed the supplied lyric text')
             word = next(w for w in segment['words'] if w['word'].strip())
             char = word['word'].strip()
             if len(char) != 1 or not '\u4e00' <= char <= '\u9fff' or word['end']-word['start'] < 1.15:
@@ -800,7 +802,8 @@ def main():
         lyrics = json.loads(Path(job['lyrics']).read_text())
         audio_info = sf.info(job['audio'])
         duration = audio_info.frames/audio_info.samplerate
-        assert audio_info.samplerate == 16000 and audio_info.channels == 1
+        if audio_info.samplerate != 16000 or audio_info.channels != 1:
+            raise ValueError('Whisper alignment requires 16000 Hz mono audio')
         audio, _ = sf.read(job['audio'], dtype='float32')
         language = {'Japanese': 'ja', 'Chinese': 'zh', 'English': 'en'}[lyrics['language']]
         blocks = [(0, len(lyrics['lines']), 0, len(lyrics['lines']), 0., duration)]
@@ -808,7 +811,8 @@ def main():
         if job.get('anchors'):
             anchors = json.loads(Path(job['anchors']).read_text())
         if anchors:
-            assert [cue['text'] for cue in anchors] == lyrics['lines']
+            if [cue['text'] for cue in anchors] != lyrics['lines']:
+                raise ValueError('Alignment anchors do not match the supplied lyric text')
             blocks = alignment_blocks(anchors, audio)
         started = time.perf_counter()
         raw_blocks, units, language_detections = [], [], []

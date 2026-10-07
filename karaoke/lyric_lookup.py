@@ -173,7 +173,7 @@ def fetch_lyrics(song, metadata_path, cache):
                         break
                     url = 'https://lrclib.net/api/search?'+urlencode(query)
                     response = cached_lyric_request('lrclib', url, cache, lambda: read_document(url), 300)
-                    if not isinstance(response, list) or len(response) > 100:
+                    if not isinstance(response, list):
                         raise ValueError('Invalid lyric search response')
                     packet['results'].extend({key: row.get(key) for key in (
                         'id', 'trackName', 'artistName', 'albumName', 'duration', 'instrumental', 'plainLyrics')}
@@ -231,15 +231,22 @@ def published_lyric_lines(text, title, artists=()):
         r'(?:第[一二三四\d]+)?(?:小提琴|中提琴|大提琴)|录音(?:师|助理)?|混音(?:师)?|母带(?:工程师)?|音频(?:助理|工程师)|'
         r'title|artist|album|composer|lyricist|producer|lyrics|music|written by|produced by|'
         r'guitar|bass|drums|piano|strings|recorded by|mixed by|mastered by|audio engineer|assistant engineer)\s*[：:]', re.I)
-    rows, metadata = [], []
+    rows, metadata, timestamps = [], [], {}
     for i, line in enumerate(text.splitlines(), 1):
         line = html.unescape(line).strip()
         if re.fullmatch(r'\[(?:ar|ti|al|by|offset|re|ve):[^\]]*\]', line, re.I):
             metadata.append(i)
             continue
-        # Ignore a line timestamp as timing evidence. Multiple timestamps on
-        # one line remain unsupported rather than silently losing repetitions.
-        line = re.sub(r'^\[\d{1,3}:\d{2}(?:[.:]\d{1,3})?\]\s*', '', line)
+        # Provider timestamps describe text order/repetitions, never our onsets.
+        # Defer repeated LRC rows until they can be ordered with the other rows.
+        prefix = re.match(r'^(?:\[\d{1,3}:\d{2}(?:[.:]\d{1,3})?\]\s*)+', line)
+        if prefix:
+            stamps = re.findall(r'\[(\d{1,3}):(\d{2}(?:[.:]\d{1,3})?)\]', prefix[0])
+            timestamps[i] = [60*int(m)+float(s.replace(':', '.')) for m,s in stamps]
+            line = line[prefix.end():]
+        if re.fullmatch(r'\[(?:verse|chorus|pre[- ]?chorus|post[- ]?chorus|bridge|intro|outro|instrumental|interlude|refrain)(?:\s+\d+)?\]', line, re.I):
+            metadata.append(i)
+            continue
         if line:
             rows.append((i, line))
     is_credit = lambda line: bool(credit.match(converter.convert(unicodedata.normalize('NFKC', line))))
@@ -265,6 +272,10 @@ def published_lyric_lines(text, title, artists=()):
                   '暂无歌词', '暂无该歌曲歌词', '歌词暂未提供', 'nolyricsavailable',
                   'lyricsnotavailable', 'instrumental'}:
         return [], sorted(metadata+[i for i, _ in rows])
+    if body and all(i in timestamps for i, _ in body):
+        body = [(i, line) for _, i, line in sorted((at, i, line) for i, line in body for at in timestamps[i])]
+    elif any(len(timestamps.get(i, [])) > 1 for i, _ in body):
+        raise ValueError('Repeated LRC lines need a fully timed body to preserve lyric order')
     return [line for _, line in body], sorted(metadata+[i for i, _ in rows[:first]+rows[stop:]])
 
 
@@ -309,6 +320,8 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
     """Select published text; recording onsets still come entirely from our audio."""
     candidates = []
     for row in rows:
+        if not isinstance(row, dict):
+            continue
         title = row.get('trackTitle')
         if not isinstance(title, str) or not isinstance(row.get('artists'), list) or not isinstance(row.get('album'), dict):
             continue
@@ -336,14 +349,22 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
     # before provider order, while retaining complete text from other releases.
     rejected = []
     for _, mismatch, row, title, artists, album, seconds in sorted(candidates, key=lambda c: c[0]):
-        text = row.get('lyrics')
-        if text is None and read_lyrics is not None:
-            text = read_lyrics(row)
-        if not isinstance(text, str) or not text.strip() or len(text) > 30000:
+        try:
+            text = row.get('lyrics')
+            if text is None and read_lyrics is not None:
+                text = read_lyrics(row)
+            if not isinstance(text, str) or not text.strip() or len(text) > 30000:
+                continue
+            lines, excluded = published_lyric_lines(text, title, artists)
+        except Exception as error:
+            failure = lyric_request_error(error)
+            if failure.get('requires_access') or failure.get('http_status') in (401, 403, 429):
+                raise
+            rejected.append(dict(reason='candidate_unavailable', track_id=str(row.get('trackId', '')),
+                                 **failure))
             continue
-        lines, excluded = published_lyric_lines(text, title, artists)
         language = song.get('language') or text_language('\n'.join(lines))
-        if not lines or language is None or any('[' in line or ']' in line for line in lines):
+        if not lines or language is None:
             continue
         lines = transcript_lines(dict(text='\n'.join(lines)), language)
         track_id = str(row.get('trackId', ''))
@@ -386,7 +407,7 @@ def fetch_published_lyrics(song, source_title, cache, duration=None):
                     response = cached_lyric_request('line_music', url, cache,
                         lambda: read_document(url, headers={'CHANNEL-ID': '1581655766'}))
                     rows = response['response']['result']['tracks']
-                    if not isinstance(rows, list) or len(rows) > 30 or any(not isinstance(r, dict) for r in rows):
+                    if not isinstance(rows, list):
                         raise ValueError('Invalid published lyric response')
                     attempted.append(dict(query=query, results=rows))
                     lines, report = published_candidate(rows, song, source_title,

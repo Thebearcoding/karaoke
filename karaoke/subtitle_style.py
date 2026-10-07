@@ -26,8 +26,10 @@ def system_font(name):
     if path.exists():
         return path
     # macOS stores some Japanese font filenames in decomposed Unicode.
-    return next(p for p in path.parent.iterdir()
-                if unicodedata.normalize('NFC', p.name) == path.name)
+    for candidate in path.parent.iterdir():
+        if unicodedata.normalize('NFC', candidate.name) == path.name:
+            return candidate
+    raise FileNotFoundError(path)
 
 
 def script_for(text, language='auto'):

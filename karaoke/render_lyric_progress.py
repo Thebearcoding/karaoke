@@ -8,8 +8,8 @@ import time
 
 from PIL import Image, ImageChops, ImageColor, ImageDraw
 
-from subtitle_style import TOKENS, STYLES, caption_image, compact_caption_image, song_intro_image
-from subtitles import countdown_events, countdown_state, read_ahead_state
+from subtitle_style import TOKENS, STYLES, CaptionOverflow, caption_image, compact_caption_image, song_intro_image
+from subtitles import countdown_events, countdown_state, normalized, read_ahead_state
 from stage_progress import progress_items, report_progress
 
 
@@ -17,14 +17,51 @@ class Caption:
     def __init__(self, cue, style, language):
         self.cue = cue
         self.layout = {}
-        self.base = caption_image(cue['text'], style=style, language=language, layout_out=self.layout)
         self.color = ImageColor.getrgb(STYLES[style].get('progress_color', '#efd29a'))
+        self.pages = []
+        try:
+            self.base = caption_image(cue['text'], style=style, language=language, layout_out=self.layout)
+        except CaptionOverflow:
+            self.pages = self.paginate(style, language)
+            self.base = self.pages[0].base
+            self.starts = [page.cue['units'][0]['start'] for page in self.pages]
+            self.countdown_geometry = self.pages[0].countdown_geometry
+            return
         self.starts = [u['start'] for u in cue.get('units', [])]
         self.cache = {}
         spec = TOKENS['countdown']
         self.countdown_geometry = dict(radius=spec['radius'], spacing=spec['spacing'],
             color=STYLES[style].get('progress_color', '#efd29a'),
             y=max(spec['radius']+3, min(c['top'] for c in self.layout['characters'])-spec['above_text']))
+
+    def paginate(self, style, language):
+        """Change only the display pages, at existing measured unit boundaries."""
+        text, units = self.cue['text'], self.cue.get('units', [])
+        if not units or normalized(text[:units[0]['first']]) or normalized(text[units[-1]['stop']:]) or any(
+                a['stop'] > b['first'] or normalized(text[a['stop']:b['first']]) or a['start'] >= b['start']
+                for a,b in zip(units, units[1:])):
+            raise CaptionOverflow('Long captions require complete, ordered timing units')
+        pages, first = [], 0
+        while first < len(units):
+            low, high, fit = first+1, len(units), None
+            begin = units[first]['first'] if first else 0
+            while low <= high:
+                stop = (low+high)//2
+                end = units[stop]['first'] if stop < len(units) else len(text)
+                try:
+                    caption_image(text[begin:end], style=style, language=language)
+                except CaptionOverflow:
+                    high = stop-1
+                else:
+                    fit, low = stop, stop+1
+            if fit is None:
+                raise CaptionOverflow('One timing unit exceeds a readable page; finer acoustic units are needed')
+            end = units[fit]['first'] if fit < len(units) else len(text)
+            page = dict(self.cue, text=text[begin:end], units=[
+                dict(unit, first=unit['first']-begin, stop=unit['stop']-begin) for unit in units[first:fit]])
+            pages.append(Caption(page, style, language))
+            first = fit
+        return pages
 
     def countdown(self, remaining, total):
         """Fixed dot positions above the lyric; exhausted dots become faint rings."""
@@ -42,7 +79,10 @@ class Caption:
                          outline=self.color+(255,) if active else (246, 244, 236, 160), width=2)
         return image
 
-    def frame(self, instant, mode):
+    def frame(self, instant, mode, *, page_at=None):
+        if self.pages:
+            page = max(0, bisect_right(self.starts, instant if page_at is None else page_at)-1)
+            return self.pages[page].frame(instant, mode)
         index = bisect_right(self.starts, instant)-1
         if mode == 'static' or index < 0:
             return self.base
@@ -122,8 +162,7 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     main_height = TOKENS['strip_height']
     preview_height = 64 if args.next_line else 0
-    if preview_height and args.bottom_margin < preview_height:
-        raise ValueError('The next-line row requires at least 64 px bottom margin')
+    args.bottom_margin = max(args.bottom_margin, preview_height)
     width, height, fps = 1280, main_height+preview_height, 30
     intro = None
     intro_path = None
@@ -139,7 +178,7 @@ def main():
             if intro['visible_in_this_export']:
                 intro_path = args.output.with_suffix('.intro.png')
                 song_intro_image(info, width=width, style=args.style).save(intro_path)
-        except (OSError, ValueError, TypeError, AttributeError) as error:
+        except Exception as error:
             intro_path = None
             intro = dict(status='omitted', error=type(error).__name__, reason=str(error),
                          visible_in_this_export=False)
@@ -176,7 +215,7 @@ def main():
         settle_seconds=TOKENS['countdown']['settle_seconds']) if args.countdown else []
     previous, caption = None, None
     preview_previous, preview_image = None, None
-    shown = set()
+    shown, pagination = set(), {}
     log = args.output.with_suffix('.ffmpeg.log')
     with log.open('w') as errors:
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=errors)
@@ -199,8 +238,10 @@ def main():
                 if index is not None:
                     if previous != index:
                         caption = Caption(cues[index], args.style, args.language)
+                        if caption.pages:
+                            pagination[index+1] = [dict(text=p.cue['text'], start=p.starts[0]) for p in caption.pages]
                         previous = index
-                    current = caption.frame(instant, args.mode)
+                    current = caption.frame(instant, args.mode, page_at=entry['onset'] if entry is not None else None)
                     if preview_height:
                         picture.alpha_composite(current)
                     else:
@@ -244,6 +285,7 @@ def main():
         'style_parameters': STYLES[args.style],
         'font': 'Bold Songti / Hiragino Mincho W6; source glyphs verified',
         'shown_lines': sorted(i+1 for i in shown),
+        'display_pages': pagination,
         'decode_check': 'pending_final_mux' if args.video_only else 'passed', 'probe': probe,
         'motion': 'Fixed text positions; hard line cuts; measured onsets with local linear playback fallback',
         'next_line_enabled': args.next_line,

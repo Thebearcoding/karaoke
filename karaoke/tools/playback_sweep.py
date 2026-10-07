@@ -50,6 +50,20 @@ def soft_failures(result, prepared):
         if source.get('status') == 'unavailable' and source.get('error'):
             events.append(dict(module='lyrics', code='lyric_provider_unavailable',
                 provider=source.get('provider'), http_status=source.get('http_status'), error_type=source.get('error')))
+    reports = [lookup, lookup.get('published_lookup', {})]
+    if crosscheck:
+        reports += crosscheck.get('sources', []) + crosscheck.get('unavailable_sources', [])
+    seen = set()
+    for source in reports:
+        for rejected in source.get('rejected_candidates', []):
+            if rejected.get('reason') != 'candidate_unavailable':
+                continue
+            event = dict(module='lyrics', code='lyric_candidate_unavailable', provider=source.get('provider'),
+                track_id=rejected.get('track_id'), http_status=rejected.get('http_status'), error_type=rejected.get('error'))
+            key = json.dumps(event, sort_keys=True)
+            if key not in seen:
+                events.append(event)
+                seen.add(key)
     return events
 
 
