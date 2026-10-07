@@ -7146,19 +7146,39 @@ def test_oversized_worker_is_stopped_cleaned_and_queue_can_continue(tmp_path):
         assert finished(client,retry['entries'][0]['job_id'])['status'] == 'completed'
 
 
-def test_cache_limit_setting_is_validated_and_survives_restart(tmp_path):
+@pytest.mark.parametrize('limit_gib', [2, None])
+def test_cache_limit_setting_is_validated_and_survives_restart(tmp_path, limit_gib):
+    expected = None if limit_gib is None else limit_gib*GIB
     with TestClient(create_app(tmp_path,version='test')) as client:
         assert client.post('/v1/storage',json={'limit_gib':0}).status_code == 422
-        saved = client.post('/v1/storage',json={'limit_gib':2}).json()
-        assert saved['storage']['limit_bytes'] == 2*GIB
+        saved = client.post('/v1/storage',json={'limit_gib':limit_gib}).json()
+        assert saved['storage']['limit_bytes'] == expected
     with TestClient(create_app(tmp_path,version='test')) as client:
-        assert client.get('/v1/storage').json()['limit_bytes'] == 2*GIB
+        assert client.get('/v1/storage').json()['limit_bytes'] == expected
+        assert client.post('/v1/storage',json={'limit_gib':10}).json()['storage']['limit_bytes'] == 10*GIB
 
 
-def test_low_free_disk_blocks_processing_without_evicting_the_playlist(tmp_path):
+def test_unlimited_cache_keeps_outputs_and_is_scoped_to_its_data_directory(tmp_path, monkeypatch):
+    store = Store(tmp_path/'remote', cache_limit_bytes=1024)
+    job = cache_fixture(store, '1')
+    folder = store.root/job['id']
+    store.cache.set_limit(None)
+    assert store.cache.enforce() and (folder/'mv.mp4').exists()
+    assert store.cache.snapshot()['used_bytes'] > 1024
+    assert Store(tmp_path/'mac').cache.limit == 10*GIB
+    assert Store(store.root).cache.limit is None
+    monkeypatch.setenv('KARAOKE_CACHE_MAX_GIB', 'none')
+    assert Store(tmp_path/'new-remote').cache.limit is None
+    assert Store(tmp_path/'mac').cache.limit == 10*GIB
+
+
+@pytest.mark.parametrize('unlimited', [False, True])
+def test_low_free_disk_blocks_processing_without_evicting_the_playlist(tmp_path, unlimited):
     def must_not_start(folder):
         raise AssertionError('The worker must not start without disk headroom')
     app = create_app(tmp_path, worker_command=must_not_start, version='test')
+    if unlimited:
+        app.state.store.cache.set_limit(None)
     pinned = cache_fixture(app.state.store,'1')
     with TestClient(app) as client:
         client.post('/v1/room/entries',json={'job_id':pinned['id']})
@@ -7685,7 +7705,7 @@ def test_playback_survey_records_source_disagreements_and_actual_provider_failur
 @pytest.mark.parametrize('hard_code', ['separate_music_failed', 'subtitles_failed'])
 @pytest.mark.parametrize('has_full_mv', [False, True])
 @pytest.mark.parametrize('targeted', [False, True])
-@pytest.mark.parametrize('mode', ['serial', 'parallel', 'cache_limited', 'pause', 'skip_large'])
+@pytest.mark.parametrize('mode', ['serial', 'parallel', 'cache_limited', 'pause', 'skip_large', 'unlimited'])
 def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monkeypatch, hard_code, has_full_mv, targeted, mode):
     from contextlib import nullcontext
     from karaoke.tools import playback_sweep as sweep
@@ -7693,6 +7713,10 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
     data.mkdir()
     (data/'preparation.pause').write_text('test survey')
     app = create_app(data, version='one-version')
+    if mode == 'unlimited':
+        from types import SimpleNamespace
+        monkeypatch.setattr('karaoke.cache.shutil.disk_usage', lambda path: SimpleNamespace(free=1000*GIB))
+        app.state.store.cache.set_limit(None)
     cases = [dict(url='https://www.youtube.com/watch?v='+key, language='English', title=key)
              for key in ['aaaaaaaaaaa','bbbbbbbbbbb','ccccccccccc']]
     selection = [dict(url=c['url'], language=c['language']) for c in cases]
@@ -7717,10 +7741,10 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
             dict(seconds=1, source_sha256=file_hash(media))))
     calls = []
     import threading
-    barrier = threading.Barrier(2)
+    barrier = threading.Barrier(3 if mode == 'unlimited' and not targeted else 2)
     counter_lock = threading.Lock()
     active, maximum = 0, 0
-    peak = app.state.store.cache.limit if mode == 'cache_limited' else 1024**2
+    peak = 20*GIB if mode == 'unlimited' else app.state.store.cache.limit if mode == 'cache_limited' else 1024**2
     monkeypatch.setattr(sweep, 'working_bytes', lambda store, case:
         store.cache.limit if mode == 'skip_large' and case['url'] == cases[1]['url'] else peak)
     def process(client, base, folder, command, **kwargs):
@@ -7730,7 +7754,7 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
             active += 1
             maximum = max(active, maximum)
             number = len(calls)
-        if mode in ('parallel', 'pause', 'skip_large') and number <= 2:
+        if mode == 'unlimited' or (mode in ('parallel', 'pause', 'skip_large') and number <= 2):
             barrier.wait(timeout=5)
             if mode == 'pause':
                 report.with_suffix('.pause').touch()
@@ -7757,11 +7781,12 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
             app.state.store.update(source_jobs[0], status='completed', result=dict(artifacts={}))
         user_queue = api.post('/v1/room/entries',json=dict(url=URL)).json()['entries']
         monkeypatch.setattr(sweep.httpx,'Client',lambda **k:nullcontext(api))
-        sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=requested, concurrency=1 if mode == 'serial' else 2)
-        sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=requested, concurrency=1 if mode == 'serial' else 2)
+        concurrency = 1 if mode == 'serial' else 4 if mode == 'unlimited' else 2
+        sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=requested, concurrency=concurrency)
+        sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=requested, concurrency=concurrency)
         assert len(calls) == (2 if targeted or mode == 'pause' else 3)
         assert set(calls[1:]) == set(source_jobs[2:] if targeted else source_jobs[1:2] if mode == 'pause' else source_jobs[1:])
-        assert maximum == (2 if mode in ('parallel', 'pause', 'skip_large') else 1)
+        assert maximum == ((2 if targeted else 3) if mode == 'unlimited' else 2 if mode in ('parallel', 'pause', 'skip_large') else 1)
         if mode == 'skip_large' and not targeted:
             assert calls[1:] == [source_jobs[2], source_jobs[1]]
         assert (calls[0] != source_jobs[0]) == has_full_mv
@@ -7788,8 +7813,8 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
     assert manifest.read_bytes() == original_manifest
 
 
-@pytest.mark.parametrize('oversized', [False, True])
-def test_probe_session_overlaps_children_and_stops_them_together(tmp_path, oversized):
+@pytest.mark.parametrize('budget', ['normal', 'quota_full', 'unlimited', 'disk_full'])
+def test_probe_session_overlaps_children_and_stops_them_together(tmp_path, budget):
     from concurrent.futures import ThreadPoolExecutor
     import httpx
     import os
@@ -7804,7 +7829,9 @@ def test_probe_session_overlaps_children_and_stops_them_together(tmp_path, overs
             data = dict(preparation_paused=True, running_job=None)
         elif request.url.path == '/v1/storage':
             both = all(p.exists() for p in pids)
-            data = dict(used_bytes=200 if oversized and both else 20, limit_bytes=100, can_prepare=True)
+            data = dict(used_bytes=200 if both else 20,
+                limit_bytes=None if budget in ('unlimited', 'disk_full') else 100 if budget == 'quota_full' else 1000,
+                can_prepare=not (budget == 'disk_full' and both))
         else:
             data = dict(status='queued')
         return httpx.Response(200, json=data)
@@ -7820,7 +7847,7 @@ def test_probe_session_overlaps_children_and_stops_them_together(tmp_path, overs
             futures = [pool.submit(run_probe, client, 'http://test', folder, command(folder), session=session)
                        for folder in folders]
             for future in futures:
-                if oversized:
+                if budget in ('quota_full', 'disk_full'):
                     with pytest.raises(ValueError, match='cache or free-space|infrastructure failure'):
                         future.result(timeout=10)
                 else:

@@ -275,10 +275,11 @@ def run_once(manifest, data_dir, report, prepared_dir, base, *, case_urls=(), co
                                     sizes.append((estimate, size))
                                 # Read storage after sizes so ongoing writes over-reserve.
                                 storage = client.get(base+'/v1/storage').raise_for_status().json()
-                                reserved = sum(max(0, (estimate or storage['limit_bytes'])-size)
+                                reserved = sum(max(0, (estimate if estimate is not None else math.inf)-size)
                                                for estimate, size in sizes)+store.cache.headroom
-                                available = min(storage['limit_bytes']-storage['protected_bytes']-reserved,
-                                                storage['free_bytes']-store.cache.minimum_free-reserved)
+                                quota = (storage['limit_bytes']-storage['protected_bytes']
+                                         if storage['limit_bytes'] is not None else math.inf)
+                                available = min(quota, storage['free_bytes']-store.cache.minimum_free)-reserved
                             admitted = False
                             for case in remaining:
                                 packet_path = prepared_dir/(hashlib.sha256(case['url'].encode()).hexdigest()+'.json')

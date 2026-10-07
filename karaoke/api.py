@@ -503,7 +503,7 @@ class Worker:
 
 
 class StorageLimit(BaseModel):
-    limit_gib: float = Field(ge=1, le=4096, allow_inf_nan=False)
+    limit_gib: float | None = Field(ge=1, le=4096, allow_inf_nan=False)
 
 
 class LeasedFileResponse(FileResponse):
@@ -628,7 +628,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
     @app.post('/v1/storage')
     async def storage_limit(payload: StorageLimit):
         try:
-            store.cache.set_limit(round(payload.limit_gib*GIB))
+            store.cache.set_limit(None if payload.limit_gib is None else round(payload.limit_gib*GIB))
         except CacheFull as error:
             raise HTTPException(409, str(error)) from error
         return room.snapshot()

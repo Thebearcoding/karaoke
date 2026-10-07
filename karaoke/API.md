@@ -30,7 +30,7 @@ API 的依赖文件只安装服务依赖。新检出请按[安装说明](../SETU
 | `POST /v1/room/commands` | `play`、`pause`、`seek`、`next`、`select`、`remove`、`reorder`、`mix`、`ready`、`retry` |
 | `GET /v1/room/events` | 推送 `event: room`；空闲时只发连接保活注释 |
 | `GET /v1/storage` | 缓存使用量、上限、受保护与可回收容量、准备空间是否足够 |
-| `POST /v1/storage` | `{ "limit_gib": 10 }` 修改并持久化上限，返回新的房间快照 |
+| `POST /v1/storage` | `{ "limit_gib": 10 }` 修改并持久化上限；`null` 取消应用配额，仍保护实际磁盘余量，返回新的房间快照 |
 
 `pause`、`seek`、`next`、`ready` 必须带 `entry_id`，防止旧播放器事件影响新歌曲。`reorder` 传入完整的 `order` ID 数组，可带 `revision` 拒绝过期操作；当前歌曲保持首位。`mix` 接受 `instrumental`（纯伴奏）、`karaoke`（伴奏＋伴唱）、`original`（三轨一起播放）。
 

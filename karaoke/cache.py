@@ -1,4 +1,4 @@
-"""Bounded song cache. Only managed job directories are eligible for deletion."""
+"""Song cache with an optional quota and mandatory disk-space protection."""
 from collections import Counter
 import hashlib
 import json
@@ -48,17 +48,22 @@ class SongCache:
         self.minimum_free = GIB
         self.stats = {}
         self.revision = 0
-        default = limit_bytes if limit_bytes is not None else int(float(os.getenv('KARAOKE_CACHE_MAX_GIB', '10'))*GIB)
-        if default <= 0:
+        configured = os.getenv('KARAOKE_CACHE_MAX_GIB', '10').strip().lower()
+        default = limit_bytes if limit_bytes is not None else (0 if configured == 'none' else int(float(configured)*GIB))
+        if default < 0 or (default == 0 and (limit_bytes is not None or configured != 'none')):
             raise ValueError('KARAOKE_CACHE_MAX_GIB must be positive')
         with store.connect() as db:
             db.execute('CREATE TABLE IF NOT EXISTS cache_settings (id INTEGER PRIMARY KEY, limit_bytes INTEGER NOT NULL)')
             db.execute('INSERT OR IGNORE INTO cache_settings VALUES (1, ?)', (default,))
-            self.limit = db.execute('SELECT limit_bytes FROM cache_settings WHERE id=1').fetchone()[0]
+            # Zero is the persisted no-quota sentinel; existing databases are NOT NULL.
+            self.limit = db.execute('SELECT limit_bytes FROM cache_settings WHERE id=1').fetchone()[0] or None
 
     @property
     def headroom(self):
-        return min(256*1024**2, self.limit//20)
+        return 256*1024**2 if self.limit is None else min(256*1024**2, self.limit//20)
+
+    def within_limit(self, size):
+        return self.limit is None or size <= self.limit
 
     def folder(self, job_id):
         # Do not follow a replaced job directory into another part of the disk.
@@ -190,7 +195,7 @@ class SongCache:
                 else (folder/name).stat().st_size for name in self.source_files(job) if (folder/name).is_file())
         # Exhaust cheap-to-rebuild video before discarding any computed audio/timings.
         for job in candidates:
-            if used + reserve <= self.limit and free >= self.minimum_free + reserve:
+            if self.within_limit(used + reserve) and free >= self.minimum_free + reserve:
                 break
             folder = self.folder(job['id'])
             if job['status'] in ('failed', 'audio_ready', 'source_ready') and (folder/'download/source.mkv').is_file():
@@ -215,7 +220,7 @@ class SongCache:
                 job.update(status='video_evicted', restore_video=True)
                 self.store.update(job['id'], status='video_evicted', restore_video=True, evicted_at=time.time())
         for job in candidates:
-            if used + reserve <= self.limit and free >= self.minimum_free + reserve:
+            if self.within_limit(used + reserve) and free >= self.minimum_free + reserve:
                 break
             size = sizes[job['id']]
             if size <= retained[job['id']]:
@@ -238,7 +243,7 @@ class SongCache:
         evictable = sum(max(0, sizes[j['id']]-retained[j['id']]) for j in candidates)
         stats = dict(used_bytes=used, limit_bytes=self.limit, evictable_bytes=evictable,
                      protected_bytes=sum(sizes.get(i, 0) for i in protected)+sum(retained.values()),
-                     free_bytes=free, can_prepare=used-evictable+self.headroom <= self.limit and
+                     free_bytes=free, can_prepare=self.within_limit(used-evictable+self.headroom) and
                      free+evictable >= self.minimum_free+self.headroom)
         # Disk free-space changes from unrelated apps need not generate SSE traffic.
         if any(stats[k] != self.stats.get(k) for k in stats if k != 'free_bytes'):
@@ -247,17 +252,18 @@ class SongCache:
             self.store.on_change()
         else:
             self.stats = stats
-        return used + reserve <= self.limit and free >= self.minimum_free + reserve
+        return self.within_limit(used + reserve) and free >= self.minimum_free + reserve
 
     def snapshot(self):
         return {**self.stats, 'revision': self.revision}
 
     def set_limit(self, value):
-        self.enforce()
-        if value < self.stats['protected_bytes']:
-            raise CacheFull('上限小于正在处理、下载、待唱或离线源文件的占用')
+        if value is not None:
+            self.enforce()
+            if value < self.stats['protected_bytes']:
+                raise CacheFull('上限小于正在处理、下载、待唱或离线源文件的占用')
         with self.store.connect() as db:
-            db.execute('UPDATE cache_settings SET limit_bytes=? WHERE id=1', (value,))
+            db.execute('UPDATE cache_settings SET limit_bytes=? WHERE id=1', (value or 0,))
         self.limit = value
         self.enforce()
 

@@ -58,13 +58,16 @@ async function flushLevels() {
 
 function renderStorage() {
   const storage = state.storage;
-  if (!storage?.limit_bytes) return;
+  if (!storage) return;
   const gib = bytes => (bytes/1024**3).toLocaleString('zh-CN', {maximumFractionDigits:2});
-  $('storage-usage').textContent = `${gib(storage.used_bytes)} / ${gib(storage.limit_bytes)} GiB`;
-  $('storage-meter').max = storage.limit_bytes;
+  const limited = storage.limit_bytes != null;
+  $('storage-usage').textContent = limited ? `${gib(storage.used_bytes)} / ${gib(storage.limit_bytes)} GiB` : `${gib(storage.used_bytes)} GiB · 不限`;
+  $('storage-meter').hidden = !limited;
+  $('storage-meter').max = storage.limit_bytes || 1;
   $('storage-meter').value = storage.used_bytes;
   $('storage-note').hidden = storage.can_prepare;
-  if (document.activeElement !== $('storage-limit')) $('storage-limit').value = storage.limit_bytes/1024**3;
+  $('storage-limit').placeholder = limited ? '' : '不限';
+  if (document.activeElement !== $('storage-limit')) $('storage-limit').value = limited ? storage.limit_bytes/1024**3 : '';
 }
 
 function toast(message) {
