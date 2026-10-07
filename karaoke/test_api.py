@@ -2312,6 +2312,43 @@ def test_unrecognized_run_does_not_use_its_drifted_times_as_search_bounds(durati
     assert result['recovery_contexts']
 
 
+@pytest.mark.parametrize('edge', ['opening', 'ending'])
+@pytest.mark.parametrize('budget', [1, 2])
+def test_unrecognized_edge_uses_the_same_bounded_window_budget_as_an_internal_verse(edge,budget):
+    from copy import deepcopy
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines=['anchor phrase','first missing verse','second missing verse']
+    starts=[20.,82.,94.]
+    if edge=='opening':
+        lines=lines[1:]+lines[:1]
+        starts=[36.,50.,110.]
+    known=lines.index('anchor phrase')
+    segments=[dict(words=[dict(word=t,start=s if i==known else 22.,end=s+1 if i==known else 22.)])
+              for i,(t,s) in enumerate(zip(lines,starts))]
+    block=dict(range=[0,3],context=[0,3],source_range=[0.,130.],result=dict(segments=segments))
+    original=deepcopy(block)
+    def recognize(begin,end):
+        return dict(segments=[dict(words=[dict(word=lines[known],start=starts[known],end=starts[known]+1)])])
+    calls=[]
+    def align(begin,end,text,**options):
+        calls.append((begin,end,text))
+        assert 45 < end-begin <= 90
+        if any(not begin<=s<s+1<=end for s in starts):
+            return None
+        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+1-begin)])
+                              for t,s in zip(lines,starts)])
+    result=recover_with_local_asr(block,lines,np.ones(130*16000)*.1,'English',recognize,align,
+                                 force_global=True,max_alignment_attempts=budget)
+    assert block==original
+    if budget==1:
+        assert calls==[] and result['result']['segments']==segments
+        assert result['asr_localizations'][0]['attempts'][0]['reason']=='local_retry_budget_exhausted'
+    else:
+        assert len(calls)==1
+        assert [s['words'][0]['start'] for s in result['result']['segments']]==starts
+        assert result['result']['segments'][known]==segments[known]
+
+
 @pytest.mark.parametrize('prefix', ['recognized', 'scattered', 'too_short'])
 def test_partial_recognition_narrows_acoustic_search_after_a_long_instrumental(prefix):
     from karaoke.anchors_from_asr import anchors_from_words
@@ -2392,7 +2429,7 @@ def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(part
     aligned_texts = []
     def align(begin,end,text,**kwargs):
         aligned_texts.append(text)
-        assert end-begin <= (90 if asr_gap=='long_phrase_window' and text==lines[2] else 45)
+        assert end-begin <= (90 if asr_gap=='unheard_opening' or asr_gap=='long_phrase_window' and text==lines[2] else 45)
         if asr_gap=='boundary_unresolved' and text.splitlines()==lines[2:8]:
             return None
         segments = [dict(text=t,words=[dict(word=t,start=starts[t]-begin,end=ends[t]-begin)])

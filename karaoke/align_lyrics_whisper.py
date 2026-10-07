@@ -295,13 +295,15 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 # well-localized verse. Its core still needs acoustic alignment.
                 cf, cs = start, stop_line
                 ab, ae = max(0., anchors[cf]['start']-.6), min(duration, anchors[cs-1]['end']+.6)
-            if ae-ab > 45 and anchors[start]['status'] != 'candidate' and anchors[stop_line-1]['status'] != 'candidate':
+            if ae-ab > 90 and anchors[start]['status'] != 'candidate' and anchors[stop_line-1]['status'] != 'candidate':
                 # Search an untimed opening/ending near its one measured
-                # neighbour; the crop is a search bound, never a lyric time.
+                # neighbour, with the same budget as internal runs. A shorter
+                # edge-only cap can crop away a verse after an instrumental.
+                # The crop is a search bound, never a lyric time.
                 if cf == start and cs > stop_line:
-                    ab = max(ab, ae-45)
+                    ab = max(ab, ae-90)
                 elif cf < start and cs == stop_line:
-                    ae = min(ae, ab+45)
+                    ae = min(ae, ab+90)
             if not selected:
                 continue
             attempt = dict(lines=[start+left+1, stop_line+left], context=[cf+left, cs+left], source_range=[ab, ae])
