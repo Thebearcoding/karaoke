@@ -359,6 +359,53 @@ class SubtitleIntegrity(unittest.TestCase):
                 self.assertFalse(report['unresolved'])
                 self.assertEqual(len(report['constraints']),1)
 
+    def test_timing_context_retry_uses_confirmed_crop_without_relaxing_evidence(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        units = [dict(first=i, stop=i+1, text=text, start=start, end=start+.2,
+                      timing_source='prior_word_fallback') for i, (text, start) in enumerate([('甲', 1.), ('乙', 1.5)])]
+        cue = dict(text='甲乙', start=1., end=4., aligned_start=1., aligned_end=4., units=units)
+        neighbour = dict(text='丙', start=5., end=5.5,
+            units=[dict(first=0, stop=1, text='丙', start=5., end=5.5, timing_source='singing_phonemes')])
+        measured = [dict(unit, start=start, end=start+.2) for unit, start in zip(units, [3., 3.4])]
+        predictions = [deepcopy(measured) for _ in range(3)]
+        for mode in ('recovered', 'unchanged', 'wrong_text', 'unavailable', 'oom'):
+            with self.subTest(mode=mode):
+                calls = []
+                def witness(context, wave, **kwargs):
+                    calls.append(context['aligned_start'])
+                    # Cropping must not become an assigned word onset.
+                    self.assertEqual(context['units'][0]['start'], 1.)
+                    views = [deepcopy(measured), deepcopy(measured)]
+                    if len(calls) == 1 or mode == 'unchanged':
+                        views[1][1].update(start=3.7, end=3.9)
+                    elif mode == 'wrong_text':
+                        views[0][1]['text'] = '丁'
+                    elif mode in ('unavailable', 'oom'):
+                        raise RuntimeError('CUDA out of memory' if mode == 'oom' else 'Witness unavailable')
+                    return views
+                if mode == 'oom':
+                    with self.assertRaisesRegex(RuntimeError, 'out of memory'):
+                        reconcile_timing([cue, neighbour], np.ones(44100*6)*.1, witness,
+                            lambda *a: predictions, protocol, 'Chinese')
+                    continue
+                result, report = reconcile_timing([cue, neighbour], np.ones(44100*6)*.1, witness,
+                    lambda *a: predictions, protocol, 'Chinese')
+                self.assertEqual(calls, [1., 3.])
+                self.assertEqual(report['lines'][-1]['context_retry'], [3., 4.])
+                self.assertEqual(result[1]['units'][0]['start'], 5.)
+                self.assertEqual([u['start'] for u in cue['units']], [1., 1.5])
+                if mode == 'recovered':
+                    self.assertEqual([u['start'] for u in result[0]['units']], [3., 3.4])
+                    self.assertFalse(report['unresolved'])
+                    validate_timeline(result, ['甲乙', '丙'], 6, report['constraints'], 'Chinese')
+                else:
+                    self.assertEqual([u['start'] for u in result[0]['units']], [1., 1.5])
+                    self.assertTrue(report['unresolved'])
+                    with self.assertRaisesRegex(ValueError, 'contradicted'):
+                        validate_timeline(result, ['甲乙', '丙'], 6, report['constraints'], 'Chinese')
+
     def test_countdown_uses_singing_offsets_and_does_not_invent_them_from_ctc(self):
         # The first word stays visible until the next word, but its singing
         # has ended. Extending the display must not erase a real vocal gap.

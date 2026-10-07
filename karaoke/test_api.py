@@ -3516,7 +3516,9 @@ def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success
         checked=json.loads(json.dumps(cue))
         if not old_time:checked['units'][0]['start']=4.
         (output/'cues.json').write_text(json.dumps([checked]))
-        (output/'report.json').write_text(json.dumps(dict(lines=[],unresolved=[],constraints=[
+        (output/'report.json').write_text(json.dumps(dict(
+            lines=[dict(line=1, status='reviewed', repairs=[]),
+                   dict(line=1, status='reviewed', repairs=[dict(accepted=True)])], unresolved=[],constraints=[
             dict(line=1,text='hello',first=0,stop=5,start_min=3.6,start_max=4.4,onset=4.)])))
     monkeypatch.setattr(pipeline,'run',run)
     if old_time:
@@ -3526,7 +3528,9 @@ def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success
     else:
         pipeline.validate_alignment(lyrics,6)
         assert json.loads((tmp_path/'cues.json').read_text())[0]['units'][0]['start']==4.
-        assert len(json.loads((tmp_path/'quality.json').read_text())['timing_review']['onset_constraints'])==1
+        review = json.loads((tmp_path/'quality.json').read_text())['timing_review']
+        assert len(review['onset_constraints']) == review['reviewed_lines'] == review['repaired_ranges'] == 1
+        assert review['review_attempts'] == 2
 
 
 def test_playback_fallback_recovers_each_phrase_from_available_stages(tmp_path):

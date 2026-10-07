@@ -1100,11 +1100,12 @@ class Pipeline:
             raise StageFailure('validate_timing', '字幕时间校验失败；局部修复诊断已保留') from error
         quality = json.loads((self.output/'quality.json').read_text())
         quality.update(lines=len(checked), units=sum(len(c['units']) for c in checked),
-            timing_review=dict(reviewed_lines=len(report['lines']),
+            timing_review=dict(reviewed_lines=len({r['line'] for r in report['lines']}),
+                review_attempts=len(report['lines']),
                 onset_constraints=report['constraints'], unresolved=report['unresolved'],
                 report_sha256=file_hash(self.output/'timing-checked/report.json'),
                 repaired_ranges=sum(r['accepted'] for line in report['lines'] for r in line['repairs']),
-                unverified_lines=[r['line'] for r in report['lines'] if r['status']=='unverified']),
+                unverified_lines=sorted({r['line'] for r in report['lines'] if r['status']=='unverified'})),
             onset_accuracy=None)
         quality['fallback_units'] = sum(u.get('timing_source') == 'prior_word_fallback'
                                        for c in checked for u in c['units'])

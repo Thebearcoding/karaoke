@@ -47,7 +47,8 @@ def screened_units(cue, wave, protocol, *, floor=None):
     return selected
 
 
-def reconcile_timing(cues, wave, witness, predict, protocol, language, constraints=()):
+def reconcile_timing(cues, wave, witness, predict, protocol, language, constraints=(), *,
+                     _retry_context=True, _review_lines=None):
     """Corroborate displaced onsets, then replace only a compatible local span.
 
     witness returns original/vocal word views. predict returns three independent
@@ -62,6 +63,8 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             unit['acoustic_end'] = acoustic_end(unit)
     floor = max(1e-5, protocol['minimum_relative_rms']*float(np.sqrt(np.mean(wave**2))))
     for index, cue in enumerate(result):
+        if _review_lines is not None and index not in _review_lines:
+            continue
         selected = screened_units(cue, wave, protocol, floor=floor)
         if not selected and not timing_violations(result, [p for p in ledger if p['line']==index+1]):
             continue
@@ -168,6 +171,33 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             if 'out of memory' in str(error).lower():
                 raise
             report['reason']=str(error)
+    if _retry_context:
+        retry = deepcopy(result)
+        windows = {}
+        for violation in timing_violations(result, ledger):
+            proof = violation['proof']
+            index = proof['line']-1
+            if not 0 <= index < len(result) or violation['reason'] == 'lyric identity changed':
+                continue
+            cue = retry[index]
+            # A disproved line boundary should not remain the only crop used
+            # to resolve its neighbours. Move the observation window, never
+            # the word times, and retain every prior acoustic constraint.
+            if (proof['first'] == cue['units'][0]['first'] and
+                    abs(proof['onset']-cue['aligned_start']) > protocol['maximum_change_seconds'] and
+                    0 < cue['aligned_end']-proof['onset'] <= 30):
+                windows[index] = [proof['onset'], cue['aligned_end']]
+                cue['aligned_start'] = proof['onset']
+        if windows:
+            retry, reviewed = reconcile_timing(retry, wave, witness, predict, protocol, language, ledger,
+                                               _retry_context=False, _review_lines=windows)
+            for index in windows:
+                cue = retry[index]
+                if cue['units'] != result[index]['units']:
+                    cue['aligned_start'] = cue['units'][0]['start']
+                    result[index] = cue
+            reports.extend(dict(r, context_retry=windows[r['line']-1]) for r in reviewed['lines'])
+            ledger = reviewed['constraints']
     return result,dict(lines=reports,constraints=ledger,unresolved=timing_violations(result,ledger),
                        accuracy=None)
 
@@ -309,7 +339,8 @@ def main():
     write(ledger_file,dict(source=source,constraints=report['constraints']))
     write(out/'cues.json',repaired);write(out/'report.json',report)
     validate_timeline(repaired,lyrics['lines'],duration,report['constraints'],lyrics['language'])
-    print(json.dumps(dict(lines=len(cues),reviewed_lines=len(report['lines']),
+    print(json.dumps(dict(lines=len(cues),reviewed_lines=len({r['line'] for r in report['lines']}),
+                         review_attempts=len(report['lines']),
                          constraints=len(report['constraints']),seconds=report['seconds'])),flush=True)
 
 
