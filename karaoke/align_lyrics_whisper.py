@@ -899,8 +899,13 @@ def main():
         (output/'raw.json').write_text(json.dumps(raw_blocks, ensure_ascii=False, indent=2, default=json_number)+'\n')
         for block in raw_blocks:
             for i in range(*block['range']):
-                words = block['result']['segments'][i-block['context'][0]]['words']
-                if normalized(''.join(w['word'] for w in words)) != normalized(lyrics['lines'][i]):
+                segment = block['result']['segments'][i-block['context'][0]]
+                words = segment['words']
+                # A rejected timing prediction keeps its lyric text but no
+                # measured words. Export it as unresolved so the caller can
+                # try a whole alternate source; it is never a valid caption.
+                text = ''.join(w['word'] for w in words) if words else segment.get('text', '')
+                if normalized(text) != normalized(lyrics['lines'][i]):
                     raise ValueError('Aligned units do not exactly cover the supplied lyric text')
         if args.device == 'mps':
             torch.mps.synchronize()
