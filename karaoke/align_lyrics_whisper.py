@@ -828,7 +828,10 @@ def main():
 
             def recognize_audio(start, stop):
                 from stage_cache import StageCache
-                config = dict(start=start, stop=stop, language=language, model=args.model,
+                # A repair crop can be in a different language from the song.
+                # Let its audio identify the language; forcing the song's tag
+                # can turn foreign words into unmatchable transliterations.
+                config = dict(start=start, stop=stop, language=None, model=args.model,
                               model_sha256=model_hash, device=args.device,
                               temperature=0, condition_on_previous_text=False,
                               implementation=inspect.getsource(recognize_audio),
@@ -841,7 +844,7 @@ def main():
                     if not reused:
                         report_progress(detail='定位未对齐的唱段')
                         recognized = model.transcribe(audio[round(start*16000):round(stop*16000)],
-                            language=language, temperature=0, condition_on_previous_text=False,
+                            language=None, temperature=0, condition_on_previous_text=False,
                             word_timestamps=True, regroup=False, verbose=None,
                             fp16=args.device == 'cuda')
                         path.write_text(json.dumps(recognized.to_dict(), ensure_ascii=False, default=json_number)+'\n')

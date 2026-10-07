@@ -1611,6 +1611,52 @@ class AlignmentIntegrity(unittest.TestCase):
         self.assertEqual(repaired, good)
         full.assert_called_once_with()
 
+    def test_localization_recognizes_foreign_lyrics_in_a_japanese_song(self):
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        from align_lyrics_whisper import main
+
+        lines, starts = ['Guten Morgen', 'Komm zurück', 'あしたも歌おう'], [1., 4., 8.]
+        recognized = False
+        def align(samples, text, **options):
+            begin = float(samples[0])
+            segments = []
+            for line in text.splitlines():
+                start = starts[lines.index(line)]-begin
+                words = [dict(word=word, start=start+i*.4, end=start+(i+1)*.4, probability=.9)
+                         for i, word in enumerate(line.split())]
+                if line == lines[1] and not recognized:
+                    for word in words:
+                        word.update(start=start, end=start)
+                segments.append(dict(text=line, start=words[0]['start'], end=words[-1]['end'], words=words))
+            return SimpleNamespace(to_dict=lambda: dict(segments=segments))
+        def transcribe(samples, language, **options):
+            nonlocal recognized
+            recognized = language is None
+            begin = float(samples[0])
+            words = [dict(word=line if recognized else 'コム', start=start-begin, end=start+.8-begin)
+                     for line, start in zip(lines, starts)]
+            return SimpleNamespace(to_dict=lambda: dict(language='de' if recognized else 'ja',
+                segments=[dict(words=words)]))
+        model = Mock()
+        model._buffers = {'alignment_heads': None}
+        model.align.side_effect, model.transcribe.side_effect = align, transcribe
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sf.write(root/'audio.wav', np.arange(12*16000)/16000, 16000, subtype='FLOAT')
+            (root/'lyrics.json').write_text(json.dumps(dict(language='Japanese', lines=lines)))
+            (root/'jobs.json').write_text(json.dumps([dict(audio=str(root/'audio.wav'),
+                lyrics=str(root/'lyrics.json'), output=str(root/'alignment'))]))
+            with patch('stable_whisper.load_model', return_value=model), patch(
+                    'align_lyrics_whisper.sha', return_value='test-model-hash'), patch('sys.argv',
+                    ['align', '--jobs', str(root/'jobs.json'), '--device', 'cpu']):
+                main()
+            cues = json.loads((root/'alignment/cues.json').read_text())
+            self.assertEqual([c['text'] for c in cues], lines)
+            np.testing.assert_allclose([c['start'] for c in cues], starts, atol=.001)
+            self.assertEqual(model.transcribe.call_count, 1)
+
     def test_rejected_alignment_retains_raw_evidence_without_publishing_captions(self):
         import json
         import shutil
