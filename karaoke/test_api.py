@@ -2349,6 +2349,43 @@ def test_unrecognized_edge_uses_the_same_bounded_window_budget_as_an_internal_ve
         assert result['result']['segments'][known]==segments[known]
 
 
+@pytest.mark.parametrize('regional_support', ['full', 'none', 'outside', 'error'])
+@pytest.mark.parametrize('budget', [2, 8])
+def test_failed_global_alignment_relocalizes_only_the_independently_bounded_region(regional_support,budget):
+    from copy import deepcopy
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines=['anchor phrase','quiet verse begins','quiet verse ends']
+    starts=[20.,82.,94.]
+    def segments(texts, begin, collapsed=False):
+        return [dict(words=[dict(word=t,start=starts[lines.index(t)]-begin,
+                    end=starts[lines.index(t)]-begin+(0 if collapsed and t!=lines[0] else 1.))])
+                for t in texts]
+    block=dict(range=[0,3],context=[0,3],source_range=[0.,130.],result=dict(segments=segments(lines,0.,True)))
+    original=deepcopy(block)
+    recognition=[]
+    def recognize(begin,end):
+        recognition.append((begin,end))
+        if (begin,end)==(0.,130.):
+            return dict(segments=segments(lines[:1],begin))
+        assert 0 < begin < 20 and 95 < end < 130
+        if regional_support=='error':
+            raise ValueError('region unavailable')
+        return dict(segments=segments(lines if regional_support!='none' else [],
+                    begin-200 if regional_support=='outside' else begin))
+    def align(begin,end,text,**options):
+        texts=text.splitlines()
+        return dict(segments=segments(texts,begin,collapsed=texts==lines))
+    result=recover_with_local_asr(block,lines,np.zeros(130*16000),'English',recognize,align,
+                                 force_global=True,max_alignment_attempts=budget)
+    assert block==original and result['result']['segments'][0]==original['result']['segments'][0]
+    assert len(recognition)==(2 if budget==8 else 1)
+    if regional_support=='full' and budget==8:
+        assert [s['words'] for s in result['result']['segments']]==[s['words'] for s in segments(lines,0.)]
+        assert result['asr_localizations'][0]['accepted_lines']==[2,3]
+    else:
+        assert result['result']==original['result']
+
+
 @pytest.mark.parametrize('prefix', ['recognized', 'scattered', 'too_short'])
 def test_partial_recognition_narrows_acoustic_search_after_a_long_instrumental(prefix):
     from karaoke.anchors_from_asr import anchors_from_words

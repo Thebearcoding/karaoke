@@ -242,11 +242,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             report.update(reason='recognition_failed', error=str(error))
             continue
         report['recognition'] = response
-        words = [dict(w, start=w['start']+begin, end=w['end']+begin)
-                 for s in response.get('segments', [])
-                 if s.get('no_speech_prob', 0) < .6 and s.get('compression_ratio', 0) < 2.4
-                 for w in s.get('words') or [] if np.isfinite([w['start'], w['end']]).all()
-                 and 0 <= w['start'] < w['end'] <= end-begin+.001]
+        words = recognized_words(begin, response, end)
         anchors = anchors_from_words(lines[left:right], words, language, allow_missing=True)
         if global_recovery:
             report['recognition_anchors'] = anchors
@@ -280,6 +276,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         except ValueError:
             report['reason'] = 'invalid_recognition_anchors'
             continue
+        relocalized = set()
         for start, stop_line, cf, cs, ab, ae in blocks:
             selected = targets.intersection(range(start+left, stop_line+left))
             # The recognizer only observed this crop. Missing edge anchors
@@ -321,8 +318,38 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                                   dynamic_heads=True, max_word_dur=None, word_dur_factor=None)
             except ValueError as error:
                 attempt['error'] = str(error)
-                continue
+                candidate = None
             attempt['result'] = candidate
+            if (global_recovery and budget >= cost+1 and
+                    not relocalized.intersection(range(start, stop_line)) and
+                    all(anchors[i]['status'] != 'candidate' for i in range(start, stop_line)) and
+                    (ab > begin+.001 or ae < end-.001) and
+                    not valid_recovery(candidate, lines[cf+left:cs+left], ae-ab)):
+                # A global recognition pass can skip a quiet verse. Revisit
+                # only its independently bounded region before forcing text
+                # through the same failed attention path again.
+                relocalized.update(range(start, stop_line))
+                budget -= 1
+                regional = dict(context=[cf+left, cs+left], source_range=[ab, ae])
+                attempt['regional_localization'] = regional
+                try:
+                    response = recognize(ab, ae)
+                    local = recovery_anchors(anchors_from_words(lines[cf+left:cs+left],
+                        recognized_words(ab, response, ae), language, allow_missing=True))
+                    regional.update(recognition=response, anchors=local)
+                    recovered = [i for i in range(start, stop_line) if local[i-cf]['status'] == 'candidate']
+                    if recovered:
+                        refined = list(anchors)
+                        for i in recovered:
+                            refined[i] = local[i-cf]
+                        refined_blocks = alignment_blocks(refined, audio)
+                        anchors[:] = refined
+                        targets.update(range(start+left, stop_line+left))
+                        blocks.extend(b for b in refined_blocks
+                                      if b[0] < stop_line and b[1] > start)
+                        continue
+                except ValueError as error:
+                    regional['error'] = str(error)
             if candidate is None:
                 continue
             if any(not np.isfinite([w['start'], w['end']]).all() or
@@ -440,6 +467,15 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
     result['asr_localizations'] = reports
     result['recovery_contexts'] = contexts
     return result
+
+
+def recognized_words(begin, response, end):
+    words = [dict(w, start=w['start']+begin, end=w['end']+begin)
+             for s in response.get('segments', [])
+             if s.get('no_speech_prob', 0) < .6 and s.get('compression_ratio', 0) < 2.4
+             for w in s.get('words') or [] if np.isfinite([w['start'], w['end']]).all()
+             and 0 <= w['start'] < w['end'] <= end-begin+.001]
+    return words
 
 
 def recovery_anchors(recognized):
