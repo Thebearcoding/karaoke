@@ -2888,6 +2888,52 @@ def test_prepared_lyrics_preserve_provenance_and_reject_different_inputs(tmp_pat
             assert json.loads((pipeline.output/'anchors.json').read_text()) == []
 
 
+@pytest.mark.parametrize('mode', ['success', 'all_fail', 'resource_failure', 'stale', 'supplied', 'soft'])
+def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeypatch, mode):
+    primary, alternative = ['First phrase', 'Missing phrase'], ['First phrase', 'Different phrase']
+    lyrics = dict(title='Evening', artist='Singer', language='English', lines=primary,
+        provenance=dict(kind='user_supplied' if mode=='supplied' else 'online_lyric_text',
+                        route='lyrics_first', lyric_lookup=dict(provider='primary')))
+    packet = dict(candidate_texts=[primary, alternative, alternative, ['Rejected fragment']],
+        crosscheck=dict(selected_source=0, eligible_sources=[0,1,2], status='conflicting',
+            sources=[dict(provider=p,language='English') for p in ('primary','alternate','duplicate','rejected')]))
+    if mode == 'stale':packet['candidate_texts'][0] = ['Old lyrics']
+    (tmp_path/'lyric-crosscheck.json').write_text(json.dumps(packet))
+    (tmp_path/'lyrics.json').write_text(json.dumps(lyrics))
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    calls = []
+    def align(candidate, duration):
+        calls.append(candidate['lines'])
+        if mode == 'resource_failure':raise StageFailure('align_words', 'CUDA out of memory')
+        (pipeline.checkpoints.directory/'align_words.json').write_text('{}')
+        cues = [dict(text=t,start=1.+i*2,end=2.+i*2,status='candidate')
+                for i,t in enumerate(candidate['lines'])]
+        failing = candidate['lines']==primary or mode=='all_fail'
+        if failing and mode != 'soft':cues[-1] = dict(text=candidate['lines'][-1],status='unresolved_timing')
+        folder = tmp_path/'alignment';folder.mkdir(exist_ok=True)
+        (folder/'cues.json').write_text(json.dumps(cues))
+        pipeline.alignment_outputs.add(folder)
+        (tmp_path/'quality.json').write_text('{}')
+        (tmp_path/'cues.json').write_text(json.dumps(cues))
+        if failing:raise ValueError('Unresolved alignment')
+    monkeypatch.setattr(pipeline, 'align', align)
+    if mode in ('success', 'soft'):
+        selected, error = pipeline.align_candidates(lyrics, {}, 6.)
+        assert selected['lines'] == (primary if mode=='soft' else alternative)
+        assert calls == ([primary] if mode=='soft' else [primary,alternative])
+        if mode == 'success':
+            quality=json.loads((tmp_path/'quality.json').read_text())
+            rejected=quality['lyric_source_fallback']['rejected']
+            assert len(rejected)==1 and rejected[0]['source']['provider']=='primary'
+            saved=tmp_path/rejected[0]['diagnostics']
+            assert json.loads((saved/'lyrics.json').read_text())['lines']==primary
+            assert json.loads((saved/'playback-warning.json').read_text())['omitted_lines']==[2]
+            assert json.loads((tmp_path/'lyrics.json').read_text())['lines']==alternative
+    else:
+        with pytest.raises(StageFailure):pipeline.align_candidates(lyrics, {}, 6.)
+        assert calls == ([primary,alternative] if mode=='all_fail' else [primary])
+
+
 @pytest.mark.parametrize('overlap', [.02, .1, .16, .32])
 def test_playback_fallback_keeps_overlapping_word_tails_without_moving_onsets(tmp_path, overlap):
     pipeline = Pipeline(dict(url=URL), tmp_path)
@@ -5981,6 +6027,9 @@ def test_compaction_keeps_outputs_and_bounded_logs_without_following_symlinks(tm
     (folder/'worker.log').write_bytes(b'l'*100000)
     crosscheck = dict(candidate_texts=[['Stars above the quiet shore']], crosscheck=dict(status='corroborated'))
     (folder/'lyric-crosscheck.json').write_text(json.dumps(crosscheck))
+    source_failure = folder/'lyric-source-attempts/first/lyrics.json'
+    source_failure.parent.mkdir(parents=True)
+    source_failure.write_text('{"lines":["Original rejected text"]}')
     render_report = dict(song_intro=dict(status='omitted', reason='Missing title glyph'))
     (folder/'captioned-picture.render.json').write_text(json.dumps(render_report))
     outside = tmp_path/'precious.wav'
@@ -5991,6 +6040,7 @@ def test_compaction_keeps_outputs_and_bounded_logs_without_following_symlinks(tm
     assert (folder/'request.json').exists() and (folder/'worker.log').stat().st_size == 65536
     assert not (folder/'raw').exists() and outside.read_bytes() == b'keep me'
     assert json.loads((folder/'lyric-crosscheck.json').read_text()) == crosscheck
+    assert json.loads(source_failure.read_text())['lines'] == ['Original rejected text']
     assert json.loads((folder/'captioned-picture.render.json').read_text()) == render_report
     store.update(job['id'], status='failed', result=None, error=dict(code='cache_full'))
     (folder/'asr').mkdir()

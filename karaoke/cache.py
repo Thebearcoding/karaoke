@@ -116,6 +116,7 @@ class SongCache:
                 'captioned-picture.render.json',
                 'song-metadata.json', 'checkpoints/extract_song_metadata.json',
                 'lyrics.json', 'timing-constraints.json', 'timing-checked/report.json'}
+        keep.update(p.relative_to(folder).as_posix() for p in (folder/'lyric-source-attempts').rglob('*.json'))
         if (job['status'] in ('failed', 'audio_ready', 'source_ready') or
                 (job.get('result') or {}).get('validation_scope') == 'playback_audio_preview'):
             keep.update(retained_files(folder))

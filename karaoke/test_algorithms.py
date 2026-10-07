@@ -1692,6 +1692,18 @@ class AlignmentIntegrity(unittest.TestCase):
             self.assertEqual(json.loads((root/'alignment/raw.json').read_text())[0]['result'], result)
             self.assertEqual(json.loads((root/'alignment/units.json').read_text())[0]['text'], 'extra word')
             self.assertFalse((root/'alignment/cues.json').exists())
+            jobs = json.loads((root/'jobs.json').read_text())
+            jobs[0]['localize_with_asr'] = False
+            (root/'jobs.json').write_text(json.dumps(jobs))
+            shutil.rmtree(root/'alignment')
+            model._buffers = {'alignment_heads': None}
+            with patch('stable_whisper.load_model', return_value=model), patch(
+                    'align_lyrics_whisper.sha', return_value='test-model-hash'), patch('sys.argv',
+                    ['align', '--jobs', str(root/'jobs.json'), '--device', 'cpu']):
+                with self.assertRaisesRegex(ValueError, 'exactly cover'):
+                    main()
+            self.assertEqual(model.transcribe.call_count, 1)
+            self.assertFalse(json.loads((root/'alignment/raw.json').read_text())[0].get('asr_localizations'))
 
     def test_skipped_refrain_requires_two_acoustic_windows_inside_the_gap(self):
         from copy import deepcopy

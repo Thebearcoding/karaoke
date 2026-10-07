@@ -135,6 +135,32 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None):
     return result['lines'], result['report']
 
 
+def alternative_lyric_candidates(lyrics, packet):
+    """Reuse whole, eligible published texts after the selected text fails alignment."""
+    from .subtitles import normalized
+    if lyrics.get('provenance', {}).get('kind') != 'online_lyric_text':
+        return
+    review = packet.get('crosscheck', {})
+    texts, sources = packet.get('candidate_texts', []), review.get('sources', [])
+    selected = review.get('selected_source')
+    if not isinstance(selected, int) or not 0 <= selected < len(texts) or texts[selected] != lyrics['lines']:
+        return  # A stale lookup must not replace the current input.
+    seen = {normalized(''.join(lyrics['lines'])).casefold()}
+    for index in review.get('eligible_sources', []):
+        if not 0 <= index < min(len(texts), len(sources)):
+            continue
+        key = normalized(''.join(texts[index])).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        selected_review = dict(review, selected_source=index, selection='alignment_fallback')
+        if review.get('status') == 'corroborated' and index not in review.get('agreeing_sources', []):
+            selected_review.update(status='conflicting', agreeing_sources=[], independent_sources=0)
+        report = dict(sources[index], crosscheck=selected_review)
+        yield dict(lyrics, lines=texts[index], language=report['language'], provenance=dict(
+            lyrics['provenance'], lyric_lookup=report, text_transform=report.get('text_transform', 'whitespace_only')))
+
+
 def fetch_lyric_consensus(song, metadata, duration, cache, description=None, preserve_title=False):
     """Resolve source identity before name searches; unavailable sources never vote."""
     def lrclib():

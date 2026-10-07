@@ -797,7 +797,8 @@ class Pipeline:
         language = lyrics['language']
         output = self.output
         write_json(output/'alignment-jobs.json', [dict(audio=str(output/'vocals-16k.wav'),
-            lyrics=str(output/'lyrics.json'), anchors=str(output/'anchors.json'), output=str(output/'alignment'))])
+            lyrics=str(output/'lyrics.json'), anchors=str(output/'anchors.json'), output=str(output/'alignment'),
+            localize_with_asr=self.strict_audio)])
         self.run('align_words', [sys.executable, ROOT/'align_lyrics_whisper.py', '--jobs',
             output/'alignment-jobs.json', '--device', self.device])
         raw = json.loads((output/'alignment/raw.json').read_text())
@@ -885,6 +886,55 @@ class Pipeline:
             line_order_fallback_lines=order_fallbacks,
             countdown_events=countdown_events(cues)))
 
+    def align_candidates(self, lyrics, metadata, duration):
+        from .lyric_consensus import alternative_lyric_candidates
+        path = self.output/'lyric-crosscheck.json'
+        try:
+            packet = json.loads(path.read_text()) if not self.strict_audio else {}
+        except (OSError, ValueError):
+            packet = {}
+        candidates = [lyrics, *alternative_lyric_candidates(lyrics, packet)]
+        attempts = []
+        for index, candidate in enumerate(candidates):
+            if index:
+                self.aligned_cues = None
+                self.alignment_outputs.clear()
+                write_json(self.output/'lyrics.json', candidate)
+                self.phase(song_info={k:candidate[k] for k in ('title', 'artist', 'language')})
+            error = None
+            try:
+                self.align(candidate, duration)
+            except (StageFailure, ValueError) as caught:
+                if self.strict_audio:
+                    raise
+                error = caught
+                try:
+                    candidate = self.playback_fallback(metadata, duration, caught)
+                except StageFailure as failure:
+                    if (failure.stage != 'subtitles' or index+1 == len(candidates) or
+                            not (self.checkpoints.directory/'align_words.json').is_file()):
+                        raise
+                    # Preserve the rejected whole text and its actual alignment,
+                    # then let the normal stage cache rebuild for the next text.
+                    folder = self.output/'lyric-source-attempts'/str(time.time_ns())
+                    folder.mkdir(parents=True)
+                    for name in ('lyrics.json', 'alignment/raw.json', 'alignment/run.json',
+                                 'playback-warning.json', 'cues.json'):
+                        source = self.output/name
+                        if source.is_file():
+                            target = folder/name
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(source, target)
+                    attempts.append(dict(source=candidate['provenance'].get('lyric_lookup'),
+                        error=str(failure), diagnostics=str(folder.relative_to(self.output))))
+                    continue
+            if attempts:
+                quality = json.loads((self.output/'quality.json').read_text())
+                quality['lyric_source_fallback'] = dict(rejected=attempts,
+                    selected=candidate['provenance']['lyric_lookup'])
+                write_json(self.output/'quality.json', quality)
+            return candidate, error
+
     def execute(self):
         started = time.perf_counter()
         if self.strict_audio and not local_asr.offline() and not os.getenv('OPENAI_API_KEY'):
@@ -964,13 +1014,8 @@ class Pipeline:
                 text_error = error
                 lyrics = None
             if text_error is None:
-                try:
-                    self.align(lyrics, duration)
-                except (StageFailure, ValueError) as error:
-                    if self.strict_audio:
-                        raise
-                    text_error = error
-            if text_error is not None:
+                lyrics, text_error = self.align_candidates(lyrics, metadata, duration)
+            else:
                 lyrics = self.playback_fallback(metadata, duration, text_error)
             # This gate is intentionally outside the fallback catch: a fallback
             # must not resurrect a timestamp contradicted by acoustic evidence.
