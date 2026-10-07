@@ -78,7 +78,9 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None):
                         raise ValueError('NetEase lyric search rejected the request')
                     rows = [dict(trackId=r['id'], trackTitle=r['name'],
                         artists=[dict(artistName=a['name']) for a in r['ar']],
-                        album=dict(albumTitle=r['al']['name'])) for r in packet['result'].get('songs', [])]
+                        album=dict(albumTitle=r['al']['name']),
+                        duration_seconds=r['dt']/1000 if isinstance(r.get('dt'), (int, float)) else None)
+                        for r in packet['result'].get('songs', [])]
                     def lyrics(row):
                         if not str(row['trackId']).isdigit():
                             return None

@@ -1126,6 +1126,46 @@ def test_netease_lyrics_reject_other_recordings_and_strip_lrc_metadata(tmp_path,
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize('album', ['Original release', None])
+def test_netease_lyrics_use_release_metadata_before_provider_order(tmp_path, monkeypatch, album):
+    from karaoke import lyric_consensus as module
+    from karaoke.stage_cache import StageCache
+    from karaoke.song_sources import video_song_info
+    calls = []
+    def read(url, **kwargs):
+        calls.append(url)
+        if 'cloudsearch' in url:
+            return dict(code=200, result=dict(songs=[
+                dict(id=1, name='Evening', ar=[dict(name='Singer')], al=dict(name='Later release'), dt=310680),
+                dict(id=2, name='Evening', ar=[dict(name='Singer')], al=dict(name='Original release'), dt=316933)]))
+        assert 'id=2' in url
+        return dict(lrc=dict(lyric='\n'.join(['Stars above the quiet shore']*8)))
+    monkeypatch.setattr(module, 'read_document', read)
+    metadata = dict(title='Evening',artist='Singer',album=album)
+    for _ in range(2):
+        lines, report = module.fetch_additional_lyrics('netease', video_song_info(metadata),
+            metadata, StageCache(tmp_path), 316.933)
+        assert lines and report['url'].endswith('id=2')
+        assert report['duration_seconds'] == 316.933
+    assert len(calls) == 2
+
+
+def test_published_lyric_release_preference_keeps_complete_fallbacks():
+    from karaoke.lyric_lookup import published_candidate
+    body='\n'.join(['Stars above the quiet shore']*8)
+    row=dict(trackId=1,trackTitle='Evening',artists=[dict(artistName='Singer')],
+             album=dict(albumTitle='Other release'),duration_seconds=100.,lyrics=body)
+    same=dict(row,trackId=2,album=dict(albumTitle='Original release'),duration_seconds=101.)
+    song=dict(title='Evening',artist='Singer',album='Original release')
+    _, report=published_candidate([row,same],song,'',duration=100.)
+    assert report['url'].endswith('/2')
+    for invalid in (dict(same,lyrics='Stars'),dict(same,duration_seconds=250.)):
+        lines, report=published_candidate([invalid,row],song,'',duration=100.)
+        assert lines and report['url'].endswith('/1')
+    lines, report=published_candidate([row],song,'',duration=100.)
+    assert lines and report['url'].endswith('/1')
+
+
 @pytest.mark.parametrize('same_recording', [True, False])
 @pytest.mark.parametrize('artist', ['Singer', ''])
 def test_music_lyrics_are_bound_to_the_requested_video(tmp_path, monkeypatch, same_recording, artist):

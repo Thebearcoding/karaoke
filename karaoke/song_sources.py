@@ -250,6 +250,8 @@ def video_song_info(metadata):
     info = dict(title=metadata.get('track') or metadata.get('title') or '',
                 artist=metadata.get('artist') or ' · '.join(metadata.get('artists') or []),
                 duration_seconds=metadata.get('duration') or 0)
+    if isinstance(metadata.get('album'), str) and metadata['album'].strip():
+        info['album'] = metadata['album']
     thumbnail = thumbnail_url(metadata.get('thumbnail')) or next((url for row in
         reversed(metadata.get('thumbnails') or []) if (url := thumbnail_url(row.get('url')))), None)
     if thumbnail:

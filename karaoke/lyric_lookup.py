@@ -320,12 +320,22 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
                 not any(identity(song['artist']) & identity(a) for a in artists)):
             continue
         mismatch = recording_mismatches(song, source_title, title, album)
-        if mismatch is None or mismatch and not allow_recording_mismatch:
+        if mismatch is None:
             continue
-        candidates.append((mismatch, row, title, artists, album))
-    # Try the same performance first, even when search ranks studio text higher.
+        seconds = row.get('duration_seconds')
+        seconds = seconds if isinstance(seconds, (int, float)) and math.isfinite(seconds) and seconds > 0 else None
+        difference = abs(seconds-duration) if seconds is not None and duration is not None else math.inf
+        if math.isfinite(difference) and difference > max(3., min(10., duration*.02)):
+            mismatch = [*mismatch, 'duration']
+        if mismatch and not allow_recording_mismatch:
+            continue
+        album_match = bool(identity(song.get('album')) & identity(album))
+        rank = (len(mismatch), not album_match, difference)
+        candidates.append((rank, mismatch, row, title, artists, album, seconds))
+    # A title can have different release edits. Use known recording metadata
+    # before provider order, while retaining complete text from other releases.
     rejected = []
-    for mismatch, row, title, artists, album in sorted(candidates, key=lambda c: len(c[0])):
+    for _, mismatch, row, title, artists, album, seconds in sorted(candidates, key=lambda c: c[0]):
         text = row.get('lyrics')
         if text is None and read_lyrics is not None:
             text = read_lyrics(row)
@@ -345,7 +355,7 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
         return lines, dict(status='candidate', provider='line_music', language=language,
             url='https://music-tw.line.me/track/'+track_id, track=title, artists=artists, album=album,
             text_sha256=hashlib.sha256(text.encode()).hexdigest(), excluded_credit_lines=excluded,
-            recording_mismatches=mismatch,
+            recording_mismatches=mismatch, duration_seconds=seconds,
             rejected_candidates=rejected,
             text_transform='html_entities_decoded_credit_header_footer_removed_then_whitespace_only',
             provider_timestamps_used=False)
