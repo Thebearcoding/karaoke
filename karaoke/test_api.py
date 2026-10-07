@@ -664,7 +664,7 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     models[3].write_bytes(b'updated independent alignment model')
     assert module.pipeline_fingerprint() != fingerprint
     prepare()
-    assert calls == ['align_context']
+    assert calls == ['align_words', 'align_context']
     calls.clear()
     fingerprint = module.pipeline_fingerprint()
     models[4].write_bytes(b'updated optional verification model')
@@ -685,8 +685,8 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     assert calls == ['align_words', 'transcribe']
     calls.clear()
     for filename, affected in (
-            ('cjk_recovery.py', ['align_context']),
-            ('align_lyric_phonemes.py', ['align_phonemes', 'align_context']),
+            ('cjk_recovery.py', ['align_words', 'align_context']),
+            ('align_lyric_phonemes.py', ['align_words', 'align_phonemes', 'align_context']),
             ('local_asr.py', ['align_words', 'transcribe']),
             ('align_lyrics_whisper.py', ['align_words'])):
         path = code/filename
@@ -696,7 +696,7 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
         calls.clear()
     (folder/'source-44100.wav').write_bytes(b'updated original audio')
     prepare()
-    assert calls == ['transcribe', 'align_context']
+    assert calls == ['align_words', 'transcribe', 'align_context']
     calls.clear()
     (folder/'lead-separation/song/vocals.wav').write_bytes(b'updated lead audio')
     prepare()
@@ -720,7 +720,7 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
         asset.write_bytes(asset.read_bytes()+b'updated')
         assert module.pipeline_fingerprint() != fingerprint
         prepare()
-        assert calls == ['align_context']
+        assert calls == (['align_words', 'align_context'] if asset == models[3] else ['align_context'])
         calls.clear()
     fingerprint = module.pipeline_fingerprint()
     (dictionary.parent/'README.txt').write_text('Documentation only')
@@ -2423,7 +2423,8 @@ def test_failed_global_alignment_relocalizes_only_the_independently_bounded_regi
         assert result['result']==original['result']
 
 
-@pytest.mark.parametrize('support', ['complete', 'missing', 'unavailable'])
+@pytest.mark.parametrize('support', ['complete', 'missing', 'unavailable', 'acoustic',
+                                     'acoustic_disagrees', 'acoustic_invalid', 'acoustic_unavailable'])
 def test_failed_long_recognition_uses_bounded_overlapping_context_without_duplicating_words(support):
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines=['anchor phrase','quiet verse begins','quiet verse ends']
@@ -2431,7 +2432,7 @@ def test_failed_long_recognition_uses_bounded_overlapping_context_without_duplic
     original=[dict(words=[dict(word=t,start=s,end=s+(1 if i==0 else 0))])
               for i,(t,s) in enumerate(zip(lines,starts))]
     block=dict(range=[0,3],context=[0,3],source_range=[0.,120.],result=dict(segments=original))
-    narrow=[]
+    narrow, acoustic_calls=[], []
     def recognize(begin,end):
         if end-begin>30:
             return dict(segments=[dict(words=[dict(word=lines[0],start=20-begin,end=21-begin)])])
@@ -2445,12 +2446,27 @@ def test_failed_long_recognition_uses_bounded_overlapping_context_without_duplic
         texts=text.splitlines()
         return dict(segments=[dict(words=[dict(word=t,start=starts[lines.index(t)]-begin,
             end=starts[lines.index(t)]-begin+(0 if texts==lines and t!=lines[0] else 1))]) for t in texts])
+    def localize(begin,end,text):
+        acoustic_calls.append((begin,end,text))
+        if support=='acoustic_unavailable':
+            raise ValueError('Independent localization unavailable')
+        words,offset=[],0
+        for t,s in zip(lines,starts):
+            words.append(dict(text=t,first=offset,stop=offset+len(t),start=s-.2,end=s+1.2))
+            offset+=len(t)+1
+        shift=2 if support=='acoustic_disagrees' else .1
+        second=[dict(w,start=w['start']+shift,end=w['end']+shift) for w in words]
+        if support=='acoustic_invalid':
+            second[1]['text']='Unrelated words'
+        return dict(views=[words,second])
     result=recover_with_local_asr(block,lines,np.zeros(120*16000),'English',recognize,align,
-                                 force_global=True,max_alignment_attempts=24)
+                                 force_global=True,max_alignment_attempts=24,
+                                 localize=localize if support.startswith('acoustic') else None)
     assert narrow and len(narrow)<=5
     assert all(a[1]>b[0] for a,b in zip(narrow,narrow[1:]))
     assert result['result']['segments'][0]==original[0]
-    if support=='complete':
+    assert len(acoustic_calls)==int(support.startswith('acoustic'))
+    if support in ('complete','acoustic'):
         assert [s['words'][0]['start'] for s in result['result']['segments']]==starts
         assert result['asr_localizations'][0]['accepted_lines']==[2,3]
         assert all(s['words'][0]['end']>s['words'][0]['start'] for s in result['result']['segments'])

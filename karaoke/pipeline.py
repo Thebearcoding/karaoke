@@ -206,7 +206,7 @@ class Pipeline:
         english_code = [*whisper, 'align_english_onsets.py', 'onset_consensus.py', 'word_onset_metrics.py']
         english = str(ROOT/'align_english_onsets.py') in [str(a) for a in command]
         alignment_code = {key: [ROOT/p for p in common+files] for key, files in {
-            'align_words': whisper,
+            'align_words': [*whisper, *phonemes, 'cjk_recovery.py'],
             'align_phonemes': english_code if english else phonemes,
             'align_repeats': [*phonemes, 'align_repeated_lyrics.py'],
             'align_context': [*phonemes, 'align_repeated_lyrics.py', 'cjk_recovery.py', 'qwen_witness.py',
@@ -225,7 +225,7 @@ class Pipeline:
             'separate_lead': (['music-separation/song/vocals.wav'], ['lead-separation'], [ROOT/'benchmark_neural.py']),
             'package_three_stems': (['two-stems', 'lead-separation/song/vocals.wav'],
                                     ['stems'], [ROOT/'exact_stems.py', ROOT/'three_stems.py']),
-            'align_words': (['vocals-16k.wav', 'lyrics.json', 'anchors.json', 'alignment-jobs.json'],
+            'align_words': (['vocals-16k.wav', 'source-44100.wav', 'lyrics.json', 'anchors.json', 'alignment-jobs.json'],
                             ['alignment'], alignment_code['align_words']),
             'align_phonemes': ((['vocals-16k.wav', 'lyrics.json', 'word-cues.json', 'english-jobs.json'] if english else
                                 ['music-separation/song/vocals.wav', 'word-cues.json', 'phoneme-jobs.json']),
@@ -263,7 +263,7 @@ class Pipeline:
             if name == 'align_words':
                 arguments = [str(a) for a in command]
                 model = arguments[arguments.index('--model')+1] if '--model' in arguments else 'large-v3-turbo'
-                weights = [ROOT/f'models/alignment/whisper/{model}.pt']
+                weights = [ROOT/f'models/alignment/whisper/{model}.pt', ROOT/'models/alignment/mms/model.pt']
             else:
                 language = 'English' if english else json.loads((self.output/'lyrics.json').read_text())['language']
                 directory = {'Chinese': 'mandarin', 'Japanese': 'japanese', 'English': 'english'}[language]
@@ -822,7 +822,8 @@ class Pipeline:
         language = lyrics['language']
         output = self.output
         write_json(output/'alignment-jobs.json', [dict(audio=str(output/'vocals-16k.wav'),
-            lyrics=str(output/'lyrics.json'), anchors=str(output/'anchors.json'), output=str(output/'alignment'))])
+            original_audio=str(output/'source-44100.wav'), lyrics=str(output/'lyrics.json'),
+            anchors=str(output/'anchors.json'), output=str(output/'alignment'))])
         self.run('align_words', [sys.executable, ROOT/'align_lyrics_whisper.py', '--jobs',
             output/'alignment-jobs.json', '--device', self.device])
         raw = json.loads((output/'alignment/raw.json').read_text())

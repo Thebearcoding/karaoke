@@ -189,7 +189,7 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
 
 
 def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
-                          force_global=False, max_alignment_attempts=24, recovery_contexts=None):
+                          force_global=False, max_alignment_attempts=24, recovery_contexts=None, localize=None):
     """Use recognition only to locate failed lyrics, never as replacement text."""
     from anchors_from_asr import anchors_from_words
     from lyric_progress import partial_alignment_cues
@@ -348,6 +348,23 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                         local = recovery_anchors(anchors_from_words(lines[cf+left:cs+left],
                             words, language, allow_missing=True))
                         regional.update(overlapping_recognition=views, anchors=local)
+                    missing = [i for i in range(start, stop_line) if local[i-cf]['status'] != 'candidate']
+                    if missing and localize is not None and budget >= cost+2:
+                        # Recognition may omit real words. A second aligner can
+                        # locate the supplied text without inventing a transcript.
+                        # Its two audio views only narrow the next search window.
+                        budget -= 2
+                        try:
+                            evidence = localize(ab, ae, '\n'.join(lines[cf+left:cs+left]))
+                            regional['acoustic_localization'] = evidence
+                            located = acoustic_line_anchors(lines[cf+left:cs+left], evidence['views'], ab, ae)
+                            regional['acoustic_anchors'] = located
+                            local = list(local)
+                            for i in missing:
+                                if located[i-cf]['status'] == 'candidate':
+                                    local[i-cf] = located[i-cf]
+                        except ValueError as error:
+                            regional['acoustic_error'] = str(error)
                     recovered = [i for i in range(start, stop_line) if local[i-cf]['status'] == 'candidate']
                     if recovered:
                         refined = list(anchors)
@@ -473,7 +490,8 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         # Apparently valid neighbours can squeeze missing lyrics into a window
         # that never contained them. Broaden once, sharing the remaining budget.
         result = recover_with_local_asr(result, lines, audio, language, recognize, align,
-                                       force_global=True, max_alignment_attempts=budget, recovery_contexts=contexts)
+                                       force_global=True, max_alignment_attempts=budget, recovery_contexts=contexts,
+                                       localize=localize)
         reports.extend(result.get('asr_localizations', []))
     result['asr_localizations'] = reports
     result['recovery_contexts'] = contexts
@@ -505,6 +523,28 @@ def recognize_in_windows(recognize, begin, end, chunks):
         except ValueError as error:
             report['error'] = str(error)
     return sorted(words, key=lambda w: (w['start'], w['end'])), reports
+
+
+def acoustic_line_anchors(lines, views, begin, end):
+    """Use agreeing original/vocal phrase bounds as search hints, not captions."""
+    text = '\n'.join(lines)
+    if (len(views) != 2 or any(normalized(''.join(u['text'] for u in v)) != normalized(text) for v in views)
+            or any(u['text'] != text[u['first']:u['stop']] or
+                   not np.isfinite([u['start'], u['end']]).all() or
+                   not begin <= u['start'] < u['end'] <= end for v in views for u in v)
+            or any(a['start'] >= b['start'] for v in views for a,b in zip(v,v[1:]))):
+        raise ValueError('Invalid acoustic localization evidence')
+    anchors, offset = [], 0
+    for line in lines:
+        spans = [[u for u in v if offset <= u['first'] < u['stop'] <= offset+len(line)] for v in views]
+        anchor = dict(text=line, start=None, end=None, status='unresolved_text')
+        if all(s and normalized(''.join(u['text'] for u in s)) == normalized(line) for s in spans):
+            starts, ends = [s[0]['start'] for s in spans], [s[-1]['end'] for s in spans]
+            if max(starts)-min(starts) <= .4 and max(ends)-min(ends) <= .4:
+                anchor.update(start=min(starts), end=max(ends), status='candidate', source='dual_audio_acoustic_search')
+        anchors.append(anchor)
+        offset += len(line)+1
+    return anchors
 
 
 def recovery_anchors(recognized):
@@ -902,6 +942,20 @@ def main():
             blocks = alignment_blocks(anchors, audio)
         started = time.perf_counter()
         raw_blocks, units, language_detections = [], [], []
+        acoustic = acoustic_audio = acoustic_hash = None
+        def localize_audio(start, stop, text):
+            nonlocal acoustic, acoustic_audio, acoustic_hash
+            from cjk_recovery import AcousticWitness
+            from scipy.signal import resample_poly
+            if acoustic is None:
+                acoustic = AcousticWitness(job['original_audio'], args.device)
+                acoustic_audio = resample_poly(audio, 441, 160).astype('float32')
+            cue = dict(text=text, aligned_start=start, aligned_end=stop, audio_bounds=[start, stop])
+            views = acoustic(cue, acoustic_audio, language=lyrics['language'])
+            if acoustic_hash is None:
+                acoustic_hash = sha(Path(__file__).resolve().parent/'models/alignment/mms/model.pt')
+            return dict(model='MMS_FA', model_sha256=acoustic_hash, views=views)
+
         for first, stop, context_first, context_stop, begin, end in progress_items(blocks, 'blocks'):
             print(json.dumps({'song': Path(job['lyrics']).stem, 'lines': [first+1, stop],
                               'window': [begin, end]}), flush=True)
@@ -965,7 +1019,8 @@ def main():
             if not anchors and job.get('localize_with_asr', True):
                 (output/'before-localization.json').write_text(json.dumps(block, ensure_ascii=False, default=json_number)+'\n')
                 block = recover_with_local_asr(block, lyrics['lines'], audio, lyrics['language'],
-                                               recognize_audio, align_audio)
+                                               recognize_audio, align_audio,
+                                               localize=localize_audio if job.get('original_audio') else None)
             result, begin = block['result'], block['source_range'][0]
             local_units = [{'text': word['word'], 'start': round(word['start']+begin, 3),
                             'end': round(word['end']+begin, 3), 'probability': word['probability']}
