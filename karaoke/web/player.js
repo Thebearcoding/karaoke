@@ -1,4 +1,4 @@
-// All three stems share one AudioContext clock. Video follows that clock.
+// Schedule all stems on the render clock; visuals follow the device output clock.
 import {createPitchShift} from './pitch-shift.js';
 import {StemStream} from './stem-stream.js';
 
@@ -44,10 +44,11 @@ export class Player {
       if (this.anchor !== null && this.context.state === 'running') {
         this.pump();
         if (this.anchor === null) { requestAnimationFrame(tick); return; }
-        const elapsed = this.context.currentTime - this.anchor;
+        const outputTime = this.outputTime();
+        const elapsed = outputTime - this.anchor;
         const position = Math.min(this.scheduledUntil,
           this.startPosition === 0 ? elapsed : Math.max(this.startPosition, elapsed));
-        if (this.videoPending && this.context.currentTime >= this.audibleWhen) {
+        if (this.videoPending && outputTime >= this.audibleWhen) {
           this.videoPending = false;
           const signature = this.signature;
           this.video.play().catch(() => {
@@ -66,6 +67,15 @@ export class Player {
       requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
+  }
+
+  outputTime() {
+    const context = this.context, stamp = context.getOutputTimestamp?.();
+    if (Number.isFinite(stamp?.contextTime) && Number.isFinite(stamp?.performanceTime) && stamp.performanceTime > 0) {
+      return Math.max(0, Math.min(context.currentTime,
+        stamp.contextTime + (performance.now() - stamp.performanceTime) / 1000));
+    }
+    return Math.max(0, context.currentTime - (context.baseLatency || 0) - (context.outputLatency || 0));
   }
 
   syncVideo(position) {
@@ -253,7 +263,7 @@ export class Player {
   pump() {
     if (this.anchor === null || !this.ready) return;
     const stream = this.stream;
-    const position = Math.max(this.startPosition, this.context.currentTime - this.anchor);
+    const position = Math.max(this.startPosition, this.outputTime() - this.anchor);
     const inputPosition = Math.max(this.startPosition,
       this.context.currentTime - this.anchor + (this.pitchChain?.latency || 0));
     stream.around(inputPosition);

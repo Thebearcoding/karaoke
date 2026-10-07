@@ -251,6 +251,36 @@ test('live key changes affect the common mix without restarting; video follows a
   assert.equal(p.pitch,0);
 });
 
+test('video, progress and song end follow device output rather than the ahead-of-time render clock', async t => {
+  t.mock.method(performance,'now',()=>100_000);
+  for (const timestamp of ['available','starting','unsupported']) {
+    const ended=[], ticks=[], p=setup(id=>ended.push(id));
+    p.onTick=position=>ticks.push(position);
+    p.pitchFactory=async()=>({input:{},latency:.12,setPitch(){},start(){},stop(){}});
+    await p.unlock(); await p.load(song);
+    p.context.baseLatency=.02; p.context.outputLatency=.16;
+    if (timestamp==='available') p.context.getOutputTimestamp=()=>({contextTime:p.context.currentTime-.20,performanceTime:99_980});
+    if (timestamp==='starting') p.context.getOutputTimestamp=()=>({contextTime:0,performanceTime:0});
+    try {
+      p.apply({...state,position:0},clockOffset());
+      const sources=[...p.sources], outputStart=p.audibleWhen;
+      p.context.currentTime=outputStart+.1; frame();
+      assert.equal(p.video.paused,true,timestamp);
+      p.context.currentTime=outputStart+.18; frame();
+      assert.equal(p.video.paused,false,timestamp);
+      assert.ok(Math.abs(ticks.at(-1))<1e-8,timestamp);
+      p.context.currentTime=outputStart+2.18; p.video.currentTime=2; frame();
+      assert.equal(p.video.playbackRate,1,timestamp);
+      assert.ok(Math.abs(ticks.at(-1)-2)<1e-8,timestamp);
+      assert.deepEqual(p.sources,sources);
+      p.context.currentTime=outputStart+song.duration; frame();
+      assert.deepEqual(ended,[],timestamp);
+      p.context.currentTime+=.18; frame(); frame();
+      assert.deepEqual(ended,['one'],timestamp);
+    } finally { p.clear(); }
+  }
+});
+
 test('a slow video decoder can finish seeking while audio keeps its common clock', async () => {
   const p=setup(); await p.unlock(); await p.load(song); p.apply(state,clockOffset());
   const sources=[...p.sources], anchor=p.anchor;
@@ -342,6 +372,25 @@ test('one delayed stem freezes all audio at the last common boundary and a seek 
     release(); await settled();
     assert.deepEqual([...p.stream.windows.keys()],[7,8]);
     assert.ok(p.sources.every(s=>!s.buffer.tag.endsWith('/1')));
+  } finally { release?.(); p.clear(); globalThis.fetch=fetchAudio; }
+});
+
+test('a missing window drains already rendered audio before reporting buffering', async () => {
+  let release;
+  globalThis.fetch=streamingFetch(url=>url.endsWith('/lead_vocals/1') ? new Promise(resolve=>{release=()=>resolve({ok:true,arrayBuffer:async()=>url});}) : null);
+  const p=setup(), waiting=[];
+  p.onBuffering=(...args)=>waiting.push(args);
+  try {
+    await p.unlock(); await p.load({...song,duration:80}); await settled();
+    p.context.baseLatency=.02; p.context.outputLatency=.16;
+    p.apply({...state,position:0},clockOffset());
+    const anchor=p.anchor;
+    p.context.currentTime=anchor+8.1; frame();
+    assert.deepEqual(waiting,[]);
+    assert.notEqual(p.anchor,null);
+    p.context.currentTime=anchor+8.19; frame(); frame();
+    assert.deepEqual(waiting,[[8,100]]);
+    assert.equal(p.anchor,null);
   } finally { release?.(); p.clear(); globalThis.fetch=fetchAudio; }
 });
 
