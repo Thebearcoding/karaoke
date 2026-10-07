@@ -492,6 +492,36 @@ class SubtitleIntegrity(unittest.TestCase):
                     self.assertFalse(groups)
                 self.assertEqual([u['start'] for u in cue['units']],[1.,1.5,4.1,5.])
 
+    def test_playback_timing_repairs_existing_groups_without_losing_guard_words(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        text = 'We are here for you'
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        old = [dict(first=0, stop=12, text=text[:12], start=1., end=3.5, timing_source='linear_fallback'),
+               dict(first=12, stop=19, text=text[12:], start=3.5, end=4.5, timing_source='linear_fallback')]
+        cue = dict(text=text, start=1., end=4.5, units=old)
+        measured = [dict(first=a, stop=b, text=text[a:b], start=t, end=t+.2)
+                    for a,b,t in [(0,2,.5),(3,6,1.5),(7,11,2.5),(12,15,3.5),(16,19,4.)]]
+        for mode in ('grouped', 'missing_guard_word', 'contradicted_interior'):
+            with self.subTest(mode=mode):
+                views = [deepcopy(measured),deepcopy(measured)]
+                views[1][2]['start']+=.15
+                constraints = []
+                if mode == 'missing_guard_word': views[1].pop()
+                if mode == 'contradicted_interior':
+                    constraints = [dict(line=1,text=text,first=7,stop=11,start_min=2.1,start_max=2.9,onset=2.5)]
+                result, report = reconcile_timing([cue], np.ones(44100*6)*.1,
+                    lambda *a,**k: views, lambda *a: [measured]*3, protocol, 'English', constraints,
+                    playback=True, _retry_context=False)
+                if mode == 'grouped':
+                    self.assertEqual([(u['text'],u['start'],u['end']) for u in result[0]['units']],
+                                     [('We are here ',.5,3.5),('for',3.5,3.7),('you',4.,4.2)])
+                    self.assertFalse(report['unresolved'])
+                    validate_timeline(result,[text],6,report['constraints'])
+                else:
+                    self.assertEqual(result[0]['units'][0]['start'],1.)
+                self.assertEqual(cue['units'],old)
+
     def test_timing_repair_closes_over_different_token_boundaries(self):
         from copy import deepcopy
         from timing_validation import reconcile_timing

@@ -267,7 +267,8 @@ def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, proto
     """Sweep an uncertain interior only within corroborated acoustic bounds.
 
     This is a playback group, never a replacement word-accuracy measurement.
-    The first corroborated following word closes the smallest possible group.
+    The first corroborated following source unit closes the smallest group.
+    A source unit may already contain several words from an earlier fallback.
     """
     from cjk_recovery import corroborated_group
     units, views = cue['units'], report['witnesses']
@@ -275,36 +276,35 @@ def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, proto
     first = proof['first']
     if first not in positions:
         return None, None
-    measured = []
-    for group in views[0]:
-        if group['first'] < first:
-            continue
-        select = lambda vs: [[u for u in v if (u['first'],u['stop'])==(group['first'],group['stop'])] for v in vs]
-        found, _ = corroborated_group(group, select(report['predictions']), select(views),
-            wave, bounds, protocol, spans=[(group['first'],group['stop'])])
-        if found:
-            measured.append(found[0])
-            if len(measured)==2:
-                break
-        elif group['first']==first:
-            return None, None
-    if not measured or measured[0]['first']!=first:
+    def corroborate(group):
+        select = lambda vs: [[u for u in v if group['first'] <= u['first'] < u['stop'] <= group['stop']] for v in vs]
+        selected = select(views)
+        if not selected[0] or normalized(''.join(u['text'] for u in selected[0])) != normalized(group['text']):
+            return None
+        found, _ = corroborated_group(group, select(report['predictions']), selected,
+            wave, bounds, protocol, spans=[(u['first'],u['stop']) for u in selected[0]])
+        return found
+
+    word = next((u for u in views[0] if u['first']==first), None)
+    measured = corroborate(word) if word else None
+    if not measured:
         return None, None
     anchor, lo = measured[0], positions[first]
-    guard = measured[1] if len(measured)==2 else None
+    guard = None
+    for hi in range(lo+1, len(units)):
+        guard = corroborate(units[hi])
+        if guard:
+            break
     if guard is not None:
-        if guard['first'] not in positions:
-            return None, None
-        hi, stop, end = positions[guard['first']], guard['first'], guard['start']
-        if guard['stop']!=units[hi]['stop']:
-            return None, None
+        stop, end = guard[0]['first'], guard[0]['start']
         limit = units[hi+1]['start'] if hi+1<len(units) else bounds[1]
-        if (guard['start']+.015 >= limit or
-                guard.get('timing_evidence')=='ctc_event' and guard['emission_end']>limit):
+        if any(u['start']+.015 >= limit or
+               u.get('timing_evidence')=='ctc_event' and u['emission_end']>limit for u in guard):
             return None, None
-        guard = dict(guard, end=min(guard['end'],limit), acoustic_end=acoustic_end(guard),
-                     timing_source='cross_model_ctc' if guard.get('timing_evidence')=='ctc_event' else 'cross_model_phonemes')
-        suffix, source = [guard]+units[hi+1:], 'cross_model_onsets'
+        guard = [dict(u, end=min(u['end'],limit), acoustic_end=acoustic_end(u),
+                      timing_source='cross_model_ctc' if u.get('timing_evidence')=='ctc_event' else 'cross_model_phonemes')
+                 for u in guard]
+        suffix, source = guard+units[hi+1:], 'cross_model_onsets'
     else:
         # The last word has no following onset. Compare actual alignment
         # ends, never a padded display hold, at the output's millisecond
@@ -327,7 +327,7 @@ def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, proto
             return None, None
         hi, stop, end = len(units), len(cue['text']), max(ends)
         suffix, source = [], 'cross_model_span_end'
-    if hi <= lo+1:
+    if hi <= lo:
         return None, None
     # Never hide another established onset inside a coarse group, or span
     # words that the acoustic witnesses place outside these two boundaries.
