@@ -2200,14 +2200,14 @@ def test_isolated_recovery_uses_recording_edge_only_as_an_audio_search_bound(edg
 
 
 @pytest.mark.parametrize('edge', ['opening', 'ending'])
-@pytest.mark.parametrize('fault', [None, 'changed_text', 'ambiguous_repeat', 'outside_neighbour', 'missing_anchor', 'no_anchors'])
+@pytest.mark.parametrize('fault', [None, 'interior_unlocalized', 'changed_text', 'ambiguous_repeat', 'outside_neighbour', 'missing_anchor', 'no_anchors'])
 def test_isolated_recovery_reuses_localization_across_long_instrumentals(edge, fault):
     from copy import deepcopy
     from karaoke.align_lyrics_whisper import recover_unresolved_lines
-    lines = ['First phrase', 'Middle phrase', 'Last phrase']
-    first, stop = (0, 2) if edge == 'opening' else (1, 3)
+    lines = ['First phrase', 'Middle phrase', 'Another phrase', 'Last phrase']
+    first, stop = (0, 3) if edge == 'opening' else (1, 4)
     segments = [dict(text=t, words=[]) for t in lines]
-    neighbour = 2 if edge == 'opening' else 0
+    neighbour = 3 if edge == 'opening' else 0
     segments[neighbour]['words'] = [dict(word=lines[neighbour], start=70. if edge=='opening' else 1.,
                                         end=71. if edge=='opening' else 2.)]
     anchors = [dict(status='candidate', text=lines[i], start=20.+3*j, end=21.+3*j)
@@ -2216,9 +2216,10 @@ def test_isolated_recovery_reuses_localization_across_long_instrumentals(edge, f
     if fault == 'ambiguous_repeat':anchors[0]['status'] = 'ambiguous_repeat'
     if fault == 'outside_neighbour':anchors[0].update(start=5., end=6.)
     if fault == 'missing_anchor':anchors.pop()
+    if fault == 'interior_unlocalized':anchors[1].update(status='unresolved_text',start=None,end=None)
     localization = dict(context=[first, stop], anchors=anchors)
     if fault == 'no_anchors':localization.pop('anchors')
-    block = dict(context=[0,3], range=[0,3], source_range=[10.,160.], result=dict(segments=segments),
+    block = dict(context=[0,4], range=[0,4], source_range=[10.,160.], result=dict(segments=segments),
                  asr_localizations=[localization])
     original = deepcopy(block)
     calls = []
@@ -2230,8 +2231,8 @@ def test_isolated_recovery_reuses_localization_across_long_instrumentals(edge, f
     assert block == original
     assert result['result']['segments'][neighbour] == segments[neighbour]
     proof = result['line_recoveries'][-1]
-    if fault is None:
-        assert calls == [(19.4,24.6,'\n'.join(lines[first:stop]))]
+    if fault in (None, 'interior_unlocalized'):
+        assert calls == [(19.4,27.6,'\n'.join(lines[first:stop]))]
         assert proof['accepted']
         assert proof['search_anchors'] == anchors
         assert result['result']['segments'][first]['words'][0]['start']+10. == pytest.approx(20.4)

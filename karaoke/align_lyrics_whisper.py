@@ -157,14 +157,19 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
                 if not first_anchor <= begin_line < end_line <= stop_anchor:
                     continue
                 anchors = localization.get('anchors', [])[begin_line-first_anchor:end_line-first_anchor]
-                if (len(anchors) != end_line-begin_line or any(
-                        a['status'] != 'candidate' or normalized(a['text']) != normalized(line) or
-                        not np.isfinite([a['start'], a['end']]).all() or
-                        not begin <= a['start'] < a['end'] <= end
-                        for a, line in zip(anchors, lines[begin_line:end_line])) or
-                        any(a['start'] >= b['start'] for a, b in zip(anchors, anchors[1:]))):
+                if (len(anchors) != end_line-begin_line or
+                        any(a['status'] != 'candidate' for a in (anchors[0], anchors[-1]))):
                     continue
-                low, high = max(begin, anchors[0]['start']-.6), min(end, max(a['end'] for a in anchors)+.6)
+                located = [a for a in anchors if a['status'] == 'candidate']
+                # Only the edges must be independently located: missing
+                # interior anchors are what this bounded realignment repairs.
+                if (any(normalized(a['text']) != normalized(line)
+                        for a, line in zip(anchors, lines[begin_line:end_line])) or any(
+                        not np.isfinite([a['start'], a['end']]).all() or
+                        not begin <= a['start'] < a['end'] <= end for a in located) or
+                        any(a['start'] >= b['start'] for a, b in zip(located, located[1:]))):
+                    continue
+                low, high = max(begin, anchors[0]['start']-.6), min(end, max(a['end'] for a in located)+.6)
                 if 0 < high-low <= 45:
                     report.update(unlocalized_range=[begin, end], search_anchors=deepcopy(anchors))
                     begin, end = low, high
