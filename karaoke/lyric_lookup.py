@@ -257,21 +257,21 @@ def published_lyric_lines(text, title, artists=()):
     is_credit = lambda line: bool(credit.match(converter.convert(unicodedata.normalize('NFKC', line))))
     artist_ids = set().union(*(identity(artist) for artist in artists))
     def title_artist(line):
-        return any(identity(line[:match.start()], title=True) & identity(title, title=True) and
-                   (identity(line[match.end():]) | identity(re.split(r'[（(]', line[match.end():])[0])) & artist_ids
-                   for match in re.finditer(r'[-–—]', line))
+        return any(identity(candidate_title, title=True) & identity(title, title=True) and
+                   (identity(candidate_artist) | identity(re.split(r'[（(]', candidate_artist)[0])) & artist_ids
+                   for match in re.finditer(r'[-–—]', line)
+                   for candidate_title, candidate_artist in (
+                       (line[:match.start()], line[match.end():]), (line[match.end():], line[:match.start()])))
     first = 0
     while first < len(rows):
         line = rows[first][1]
-        if is_credit(line) or ((identity(line) & identity(title) or title_artist(line)) and
+        if is_credit(line) or title_artist(line) or (identity(line) & identity(title) and
                 first+1 < len(rows) and is_credit(rows[first+1][1])):
             first += 1
         else:
             break
     stop = next((i for i in range(first, len(rows)) if is_credit(rows[i][1])), len(rows))
     body = rows[first:stop]
-    if len(body) == 1 and title_artist(body[0][1]):
-        return [], sorted(metadata+[i for i, _ in rows])
     marker = re.sub(r'[^\w]', '', converter.convert(''.join(line for _, line in body))).casefold()
     if marker in {'纯音乐请欣赏', '纯音乐请您欣赏', '此歌曲为没有填词的纯音乐请您欣赏',
                   '暂无歌词', '暂无该歌曲歌词', '歌词暂未提供', 'nolyricsavailable',
@@ -378,8 +378,12 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
             rejected.append(dict(reason='candidate_unavailable', track_id=str(row.get('trackId', '')),
                                  **failure))
             continue
+        if not lines:
+            rejected.append(dict(reason='empty_lyric_body', track_id=str(row.get('trackId', '')),
+                text_sha256=hashlib.sha256(text.encode()).hexdigest(), excluded_credit_lines=excluded))
+            continue
         language = song.get('language') or text_language('\n'.join(lines))
-        if not lines or language is None:
+        if language is None:
             continue
         identity_support = None
         if not title_match:
@@ -626,6 +630,8 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
             clean_lines, excluded = published_lyric_lines(raw_text, row['trackName'], [row['artistName']])
             text = '\n'.join(clean_lines)
             if not text:
+                report['rejected_candidates'].append(dict(reason='empty_lyric_body', id=row.get('id'),
+                    text_sha256=hashlib.sha256(raw_text.encode()).hexdigest(), excluded_credit_lines=excluded))
                 continue
             language = song.get('language') or text_language(text)
             if language is None:

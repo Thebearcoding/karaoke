@@ -1684,7 +1684,7 @@ def test_published_lyrics_remove_credit_blocks_but_keep_sung_titles_and_colons(c
     assert published_lyric_lines('\n'.join(body), '晚風') == (body, [])
 
 
-@pytest.mark.parametrize('heading', ['晚風-林林', '晚風 — 林林', '晚風-林林\n詞：林林\n曲：林林'])
+@pytest.mark.parametrize('heading', ['晚風-林林', '晚風 — 林林', '林林 - 晚風', '晚風-林林\n詞：林林\n曲：林林'])
 def test_title_artist_credit_is_not_a_lyric_candidate(heading):
     from karaoke.lyric_lookup import published_candidate, published_lyric_lines, lyric_candidate
     song = dict(title='晚風', artist='林林')
@@ -1697,6 +1697,20 @@ def test_title_artist_credit_is_not_a_lyric_candidate(heading):
     packet = dict(status='ok', results=[dict(id=123, trackName='晚風', artistName='林林',
         albumName='春天', duration=300, instrumental=False, plainLyrics=heading)])
     assert lyric_candidate(packet, song, None, 300, allow_recording_mismatch=True)[0] is None
+
+
+@pytest.mark.parametrize('title,artist,heading', [
+    ('晚風', '林林', '晚風 - 林林'),
+    ('晚風', '林林', '林林 — 晚風'),
+    ('Evening Breeze', 'Singer', 'Singer - Evening Breeze 晚風'),
+    ('Evening Breeze', 'Singer', 'Evening Breeze 晚風 – Singer')])
+def test_published_lyrics_strip_only_leading_metadata_identity(title, artist, heading):
+    from karaoke.lyric_lookup import published_lyric_lines
+    body = [title, 'We keep singing through the night', heading, title]
+    assert published_lyric_lines('\n'.join([heading, *body]), title, [artist]) == (body, [1])
+    # A hyphen alone is not a header, nor is a different artist or title.
+    for line in ('Another song - '+artist, title+' - Someone Else', 'You - and me'):
+        assert published_lyric_lines('\n'.join([line, *body]), title, [artist]) == ([line, *body], [])
 
 
 @pytest.mark.parametrize('credit', ['音频助理', '音頻工程師', '录音助理', 'Audio Engineer', 'Assistant Engineer'])
@@ -1896,7 +1910,7 @@ def test_published_lyrics_match_joined_artist_scripts_without_matching_collabora
         assert published_candidate([dict(row, artists=[dict(artistName=name)])], song, '')[0] is None
 
 
-@pytest.mark.parametrize('first_hit', ['yes', 'wrong_identity', 'short'])
+@pytest.mark.parametrize('first_hit', ['yes', 'wrong_identity', 'short', 'header'])
 def test_published_lyric_search_uses_a_bounded_title_query_only_after_no_match(tmp_path, monkeypatch, first_hit):
     from urllib.parse import parse_qs, urlparse
     from karaoke import lyric_lookup
@@ -1908,25 +1922,27 @@ def test_published_lyric_search_uses_a_bounded_title_query_only_after_no_match(t
         query = parse_qs(urlparse(url).query)['query'][0]
         calls.append(query)
         selected = row if first_hit == 'yes' or query == '晚風' else (
-            dict(row, lyrics='林林 - 晚風') if first_hit == 'short' else dict(row, trackTitle='無關歌曲'))
+            dict(row, lyrics='晚風吹' if first_hit == 'short' else '林林 - 晚風')
+            if first_hit in ('short', 'header') else dict(row, trackTitle='無關歌曲'))
         return dict(response=dict(result=dict(tracks=[selected])))
     monkeypatch.setattr(lyric_lookup, 'read_document', read)
     song = dict(title='晚風', artist='林林')
     for _ in range(2):
         lines, report = lyric_lookup.fetch_published_lyrics(song, '', StageCache(tmp_path), 60)
         assert lines == [row['lyrics']] and report['url'].endswith('/123')
-        assert bool(report['rejected_candidates']) == (first_hit == 'short')
+        assert bool(report['rejected_candidates']) == (first_hit in ('short', 'header'))
     assert calls == (['晚風 林林'] if first_hit == 'yes' else ['晚風 林林', '晚風'])
 
 
 @pytest.mark.parametrize('provider', ['line_music', 'lrclib', 'netease'])
-def test_short_lyric_release_does_not_hide_later_complete_release(tmp_path, monkeypatch, provider):
+@pytest.mark.parametrize('bad_text,reason', [('林林 - 晚風', 'empty_lyric_body'), ('晚風吹', 'lyrics_too_short')])
+def test_short_lyric_release_does_not_hide_later_complete_release(tmp_path, monkeypatch, provider, bad_text, reason):
     from karaoke import lyric_lookup, lyric_consensus
     from karaoke.stage_cache import StageCache
     song = dict(title='晚風', artist='林林')
     body = '微風裡慢慢歌唱\n星光下靜靜傾聽\n' * 3
     row = dict(trackId=1, trackTitle='晚風', artists=[dict(artistName='林林')],
-               album=dict(albumTitle='春天'), lyrics='林林 - 晚風')
+               album=dict(albumTitle='春天'), lyrics=bad_text)
     if provider == 'line_music':
         lines, report = lyric_lookup.published_candidate([row, dict(row, trackId=2, lyrics=body)],
             song, '', duration=300)
@@ -1950,7 +1966,10 @@ def test_short_lyric_release_does_not_hide_later_complete_release(tmp_path, monk
         assert len(calls) == 3 and report['url'].endswith('id=2')
     assert lines == body.splitlines()
     assert len(report['rejected_candidates']) == 1
-    assert report['rejected_candidates'][0]['reason'] == 'lyrics_too_short'
+    assert report['rejected_candidates'][0]['reason'] == reason
+    assert report['rejected_candidates'][0]['text_sha256'] == hashlib.sha256(bad_text.encode()).hexdigest()
+    if reason == 'empty_lyric_body':
+        assert report['rejected_candidates'][0]['excluded_credit_lines'] == [1]
 
 
 def test_published_lyric_search_does_not_issue_another_query_after_rate_limit(tmp_path, monkeypatch):
