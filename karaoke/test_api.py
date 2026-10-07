@@ -920,7 +920,8 @@ def test_online_lyrics_reject_other_versions_and_unsupported_text(change):
 
 def test_lyric_candidate_preserves_sung_words_in_brackets():
     from karaoke.lyric_lookup import lyric_candidate
-    body = ['Stay [with me] beside the quiet shore', 'Sing once more beneath the stars']
+    body = ['Stay [with me] beside the quiet shore until the morning light returns (sing with me)',
+            'Sing once more beneath the stars']
     row = dict(id=1, trackName='Evening', artistName='Singer', duration=30.,
                instrumental=False, plainLyrics='[Verse 1]\n'+'\n'.join(body))
     lines, report = lyric_candidate(dict(status='ok', results=[row]),
@@ -1486,6 +1487,7 @@ def test_music_lyrics_are_bound_to_the_requested_video(tmp_path, monkeypatch, sa
     from karaoke.stage_cache import StageCache
     import ytmusicapi
     calls = []
+    body = 'Stars above the quiet shore will guide me home tonight (sing with me)'
     class Music:
         def __init__(self, **kwargs): pass
         def get_watch_playlist(self, videoId, limit):
@@ -1493,7 +1495,7 @@ def test_music_lyrics_are_bound_to_the_requested_video(tmp_path, monkeypatch, sa
             return dict(lyrics='lyrics-id',tracks=[dict(videoId=videoId if same_recording else 'another',
                 title='Evening', artists=[dict(name='Confirmed singer')])])
         def get_lyrics(self, key):
-            return dict(lyrics='Stars above the quiet shore',source='Source: LyricFind')
+            return dict(lyrics=body,source='Source: LyricFind')
     monkeypatch.setattr(ytmusicapi,'YTMusic',Music)
     for _ in range(2):
         lines, report = module.fetch_additional_lyrics('youtube_music',dict(title='Evening',artist=artist),
@@ -1501,6 +1503,7 @@ def test_music_lyrics_are_bound_to_the_requested_video(tmp_path, monkeypatch, sa
         assert bool(lines) == same_recording
     assert len(calls) == 1
     if same_recording:
+        assert lines == [body]
         assert report['publisher'] == 'lyricfind' and not report['provider_timestamps_used']
         assert report['recording_identity']['artist'] == 'Confirmed singer'
     else:
@@ -1645,7 +1648,7 @@ def test_duration_reselects_cached_lyrics_and_can_fetch_a_later_candidate(tmp_pa
     from karaoke import lyric_lookup, lyric_consensus
     from karaoke.stage_cache import StageCache
     song = dict(title='Evening',artist='Singer')
-    body = 'Stars above the quiet shore\nMorning light will guide me home'
+    body = 'Stars above the quiet shore\nMorning light will guide me home along the road (where we belong)'
     rows = [dict(trackId=i,trackTitle='Evening',artists=[dict(artistName='Singer')],
         album=dict(albumTitle='Night'),lyrics=text) for i,text in ((1,'Stars'),(2,body))]
     calls = []
@@ -2113,6 +2116,40 @@ def test_direct_alignment_has_a_shared_local_retry_budget():
     assert result['line_recoveries'][0]['accepted']
     assert result['line_recoveries'][1]['reason'] == 'local_retry_budget_exhausted'
     assert result['result']['segments'][3:] == segments[3:]
+
+
+@pytest.mark.parametrize('failure', [None, 'changed_text', 'outside', 'collapsed', 'missing_neighbour'])
+def test_isolated_gap_recovery_keeps_both_neighbours_and_prior_diagnostics(failure):
+    from copy import deepcopy
+    from karaoke.align_lyrics_whisper import recover_unresolved_lines
+    lines = ['Before', 'Quiet repeated phrase', 'After']
+    segments = [dict(text=t, words=[dict(word=t, start=a, end=b)])
+                for t,a,b in zip(lines, [1.,4.,8.], [2.,4.,9.])]
+    if failure == 'missing_neighbour': segments[0]['words']=[]
+    block = dict(context=[0,3], range=[0,3], source_range=[0.,10.], result=dict(segments=segments),
+                 line_recoveries=[dict(accepted=False,reason='earlier_context_failure')])
+    original = deepcopy(block)
+    calls=[]
+    def align(begin,end,text,**options):
+        calls.append((begin,end,text))
+        assert (begin,end,text) == (2.,8.,lines[1])
+        assert not options['detect_language']
+        words=[dict(word=t,start=s,end=s+.5) for t,s in zip(text.split(),[1.,2.,3.])]
+        if failure == 'changed_text':words[0]['word']='Different'
+        if failure == 'outside':words[-1]['end']=7.
+        if failure == 'collapsed':words[-1]['end']=words[-1]['start']
+        return dict(segments=[dict(text=text,words=words)])
+    result=recover_unresolved_lines(block,lines,10.,'English',align,isolated=True)
+    assert block == original
+    assert result['line_recoveries'][0] == block['line_recoveries'][0]
+    assert result['line_recoveries'][-1]['accepted'] == (failure is None)
+    assert len(calls) == (0 if failure == 'missing_neighbour' else 1)
+    assert result['result']['segments'][0] == segments[0]
+    assert result['result']['segments'][2] == segments[2]
+    if failure is None:
+        assert [w['start'] for w in result['result']['segments'][1]['words']] == [3.,4.,5.]
+    else:
+        assert result['result'] == block['result']
 
 
 @pytest.mark.parametrize('far_neighbour', [False, True])

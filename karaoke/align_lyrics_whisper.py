@@ -118,7 +118,7 @@ def recover_unresolved_block(block, lines, anchors, duration, align):
     return block
 
 
-def recover_unresolved_lines(block, lines, duration, language, align, max_attempts=8):
+def recover_unresolved_lines(block, lines, duration, language, align, max_attempts=8, *, isolated=False):
     """Re-align only broken runs inside their measured neighbouring phrases."""
     from lyric_progress import partial_alignment_cues
     first, stop = block['context']
@@ -138,9 +138,15 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
         right = end_line+1 if end_line < stop and cues[end_line]['status'] == 'candidate' else end_line
         begin = max(block['source_range'][0], cues[left]['start']-.6) if left < begin_line else block['source_range'][0]
         end = min(block['source_range'][1], cues[right-1]['end']+.6) if right > end_line else block['source_range'][1]
-        report = dict(lines=[begin_line+1, end_line], context=[left, right],
-                      source_range=[begin, end], accepted=False)
+        call_left, call_right = (begin_line, end_line) if isolated else (left, right)
+        if isolated and left < begin_line and right > end_line:
+            begin, end = cues[left]['end'], cues[right-1]['start']
+        report = dict(lines=[begin_line+1, end_line], context=[call_left, call_right],
+                      source_range=[begin, end], accepted=False, isolated=isolated)
         reports.append(report)
+        if isolated and (left == begin_line or right == end_line):
+            report['reason'] = 'no_bounded_gap'
+            continue
         if left == begin_line and right == end_line:
             report['reason'] = 'no_measured_neighbour'
             continue
@@ -152,17 +158,17 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
             continue
         attempts += 1
         try:
-            candidate = align_candidate(align, begin, end, '\n'.join(lines[left:right]),
+            candidate = align_candidate(align, begin, end, '\n'.join(lines[call_left:call_right]),
                               gap_padding=None, dynamic_heads=True,
-                              max_word_dur=None, word_dur_factor=None, detect_language=True)
+                              max_word_dur=None, word_dur_factor=None, detect_language=not isolated)
         except ValueError as error:
             report.update(reason='local_alignment_failed', error=str(error))
             continue
         report['result'] = candidate
-        if not valid_recovery(candidate, lines[left:right], end-begin):
+        if not valid_recovery(candidate, lines[call_left:call_right], end-begin):
             report['reason'] = 'invalid_acoustic_result'
             continue
-        replacement = deepcopy(candidate['segments'][begin_line-left:end_line-left])
+        replacement = deepcopy(candidate['segments'][begin_line-call_left:end_line-call_left])
         for segment in replacement:
             for word in segment['words']:
                 for key in ('start', 'end'):
@@ -184,7 +190,7 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
         report.update(accepted=True, original_segments=result['result']['segments'][begin_line-first:end_line-first])
         result, cues = updated, proposed
     if reports:
-        result['line_recoveries'] = reports
+        result['line_recoveries'] = result.get('line_recoveries', [])+reports
     return result
 
 
@@ -1068,6 +1074,13 @@ def main():
                                                align_original=(lambda a, b, text, **options:
                                                    align_audio(a, b, text, original_mix=True, **options))
                                                if job.get('original_audio') else None)
+            if job.get('original_audio'):
+                # A repeated/quiet phrase can be swallowed by neighbouring
+                # attention or by separation. Retry only the remaining bounded
+                # gap on the original mix; neither neighbour moves.
+                block = recover_unresolved_lines(block, lyrics['lines'], duration, lyrics['language'],
+                    lambda a, b, text, **options: align_audio(a, b, text, original_mix=True, **options),
+                    isolated=True)
             result, begin = block['result'], block['source_range'][0]
             local_units = [{'text': word['word'], 'start': round(word['start']+begin, 3),
                             'end': round(word['end']+begin, 3), 'probability': word['probability']}

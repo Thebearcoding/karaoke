@@ -18,7 +18,7 @@ from rapidfuzz.distance import Levenshtein
 from .anchors_from_asr import text_units
 from .job_schema import provider_error, retry_after_seconds, retry_fields
 from .song_sources import (SongText, extract_song_metadata, find_verified_lyrics,
-                           transcript_lines, video_song_info)
+                           join_punctuation_lines, video_song_info)
 from .source_captions import read_document
 
 
@@ -229,7 +229,7 @@ def text_language(text):
 
 
 def published_lyric_lines(text, title, artists=()):
-    """Remove explicit credit headers/footers before wrapping published lyrics."""
+    """Keep published phrases intact; remove only explicit credit metadata."""
     converter = OpenCC('t2s')
     credit = re.compile(r'^(?:歌名|歌曲|词|曲|词曲|作词|作曲|编曲|演唱|专辑|发行日|制作人|监制|'
         r'弦乐(?:编写|编曲)?|(?:人声|配唱|伴唱|主唱|合唱|童声|合声|和声|和音)(?:编写|编曲|编配|制作|录音)?(?:人|师|指导)?|钢琴|吉他|贝斯|鼓|'
@@ -281,7 +281,7 @@ def published_lyric_lines(text, title, artists=()):
         body = [(i, line) for _, i, line in sorted((at, i, line) for i, line in body for at in timestamps[i])]
     elif any(len(timestamps.get(i, [])) > 1 for i, _ in body):
         raise ValueError('Repeated LRC lines need a fully timed body to preserve lyric order')
-    return [line for _, line in body], sorted(metadata+[i for i, _ in rows[:first]+rows[stop:]])
+    return join_punctuation_lines([line for _, line in body]), sorted(metadata+[i for i, _ in rows[:first]+rows[stop:]])
 
 
 def version_tags(text):
@@ -396,7 +396,6 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
                 continue
             identity_support = dict(matched_units=matched, candidate_units=len(left), reference_units=len(right),
                 reference_sha256=hashlib.sha256('\n'.join(reference_lines).encode()).hexdigest())
-        lines = transcript_lines(dict(text='\n'.join(lines)), language)
         track_id = str(row.get('trackId', ''))
         if not track_id.isdigit() or len(lines) > 1000 or any(len(line) > 200 for line in lines):
             continue
@@ -647,7 +646,7 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
             language = song.get('language') or text_language(text)
             if language is None:
                 continue
-            lines = transcript_lines(dict(text=text), language)
+            lines = clean_lines
             if transcription is None and (issue := short_lyric_text(lines, duration)):
                 report['rejected_candidates'].append(dict(issue, id=row.get('id'),
                     text_sha256=hashlib.sha256(raw_text.encode()).hexdigest()))

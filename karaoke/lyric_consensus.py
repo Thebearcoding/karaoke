@@ -15,7 +15,6 @@ from opencc import OpenCC
 import requests
 
 from . import lyric_lookup as lookup
-from .song_sources import transcript_lines
 from .source_captions import read_document
 
 
@@ -116,7 +115,7 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
                     artist = song.get('artist') or recording_identity['artist']
                     lines, excluded = lookup.published_lyric_lines(text or '', title, [artist])
                     language = song.get('language') or lookup.text_language('\n'.join(lines))
-                    lines = transcript_lines(dict(text='\n'.join(lines)), language) if language else None
+                    lines = lines if language else None
                     if lines and (len(lines) > 1000 or any(len(line) > 200 for line in lines)):
                         raise ValueError('Invalid Music lyric lines')
                     report = dict(status='candidate' if lines else 'unavailable', language=language,
