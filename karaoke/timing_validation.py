@@ -47,6 +47,14 @@ def screened_units(cue, wave, protocol, *, floor=None):
     return selected
 
 
+def closure_pronunciation(unit, predictions):
+    """A closure is a stop gesture, not a voiced sound to find with RMS."""
+    matches = [[u for u in view if (u['first'], u['stop'], u['text']) ==
+                (unit['first'], unit['stop'], unit['text'])] for view in predictions]
+    return len(matches) == 3 and all(len(items) == 1 and items[0].get('phones') == ['cl']
+                                     for items in matches)
+
+
 def reconcile_timing(cues, wave, witness, predict, protocol, language, constraints=(), *,
                      playback=False, _retry_context=True, _review_lines=None):
     """Corroborate displaced onsets, then replace only a compatible local span.
@@ -158,7 +166,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                     if any(abs(u['start']-other[u['first']]['start'])>.1 for u in members):
                         reason='original and vocal localization disagree'
                     limit=units[hi]['start'] if hi<len(units) else bounds[1]
-                    for unit,following in zip(members,[*members[1:],dict(start=limit)]):
+                    for member_index,(unit,following) in enumerate(zip(members,[*members[1:],dict(start=limit)])):
                         unit['end']=min(unit['end'],following['start'])
                         # Recheck the clipped interval using the same support
                         # contract as corroborated_group. A phonetic word can
@@ -169,7 +177,16 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                         piece=wave[round(unit['start']*44100):round(support_end*44100)]
                         if unit['end']<=unit['start'] or following['start']-unit['start']<.015:
                             reason='invalid local word order'
-                        if not len(piece) or not np.isfinite(piece).all() or float(np.sqrt(np.mean(piece**2)))<=floor:
+                        valid_audio = len(piece) and np.isfinite(piece).all()
+                        quiet_closure = (0 < member_index < len(members)-1 and valid_audio and
+                                         closure_pronunciation(unit, predictions) and
+                                         not closure_pronunciation(members[member_index-1], predictions) and
+                                         not closure_pronunciation(following, predictions))
+                        if quiet_closure:
+                            unit['support'] = 'phonetic_closure_between_audible_units'
+                            report.setdefault('closure_spans', []).append(dict(
+                                first=unit['first'], stop=unit['stop'], start=unit['start'], end=unit['end']))
+                        if not valid_audio or (float(np.sqrt(np.mean(piece**2)))<=floor and not quiet_closure):
                             reason='replacement lacks audible vocal support'
                             report.setdefault('unsupported_spans', []).append(dict(
                                 first=unit['first'], stop=unit['stop'], start=unit['start'], end=unit['end']))

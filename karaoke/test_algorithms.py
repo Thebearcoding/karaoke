@@ -521,6 +521,48 @@ class SubtitleIntegrity(unittest.TestCase):
                         self.assertEqual([u['start'] for u in result[0]['units']],[1.5,2.5,4.5])
                     self.assertEqual(result[0]['units'][-1]['start'],old[-1]['start'])
 
+    def test_local_timing_repair_distinguishes_a_closure_from_missing_voice(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        cue = dict(text='あがっこう', start=.2, end=5., units=[
+            dict(first=0, stop=1, text='あ', start=.2, end=.4),
+            dict(first=1, stop=5, text='がっこう', start=4.5, end=5., timing_source='prior_word_fallback')])
+        measured = [dict(first=i, stop=i+1, text=c, start=t, end=t+.1)
+                    for i, (c,t) in enumerate(zip(cue['text'], [.2,2.,2.3,2.5,2.7]))]
+        for mode in ('closure', 'vowel', 'mixed_phone', 'missing_prediction', 'silent_neighbor',
+                     'adjacent_closure', 'edge_closure'):
+            with self.subTest(mode=mode):
+                wave = np.ones(44100*6)*.1
+                wave[round(2.3*44100):round(2.4*44100)] = 0.
+                predictions = [deepcopy(measured) for _ in range(3)]
+                for view in predictions:
+                    view[2]['phones'] = ['cl']
+                if mode == 'vowel':
+                    for view in predictions:
+                        view[2]['phones'] = ['a']
+                if mode == 'mixed_phone': predictions[1][2]['phones'] = ['cl', 'a']
+                if mode == 'missing_prediction': predictions[1].pop(2)
+                if mode == 'silent_neighbor': wave[round(2.5*44100):round(2.6*44100)] = 0.
+                if mode in ('adjacent_closure', 'edge_closure'):
+                    index = 3 if mode == 'adjacent_closure' else 4
+                    for view in predictions:
+                        view[index]['phones'] = ['cl']
+                    unit = measured[index]
+                    wave[round(unit['start']*44100):round(unit['end']*44100)] = 0.
+                result, report = reconcile_timing([cue], wave,
+                    lambda *a, **k: [measured, measured], lambda *a: predictions,
+                    protocol, 'Japanese', _retry_context=False)
+                if mode == 'closure':
+                    self.assertEqual([u['start'] for u in result[0]['units']], [.2,2.,2.3,2.5,2.7])
+                    self.assertEqual(result[0]['units'][2]['support'], 'phonetic_closure_between_audible_units')
+                    self.assertFalse(report['unresolved'])
+                    validate_timeline(result, [cue['text']], 6., report['constraints'], 'Japanese')
+                else:
+                    self.assertEqual(result[0]['units'][1]['start'], 4.5)
+                    self.assertTrue(report['unresolved'])
+                self.assertEqual(cue['units'][1]['start'], 4.5)
+
     def test_timing_repair_keeps_the_evidence_support_contract(self):
         from copy import deepcopy
         from timing_validation import reconcile_timing, validate_timeline
