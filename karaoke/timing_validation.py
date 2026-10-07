@@ -124,7 +124,14 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                 while True:
                     members = [dict(a,timing_source='prior_word_fallback',
                                     localization_source='mms_original_and_vocals',acoustic_end=None)
-                               for a in views[0] if units[lo]['first']<=a['first'] and a['stop']<=units[hi-1]['stop']]
+                               for a in views[0] if a['first']<units[hi-1]['stop'] and a['stop']>units[lo]['first']]
+                    # Close the edit over both tokenizations before checking
+                    # time neighbours. A measured word can cover several old
+                    # characters, and an old group can straddle measured words.
+                    if members and lo and members[0]['first']<units[lo]['first']:
+                        lo-=1;continue
+                    if members and hi<len(units) and members[-1]['stop']>units[hi-1]['stop']:
+                        hi+=1;continue
                     if not members or normalized(''.join(u['text'] for u in members)) != normalized(cue['text'][units[lo]['first']:units[hi-1]['stop']]):
                         members=[];break
                     members = [dict(confirmed.get(u['first'],u)) for u in members]

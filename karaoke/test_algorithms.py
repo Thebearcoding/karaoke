@@ -367,6 +367,35 @@ class SubtitleIntegrity(unittest.TestCase):
         units[0]=dict(start=1.,end=9.,emission_end=1.05,timing_evidence='ctc_event')
         self.assertEqual([e['onset'] for e in countdown_events([dict(units=units)])],[1.])
 
+    def test_timing_repair_closes_over_different_token_boundaries(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing
+        text = 'あいうえおか'
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        for old_spans, new_spans in [
+                ([(0,1),(1,2),(2,4),(4,6)], [(0,2),(2,4),(4,6)]),
+                ([(0,1),(1,3),(3,4),(4,6)], [(0,2),(2,4),(4,6)])]:
+            for disagreement in (False, True):
+                with self.subTest(old_spans=old_spans, disagreement=disagreement):
+                    old = [dict(first=a, stop=b, text=text[a:b], start=t, end=t+.2,
+                                timing_source='prior_word_fallback')
+                           for (a,b),t in zip(old_spans,[.1,.4,2.5,4.5])]
+                    measured = [dict(first=a, stop=b, text=text[a:b], start=t, end=t+.2)
+                                for (a,b),t in zip(new_spans,[1.5,2.5,4.5])]
+                    views = [deepcopy(measured),deepcopy(measured)]
+                    if disagreement:
+                        views[1][0]['start'] += .2
+                    cue = dict(text=text,start=.1,end=4.7,units=old)
+                    result,report = reconcile_timing([cue],np.ones(44100*6)*.1,
+                        lambda *a,**k:views,lambda *a:[measured]*3,protocol,'Japanese')
+                    if disagreement:
+                        self.assertEqual([u['start'] for u in result[0]['units']],[u['start'] for u in old])
+                    else:
+                        self.assertFalse(report['unresolved'])
+                        self.assertEqual([(u['first'],u['stop']) for u in result[0]['units']],new_spans)
+                        self.assertEqual([u['start'] for u in result[0]['units']],[1.5,2.5,4.5])
+                    self.assertEqual(result[0]['units'][-1]['start'],old[-1]['start'])
+
     def test_cross_model_recovery_preserves_foreign_words_and_rejects_unverified_changes(self):
         import copy
         from unittest.mock import patch
