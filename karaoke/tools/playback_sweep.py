@@ -34,6 +34,11 @@ def soft_failures(result, prepared):
         events.append(dict(module='alignment', code='alignment_localized_with_asr',
                            windows=quality['asr_localization_windows']))
     lookup = prepared.get('lookup') or {}
+    for key in ('identity_recovery', 'metadata_language_corrected'):
+        recovery = lookup.get(key)
+        if recovery and (key != 'identity_recovery' or recovery.get('recovered')):
+            events.append(dict(module='metadata', code='lyric_'+key,
+                original=recovery['original'], resolved=recovery['resolved']))
     if lookup.get('recording_mismatches'):
         events.append(dict(module='lyrics', code='lyric_recording_mismatch',
             provider=lookup.get('provider'), reasons=lookup['recording_mismatches']))

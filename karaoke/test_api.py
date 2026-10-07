@@ -903,6 +903,8 @@ def test_online_lyrics_reject_other_versions_and_unsupported_text(change):
     transcription = dict(words=[dict(word=row['plainLyrics'])])
     candidate, report = lyric_candidate(dict(status='ok', results=[row]), song, transcription, 265.)
     assert candidate and report['status'] == 'accepted'
+    song['title'] = '晚風 - Evening Wind'
+    assert lyric_candidate(dict(status='ok', results=[row]), song, transcription, 265.)[0]
     candidate, report = lyric_candidate(dict(status='ok', results=[dict(row, **change)]), song, transcription, 265.)
     assert candidate is None and report['status'] == 'no_supported_recording'
 
@@ -988,7 +990,7 @@ def test_lyrics_first_search_uses_metadata_duration_and_retains_review_status(tm
         (row['plainLyrics'].splitlines() if provider == 'youtube_music' else None,
          dict(provider=provider, language='Chinese')))
     monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', lambda *a: pytest.fail('Tagged recording needs no model'))
-    result = lyric_lookup.prepare_online_lyrics(dict(url=URL), dict(track='晚風', artist='林林'),
+    result = lyric_lookup.prepare_online_lyrics(dict(url=URL), dict(track='晚風', artist='林林', language='en'),
                                                30, StageCache(tmp_path), 'unused', None)
     assert len(queries) == 2 and result['lines'] == row['plainLyrics'].splitlines()
     assert result['language'] == 'Chinese'
@@ -998,6 +1000,50 @@ def test_lyrics_first_search_uses_metadata_duration_and_retains_review_status(tm
     assert provenance['lyric_lookup']['status'] == 'candidate'
     assert provenance['lyric_lookup']['audio_word_coverage'] is None
     assert provenance['lyric_lookup']['text_sha256'] == hashlib.sha256(row['plainLyrics'].encode()).hexdigest()
+    assert provenance['lyric_lookup']['metadata_language_corrected'] == dict(original='English', resolved='Chinese')
+
+
+@pytest.mark.parametrize('recovered', [True, False])
+@pytest.mark.parametrize('explicit_identity', [True, False])
+def test_unmatched_lyrics_retry_cached_native_identity_once_without_repeating_blocked_providers(
+        tmp_path, monkeypatch, recovered, explicit_identity):
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    calls, metadata_calls, limited_calls = [], [], []
+    body = ['微風裡慢慢歌唱', '星光下靜靜傾聽']
+    def extract(*args):
+        metadata_calls.append(1)
+        return dict(parsed=dict(title='晚風 Evening Wind', artist='林林 Lin Lin', lyric_line_numbers=[]))
+    def published(song, *args):
+        calls.append((song['title'], song['artist']))
+        found = recovered and song['artist'] == '林林 Lin Lin'
+        return (body if found else None), dict(provider='line_music',language='Chinese',
+            status='candidate' if found else 'no_matching_published_text')
+    def additional(provider, *args):
+        if provider == 'netease':
+            limited_calls.append(provider)
+            return None, dict(provider=provider,status='unavailable',http_status=429,error='HTTPStatusError')
+        return None, dict(provider=provider,status='unavailable')
+    monkeypatch.setattr(lyric_lookup,'extract_song_metadata',extract)
+    monkeypatch.setattr(lyric_lookup,'fetch_published_lyrics',published)
+    monkeypatch.setattr(lyric_lookup,'fetch_lyrics',lambda *a:dict(status='no_supported_recording'))
+    monkeypatch.setattr(lyric_consensus,'fetch_additional_lyrics',additional)
+    request = dict(url=URL)
+    if explicit_identity:
+        request.update(title='Evening',artist='Lin')
+    result = lyric_lookup.prepare_online_lyrics(request,
+        dict(track='Evening',artist='Lin',description='Published album and artist information'),
+        30,StageCache(tmp_path),'test-model',None)
+    assert len(metadata_calls) == 1 and limited_calls == ['netease']
+    assert calls == [('Evening','Lin')] + ([] if explicit_identity else [('晚風 Evening Wind','林林 Lin Lin')])
+    assert bool(result) == (recovered and not explicit_identity)
+    if result:
+        assert result['lines'] == body
+        recovery = result['provenance']['lyric_lookup']['identity_recovery']
+        assert recovery['recovered'] and recovery['previous_lookup']['crosscheck']['unavailable_sources']
+    else:
+        report = json.loads((tmp_path/'lyrics-first-lookup.json').read_text())
+        assert not report.get('identity_recovery',{}).get('recovered',False)
 
 
 def test_published_lyrics_use_explicit_video_credits_without_a_text_model(tmp_path, monkeypatch):
@@ -6920,6 +6966,26 @@ def test_playback_survey_classifies_empty_subtitles_without_rewriting_recorded_a
     assert json.dumps(attempts, sort_keys=True) == original
 
 
+def test_timeline_publication_check_works_without_development_pythonpath(tmp_path):
+    from pathlib import Path
+    # The real `python -m karaoke.tools.playback_sweep` entry imports a package;
+    # PYTHONPATH=karaoke in the legacy test command must not hide script imports.
+    root = str(Path(__file__).resolve().parents[1])
+    code = f'''import sys
+sys.path.insert(0, {root!r})
+from karaoke.timing_validation import validate_timeline
+cue = dict(text='Hello', start=1., end=2., units=[dict(text='Hello', first=0, stop=5, start=1., end=2.)])
+validate_timeline([cue], ['Hello'], 3.)
+try:
+    validate_timeline([cue], ['Missing text'], 3.)
+except ValueError:
+    pass
+else:
+    raise AssertionError('The publication guard was bypassed')
+'''
+    subprocess.run([sys.executable, '-I', '-c', code], cwd=tmp_path, check=True, capture_output=True)
+
+
 def test_playback_survey_records_source_disagreements_and_actual_provider_failures():
     from karaoke.tools.playback_sweep import soft_failures
     crosscheck = dict(status='conflicting',sources=[dict(provider='line_music'),dict(provider='lrclib')],
@@ -6946,6 +7012,11 @@ def test_playback_survey_records_source_disagreements_and_actual_provider_failur
     crosscheck['sources'] = [recovered]
     assert soft_failures({},packet) == [dict(module='lyrics', code='lyric_candidate_unavailable',
         provider='line_music', track_id='123', http_status=None, error_type='ReadTimeout')]
+    packet['lookup'].update(identity_recovery=dict(original={'artist':'Latin name'},
+        resolved={'artist':'Native name'},recovered=True),
+        metadata_language_corrected=dict(original='English',resolved='Chinese'))
+    assert [e['code'] for e in soft_failures({},packet)] == [
+        'lyric_identity_recovery','lyric_metadata_language_corrected','lyric_candidate_unavailable']
 
 
 @pytest.mark.parametrize('hard_code', ['separate_music_failed', 'subtitles_failed'])

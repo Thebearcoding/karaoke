@@ -106,7 +106,7 @@ def names(value):
     # Version labels are not translations: never strip "Live", "Remix", etc.
     native = r'[\u3040-\u30ff\u3400-\u9fff]+(?:[ ·][\u3040-\u30ff\u3400-\u9fff]+)*'
     latin = r'[A-Za-z][\x20-\x7e]*?'
-    match = re.fullmatch(rf'({native})(?:\s+({latin})|\s*\(({latin})\))', value)
+    match = re.fullmatch(rf'({native})(?:\s+(?:[-–—]\s+)?({latin})|\s*\(({latin})\))', value)
     reverse = re.fullmatch(rf'({latin})\s+({native})', value)
     if match or reverse:
         local, english = (match[1], match[2] or match[3]) if match else (reverse[2], reverse[1])
@@ -429,6 +429,9 @@ def fetch_published_lyrics(song, source_title, cache, duration=None):
 def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_root):
     """Find supplied text before ASR; this is a candidate, not independent audio validation."""
     song = video_song_info(metadata)
+    # Upload/default-track tags are hints, not the language of published text.
+    # Keep explicit user choices; otherwise choose from the actual lyric body.
+    metadata_language = song.pop('language', None)
     song.update({key: request[key] for key in ('title', 'artist', 'language') if request.get(key)})
     lines, provenance = request.get('lyrics'), dict(kind='user_supplied')
     metadata_error = None
@@ -443,12 +446,16 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
         evidence['description_lines'] = [dict(number=i+1, text=line) for i, line in enumerate(description_lines)]
         from openai import OpenAIError
         preserve_title = bool(request.get('title') or metadata.get('track'))
+        metadata_read, parsed = False, None
         def read_description(resolve_identity=()):
-            nonlocal metadata_error
+            nonlocal metadata_error, metadata_read, parsed
+            if not resolve_identity and not description.strip():
+                return None
             try:
-                packet = (dict(parsed=None) if not resolve_identity and not description.strip() else
-                          extract_song_metadata(evidence, model, cache))
-                parsed = SongText.model_validate(packet['parsed']) if packet['parsed'] is not None else None
+                if not metadata_read:
+                    metadata_read = True
+                    packet = extract_song_metadata(evidence, model, cache)
+                    parsed = SongText.model_validate(packet['parsed']) if packet['parsed'] is not None else None
             except (OpenAIError, ValueError) as error:
                 metadata_error = type(error).__name__
                 parsed = None
@@ -457,7 +464,7 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
             if 'title' in resolve_identity:
                 song['title'] = parsed.title or song['title']
             if 'artist' in resolve_identity:
-                song['artist'] = song['artist'] or parsed.artist
+                song['artist'] = parsed.artist or song['artist']
             selected = parsed.lyric_line_numbers
             if not selected or selected != sorted(set(selected)) or not all(1 <= i <= len(description_lines) for i in selected):
                 return None
@@ -470,6 +477,20 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 text_sha256=hashlib.sha256('\n'.join(text).encode()).hexdigest())
         from .lyric_consensus import fetch_lyric_consensus
         lines, report = fetch_lyric_consensus(song, metadata, duration, cache, read_description, preserve_title)
+        if not lines:
+            original = {key: song.get(key) for key in ('title', 'artist')}
+            description_text = read_description([key for key in original if not request.get(key)])
+            resolved = {key: song.get(key) for key in original}
+            if resolved != original:
+                previous = report
+                blocked = {r['provider']: (None, r) for r in report.get('crosscheck', {}).get('unavailable_sources', [])
+                           if r.get('error') and r.get('provider')}
+                lines, report = fetch_lyric_consensus(song, metadata, duration, cache, description_text, True,
+                                                      prefetched=blocked)
+                report = dict(report, identity_recovery=dict(original=original, resolved=resolved,
+                    recovered=bool(lines), previous_lookup=previous))
+        if metadata_language and report.get('language') and metadata_language != report['language']:
+            report = dict(report, metadata_language_corrected=dict(original=metadata_language, resolved=report['language']))
         if metadata_error:
             report = dict(report, metadata_error=metadata_error)
         (cache.root/'lyrics-first-lookup.json').write_text(json.dumps(report, ensure_ascii=False)+'\n')

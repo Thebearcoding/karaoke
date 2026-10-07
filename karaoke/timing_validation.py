@@ -9,9 +9,9 @@ from copy import deepcopy
 import numpy as np
 
 if __package__:
-    from .subtitles import acoustic_end, normalized, highlight_coverage_errors
+    from .subtitles import acoustic_end, collapsed_phrase, normalized, highlight_coverage_errors
 else:
-    from subtitles import acoustic_end, normalized, highlight_coverage_errors
+    from subtitles import acoustic_end, collapsed_phrase, normalized, highlight_coverage_errors
 
 
 def timing_violations(cues, constraints):
@@ -174,7 +174,6 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
 
 def validate_timeline(cues, lines, duration, constraints=(), language='English'):
     """Publication contract shared by fine and fallback timing."""
-    from subtitles import collapsed_phrase
     if not cues or [c['text'] for c in cues] != lines:
         raise ValueError('Final timing omits supplied lyric lines')
     units=[u for c in cues for u in c.get('units',[])]

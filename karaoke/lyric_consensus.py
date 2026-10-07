@@ -161,7 +161,7 @@ def alternative_lyric_candidates(lyrics, packet):
             lyrics['provenance'], lyric_lookup=report, text_transform=report.get('text_transform', 'whitespace_only')))
 
 
-def fetch_lyric_consensus(song, metadata, duration, cache, description=None, preserve_title=False):
+def fetch_lyric_consensus(song, metadata, duration, cache, description=None, preserve_title=False, *, prefetched=None):
     """Resolve source identity before name searches; unavailable sources never vote."""
     def lrclib():
         packet = lookup.fetch_lyrics(song, cache.root/'download/source.info.json', cache)
@@ -171,7 +171,7 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
     sources = [('line_music', lambda: lookup.fetch_published_lyrics(song, metadata.get('title'), cache, duration)), ('lrclib', lrclib),
                ('netease', lambda: fetch_additional_lyrics('netease', song, metadata, cache, duration)),
                ('youtube_music', lambda: fetch_additional_lyrics('youtube_music', song, metadata, cache, duration))]
-    prefetched = {}
+    prefetched = dict(prefetched or {})
     def fetch(source):
         name, request = source
         if name in prefetched:
