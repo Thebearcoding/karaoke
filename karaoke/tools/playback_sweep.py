@@ -204,7 +204,8 @@ def run_once(manifest, data_dir, report, prepared_dir, base, *, case_urls=(), co
                            '--output', str(folder), '--playback-audio', '--prepared-lyrics', str(folder/'prepared-lyrics.json')]
                 code = run_probe(client, base, folder, command, session=session)
                 probe_finished = True
-                if client.get(base+'/health').raise_for_status().json()['pipeline_version'] != version:
+                health, _ = session.check_resources(client, base, refresh=True)
+                if health['pipeline_version'] != version:
                     probe_finished = False
                     raise RuntimeError('Pipeline changed during this case')
                 if code:
@@ -258,7 +259,8 @@ def run_once(manifest, data_dir, report, prepared_dir, base, *, case_urls=(), co
                             del pending[future]
                     if session.cancelled.is_set() or report.with_suffix('.pause').exists():
                         break
-                    if client.get(base+'/health').raise_for_status().json()['pipeline_version'] != version:
+                    health, _ = session.check_resources(client, base)
+                    if health['pipeline_version'] != version:
                         session.cancelled.set()
                         raise ValueError('Pipeline changed during the one-pass survey')
                     if remaining and len(pending) < concurrency:
@@ -274,7 +276,7 @@ def run_once(manifest, data_dir, report, prepared_dir, base, *, case_urls=(), co
                                     size = store.cache.size(data_dir/attempt['job_id']) if attempt.get('job_id') else 0
                                     sizes.append((estimate, size))
                                 # Read storage after sizes so ongoing writes over-reserve.
-                                storage = client.get(base+'/v1/storage').raise_for_status().json()
+                                _, storage = session.check_resources(client, base, refresh=True)
                                 reserved = sum(max(0, (estimate if estimate is not None else math.inf)-size)
                                                for estimate, size in sizes)+store.cache.headroom
                                 quota = (storage['limit_bytes']-storage['protected_bytes']

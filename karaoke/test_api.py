@@ -7816,6 +7816,17 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
     report = tmp_path/'report.json'
     requested = [cases[0]['url'], cases[2]['url']] if targeted else []
     with TestClient(app) as api:
+        health_disconnected = False
+        if mode == 'parallel':
+            import httpx
+            original_get = api.get
+            def interrupted_health(url, *args, **kwargs):
+                nonlocal health_disconnected
+                if str(url).endswith('/health') and calls and not health_disconnected:
+                    health_disconnected = True
+                    raise httpx.ReadError('Connection reset by peer')
+                return original_get(url, *args, **kwargs)
+            monkeypatch.setattr(api, 'get', interrupted_health)
         if has_full_mv:
             app.state.store.update(source_jobs[0], status='completed', result=dict(artifacts={}))
         user_queue = api.post('/v1/room/entries',json=dict(url=URL)).json()['entries']
@@ -7824,6 +7835,8 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
         sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=requested, concurrency=concurrency)
         sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=requested, concurrency=concurrency)
         assert len(calls) == (2 if targeted or mode == 'pause' else 3)
+        if mode == 'parallel':
+            assert health_disconnected
         assert set(calls[1:]) == set(source_jobs[2:] if targeted else source_jobs[1:2] if mode == 'pause' else source_jobs[1:])
         assert maximum == ((2 if targeted else 3) if mode == 'unlimited' else 2 if mode in ('parallel', 'pause', 'skip_large') else 1)
         if mode == 'skip_large' and not targeted:
@@ -7906,3 +7919,46 @@ def test_probe_session_overlaps_children_and_stops_them_together(tmp_path, budge
         assert any('Probe monitor retry after ReadError' in (folder/'probe.log').read_text() for folder in folders)
     with pytest.raises(ValueError, match='does not own'):
         session.check(folders[0])
+
+
+@pytest.mark.parametrize('failed_endpoint', [None, '/health', '/v1/storage'])
+def test_probe_session_shares_fresh_monitoring_with_the_controller(tmp_path, monkeypatch, failed_endpoint):
+    from collections import Counter
+    from concurrent.futures import ThreadPoolExecutor
+    import httpx
+    from karaoke.tools import soak
+    now = [0.]
+    monkeypatch.setattr(soak.time, 'monotonic', lambda: now[0])
+    calls = Counter()
+    state = dict(version='before', full=False)
+    def respond(request):
+        path = request.url.path
+        calls[path] += 1
+        assert request.method == 'GET'
+        if path == failed_endpoint and calls[path] == 1:
+            raise httpx.ReadError('Connection reset by peer', request=request)
+        data = (dict(used_bytes=10, limit_bytes=None, can_prepare=not state['full'])
+                if path == '/v1/storage' else dict(pipeline_version=state['version']))
+        return httpx.Response(200, json=data)
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client, soak.ProbeSession(tmp_path) as session:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _: session.check_resources(client, 'http://test'), range(8)))
+        assert all(health['pipeline_version'] == 'before' for health, _ in results)
+        assert calls == {'/v1/storage': 2 if failed_endpoint else 1,
+                         '/health': 2 if failed_endpoint == '/health' else 1}
+        before = calls.copy()
+        state['version'] = 'after'
+        now[0] = .5
+        assert session.check_resources(client, 'http://test')[0]['pipeline_version'] == 'before'
+        assert calls == before
+        # Admission and final acceptance need current state, even within a sample interval.
+        assert session.check_resources(client, 'http://test', refresh=True)[0]['pipeline_version'] == 'after'
+        assert calls == before + Counter({'/health': 1, '/v1/storage': 1})
+        state['full'] = True
+        now[0] = 2.
+        with pytest.raises(ValueError, match='cache or free-space'):
+            session.check_resources(client, 'http://test')
+        assert session.cancelled.is_set()
+        state['full'] = False
+        with pytest.raises(ValueError, match='infrastructure failure'):
+            session.check_resources(client, 'http://test')

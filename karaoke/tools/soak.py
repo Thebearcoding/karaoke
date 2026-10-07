@@ -306,6 +306,9 @@ class ProbeSession:
         self.root = Path(root).resolve()
         self.cancelled = threading.Event()
         self.lock = None
+        self.monitor_lock = threading.Lock()
+        self.resources = None
+        self.checked_at = 0.
 
     def __enter__(self):
         self.lock = (self.root/'focused-probe.lock').open('a')
@@ -316,11 +319,43 @@ class ProbeSession:
             raise
         return self
 
-    def check(self, folder):
-        if self.lock is None or self.lock.closed or folder.parent.resolve() != self.root:
+    def check(self, folder=None):
+        if self.lock is None or self.lock.closed or (folder is not None and folder.parent.resolve() != self.root):
             raise ValueError('Probe session does not own this data directory')
         if self.cancelled.is_set():
             raise ValueError('Probe session stopped after an infrastructure failure')
+
+    def check_resources(self, client, base, *, refresh=False, log=None):
+        """All children share one fresh resource sample per second."""
+        with self.monitor_lock:
+            self.check()
+            if not refresh and self.resources is not None and time.monotonic()-self.checked_at < 1:
+                return self.resources
+            try:
+                for attempt in range(2):
+                    try:
+                        storage = client.get(base+'/v1/storage').raise_for_status().json()
+                        if (storage['limit_bytes'] is not None and storage['used_bytes'] > storage['limit_bytes']) or not storage['can_prepare']:
+                            raise ValueError('Focused probe reached the shared cache or free-space limit')
+                        health = client.get(base+'/health').raise_for_status().json()
+                        break
+                    except httpx.TransportError as error:
+                        if attempt:
+                            raise
+                        message = f'Probe monitor retry after {type(error).__name__}'
+                        if log is None:
+                            print(message, flush=True)
+                        else:
+                            log.write((message+'\n').encode())
+                            log.flush()
+                        time.sleep(.2)
+                        self.check()
+            except BaseException:
+                self.cancelled.set()
+                raise
+            self.resources = health, storage
+            self.checked_at = time.monotonic()
+            return self.resources
 
     def __exit__(self, *error):
         self.cancelled.set()
@@ -372,20 +407,7 @@ def run_probe(client, base, folder, command, *, resume_preparation=None, session
                     output = reader.submit(read_output)
                 while True:
                     session.check(folder)
-                    for attempt in range(2):
-                        try:
-                            storage = client.get(base+'/v1/storage').raise_for_status().json()
-                            if (storage['limit_bytes'] is not None and storage['used_bytes'] > storage['limit_bytes']) or not storage['can_prepare']:
-                                raise ValueError('Focused probe reached the shared cache or free-space limit')
-                            health = client.get(base+'/health').raise_for_status().json()
-                            break
-                        except httpx.TransportError as error:
-                            if attempt:
-                                raise
-                            log.write(f'Probe monitor retry after {type(error).__name__}\n'.encode())
-                            log.flush()
-                            time.sleep(.2)
-                            session.check(folder)
+                    health, _ = session.check_resources(client, base, log=log)
                     if store is None and (not health.get('preparation_paused') or health.get('running_job')):
                         raise ValueError('Preparation resumed during the focused probe')
                     if output is not None and output.done():
