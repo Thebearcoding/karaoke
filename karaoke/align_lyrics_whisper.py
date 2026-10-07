@@ -273,7 +273,7 @@ def acoustic_segments(lines, units, begin, end):
 
 def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                           force_global=False, max_alignment_attempts=24, recovery_contexts=None, localize=None,
-                          align_original=None):
+                          align_original=None, recognize_original=None):
     """Use recognition only to locate failed lyrics, never as replacement text."""
     from anchors_from_asr import anchors_from_words
     from lyric_progress import partial_alignment_cues
@@ -405,11 +405,11 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 attempt['error'] = str(error)
                 candidate = None
             attempt['result'] = candidate
-            if (align_original is not None and ae-ab <= 45 and budget and
+            if (align_original is not None and budget >= cost and
                     not valid_recovery(candidate, lines[cf+left:cs+left], ae-ab)):
                 # Separation can suppress a real choir/quiet voice. Change the
                 # audio view within the same known bounds, not the lyric text.
-                budget -= 1
+                budget -= cost
                 try:
                     alternate = align_candidate(align_original, ab, ae, '\n'.join(lines[cf+left:cs+left]),
                         gap_padding=None, dynamic_heads=True, max_word_dur=None, word_dur_factor=None)
@@ -464,6 +464,18 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                             words, language, allow_missing=True))
                         local = [new if new['status']=='candidate' else old for old,new in zip(local,narrowed)]
                         regional.update(overlapping_recognition=views, anchors=local)
+                    if (recognize_original is not None and budget >= chunks+cost and
+                            any(local[i-cf]['status']!='candidate' for i in range(start, stop_line))):
+                        # A separated view can hide quiet singing or favour
+                        # introductory speech. Search the same bounded region
+                        # in the original mix, keeping already measured anchors.
+                        budget -= chunks
+                        words, views = recognize_in_windows(recognize_original, ab, ae, chunks)
+                        narrowed = recovery_anchors(anchors_from_words(lines[cf+left:cs+left],
+                            words, language, allow_missing=True))
+                        local = [new if old['status']!='candidate' and new['status']=='candidate' else old
+                                 for old,new in zip(local,narrowed)]
+                        regional.update(original_mix_recognition=views, anchors=local)
                     recovered = [i for i in range(start, stop_line) if local[i-cf]['status'] == 'candidate']
                     if recovered:
                         refined = list(anchors)
@@ -592,7 +604,8 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         # that never contained them. Broaden once, sharing the remaining budget.
         result = recover_with_local_asr(result, lines, audio, language, recognize, align,
                                        force_global=True, max_alignment_attempts=budget, recovery_contexts=contexts,
-                                       localize=localize, align_original=align_original)
+                                       localize=localize, align_original=align_original,
+                                       recognize_original=recognize_original)
         reports.extend(result.get('asr_localizations', []))
     result['asr_localizations'] = reports
     result['recovery_contexts'] = contexts
@@ -1092,16 +1105,18 @@ def main():
                               'window': [begin, end]}), flush=True)
             piece = audio[round(begin*16000):round(end*16000)]
 
-            def align_audio(start, stop, text, **options):
-                if options.pop('original_mix', False):
+            def audio_clip(start, stop, original_mix=False):
+                if original_mix:
                     from scipy.signal import resample_poly
                     info = sf.info(job['original_audio'])
                     original, rate = sf.read(job['original_audio'], start=round(start*info.samplerate),
                         stop=round(stop*info.samplerate), dtype='float32', always_2d=True)
                     divisor = np.gcd(rate, 16000)
-                    clip = resample_poly(original.mean(axis=1), 16000//divisor, rate//divisor)
-                else:
-                    clip = audio[round(start*16000):round(stop*16000)]
+                    return resample_poly(original.mean(axis=1), 16000//divisor, rate//divisor)
+                return audio[round(start*16000):round(stop*16000)]
+
+            def align_audio(start, stop, text, **options):
+                clip = audio_clip(start, stop, options.pop('original_mix', False))
                 selected_language = language
                 if options.pop('detect_language', False):
                     detected, probes = detect_whisper_language(model, clip)
@@ -1116,21 +1131,22 @@ def main():
             def align_piece(start, stop, text, **options):
                 return align_audio(begin+start, begin+stop, text, **options)
 
-            def recognize_audio(start, stop):
+            def recognize_audio(start, stop, *, original_mix=False):
                 from stage_cache import StageCache
                 config = dict(start=start, stop=stop, language=None, model=args.model,
                               model_sha256=model_hash, device=args.device,
                               temperature=0, condition_on_previous_text=False,
-                              implementation=inspect.getsource(recognize_audio),
+                              implementation=inspect.getsource(recognize_audio), original_mix=original_mix,
+                              audio_reader=inspect.getsource(audio_clip),
                               packages={name: version(name) for name in ('stable-ts', 'openai-whisper')})
                 key = 'alignment_localization_'+hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:16]
                 path = output.parent/'asr-requests'/(key+'.json')
                 path.parent.mkdir(exist_ok=True)
-                with StageCache(output.parent).stage(key, inputs=[job['audio']], outputs=[path], config=config,
+                with StageCache(output.parent).stage(key, inputs=[job['original_audio'] if original_mix else job['audio']], outputs=[path], config=config,
                         code=[Path(inspect.getfile(StageCache)), Path(inspect.getfile(detect_whisper_language))]) as reused:
                     if not reused:
                         report_progress(detail='定位未对齐的唱段')
-                        clip = audio[round(start*16000):round(stop*16000)]
+                        clip = audio_clip(start, stop, original_mix)
                         detected, probes = detect_whisper_language(model, clip) if stop-start > 30 else (None, [])
                         recognized = model.transcribe(clip,
                             language=detected, temperature=0, condition_on_previous_text=False,
@@ -1162,6 +1178,8 @@ def main():
                                                localize=localize_audio if job.get('original_audio') else None,
                                                align_original=(lambda a, b, text, **options:
                                                    align_audio(a, b, text, original_mix=True, **options))
+                                               if job.get('original_audio') else None,
+                                               recognize_original=(lambda a, b: recognize_audio(a, b, original_mix=True))
                                                if job.get('original_audio') else None)
             if job.get('original_audio'):
                 # A repeated/quiet phrase can be swallowed by neighbouring
