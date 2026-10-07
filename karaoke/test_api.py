@@ -453,6 +453,12 @@ def test_soak_preserves_failed_stage_diagnostics_after_cache_eviction(tmp_path):
     (folder/'asr-requests/local-rejected.json').write_text(json.dumps(rejected))
     (folder/'repeated-lyrics').mkdir()
     (folder/'repeated-lyrics/run.json').write_text('{"attempts": []}')
+    (folder/'alignment').mkdir()
+    raw_alignment = dict(context=['A measured phrase']*130000, segments=[dict(text='A measured phrase', words=[])])
+    (folder/'alignment/raw.json').write_text(json.dumps(raw_alignment))
+    rejected_source = folder/'lyric-source-attempts/1'
+    rejected_source.mkdir(parents=True)
+    (rejected_source/'playback-warning.json').write_text('{"omitted_lines": [2]}')
     final_validation = {
         'cues.json': [dict(text='final cue', start=2., end=3.)],
         'audio-result.json': dict(duration_seconds=4., artifacts={'subtitles': {'path': 'cues.json'}}),
@@ -481,6 +487,8 @@ def test_soak_preserves_failed_stage_diagnostics_after_cache_eviction(tmp_path):
     assert saved['asr/transcription.json'] == {'language': 'chinese'}
     assert saved['asr-requests/local-rejected.json'] == rejected
     assert saved['repeated-lyrics/run.json'] == {'attempts': []}
+    assert saved['alignment/raw.json'] == raw_alignment
+    assert saved['lyric-source-attempts/1/playback-warning.json'] == {'omitted_lines': [2]}
     assert {name: saved[name] for name in final_validation} == final_validation
     assert 'vocals.mp3' not in saved
     assert traceback in attempt['diagnostic_tail']
@@ -983,7 +991,8 @@ def test_online_lyric_candidate_skips_asr_only_for_interactive_playback(tmp_path
         assert 'transcribe' not in stages
 
 
-def test_lyrics_first_search_uses_metadata_duration_and_retains_review_status(tmp_path, monkeypatch):
+@pytest.mark.parametrize('title', ['晚風', '晚風 (Official Music Video)', '晚風 [Official Audio]'])
+def test_lyrics_first_search_uses_metadata_duration_and_retains_review_status(tmp_path, monkeypatch, title):
     from karaoke import lyric_lookup, lyric_consensus
     from karaoke.stage_cache import StageCache
     (tmp_path/'download').mkdir()
@@ -1000,7 +1009,7 @@ def test_lyrics_first_search_uses_metadata_duration_and_retains_review_status(tm
         (row['plainLyrics'].splitlines() if provider == 'youtube_music' else None,
          dict(provider=provider, language='Chinese')))
     monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', lambda *a: pytest.fail('Tagged recording needs no model'))
-    result = lyric_lookup.prepare_online_lyrics(dict(url=URL), dict(track='晚風', artist='林林', language='en'),
+    result = lyric_lookup.prepare_online_lyrics(dict(url=URL), dict(track=title, artist='林林', language='en'),
                                                30, StageCache(tmp_path), 'unused', None)
     assert len(queries) == 2 and result['lines'] == row['plainLyrics'].splitlines()
     assert result['language'] == 'Chinese'
@@ -3248,7 +3257,7 @@ def test_prepared_lyrics_preserve_provenance_and_reject_different_inputs(tmp_pat
             assert json.loads((pipeline.output/'anchors.json').read_text()) == []
 
 
-@pytest.mark.parametrize('mode', ['success', 'all_fail', 'resource_failure', 'stale', 'supplied', 'soft'])
+@pytest.mark.parametrize('mode', ['success', 'other_recording', 'all_fail', 'resource_failure', 'stale', 'supplied', 'soft'])
 @pytest.mark.parametrize('prepared', [False, True])
 def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeypatch, mode, prepared):
     from karaoke.lyric_lookup import prepared_lyrics_identity
@@ -3258,7 +3267,11 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
                         route='lyrics_first', lyric_lookup=dict(provider='primary')))
     packet = dict(candidate_texts=[primary, alternative, alternative, ['Rejected fragment']],
         crosscheck=dict(selected_source=0, eligible_sources=[0,1,2], status='conflicting',
+            rejected_sources=[dict(source=3, reason='lyrics_fragment')],
             sources=[dict(provider=p,language='English') for p in ('primary','alternate','duplicate','rejected')]))
+    if mode == 'other_recording':
+        packet['crosscheck']['eligible_sources'] = [0]
+        packet['crosscheck']['sources'][1]['recording_mismatches'] = ['duration']
     if mode == 'stale':packet['candidate_texts'][0] = ['Old lyrics']
     prepared_path = None
     if prepared:
@@ -3290,11 +3303,11 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
         (tmp_path/'cues.json').write_text(json.dumps(cues))
         if failing:raise ValueError('Unresolved alignment')
     monkeypatch.setattr(pipeline, 'align', align)
-    if mode in ('success', 'soft'):
+    if mode in ('success', 'other_recording', 'soft'):
         selected, error = pipeline.align_candidates(lyrics, {}, 6.)
         assert selected['lines'] == (primary if mode=='soft' else alternative)
         assert calls == ([primary] if mode=='soft' else [primary,alternative])
-        if mode == 'success':
+        if mode in ('success', 'other_recording'):
             from karaoke.tools.playback_sweep import soft_failures
             quality=json.loads((tmp_path/'quality.json').read_text())
             assert soft_failures(dict(quality=quality), {}) == [dict(module='lyrics',

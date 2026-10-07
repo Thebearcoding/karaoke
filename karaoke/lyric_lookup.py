@@ -99,9 +99,14 @@ def cached_lyric_request(provider, identity, cache, request, minimum_delay=30):
     return packet['data']
 
 
-def names(value):
+def names(value, *, title=False):
     value = unicodedata.normalize('NFKC', value if isinstance(value, str) else '').strip()
     result = [value] if value else []
+    if title:
+        clean = re.sub(r'\s*[\[(](?:official\s+(?:music\s+video|video|mv|audio|visualizer)|'
+                       r'(?:official\s+)?lyrics?\s+video)(?:\s+(?:hd|4k))?[\])]\s*$', '', value, flags=re.I)
+        if clean and clean != value:
+            return result + names(clean, title=True)
     # Music metadata often appends an English translation to a Chinese name.
     # Version labels are not translations: never strip "Live", "Remix", etc.
     native = r'[\u3040-\u30ff\u3400-\u9fff]+(?:[ ·][\u3040-\u30ff\u3400-\u9fff]+)*'
@@ -117,7 +122,7 @@ def names(value):
 
 def identity(value, *, title=False):
     converter = OpenCC('tw2s')
-    aliases = [converter.convert(name).casefold() for name in names(value)]
+    aliases = [converter.convert(name).casefold() for name in names(value, title=title)]
     if not title:
         if aliases and re.search(r'[&,/×+]|\b(?:feat\.?|featuring|ft\.?|with)\s', aliases[0]):
             aliases = aliases[:1]  # A collaborator is not an alias for the whole credit.
@@ -146,7 +151,7 @@ def live_performance(value):
 
 
 def fetch_lyrics(song, metadata_path, cache):
-    titles, artists = names(song.get('title')), names(song.get('artist'))
+    titles, artists = names(song.get('title'), title=True), names(song.get('artist'))
     if not titles or not artists or not metadata_path.is_file():
         return dict(status='missing_identity')
     queries = [dict(track_name=titles[0], artist_name=artists[0])]
@@ -387,7 +392,7 @@ def fetch_published_lyrics(song, source_title, cache, duration=None):
     if not song.get('title') or not song.get('artist'):
         return None, dict(status='missing_identity', provider='line_music')
     path, stage = cache.root/'published-lyrics.json', 'fetch_published_lyrics'
-    title = names(song['title'])[-1]
+    title = names(song['title'], title=True)[-1]
     queries = list(dict.fromkeys([' '.join((title, names(song['artist'])[-1])), title]))
     try:
         old = json.loads(path.read_text())

@@ -72,7 +72,7 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None):
             recording_identity = {}
             try:
                 if provider == 'netease':
-                    query = ' '.join(lookup.names(song[k])[-1] for k in ('title','artist'))
+                    query = ' '.join(lookup.names(song[k], title=k == 'title')[-1] for k in ('title','artist'))
                     url = 'https://music.163.com/api/cloudsearch/pc?'+urlencode(dict(s=query, type=1, limit=30, offset=0))
                     packet = lookup.cached_lyric_request(provider, url, cache, lambda: read_document(url, timeout=10))
                     if packet.get('code') != 200:
@@ -147,8 +147,12 @@ def alternative_lyric_candidates(lyrics, packet):
     if not isinstance(selected, int) or not 0 <= selected < len(texts) or texts[selected] != lyrics['lines']:
         return  # A stale lookup must not replace the current input.
     seen = {normalized(''.join(lyrics['lines'])).casefold()}
-    for index in review.get('eligible_sources', []):
-        if not 0 <= index < min(len(texts), len(sources)):
+    rejected = {item['source'] for item in review.get('rejected_sources', [])}
+    # Recording agreement is a preference, not a ban on another release's
+    # complete text after the preferred version fails acoustic alignment.
+    order = dict.fromkeys([*review.get('eligible_sources', []), *range(len(texts))])
+    for index in order:
+        if index in rejected or not 0 <= index < min(len(texts), len(sources)):
             continue
         key = normalized(''.join(texts[index])).casefold()
         if key in seen:

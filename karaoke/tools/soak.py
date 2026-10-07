@@ -566,6 +566,7 @@ def record_failure(attempt, job, folder):
         error_fingerprint=hashlib.sha256(json.dumps(error, sort_keys=True).encode()).hexdigest())
     attempt['diagnostic_tail'] = '\n'.join(logs)
     for pattern in ('asr/*.json', 'asr-requests/*.json', 'alignment/*.json', 'phonemes/*.json', 'context/**/*.json',
+                    'lyric-source-attempts/**/*.json',
                     'repeated-lyrics/*.json', 'english-onsets/*.json',
                     'lyrics.json', 'anchors.json', 'word-cues.json', 'ordered-cues.json', 'cues.json', 'quality.json',
                     'prepared-lyrics.json', 'playback-warning.json', 'lyrics-first-lookup.json',
@@ -575,8 +576,13 @@ def record_failure(attempt, job, folder):
                     'timing-checked/*.json', 'timing-constraints.json', 'timing-input.json'):
         for path in folder.glob(pattern):
             try:
-                if path.stat().st_size <= 2*1024**2:
+                # Alignment retries contain repeated contexts which compress
+                # well. Preserve them before releasing the job's cache guard.
+                if path.stat().st_size <= 16*1024**2:
                     diagnostics[str(path.relative_to(folder))] = json.loads(path.read_text())
+                else:
+                    diagnostics.setdefault('omitted_diagnostics', []).append(dict(
+                        path=str(path.relative_to(folder)), bytes=path.stat().st_size, reason='size_limit'))
             except (ValueError, OSError):
                 continue
     if diagnostics:
