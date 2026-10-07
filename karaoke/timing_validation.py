@@ -671,7 +671,7 @@ def main():
         if lyrics['language'] != 'English':
             yield 'vocals_phonemes', wave, review.observe, review.predict(wave,decoder='phonemes')
         if args.lead is not None:
-            lead, lead_rate=sf.read(args.lead,dtype='float32',always_2d=True)
+            lead, lead_rate=sf.read(args.lead,dtype='float64',always_2d=True)
             if abs(len(lead)/lead_rate-duration) > 1/lead_rate:
                 raise ValueError('Alternate acoustic view does not match the source duration')
             divisor=np.gcd(lead_rate,44100)

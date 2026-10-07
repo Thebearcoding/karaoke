@@ -612,14 +612,15 @@ def test_pipeline_reuses_decoded_audio_and_rebuilds_corrupted_stage(tmp_path):
     assert output.read_bytes() == expected
 
 
-def test_timing_review_cache_tracks_its_additional_audio_view(tmp_path, monkeypatch):
+@pytest.mark.parametrize('lead_file', ['lead-separation/song/vocals.wav', 'stems/lead.wav'])
+def test_timing_review_cache_tracks_its_additional_audio_view(tmp_path, monkeypatch, lead_file):
     from karaoke import pipeline as module
     code, folder = tmp_path/'code', tmp_path/'job'
     code.mkdir()
     monkeypatch.setattr(module, 'ROOT', code)
     pipeline = Pipeline(dict(url=URL), folder)
     (folder/'lyrics.json').write_text(json.dumps(dict(language='Chinese')))
-    lead = folder/'lead-separation/song/vocals.wav'
+    lead = folder/lead_file
     lead.parent.mkdir(parents=True)
     lead.write_bytes(b'lead version 1')
     base = [sys.executable, code/'timing_validation.py']
@@ -4129,6 +4130,12 @@ def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success
     (tmp_path/'quality.json').write_text('{}')
     calls = []
     lead = Mock() if need_lead is not None else None
+    master = tmp_path/'stems/lead.wav'
+    def finish_packaging():
+        master.parent.mkdir(exist_ok=True)
+        master.write_bytes(b'delivered lead after native-rate conversion')
+    if lead is not None:
+        lead.result.side_effect = finish_packaging
     def run(*args):
         calls.append(args[1])
         assert ('--playback-fallback' in args[1]) is not strict_audio
@@ -4136,6 +4143,10 @@ def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success
         assert ('--lead' in args[1]) is (len(calls)==2)
         if lead is not None and len(calls)==1:
             lead.result.assert_not_called()
+            assert not master.exists()
+        if len(calls)==2:
+            source = args[1][args[1].index('--lead')+1]
+            assert source == master and source.read_bytes() == b'delivered lead after native-rate conversion'
         output=tmp_path/'timing-checked';output.mkdir(exist_ok=True)
         checked=json.loads(json.dumps(cue))
         if not old_time and (not need_lead or len(calls)==2):checked['units'][0]['start']=4.

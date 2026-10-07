@@ -258,7 +258,7 @@ class Pipeline:
         if name == 'validate_timing':
             from .timing_validation import acoustic_model_files
             if '--lead' in command:
-                inputs = [*inputs, 'lead-separation/song/vocals.wav']
+                inputs = [*inputs, command[command.index('--lead')+1]]
             constraints = self.output/'timing-constraints.json'
             if constraints.is_file():
                 inputs = [*inputs, 'timing-constraints.json']
@@ -1089,7 +1089,7 @@ class Pipeline:
                 lyrics = self.playback_fallback(metadata, duration, text_error)
             # This gate is intentionally outside the fallback catch: a fallback
             # must not resurrect a timestamp contradicted by acoustic evidence.
-            self.validate_alignment(lyrics, duration, lead)
+            self.validate_alignment(lyrics, duration, packaging)
             render_info = dict(title=lyrics['title'], artist=lyrics['artist'], language=lyrics['language'],
                                duration_seconds=duration)
             def prepare_picture():
@@ -1137,14 +1137,14 @@ class Pipeline:
             '--audio', self.vocals, '--original', self.output/'source-44100.wav',
             '--output', self.output/'timing-checked', '--device', self.device,
             *([] if self.strict_audio else ['--playback-fallback'])]
-        # Start while lead separation is still running. Only unresolved local
-        # evidence needs that additional audio view; no published result can
-        # skip the final constraint check below.
+        # Start while packaging is still running. Only unresolved local evidence
+        # waits for the delivered lead master, including its native-rate conversion.
+        # Review the sound the user receives, not an intermediate model output.
         self.run('validate_timing', command+(['--defer-constraints'] if lead is not None else []))
         report = json.loads((self.output/'timing-checked/report.json').read_text())
         if lead is not None and (report.get('pending_review_lines') or report['unresolved']):
             lead.result()
-            self.run('validate_timing', command+['--lead', self.output/'lead-separation/song/vocals.wav'])
+            self.run('validate_timing', command+['--lead', self.output/'stems/lead.wav'])
         checked = json.loads((self.output/'timing-checked/cues.json').read_text())
         report = json.loads((self.output/'timing-checked/report.json').read_text())
         try:
