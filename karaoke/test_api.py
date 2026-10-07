@@ -3505,13 +3505,15 @@ def test_playback_fallback_preserves_other_lines_highlights(tmp_path, bad):
 
 
 @pytest.mark.parametrize('old_time', [True, False])
-def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success_flag(tmp_path, monkeypatch, old_time):
-    pipeline = Pipeline(dict(url=URL), tmp_path, device='cpu')
+@pytest.mark.parametrize('strict_audio', [True, False])
+def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success_flag(tmp_path, monkeypatch, old_time, strict_audio):
+    pipeline = Pipeline(dict(url=URL), tmp_path, device='cpu', audio_only=strict_audio)
     lyrics = dict(lines=['hello'], language='English')
     cue = dict(text='hello', start=1., end=5., units=[dict(text='hello', first=0, stop=5, start=1., end=5.)])
     (tmp_path/'cues.json').write_text(json.dumps([cue]))
     (tmp_path/'quality.json').write_text('{}')
     def run(*args):
+        assert ('--playback-fallback' in args[1]) is not strict_audio
         output=tmp_path/'timing-checked';output.mkdir()
         checked=json.loads(json.dumps(cue))
         if not old_time:checked['units'][0]['start']=4.
@@ -7189,6 +7191,9 @@ def test_playback_survey_records_source_disagreements_and_actual_provider_failur
         metadata_language_corrected=dict(original='English',resolved='Chinese'))
     assert [e['code'] for e in soft_failures({},packet)] == [
         'lyric_identity_recovery','lyric_metadata_language_corrected','lyric_candidate_unavailable']
+    spans = [dict(line=2,first=0,stop=2,start=3.,end=4.2,timing_source='linear_fallback')]
+    assert soft_failures(dict(quality=dict(timing_review=dict(estimated_spans=spans))), {}) == [
+        dict(module='alignment',code='timing_group_fallback',spans=spans)]
 
 
 @pytest.mark.parametrize('hard_code', ['separate_music_failed', 'subtitles_failed'])

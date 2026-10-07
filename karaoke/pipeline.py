@@ -1091,7 +1091,8 @@ class Pipeline:
         self.run('validate_timing', [sys.executable, ROOT/'timing_validation.py',
             '--input', self.output/'timing-input.json', '--lyrics', self.output/'lyrics.json',
             '--audio', self.vocals, '--original', self.output/'source-44100.wav',
-            '--output', self.output/'timing-checked', '--device', self.device])
+            '--output', self.output/'timing-checked', '--device', self.device,
+            *([] if self.strict_audio else ['--playback-fallback'])])
         checked = json.loads((self.output/'timing-checked/cues.json').read_text())
         report = json.loads((self.output/'timing-checked/report.json').read_text())
         try:
@@ -1105,6 +1106,8 @@ class Pipeline:
                 onset_constraints=report['constraints'], unresolved=report['unresolved'],
                 report_sha256=file_hash(self.output/'timing-checked/report.json'),
                 repaired_ranges=sum(r['accepted'] for line in report['lines'] for r in line['repairs']),
+                estimated_spans=[dict(line=i+1, **u) for i,c in enumerate(checked) for u in c['units']
+                                 if u.get('timing_source')=='linear_fallback' and u.get('bounds_source')=='cross_model_onsets'],
                 unverified_lines=sorted({r['line'] for r in report['lines'] if r['status']=='unverified'})),
             onset_accuracy=None)
         quality['fallback_units'] = sum(u.get('timing_source') == 'prior_word_fallback'

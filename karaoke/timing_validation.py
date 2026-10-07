@@ -48,7 +48,7 @@ def screened_units(cue, wave, protocol, *, floor=None):
 
 
 def reconcile_timing(cues, wave, witness, predict, protocol, language, constraints=(), *,
-                     _retry_context=True, _review_lines=None):
+                     playback=False, _retry_context=True, _review_lines=None):
     """Corroborate displaced onsets, then replace only a compatible local span.
 
     witness returns original/vocal word views. predict returns three independent
@@ -198,8 +198,81 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                     result[index] = cue
             reports.extend(dict(r, context_retry=windows[r['line']-1]) for r in reviewed['lines'])
             ledger = reviewed['constraints']
+    if playback:
+        for row in reports:
+            index = row['line']-1
+            proofs = [v['proof'] for v in timing_violations(result, ledger) if v['proof']['line']==index+1]
+            if not proofs or 'predictions' not in row:
+                continue
+            bounds = [result[index-1]['units'][-1]['start']+.015 if index else 0.,
+                      result[index+1]['units'][0]['start'] if index+1<len(result) else len(wave)/44100]
+            for proof in proofs:
+                candidate, repair = grouped_timing_fallback(result[index], row, proof, ledger,
+                    wave, bounds, protocol, language)
+                if candidate is not None:
+                    result[index] = candidate
+                    row['repairs'].append(repair)
     return result,dict(lines=reports,constraints=ledger,unresolved=timing_violations(result,ledger),
                        accuracy=None)
+
+
+def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, protocol, language):
+    """Sweep an uncertain interior only between independently measured onsets.
+
+    This is a playback group, never a replacement word-accuracy measurement.
+    The first corroborated following word closes the smallest possible group.
+    """
+    from cjk_recovery import corroborated_group
+    units, views = cue['units'], report['witnesses']
+    positions = {u['first']:i for i,u in enumerate(units)}
+    first = proof['first']
+    if first not in positions:
+        return None, None
+    measured = []
+    for group in views[0]:
+        if group['first'] < first:
+            continue
+        select = lambda vs: [[u for u in v if (u['first'],u['stop'])==(group['first'],group['stop'])] for v in vs]
+        found, _ = corroborated_group(group, select(report['predictions']), select(views),
+            wave, bounds, protocol, spans=[(group['first'],group['stop'])])
+        if found:
+            measured.append(found[0])
+            if len(measured)==2:
+                break
+        elif group['first']==first:
+            return None, None
+    if len(measured)!=2 or measured[0]['first']!=first or measured[1]['first'] not in positions:
+        return None, None
+    anchor, guard = measured
+    lo, hi = positions[first], positions[guard['first']]
+    if hi <= lo+1 or guard['stop']!=units[hi]['stop']:
+        return None, None
+    # Never hide another established onset inside a coarse group, or span
+    # words that the acoustic witnesses place outside these two boundaries.
+    covered = [p for p in constraints if p['line']==proof['line'] and first<=p['first']<=guard['first']]
+    if any(first<p['first']<guard['first'] for p in covered) or any(
+            not anchor['start']<u['start']<guard['start']
+            for view in views for u in view if first<u['first']<guard['first']):
+        return None, None
+    limit = units[hi+1]['start'] if hi+1<len(units) else bounds[1]
+    if (guard['start']+.015 >= limit or
+            guard.get('timing_evidence')=='ctc_event' and guard['emission_end']>limit):
+        return None, None
+    guard = dict(guard, end=min(guard['end'],limit), acoustic_end=acoustic_end(guard),
+                 timing_source='cross_model_ctc' if guard.get('timing_evidence')=='ctc_event' else 'cross_model_phonemes')
+    group = dict(first=first, stop=guard['first'], text=cue['text'][first:guard['first']],
+                 start=anchor['start'], end=guard['start'], acoustic_end=None,
+                 timing_source='linear_fallback', bounds_source='cross_model_onsets')
+    candidate = dict(cue, units=units[:lo]+[group,guard]+units[hi+1:])
+    candidate.update(start=candidate['units'][0]['start'], aligned_start=candidate['units'][0]['start'],
+                     end=candidate['units'][-1]['end'], aligned_end=candidate['units'][-1]['end'])
+    try:
+        validate_timeline([candidate], [cue['text']], len(wave)/44100,
+                          [dict(p,line=1) for p in covered], language)
+    except ValueError:
+        return None, None
+    return candidate, dict(first=first, stop=guard['first'], accepted=True,
+        reason='uncertain interior swept between corroborated onsets', mode='grouped_fallback')
 
 
 def validate_timeline(cues, lines, duration, constraints=(), language='English'):
@@ -306,6 +379,7 @@ def main():
     parser.add_argument('--original',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--device',choices=['cpu','mps','cuda'],required=True)
+    parser.add_argument('--playback-fallback',action='store_true')
     args=parser.parse_args()
     out=args.output;out.mkdir(parents=True,exist_ok=True)
     read=lambda p:json.loads(p.read_text())
@@ -334,7 +408,7 @@ def main():
     review=AcousticReview(args.original,args.device,out.parent/'timing-cache',identity,protocol)
     started=time.perf_counter()
     repaired,report=reconcile_timing(cues,wave,review.observe,review.predict(wave),protocol,
-                                     lyrics['language'],constraints)
+                                     lyrics['language'],constraints,playback=args.playback_fallback)
     report.update(seconds=time.perf_counter()-started,source=source,input_sha256=sha(args.input))
     write(ledger_file,dict(source=source,constraints=report['constraints']))
     write(out/'cues.json',repaired);write(out/'report.json',report)
