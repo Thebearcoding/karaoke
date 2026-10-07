@@ -92,6 +92,8 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                 raise ValueError('Incomplete acoustic text evidence')
             bounds = [result[index-1]['units'][-1]['start']+.015 if index else 0.,
                       result[index+1]['units'][0]['start'] if index+1<len(result) else len(wave)/44100]
+            if 'audio_bounds' in cue:
+                bounds = [max(bounds[0],cue['audio_bounds'][0]), min(bounds[1],cue['audio_bounds'][1])]
             if any(not np.isfinite([u['start'],u['end']]).all()
                    or not bounds[0] <= u['start'] < bounds[1]
                    or not u['start'] < u['end'] <= len(wave)/44100 for v in views for u in v) or any(
@@ -228,12 +230,11 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                     continue
                 views = row['witnesses']
                 begin, end = min(v[0]['start'] for v in views), max(v[-1]['end'] for v in views)
-                # Reobserve a conflicting interior in its measured phrase
-                # once, even when the crop changed less than the displacement
-                # threshold. Crop sensitivity is not an onset error threshold.
+                # An internal merged word can also inherit an obsolete long
+                # crop. Reobserve the whole measured phrase once; its boundary
+                # envelope is only context, never an assigned word time.
                 if (0 < end-begin <= 30 and
-                        any(round(a*44100) != round(b*44100) for a,b in
-                            zip((begin,end),(cue['aligned_start'],cue['aligned_end'])))):
+                        max(abs(begin-cue['aligned_start']), abs(end-cue['aligned_end'])) > protocol['maximum_change_seconds']):
                     windows[index] = [begin, end]
                     cue.update(aligned_start=begin, aligned_end=end)
         if windows:
@@ -246,6 +247,65 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                     result[index] = cue
             reports.extend(dict(r, context_retry=windows[r['line']-1]) for r in reviewed['lines'])
             ledger = reviewed['constraints']
+        # A whole phrase can include competing voices or repeated words. If
+        # its crop was already appropriate, reobserve only the failed edit's
+        # text and audio span once, keeping surrounding words read-only.
+        unresolved = timing_violations(result, ledger)
+        for index in sorted({v['proof']['line']-1 for v in unresolved}-set(windows)):
+            if not 0<=index<len(result):
+                continue
+            cue = result[index]
+            row = next((r for r in reversed(reports) if r['line']==index+1 and r.get('predictions')), None)
+            if row is None:
+                continue
+            proofs = [v['proof'] for v in unresolved if v['proof']['line']==index+1 and v['reason']!='lyric identity changed']
+            failed = [r for r in row['repairs'] if not r['accepted'] and
+                      any(r['first']<=p['first']<r['stop'] for p in proofs)]
+            if not failed:
+                continue
+            first, stop = min(r['first'] for r in failed), max(r['stop'] for r in failed)
+            if first==0 and stop==len(cue['text']):
+                continue
+            units=cue['units']
+            selected=[i for i,u in enumerate(units) if first<=u['first']<u['stop']<=stop]
+            if not selected or units[selected[0]]['first']!=first or units[selected[-1]]['stop']!=stop:
+                continue
+            lo,hi=selected[0],selected[-1]+1
+            spans=[[u for u in v if first<=u['first']<u['stop']<=stop] for v in row['witnesses']]
+            text=cue['text'][first:stop]
+            if any(not v or normalized(''.join(u['text'] for u in v))!=normalized(text) for v in spans):
+                continue
+            low=units[lo-1]['start']+.015 if lo else (result[index-1]['units'][-1]['start']+.015 if index else 0.)
+            high=units[hi]['start'] if hi<len(units) else (result[index+1]['units'][0]['start'] if index+1<len(result) else len(wave)/44100)
+            begin,end=max(low,min(v[0]['start'] for v in spans)),min(high,max(v[-1]['end'] for v in spans))
+            if not 0 < end-begin <= 30:
+                continue
+            part=dict(text=text,start=units[lo]['start'],end=units[hi-1]['end'],
+                      aligned_start=begin,aligned_end=end,audio_bounds=[low,high],
+                      units=[dict(u,first=u['first']-first,stop=u['stop']-first) for u in units[lo:hi]])
+            local=[dict(p,line=1,text=text,first=p['first']-first,stop=p['stop']-first)
+                   for p in ledger if p['line']==index+1 and first<=p['first']<p['stop']<=stop]
+            recovered,reviewed=reconcile_timing([part],wave,witness,predict,protocol,language,local,_retry_context=False)
+            detail=dict(span=[first,stop],audio_bounds=[low,high],report=reviewed,accepted=False)
+            row['local_span_retry']=detail
+            for p in reviewed['constraints']:
+                translated=dict(p,line=index+1,text=cue['text'],first=p['first']+first,stop=p['stop']+first)
+                if translated not in ledger:ledger.append(translated)
+            replacement=[dict(u,first=u['first']+first,stop=u['stop']+first) for u in recovered[0]['units']]
+            candidate=dict(cue,units=units[:lo]+replacement+units[hi:])
+            try:
+                if any(not low<=u['start']<u['end']<=high for u in replacement):
+                    raise ValueError('Local timing repair crosses preserved neighbours')
+                validate_timeline([candidate],[cue['text']],len(wave)/44100,
+                                  [dict(p,line=1) for p in ledger if p['line']==index+1],language)
+            except ValueError as error:
+                detail['reason']=str(error)
+                continue
+            candidate.update(start=candidate['units'][0]['start'],aligned_start=candidate['units'][0]['start'],
+                             end=candidate['units'][-1]['end'],aligned_end=candidate['units'][-1]['end'])
+            result[index]=candidate
+            detail['accepted']=True
+            row['repairs'].append(dict(first=first,stop=stop,accepted=True,mode='local_acoustic_span'))
     if playback:
         for row in reports:
             index = row['line']-1
