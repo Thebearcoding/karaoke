@@ -2055,6 +2055,78 @@ class AlignmentIntegrity(unittest.TestCase):
             np.testing.assert_allclose([c['start'] for c in cues], starts, atol=.001)
             self.assertEqual([c['text'] for c in cues], lines)
 
+    def test_known_text_localizer_falls_back_when_specialized_vocabulary_cannot_read_the_lyrics(self):
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        from align_lyrics_whisper import main
+        from subtitles import highlight_spans
+
+        for middle, oom in [('还是想你', False), ('唱到 Open Sky', False), ('唱到 Open Sky', True)]:
+            with self.subTest(middle=middle, oom=oom), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                lines, starts = ['你好', middle, '再见'], [1., 4., 8.]
+                def align(samples, text, **options):
+                    begin = float(samples[0])
+                    segments = []
+                    for line in text.splitlines():
+                        start = starts[lines.index(line)]-begin
+                        words = [dict(word=line[a:b], start=start+i*.3, end=start+i*.3+.2, probability=.9)
+                                 for i,(a,b) in enumerate(highlight_spans(line, 'Chinese'))]
+                        if line == middle:
+                            for word in words:
+                                word.update(start=start, end=start)
+                        segments.append(dict(text=line, words=words, start=start, end=words[-1]['end']))
+                    return SimpleNamespace(to_dict=lambda: dict(segments=segments))
+                measured = [dict(first=a, stop=b, text=middle[a:b], start=4.+i*.3, end=4.2+i*.3)
+                            for i,(a,b) in enumerate(highlight_spans(middle, 'Chinese'))]
+                def witness(cue, wave, **options):
+                    self.assertEqual(cue['text'], middle)
+                    self.assertLess(cue['audio_bounds'][0], 4.)
+                    self.assertEqual(cue['audio_bounds'][1], 8.)
+                    if oom:
+                        raise RuntimeError('CUDA out of memory')
+                    return [measured, measured]
+                model = Mock()
+                model._buffers = {'alignment_heads': None}
+                model.dims.n_mels, model.device = 80, 'cpu'
+                model.detect_language.return_value = (None, {'zh': 1.})
+                model.align.side_effect = align
+                singing = Mock(checkpoint=root/'model')
+                singing.infer.return_value = dict(units=measured)
+                sf.write(root/'audio.wav', np.arange(12*16000)/16000, 16000, subtype='FLOAT')
+                sf.write(root/'original.wav', np.arange(12*44100)/44100, 44100, subtype='FLOAT')
+                (root/'lyrics.json').write_text(json.dumps(dict(language='Chinese', lines=lines)))
+                (root/'jobs.json').write_text(json.dumps([dict(audio=str(root/'audio.wav'),
+                    original_audio=str(root/'original.wav'), lyrics=str(root/'lyrics.json'),
+                    localize_with_asr=False, output=str(root/'alignment'))]))
+                with patch('stable_whisper.load_model', return_value=model), patch(
+                        'align_lyrics_whisper.sha', return_value='test-model-hash'), patch(
+                        'cjk_recovery.AcousticWitness', return_value=witness) as multilingual, patch(
+                        'align_lyric_phonemes.SingingAligner', return_value=singing) as specialized, patch(
+                        'sys.argv', ['align', '--jobs', str(root/'jobs.json'), '--device', 'cpu']):
+                    if oom:
+                        with self.assertRaisesRegex(RuntimeError, 'CUDA out of memory'):
+                            main()
+                        continue
+                    main()
+                model.transcribe.assert_not_called()
+                cues = json.loads((root/'alignment/cues.json').read_text())
+                self.assertEqual([c['text'] for c in cues], lines)
+                np.testing.assert_allclose([c['start'] for c in cues], starts, atol=.001)
+                report = json.loads((root/'alignment/run.json').read_text())
+                recovery = next(r for r in report['line_recoveries'] if r.get('isolated') and r['accepted'])
+                evidence = recovery['acoustic_fallback']
+                if 'Open' in middle:
+                    specialized.assert_not_called()
+                    multilingual.assert_called_once()
+                    self.assertEqual(evidence['model'], 'MMS_FA')
+                    self.assertIn('Unsupported Chinese pronunciation', evidence['specialized_pronunciation_error'])
+                else:
+                    specialized.assert_called_once()
+                    multilingual.assert_not_called()
+                    self.assertEqual(evidence['model'], 'SOFA_CTC')
+
     def test_rejected_alignment_retains_raw_evidence_without_publishing_captions(self):
         import json
         import shutil

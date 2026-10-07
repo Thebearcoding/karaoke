@@ -1032,27 +1032,35 @@ def main():
             from scipy.signal import resample_poly
             if acoustic_audio is None:
                 acoustic_audio = resample_poly(audio, 441, 160).astype('float32')
+            pronunciation_error = None
             if lyrics['language'] == 'Chinese':
                 from align_lyric_phonemes import SingingAligner
                 from phoneme_progress import spoken_units
-                if singing is None:
-                    singing = SingingAligner('Chinese', args.device)
-                info = sf.info(job['original_audio'])
-                mixture, rate = sf.read(job['original_audio'], start=round(start*info.samplerate),
-                    stop=round(stop*info.samplerate), dtype='float32', always_2d=True)
-                divisor = np.gcd(rate, 44100)
-                mixture = resample_poly(mixture.mean(axis=1), 44100//divisor, rate//divisor)
-                units = spoken_units(text, 'Chinese')
-                views = [singing.infer(clip, start, units, None, decoder='ctc')['units'] for clip in
-                    (acoustic_audio[round(start*44100):round(stop*44100)], mixture)]
-                return dict(model='SOFA_CTC', model_sha256=sha(singing.checkpoint), views=views)
+                try:
+                    units = spoken_units(text, 'Chinese')
+                except ValueError as error:
+                    # A song's dominant language is not a decoder vocabulary
+                    # guarantee. Keep mixed-language text and try multilingual MMS.
+                    pronunciation_error = str(error)
+                else:
+                    if singing is None:
+                        singing = SingingAligner('Chinese', args.device)
+                    info = sf.info(job['original_audio'])
+                    mixture, rate = sf.read(job['original_audio'], start=round(start*info.samplerate),
+                        stop=round(stop*info.samplerate), dtype='float32', always_2d=True)
+                    divisor = np.gcd(rate, 44100)
+                    mixture = resample_poly(mixture.mean(axis=1), 44100//divisor, rate//divisor)
+                    views = [singing.infer(clip, start, units, None, decoder='ctc')['units'] for clip in
+                        (acoustic_audio[round(start*44100):round(stop*44100)], mixture)]
+                    return dict(model='SOFA_CTC', model_sha256=sha(singing.checkpoint), views=views)
             if acoustic is None:
                 acoustic = AcousticWitness(job['original_audio'], args.device)
             cue = dict(text=text, aligned_start=start, aligned_end=stop, audio_bounds=[start, stop])
             views = acoustic(cue, acoustic_audio, language=lyrics['language'])
             if acoustic_hash is None:
                 acoustic_hash = sha(Path(__file__).resolve().parent/'models/alignment/mms/model.pt')
-            return dict(model='MMS_FA', model_sha256=acoustic_hash, views=views)
+            return dict(model='MMS_FA', model_sha256=acoustic_hash, views=views,
+                        specialized_pronunciation_error=pronunciation_error)
 
         for first, stop, context_first, context_stop, begin, end in progress_items(blocks, 'blocks'):
             print(json.dumps({'song': Path(job['lyrics']).stem, 'lines': [first+1, stop],
