@@ -648,7 +648,8 @@ def main():
         with p.open('rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
     cues,lyrics=read(args.input),read(args.lyrics)
     wave,rate=sf.read(args.audio,dtype='float32',always_2d=True)
-    duration=len(wave)/rate
+    frames=len(wave)
+    duration=frames/rate
     validate_timeline(cues,lyrics['lines'],duration,language=lyrics['language'])
     divisor=np.gcd(rate,44100)
     wave=resample_poly(wave.mean(axis=1),44100//divisor,rate//divisor).astype('float32')
@@ -672,7 +673,9 @@ def main():
             yield 'vocals_phonemes', wave, review.observe, review.predict(wave,decoder='phonemes')
         if args.lead is not None:
             lead, lead_rate=sf.read(args.lead,dtype='float64',always_2d=True)
-            if abs(len(lead)/lead_rate-duration) > 1/lead_rate:
+            # Resampling rounds the same endpoint on two sample grids. Use
+            # integer frame counts and one frame of the coarser grid.
+            if abs(len(lead)*rate-frames*lead_rate) > max(rate,lead_rate):
                 raise ValueError('Alternate acoustic view does not match the source duration')
             divisor=np.gcd(lead_rate,44100)
             lead=resample_poly(lead.mean(axis=1),44100//divisor,lead_rate//divisor).astype('float32')

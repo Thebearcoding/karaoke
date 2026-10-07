@@ -4179,6 +4179,35 @@ def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success
         assert lead.result.call_count == int(need_lead)
 
 
+@pytest.mark.parametrize('extra_frames', [0, 4])
+def test_timing_review_accepts_one_sample_of_resampling_but_rejects_different_lengths(tmp_path, monkeypatch, extra_frames):
+    import soundfile as sf
+    from karaoke import timing_validation as module
+    cue = dict(text='hello', start=.1, end=.3,
+               units=[dict(text='hello', first=0, stop=5, start=.1, end=.3)])
+    (tmp_path/'cues.json').write_text(json.dumps([cue]))
+    (tmp_path/'lyrics.json').write_text(json.dumps(dict(lines=['hello'], language='English')))
+    audio, lead = tmp_path/'audio.wav', tmp_path/'lead.wav'
+    sf.write(audio, np.ones((44101, 2))*.05, 44100, subtype='FLOAT')
+    sf.write(lead, np.ones((48000+extra_frames, 2))*.05, 48000, subtype='DOUBLE')
+    review = Mock()
+    monkeypatch.setattr(module, 'AcousticReview', lambda *args: review)
+    monkeypatch.setattr(module, 'acoustic_model_files', lambda *args: [])
+    def reconcile(cues, observations, *args, **kwargs):
+        assert len(list(observations)) == 2
+        return cues, dict(lines=[], constraints=[], unresolved=[])
+    monkeypatch.setattr(module, 'reconcile_views', reconcile)
+    monkeypatch.setattr(sys, 'argv', ['timing_validation', '--input', str(tmp_path/'cues.json'),
+        '--lyrics', str(tmp_path/'lyrics.json'), '--audio', str(audio), '--original', str(audio),
+        '--lead', str(lead), '--output', str(tmp_path/'checked'), '--device', 'cpu'])
+    if extra_frames:
+        with pytest.raises(ValueError, match='does not match the source duration'):
+            module.main()
+    else:
+        module.main()
+        assert json.loads((tmp_path/'checked/cues.json').read_text()) == [cue]
+
+
 def test_playback_fallback_recovers_each_phrase_from_available_stages(tmp_path):
     pipeline = Pipeline(dict(url=URL), tmp_path)
     lines = ['第一句', '第二句', '第三句']
