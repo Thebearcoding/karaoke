@@ -369,7 +369,8 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         except ValueError:
             report['reason'] = 'invalid_recognition_anchors'
             continue
-        blocks.sort(key=lambda block: not untimed.intersection(range(block[0]+left, block[1]+left)))
+        priority = lambda b: not untimed.intersection(range(b[0]+left, b[1]+left))
+        blocks.sort(key=priority)
         relocalized = set()
         for block_index, (start, stop_line, cf, cs, ab, ae) in enumerate(blocks):
             selected = targets.intersection(range(start+left, stop_line+left))
@@ -494,10 +495,13 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                         refined_blocks = alignment_blocks(refined, audio)
                         anchors[:] = refined
                         targets.update(range(start+left, stop_line+left))
-                        # Finish the narrowed search we already paid for before
-                        # unrelated regions can consume its remaining budget.
-                        blocks[block_index+1:block_index+1] = [b for b in refined_blocks
+                        # Preserve missing-line priority after splitting too.
+                        # Other refinements follow regions already waiting.
+                        narrowed = [b for b in refined_blocks
                             if b[0] < stop_line and b[1] > start]
+                        pending = ([b for b in narrowed if not priority(b)]+blocks[block_index+1:]
+                                   +[b for b in narrowed if priority(b)])
+                        blocks[block_index+1:] = sorted(pending, key=priority)
                         continue
                 except ValueError as error:
                     regional['error'] = str(error)

@@ -2522,6 +2522,34 @@ def test_missing_lyric_timing_takes_priority_over_collapsed_refinement(force_glo
     assert result['result']['segments'][1]==segments[1]
 
 
+def test_regional_split_keeps_missing_line_ahead_of_optional_refinement():
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines = ['line'+str(i) for i in range(12)]
+    lines[7] = 'earlier collapsed phrase here'
+    starts = [1.+8*i for i in range(12)]
+    segments = [dict(words=[dict(word=t,start=s,end=s+(.8 if i!=8 else 0))])
+                for i,(t,s) in enumerate(zip(lines,starts))]
+    segments[7]['words'] = [dict(word=w+' ',start=57.,end=57.+(.12 if i==3 else 0))
+                            for i,w in enumerate(lines[7].split())]
+    block = dict(range=[0,12],context=[0,12],source_range=[0.,100.],result=dict(segments=segments))
+    recognized, aligned = [], []
+    def recognize(begin,end):
+        recognized.append((begin,end))
+        omitted = (7,8) if (begin,end)==(0.,100.) else (7,)
+        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+.8-begin)
+            for i,(t,s) in enumerate(zip(lines,starts)) if i not in omitted and begin<=s<s+.8<=end])])
+    def align(begin,end,text,**options):
+        aligned.append(text.splitlines())
+        if text!=lines[8]:
+            return None
+        return dict(segments=[dict(words=[dict(word=text,start=65.-begin,end=65.8-begin)])])
+    result = recover_with_local_asr(block,lines,np.zeros(100*16000),'English',recognize,align,
+                                   force_global=True,max_alignment_attempts=3)
+    assert len(recognized)==2 and aligned==[lines[6:10],lines[8:9]]
+    assert result['result']['segments'][8]['words'][0]==dict(word=lines[8],start=65.,end=65.8)
+    assert result['result']['segments'][7]==segments[7]
+
+
 @pytest.mark.parametrize('located', [1, 3])
 def test_local_recognition_keeps_context_predictions_through_global_retry(located):
     from karaoke.align_lyrics_whisper import recover_with_local_asr
