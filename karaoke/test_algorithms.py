@@ -1900,6 +1900,44 @@ class AlignmentIntegrity(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, 'overlap'):
                         presentation_cues(cues, 10., lead=0, tail=0, bridge_gap=0)
 
+    def test_distant_context_does_not_block_a_bounded_boundary_repair(self):
+        from copy import deepcopy
+        lines = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot']
+        for gap in ('before', 'after', 'inside_core'):
+            with self.subTest(gap=gap):
+                times = ([(1.,2.), (10.,11.), (82.,93.4), (92.7,94.4), (96.,97.), (110.,111.)]
+                         if gap == 'before' else
+                         [(1.,2.), (10.,11.), (12.,23.4), (22.7,24.4), (96.,97.), (110.,111.)])
+                if gap == 'inside_core':
+                    times[2:4] = [(12.,93.4), (92.7,94.4)]
+                segments = [dict(text=t,words=[dict(word=t,start=a,end=b)]) for t,(a,b) in zip(lines,times)]
+                raw = dict(range=[0,6],context=[0,6],source_range=[0.,120.],result=dict(segments=segments))
+                original, calls = deepcopy(raw), []
+                def align(begin,end,text,**options):
+                    calls.append((begin,end,text.splitlines()))
+                    self.assertLessEqual(end-begin,45.)
+                    selected = deepcopy([segments[lines.index(t)] for t in text.splitlines()])
+                    for segment in selected:
+                        word = segment['words'][0]
+                        if word['word'] == 'charlie':word['end'] -= .6
+                        if word['word'] == 'delta':word['start'] += .2
+                        word['start'] -= begin
+                        word['end'] -= begin
+                    return dict(segments=selected)
+                cues, stitched, repairs = stitch_blocks(lines,[raw],120.,'English',align)
+                self.assertEqual(raw,original)
+                if gap == 'inside_core':
+                    self.assertEqual(calls,[])
+                    self.assertEqual(stitched,[raw])
+                    continue
+                self.assertEqual(len(calls),1)
+                self.assertEqual(calls[0][2],lines[2:] if gap == 'before' else lines[:4])
+                self.assertEqual(repairs[0]['range'],[2,4])
+                self.assertEqual([(cues[i]['start'],cues[i]['end']) for i in (0,1,4,5)],
+                                 [times[i] for i in (0,1,4,5)])
+                presentation_cues(cues,120.,lead=0,tail=0,bridge_gap=0)
+                self.assertFalse(build_progress(cues,stitched,'English')[1]['fallback_lines'])
+
     def test_asr_silence_filter_keeps_quiet_speech_and_nearby_collapsed_words(self):
         audio = np.zeros(5*16000, dtype='float32')
         audio[16000:2*16000] = 1e-7

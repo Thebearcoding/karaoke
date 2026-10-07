@@ -645,9 +645,21 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
                 break
         if not repaired and align is not None:
             for index in sorted(bad):
-                # Start with the conflicting pair. The same joint prediction
-                # may include adjacent lines only to resolve edge crossings.
-                first, stop = max(0, index-3), min(len(lines), index+3)
+                # Keep as much nearby context as fits, but never let a distant
+                # verse prevent repairing the pair. The core is never cropped.
+                windows = []
+                for first in range(max(0, index-3), index):
+                    for stop in range(index+1, min(len(lines), index+3)+1):
+                        context = [predictions[owners[i]][i][0] for i in range(first, stop)]
+                        if context[0]['status'] != 'candidate' or context[-1]['status'] != 'candidate':
+                            continue
+                        measured = [c for c in context if c['status'] == 'candidate']
+                        span = min(duration, max(c['end'] for c in measured)+.6)-max(0., min(c['start'] for c in measured)-.6)
+                        if 0 < span <= 45:
+                            windows.append((first-stop, span, first, stop))
+                if not windows:
+                    continue
+                _, _, first, stop = min(windows)
                 while len(attempted) < 24:
                     context = [predictions[owners[i]][i][0] for i in range(first, stop)]
                     if context[0]['status'] != 'candidate' or context[-1]['status'] != 'candidate':
