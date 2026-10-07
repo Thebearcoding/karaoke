@@ -64,7 +64,8 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None):
     except (OSError, ValueError, TypeError):
         pass
     with cache.stage(stage, inputs=[Path(__file__)], outputs=[path],
-                     config=dict(song=song, video_id=metadata.get('id'), source_title=metadata.get('title'), duration=duration),
+                     config=dict(song=song, video_id=metadata.get('id'), source_title=metadata.get('title'), duration=duration,
+                                 locale='zh_CN' if provider == 'youtube_music' else None),
                      code=[Path(__file__), Path(__file__).with_name('lyric_lookup.py'),
                            Path(__file__).with_name('source_captions.py')]) as reused:
         if not reused:
@@ -97,8 +98,8 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None):
                     with requests.Session() as session:
                         session.request = functools.partial(session.request, timeout=10)
                         session.hooks['response'].append(lambda response, *a, **kw: response.raise_for_status())
-                        music = YTMusic(requests_session=session)
-                        listing = lookup.cached_lyric_request(provider, dict(video_id=video, method='watch'), cache,
+                        music = YTMusic(language='zh_CN', requests_session=session)
+                        listing = lookup.cached_lyric_request(provider, dict(video_id=video, method='watch', locale='zh_CN'), cache,
                             lambda: music.get_watch_playlist(videoId=video, limit=1))
                         if not listing['tracks'] or listing['tracks'][0]['videoId'] != video:
                             raise ValueError('Music lyrics refer to another recording')
@@ -106,7 +107,7 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None):
                         recording_identity = dict(title=track.get('title') or '', video_id=video,
                             artist=' · '.join(a['name'] for a in track.get('artists', []) if a.get('name')))
                         result = (lookup.cached_lyric_request(provider,
-                            dict(video_id=video, method='lyrics', browse_id=listing['lyrics']), cache,
+                            dict(video_id=video, method='lyrics', browse_id=listing['lyrics'], locale='zh_CN'), cache,
                             lambda: music.get_lyrics(listing['lyrics'])) if listing.get('lyrics') else None)
                     text = (result or {}).get('lyrics')
                     if text is not None and (not isinstance(text, str) or len(text) > 30000):

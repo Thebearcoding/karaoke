@@ -1613,6 +1613,7 @@ class AlignmentIntegrity(unittest.TestCase):
 
     def test_foreign_lyrics_retry_alignment_in_clip_language_before_asr(self):
         import json
+        import shutil
         from types import SimpleNamespace
         from unittest.mock import Mock, patch
         from align_lyrics_whisper import main
@@ -1659,6 +1660,19 @@ class AlignmentIntegrity(unittest.TestCase):
             np.testing.assert_allclose([c['start'] for c in cues], starts, atol=.001)
             model.transcribe.assert_not_called()
             self.assertEqual(json.loads((root/'alignment/run.json').read_text())['local_alignment_languages'][0]['language'], 'de')
+            # If direct retries still fail, recognition detects the crop language
+            # independently rather than forcing the song's dominant language.
+            shutil.rmtree(root/'alignment')
+            model._buffers = {'alignment_heads': None}
+            model.detect_language.return_value = (None, {'ja': 1.})
+            with patch('stable_whisper.load_model', return_value=model), patch(
+                    'align_lyrics_whisper.sha', return_value='test-model-hash'), patch('sys.argv',
+                    ['align', '--jobs', str(root/'jobs.json'), '--device', 'cpu']):
+                main()
+            self.assertTrue(recognized)
+            cues = json.loads((root/'alignment/cues.json').read_text())
+            self.assertEqual([c['text'] for c in cues], lines)
+            np.testing.assert_allclose([c['start'] for c in cues], starts, atol=.001)
 
     def test_rejected_alignment_retains_raw_evidence_without_publishing_captions(self):
         import json

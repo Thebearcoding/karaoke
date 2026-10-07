@@ -16,7 +16,7 @@ from opencc import OpenCC
 from rapidfuzz.distance import Levenshtein
 
 from .anchors_from_asr import text_units
-from .job_schema import retry_after_seconds
+from .job_schema import provider_error, retry_after_seconds, retry_fields
 from .song_sources import (SongText, extract_song_metadata, find_verified_lyrics,
                            transcript_lines, video_song_info)
 from .source_captions import read_document
@@ -446,11 +446,22 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
         evidence['description_lines'] = [dict(number=i+1, text=line) for i, line in enumerate(description_lines)]
         from openai import OpenAIError
         preserve_title = bool(request.get('title') or metadata.get('track'))
-        metadata_read, parsed = False, None
-        def read_description(resolve_identity=()):
-            nonlocal metadata_error, metadata_read, parsed
+        metadata_read, parsed, metadata_failure = False, None, None
+        metadata_retries = []
+        def read_description(resolve_identity=(), *, retry=False):
+            nonlocal metadata_error, metadata_read, parsed, metadata_failure
             if not resolve_identity and not description.strip():
                 return None
+            if retry and metadata_failure and not metadata_retries:
+                error, failed_at = metadata_failure
+                fields = retry_fields(error, '', 1, failed_at=failed_at)
+                deadline = fields.get('next_retry_at')
+                delay = max(0, deadline-time.time()) if deadline else None
+                metadata_retries.append(dict(error=error, next_retry_at=deadline,
+                                             attempted=delay is not None and delay <= 60))
+                if metadata_retries[-1]['attempted']:
+                    time.sleep(delay)
+                    metadata_read = False
             try:
                 if not metadata_read:
                     metadata_read = True
@@ -458,6 +469,8 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                     parsed = SongText.model_validate(packet['parsed']) if packet['parsed'] is not None else None
             except (OpenAIError, ValueError) as error:
                 metadata_error = type(error).__name__
+                classified = provider_error(error)
+                metadata_failure = (classified, time.time()) if classified else None
                 parsed = None
             if parsed is None:
                 return None
@@ -479,20 +492,35 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
         lines, report = fetch_lyric_consensus(song, metadata, duration, cache, read_description, preserve_title)
         if not lines:
             original = {key: song.get(key) for key in ('title', 'artist')}
-            description_text = read_description([key for key in original if not request.get(key)])
-            resolved = {key: song.get(key) for key in original}
-            if resolved != original:
-                previous = report
+            previous, attempts = report, []
+            # Retain a platform-confirmed performer while resolving an upload
+            # title. A description can also credit producers or session players.
+            for key in ('title', 'artist'):
+                if request.get(key):
+                    continue
+                before = dict(song)
+                description_text = read_description([key], retry=True)
+                if parsed is None and metadata_failure and not metadata_retries:
+                    description_text = read_description([key], retry=True)
+                if song == before:
+                    continue
                 blocked = {r['provider']: (None, r) for r in report.get('crosscheck', {}).get('unavailable_sources', [])
                            if r.get('error') and r.get('provider')}
                 lines, report = fetch_lyric_consensus(song, metadata, duration, cache, description_text, True,
                                                       prefetched=blocked)
-                report = dict(report, identity_recovery=dict(original=original, resolved=resolved,
-                    recovered=bool(lines), previous_lookup=previous))
+                attempts.append(dict(identity={key: song.get(key) for key in original}, lookup=report))
+                if lines:
+                    break
+            if attempts:
+                report = dict(report, identity_recovery=dict(original=original,
+                    resolved={key: song.get(key) for key in original}, recovered=bool(lines),
+                    attempts=attempts, previous_lookup=previous))
         if metadata_language and report.get('language') and metadata_language != report['language']:
             report = dict(report, metadata_language_corrected=dict(original=metadata_language, resolved=report['language']))
         if metadata_error:
             report = dict(report, metadata_error=metadata_error)
+        if metadata_retries:
+            report = dict(report, metadata_retries=metadata_retries)
         (cache.root/'lyrics-first-lookup.json').write_text(json.dumps(report, ensure_ascii=False)+'\n')
         if not lines:
             return None
@@ -569,7 +597,7 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
                 continue
             clean_lines, excluded = published_lyric_lines(raw_text, row['trackName'], [row['artistName']])
             text = '\n'.join(clean_lines)
-            if not text or re.search(r'\[[^\]\n]+\]', text):
+            if not text:
                 continue
             language = song.get('language') or text_language(text)
             if language is None:

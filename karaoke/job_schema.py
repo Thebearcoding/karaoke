@@ -113,6 +113,7 @@ def provider_error(value):
     known = {
         'APITimeoutError': ('timeout', '语音或歌词服务响应超时，请稍后重试', True),
         'APIConnectionError': ('connection', '无法连接语音或歌词服务，请稍后重试', True),
+        'InternalServerError': ('server_error', '语音或歌词服务暂时异常，请稍后重试', True),
         'RateLimitError': ('rate_limit', '语音或歌词服务额度或频率受限，请稍后重试', True),
         'ContentFilterFinishReasonError': ('content_rejected', '歌词服务拒绝处理本次内容，需要人工检查', False),
         'AuthenticationError': ('authentication', '语音或歌词服务认证失败，请检查服务配置', False),

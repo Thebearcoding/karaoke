@@ -202,6 +202,11 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         words = [w for w in block['result']['segments'][i-first]['words'] if normalized(w['word'])]
         if len(words) >= 4 and sum(w['end']-w['start'] < .015 for w in words) > len(words)/2:
             bad.add(i)  # A tiny surviving token must not hide a collapsed phrase.
+        if i > block['range'][0] and all(cues[j]['status'] == 'candidate' for j in (i-1, i)):
+            try:
+                presentation_cues(cues[i-1:i+1], duration, lead=0, tail=0, bridge_gap=0)
+            except ValueError:
+                bad.update((i-1, i))  # Complete words can still occupy the wrong repeated passage.
     if not bad:
         return block
     # Widespread collapse makes the old neighbouring times unsafe as anchors.
@@ -841,7 +846,7 @@ def main():
 
             def recognize_audio(start, stop):
                 from stage_cache import StageCache
-                config = dict(start=start, stop=stop, language=language, model=args.model,
+                config = dict(start=start, stop=stop, language=None, model=args.model,
                               model_sha256=model_hash, device=args.device,
                               temperature=0, condition_on_previous_text=False,
                               implementation=inspect.getsource(recognize_audio),
@@ -854,7 +859,7 @@ def main():
                     if not reused:
                         report_progress(detail='定位未对齐的唱段')
                         recognized = model.transcribe(audio[round(start*16000):round(stop*16000)],
-                            language=language, temperature=0, condition_on_previous_text=False,
+                            language=None, temperature=0, condition_on_previous_text=False,
                             word_timestamps=True, regroup=False, verbose=None,
                             fp16=args.device == 'cuda')
                         path.write_text(json.dumps(recognized.to_dict(), ensure_ascii=False, default=json_number)+'\n')

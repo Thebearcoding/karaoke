@@ -892,7 +892,7 @@ def test_online_lyrics_correct_asr_text_without_using_provider_times(tmp_path, m
     dict(trackName='晚風（鋼琴版）'), dict(trackName='別的歌（電影《遠山》主題曲）'),
     dict(artistName='林林（電影《遠山》主題曲）'),
     dict(duration=309), dict(duration=float('nan')), dict(instrumental=True),
-    dict(plainLyrics='毫不相干的文字'), dict(plainLyrics='[Music] 微風裡慢慢歌唱'),
+    dict(plainLyrics='毫不相干的文字'), dict(plainLyrics='[Music]'),
     dict(trackName=['malformed']), dict(plainLyrics=None),
 ])
 def test_online_lyrics_reject_other_versions_and_unsupported_text(change):
@@ -907,6 +907,16 @@ def test_online_lyrics_reject_other_versions_and_unsupported_text(change):
     assert lyric_candidate(dict(status='ok', results=[row]), song, transcription, 265.)[0]
     candidate, report = lyric_candidate(dict(status='ok', results=[dict(row, **change)]), song, transcription, 265.)
     assert candidate is None and report['status'] == 'no_supported_recording'
+
+
+def test_lyric_candidate_preserves_sung_words_in_brackets():
+    from karaoke.lyric_lookup import lyric_candidate
+    body = ['Stay [with me] beside the quiet shore', 'Sing once more beneath the stars']
+    row = dict(id=1, trackName='Evening', artistName='Singer', duration=30.,
+               instrumental=False, plainLyrics='[Verse 1]\n'+'\n'.join(body))
+    lines, report = lyric_candidate(dict(status='ok', results=[row]),
+        dict(title='Evening', artist='Singer'), None, 30.)
+    assert lines == body and report['excluded_credit_lines'] == [1]
 
 
 def test_lyric_text_search_skips_a_title_only_result_before_alignment():
@@ -1035,7 +1045,8 @@ def test_unmatched_lyrics_retry_cached_native_identity_once_without_repeating_bl
         dict(track='Evening',artist='Lin',description='Published album and artist information'),
         30,StageCache(tmp_path),'test-model',None)
     assert len(metadata_calls) == 1 and limited_calls == ['netease']
-    assert calls == [('Evening','Lin')] + ([] if explicit_identity else [('晚風 Evening Wind','林林 Lin Lin')])
+    assert calls == [('Evening','Lin')] + ([] if explicit_identity else [
+        ('晚風 Evening Wind','Lin'), ('晚風 Evening Wind','林林 Lin Lin')])
     assert bool(result) == (recovered and not explicit_identity)
     if result:
         assert result['lines'] == body
@@ -1044,6 +1055,47 @@ def test_unmatched_lyrics_retry_cached_native_identity_once_without_repeating_bl
     else:
         report = json.loads((tmp_path/'lyrics-first-lookup.json').read_text())
         assert not report.get('identity_recovery',{}).get('recovered',False)
+
+
+@pytest.mark.parametrize('failure', ['timeout', 'server', 'long_backoff', 'authentication'])
+def test_missing_lyrics_retry_transient_metadata_and_keep_confirmed_artist(tmp_path, monkeypatch, failure):
+    import httpx
+    from openai import APITimeoutError, InternalServerError, RateLimitError, AuthenticationError
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    request = httpx.Request('POST', 'https://example.test')
+    response = httpx.Response(429, request=request, headers={'retry-after': '120'})
+    error = {'timeout': APITimeoutError(request=request),
+             'server': InternalServerError('server', response=httpx.Response(503, request=request), body=None),
+             'long_backoff': RateLimitError('rate limit', response=response, body=None),
+             'authentication': AuthenticationError('auth', response=response, body=None)}[failure]
+    calls, waits, queries = [], [], []
+    def extract(*args):
+        calls.append(1)
+        if len(calls) == 1:
+            raise error
+        return dict(parsed=dict(title='晚風', artist='Singer; session musician', lyric_line_numbers=[]))
+    def search(song, *args, **kwargs):
+        queries.append((song['title'], song['artist']))
+        if callable(args[3]):
+            args[3]()
+        found = song['title'] == '晚風' and song['artist'] == '林林'
+        return (['微風裡慢慢歌唱'] if found else None), dict(provider='line_music', language='Chinese')
+    monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', extract)
+    monkeypatch.setattr(lyric_lookup.time, 'sleep', waits.append)
+    monkeypatch.setattr(lyric_consensus, 'fetch_lyric_consensus', search)
+    recovered = failure in ('timeout', 'server')
+    result = lyric_lookup.prepare_online_lyrics(dict(url=URL),
+        dict(track='Evening', artist='林林', description='Published metadata'),
+        30, StageCache(tmp_path), 'unused', None)
+    assert bool(result) == recovered
+    assert len(calls) == (2 if recovered else 1)
+    assert len(waits) == int(recovered)
+    if recovered:
+        assert 0 <= waits[0] <= 30 and result['artist'] == '林林'
+        assert queries == [('Evening','林林'), ('晚風','林林')]
+    report = json.loads((tmp_path/'lyrics-first-lookup.json').read_text())
+    assert report['metadata_retries'][0]['attempted'] == recovered
 
 
 def test_published_lyrics_use_explicit_video_credits_without_a_text_model(tmp_path, monkeypatch):
@@ -1956,7 +2008,7 @@ def test_direct_alignment_defers_unanchored_or_oversized_repairs(far_neighbour):
         'requires_coarse_localization' if far_neighbour else 'no_measured_neighbour')
 
 
-@pytest.mark.parametrize('failure', [None, 'wrong_words', 'outside_window', 'outside_anchor', 'no_speech', 'boundary_overlap', 'collapsed', 'empty_attention', 'oom'])
+@pytest.mark.parametrize('failure', [None, 'wrong_words', 'outside_window', 'outside_anchor', 'no_speech', 'boundary_overlap', 'only_overlap', 'collapsed', 'empty_attention', 'oom'])
 def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neighbours(failure):
     from copy import deepcopy
     from karaoke.align_lyrics_whisper import recover_with_local_asr
@@ -1964,8 +2016,9 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
     if failure == 'collapsed':lines[1] = 'bravo delta echo foxtrot'
     segments = [dict(text=text, start=t, end=t+.8, words=[dict(word=text,start=t,end=t+.8)])
                 for text,t in zip(lines,starts)]
-    segments[1]['words'][0]['end'] = 4.
-    if failure == 'boundary_overlap':
+    if failure != 'only_overlap':
+        segments[1]['words'][0]['end'] = 4.
+    if failure in ('boundary_overlap', 'only_overlap'):
         segments[2]['words'][0]['start'] = 3.8
     block = dict(range=[0,3],context=[0,3],source_range=[0.,12.],result=dict(segments=segments))
     original = deepcopy(block)
@@ -1995,11 +2048,11 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
     result = recover_with_local_asr(block,lines,np.zeros(12*16000),'English',recognize,align)
     assert block == original
     assert result['result']['segments'][0] == segments[0]
-    if failure != 'boundary_overlap':
+    if failure not in ('boundary_overlap', 'only_overlap'):
         assert result['result']['segments'][2] == segments[2]
     assert result['asr_localizations'][0]['accepted_lines'] == (
-        [2,3] if failure == 'boundary_overlap' else [2] if failure is None else [])
-    if failure in (None, 'boundary_overlap', 'empty_attention'):
+        [2,3] if failure in ('boundary_overlap', 'only_overlap') else [2] if failure is None else [])
+    if failure in (None, 'boundary_overlap', 'only_overlap', 'empty_attention'):
         assert result['result']['segments'][1]['words'] == [dict(word='bravo',start=4.,end=4.8)]
         assert result['result']['segments'][2]['words'] == [dict(word='charlie',start=8.,end=8.8)]
     else:

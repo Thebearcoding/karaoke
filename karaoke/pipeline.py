@@ -817,8 +817,7 @@ class Pipeline:
         language = lyrics['language']
         output = self.output
         write_json(output/'alignment-jobs.json', [dict(audio=str(output/'vocals-16k.wav'),
-            lyrics=str(output/'lyrics.json'), anchors=str(output/'anchors.json'), output=str(output/'alignment'),
-            localize_with_asr=self.strict_audio)])
+            lyrics=str(output/'lyrics.json'), anchors=str(output/'anchors.json'), output=str(output/'alignment'))])
         self.run('align_words', [sys.executable, ROOT/'align_lyrics_whisper.py', '--jobs',
             output/'alignment-jobs.json', '--device', self.device])
         raw = json.loads((output/'alignment/raw.json').read_text())
