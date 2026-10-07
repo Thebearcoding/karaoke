@@ -9,7 +9,7 @@ import threading
 import time
 from urllib.parse import urljoin
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 import numpy as np
@@ -610,6 +610,42 @@ def test_pipeline_reuses_decoded_audio_and_rebuilds_corrupted_stage(tmp_path):
     output.write_bytes(b'truncated')
     pipeline.run('decode_audio', command)
     assert output.read_bytes() == expected
+
+
+def test_timing_review_cache_tracks_its_additional_audio_view(tmp_path, monkeypatch):
+    from karaoke import pipeline as module
+    code, folder = tmp_path/'code', tmp_path/'job'
+    code.mkdir()
+    monkeypatch.setattr(module, 'ROOT', code)
+    pipeline = Pipeline(dict(url=URL), folder)
+    (folder/'lyrics.json').write_text(json.dumps(dict(language='Chinese')))
+    lead = folder/'lead-separation/song/vocals.wav'
+    lead.parent.mkdir(parents=True)
+    lead.write_bytes(b'lead version 1')
+    base = [sys.executable, code/'timing_validation.py']
+    command = base+['--lead', lead]
+    spec = pipeline.stage_spec('validate_timing', command)
+    for path in spec['inputs']+spec['code']:
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'fixture')
+    calls = []
+    def run(*args):
+        calls.append(True)
+        output = folder/'timing-checked'
+        output.mkdir()
+        (output/'cues.json').write_text('[]')
+    monkeypatch.setattr(pipeline, 'run_process', run)
+    pipeline.run('validate_timing', base)
+    lead.write_bytes(b'lead version 2')
+    pipeline.run('validate_timing', base)
+    assert len(calls)==1
+    pipeline.run('validate_timing', command)
+    pipeline.run('validate_timing', command)
+    assert len(calls)==2
+    lead.write_bytes(b'lead version 3')
+    pipeline.run('validate_timing', command)
+    assert len(calls)==3
 
 
 def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
@@ -4084,32 +4120,41 @@ def test_playback_fallback_preserves_other_lines_highlights(tmp_path, bad):
 
 @pytest.mark.parametrize('old_time', [True, False])
 @pytest.mark.parametrize('strict_audio', [True, False])
-def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success_flag(tmp_path, monkeypatch, old_time, strict_audio):
+@pytest.mark.parametrize('need_lead', [None, False, True])
+def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success_flag(tmp_path, monkeypatch, old_time, strict_audio, need_lead):
     pipeline = Pipeline(dict(url=URL), tmp_path, device='cpu', audio_only=strict_audio)
     lyrics = dict(lines=['hello'], language='English')
     cue = dict(text='hello', start=1., end=5., units=[dict(text='hello', first=0, stop=5, start=1., end=5.)])
     (tmp_path/'cues.json').write_text(json.dumps([cue]))
     (tmp_path/'quality.json').write_text('{}')
+    calls = []
+    lead = Mock() if need_lead is not None else None
     def run(*args):
+        calls.append(args[1])
         assert ('--playback-fallback' in args[1]) is not strict_audio
-        output=tmp_path/'timing-checked';output.mkdir()
+        assert ('--defer-constraints' in args[1]) is (lead is not None and len(calls)==1)
+        assert ('--lead' in args[1]) is (len(calls)==2)
+        if lead is not None and len(calls)==1:
+            lead.result.assert_not_called()
+        output=tmp_path/'timing-checked';output.mkdir(exist_ok=True)
         checked=json.loads(json.dumps(cue))
-        if not old_time:checked['units'][0]['start']=4.
+        if not old_time and (not need_lead or len(calls)==2):checked['units'][0]['start']=4.
         if not strict_audio:
             checked['units'][0].update(timing_source='linear_fallback',
                                       bounds_source='cross_model_onset_prior_acoustic_end')
         (output/'cues.json').write_text(json.dumps([checked]))
         (output/'report.json').write_text(json.dumps(dict(
+            pending_review_lines=[1] if need_lead and len(calls)==1 else [],
             lines=[dict(line=1, status='reviewed', repairs=[]),
                    dict(line=1, status='reviewed', repairs=[dict(accepted=True)])], unresolved=[],constraints=[
             dict(line=1,text='hello',first=0,stop=5,start_min=3.6,start_max=4.4,onset=4.)])))
     monkeypatch.setattr(pipeline,'run',run)
     if old_time:
         with pytest.raises(StageFailure, match='字幕时间校验失败'):
-            pipeline.validate_alignment(lyrics,6)
+            pipeline.validate_alignment(lyrics,6,lead)
         assert json.loads((tmp_path/'cues.json').read_text())==[cue]
     else:
-        pipeline.validate_alignment(lyrics,6)
+        pipeline.validate_alignment(lyrics,6,lead)
         assert json.loads((tmp_path/'cues.json').read_text())[0]['units'][0]['start']==4.
         review = json.loads((tmp_path/'quality.json').read_text())['timing_review']
         assert len(review['onset_constraints']) == review['reviewed_lines'] == review['repaired_ranges'] == 1
@@ -4118,6 +4163,9 @@ def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success
             from karaoke.tools.playback_sweep import soft_failures
             assert len(review['estimated_spans'])==1
             assert soft_failures(dict(quality=dict(timing_review=review)),{})[0]['code']=='timing_group_fallback'
+    assert len(calls) == (2 if need_lead else 1)
+    if lead is not None:
+        assert lead.result.call_count == int(need_lead)
 
 
 def test_playback_fallback_recovers_each_phrase_from_available_stages(tmp_path):
@@ -7852,8 +7900,10 @@ def test_playback_survey_records_source_disagreements_and_actual_provider_failur
     assert [e['code'] for e in soft_failures({},packet)] == [
         'lyric_identity_recovery','lyric_metadata_language_corrected','lyric_candidate_unavailable']
     spans = [dict(line=2,first=0,stop=2,start=3.,end=4.2,timing_source='linear_fallback')]
-    assert soft_failures(dict(quality=dict(timing_review=dict(estimated_spans=spans))), {}) == [
-        dict(module='alignment',code='timing_group_fallback',spans=spans)]
+    review = dict(estimated_spans=spans, pending_review_lines=[3])
+    assert soft_failures(dict(quality=dict(timing_review=review)), {}) == [
+        dict(module='alignment',code='timing_group_fallback',spans=spans),
+        dict(module='alignment',code='timing_review_unconfirmed',lines=[3])]
 
 
 @pytest.mark.parametrize('hard_code', ['separate_music_failed', 'subtitles_failed'])

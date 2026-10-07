@@ -257,6 +257,8 @@ class Pipeline:
         config = dict(command=[str(a) for a in command], compute_concurrency=self.compute_concurrency)
         if name == 'validate_timing':
             from .timing_validation import acoustic_model_files
+            if '--lead' in command:
+                inputs = [*inputs, 'lead-separation/song/vocals.wav']
             constraints = self.output/'timing-constraints.json'
             if constraints.is_file():
                 inputs = [*inputs, 'timing-constraints.json']
@@ -1087,7 +1089,7 @@ class Pipeline:
                 lyrics = self.playback_fallback(metadata, duration, text_error)
             # This gate is intentionally outside the fallback catch: a fallback
             # must not resurrect a timestamp contradicted by acoustic evidence.
-            self.validate_alignment(lyrics, duration)
+            self.validate_alignment(lyrics, duration, lead)
             render_info = dict(title=lyrics['title'], artist=lyrics['artist'], language=lyrics['language'],
                                duration_seconds=duration)
             def prepare_picture():
@@ -1126,15 +1128,23 @@ class Pipeline:
         file = self.output/path
         return dict(path=str(path), bytes=file.stat().st_size, sha256=file_hash(file))
 
-    def validate_alignment(self, lyrics, duration):
+    def validate_alignment(self, lyrics, duration, lead=None):
         from .timing_validation import validate_timeline
         cues = json.loads((self.output/'cues.json').read_text())
         write_json(self.output/'timing-input.json', cues)
-        self.run('validate_timing', [sys.executable, ROOT/'timing_validation.py',
+        command = [sys.executable, ROOT/'timing_validation.py',
             '--input', self.output/'timing-input.json', '--lyrics', self.output/'lyrics.json',
             '--audio', self.vocals, '--original', self.output/'source-44100.wav',
             '--output', self.output/'timing-checked', '--device', self.device,
-            *([] if self.strict_audio else ['--playback-fallback'])])
+            *([] if self.strict_audio else ['--playback-fallback'])]
+        # Start while lead separation is still running. Only unresolved local
+        # evidence needs that additional audio view; no published result can
+        # skip the final constraint check below.
+        self.run('validate_timing', command+(['--defer-constraints'] if lead is not None else []))
+        report = json.loads((self.output/'timing-checked/report.json').read_text())
+        if lead is not None and (report.get('pending_review_lines') or report['unresolved']):
+            lead.result()
+            self.run('validate_timing', command+['--lead', self.output/'lead-separation/song/vocals.wav'])
         checked = json.loads((self.output/'timing-checked/cues.json').read_text())
         report = json.loads((self.output/'timing-checked/report.json').read_text())
         try:
@@ -1152,6 +1162,7 @@ class Pipeline:
                                  if u.get('timing_source')=='linear_fallback' and
                                  u.get('bounds_source') in ('cross_model_onsets','cross_model_span_end',
                                                           'cross_model_onset_prior_acoustic_end')],
+                pending_review_lines=report.get('pending_review_lines', []),
                 unverified_lines=sorted({r['line'] for r in report['lines'] if r['status']=='unverified'})),
             onset_accuracy=None)
         quality['fallback_units'] = sum(u.get('timing_source') == 'prior_word_fallback'

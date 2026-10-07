@@ -159,7 +159,7 @@ class SingingAligner:
             win_length=c['win_length'],hop_length=c['hop_length'],n_fft=c['n_fft'],
             mel_fmin=c['fmin'],mel_fmax=c['fmax'],clamp=c['clamp'])
 
-    def infer(self,audio,begin,units,cue,*,decoder='phonemes'):
+    def infer(self,audio,begin,units,cue,*,decoder='phonemes',use_word_priors=True):
         if decoder not in ('phonemes', 'ctc'):
             raise ValueError('Unsupported singing alignment decoder')
         phones,words,owners=phoneme_sequence(units)
@@ -182,7 +182,7 @@ class SingingAligner:
             times=np.arange(len(log_probs))*self.config['hop_length']/(44100*self.config['scale_factor'])+begin
             state_ids,scores=guided_scores(ids,log_probs,owners,units,cue['units'],times)
             return self.decode(state_ids,scores,edges)
-        self.model._decode=decode
+        self.model._decode=decode if use_word_priors else self.decode
         ph,intervals,word_seq,word_times,confidence,_,_=self.model._infer_once(mel,len(audio)/44100,phones,words,owners)
         if list(word_seq)!=words:
             raise ValueError('Phonetic decoder omitted a displayed unit')

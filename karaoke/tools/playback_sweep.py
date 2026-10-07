@@ -39,6 +39,8 @@ def soft_failures(result, prepared):
                            windows=quality['asr_localization_windows']))
     if spans := quality.get('timing_review', {}).get('estimated_spans'):
         events.append(dict(module='alignment', code='timing_group_fallback', spans=spans))
+    if lines := quality.get('timing_review', {}).get('pending_review_lines'):
+        events.append(dict(module='alignment', code='timing_review_unconfirmed', lines=lines))
     if fallback := quality.get('lyric_source_fallback'):
         events.append(dict(module='lyrics', code='lyric_source_fallback',
             rejected_sources=len(fallback['rejected']), selected_provider=fallback['selected']['provider']))

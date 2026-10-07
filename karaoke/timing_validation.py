@@ -55,6 +55,47 @@ def closure_pronunciation(unit, predictions):
                                      for items in matches)
 
 
+def displaced_units(cue, views, tolerance):
+    """Coarse agreement selects another observation, never assigns a time."""
+    old = {u['first']: u for u in cue['units']}
+    if len(views) != 2 or not views[0] or len(views[0]) != len(views[1]):
+        return []
+    return [a['first'] for a, b in zip(*views) if a['first'] in old
+            and (a['first'], a['stop'], a['text']) == (b['first'], b['stop'], b['text'])
+            and abs(a['start']-b['start']) <= tolerance
+            and (old[a['first']]['start'] < min(a['start'], b['start'])-tolerance
+                 or old[a['first']]['start'] > max(a['start'], b['start'])+tolerance)]
+
+
+def pending_review_lines(cues, report, protocol):
+    settled = {(p['line'], p['first']) for p in report['constraints']
+               if not timing_violations(cues, [p])}
+    pending = {row['line']-1 for row in report['lines'] if row['status'] != 'unverified'
+               for first in displaced_units(cues[row['line']-1], row.get('witnesses', []),
+                                             protocol['maximum_change_seconds'])
+               if (row['line'], first) not in settled}
+    return pending | {v['proof']['line']-1 for v in timing_violations(cues, report['constraints'])}
+
+
+def reconcile_views(cues, observations, protocol, language, constraints=(), *, playback=False):
+    """Spend additional acoustic work only on unresolved local disagreements.
+
+    Each observation uses the same acceptance contract and retains all previous
+    onset constraints. The iterator may load a different audio view lazily.
+    """
+    result, report, pending = cues, dict(lines=[], constraints=list(constraints)), None
+    for name, wave, witness, predict in observations:
+        result, reviewed = reconcile_timing(result, wave, witness, predict, protocol, language,
+            report['constraints'], playback=playback, _review_lines=pending)
+        report['lines'].extend(dict(row, observation=name) for row in reviewed['lines'])
+        report.update(constraints=reviewed['constraints'], unresolved=reviewed['unresolved'], accuracy=None)
+        pending = pending_review_lines(result, report, protocol)
+        if not pending:
+            break
+    report['pending_review_lines'] = [i+1 for i in sorted(pending or [])]
+    return result, report
+
+
 def reconcile_timing(cues, wave, witness, predict, protocol, language, constraints=(), *,
                      playback=False, _retry_context=True, _review_lines=None):
     """Corroborate displaced onsets, then replace only a compatible local span.
@@ -102,11 +143,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             # Coarse localization need not meet the final onset tolerance to
             # justify another observation. Two nearby estimates can both
             # exclude an old time while differing by more than 100 ms.
-            if _retry_context and any(a['first'] in old
-                    and .1 < abs(a['start']-b['start']) <= protocol['maximum_change_seconds']
-                    and (old[a['first']]['start'] < min(a['start'],b['start'])-protocol['maximum_change_seconds']
-                         or old[a['first']]['start'] > max(a['start'],b['start'])+protocol['maximum_change_seconds'])
-                    for a,b in zip(*views)):
+            if _retry_context and displaced_units(cue, views, protocol['maximum_change_seconds']):
                 begin, end = min(v[0]['start'] for v in views), max(v[-1]['end'] for v in views)
                 if (0 < end-begin <= 30 and
                         max(abs(begin-cue['aligned_start']),abs(end-cue['aligned_end'])) > protocol['maximum_change_seconds']):
@@ -220,7 +257,9 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             report['reason']=str(error)
     if _retry_context:
         retry = deepcopy(result)
-        windows = dict(context_hints)
+        latest = {r['line']-1: r for r in reports}
+        windows = {i: window for i, window in context_hints.items()
+                   if displaced_units(result[i], latest[i]['witnesses'], protocol['maximum_change_seconds'])}
         for violation in timing_violations(result, ledger):
             proof = violation['proof']
             index = proof['line']-1
@@ -262,6 +301,36 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             reports.extend(dict(r, context_retry=windows[r['line']-1]) for r in reviewed['lines'])
             ledger = reviewed['constraints']
     if playback:
+        # A short phoneme can have a corroborated onset without enough room
+        # for an independent highlight. Verify a minimal playback group
+        # instead of restoring a grossly displaced earlier word time.
+        for row in reports:
+            if not row.get('predictions'):
+                continue
+            index = row['line']-1
+            bounds = [result[index-1]['units'][-1]['start']+.015 if index else 0.,
+                      result[index+1]['units'][0]['start'] if index+1<len(result) else len(wave)/44100]
+            for rejected in row.get('unconfirmed', []):
+                if rejected['reason'] not in ('insufficient time between onset events', 'collapsed phonetic span'):
+                    continue
+                first = rejected['first']
+                old = next((u for u in result[index]['units'] if u['first']==first), None)
+                if old is None:
+                    continue
+                proof = dict(line=index+1,text=result[index]['text'],first=first)
+                candidate, repair = grouped_timing_fallback(result[index], row, proof, ledger,
+                    wave, bounds, protocol, language)
+                if candidate is None:
+                    continue
+                anchor = next((u for u in candidate['units'] if u['first']==first), None)
+                if anchor is None or abs(anchor['start']-old['start']) <= protocol['maximum_change_seconds']:
+                    continue
+                proof.update(stop=anchor['stop'],onset=anchor['start'],
+                             start_min=max(0.,anchor['start']-protocol['maximum_change_seconds']),
+                             start_max=anchor['start']+protocol['maximum_change_seconds'])
+                ledger.append(proof)
+                result[index] = candidate
+                row['repairs'].append(repair)
         # A repaired neighbour can make an earlier rejected local edit fit.
         # Reuse the same evidence until no more constraints are resolved;
         # never rerun models or discard a constraint to make progress.
@@ -303,17 +372,42 @@ def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, proto
     first = proof['first']
     if first not in positions:
         return None, None
-    def corroborate(group):
+    def corroborate(group, *, boundary=False):
         select = lambda vs: [[u for u in v if group['first'] <= u['first'] < u['stop'] <= group['stop']] for v in vs]
-        selected = select(views)
+        selected, primary = select(views), select(report['predictions'])
         if not selected[0] or normalized(''.join(u['text'] for u in selected[0])) != normalized(group['text']):
             return None
-        found, _ = corroborated_group(group, select(report['predictions']), selected,
+        if boundary:
+            # Keep the measured outside boundaries; the interior is explicitly
+            # a playback sweep, not fabricated per-character timestamps.
+            if any(not v or normalized(''.join(u['text'] for u in v))!=normalized(group['text'])
+                   or any(a['stop']>b['first'] or a['start']>=b['start'] for a,b in zip(v,v[1:]))
+                   for v in [*primary,*selected]):
+                return None
+            def joined(v):
+                return [dict(v[0],first=group['first'],stop=group['stop'],text=group['text'],
+                             end=v[-1]['end'],emission_end=v[-1].get('emission_end'),acoustic_end=None)]
+            primary, selected = [joined(v) for v in primary], [joined(v) for v in selected]
+        found, _ = corroborated_group(group, primary, selected,
             wave, bounds, protocol, spans=[(u['first'],u['stop']) for u in selected[0]])
+        if found and boundary:
+            start = found[0]['start']
+            piece = wave[round(start*44100):round((start+.035)*44100)]
+            floor = max(1e-5,protocol['minimum_relative_rms']*float(np.sqrt(np.mean(wave**2))))
+            if not len(piece) or not np.isfinite(piece).all() or float(np.sqrt(np.mean(piece**2)))<=floor:
+                return None
         return found
 
     word = next((u for u in views[0] if u['first']==first), None)
     measured = corroborate(word) if word else None
+    if word and not measured:
+        for last in views[0]:
+            if last['first'] <= first:
+                continue
+            group = dict(first=first,stop=last['stop'],text=cue['text'][first:last['stop']])
+            measured = corroborate(group,boundary=True)
+            if measured:
+                break
     if not measured:
         return None, None
     anchor, lo = measured[0], positions[first]
@@ -331,6 +425,8 @@ def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, proto
             return None, None
     guard = None
     for hi in range(lo+1, len(units)):
+        if units[hi]['first'] < anchor['stop']:
+            continue
         guard = corroborate(units[hi])
         if not guard:
             # An existing group need not be split to correct its known onset.
@@ -458,7 +554,7 @@ class AcousticReview:
         request={k:cue.get(k) for k in ('text','aligned_start','aligned_end','audio_bounds')}
         return self.cached('witness',[language,request],lambda:self.witness(cue,wave,language=language))
 
-    def predict(self, wave):
+    def predict(self, wave, *, decoder='ctc'):
         def run(cue, views, bounds, language):
             from phoneme_progress import spoken_units
             from subtitles import highlight_spans
@@ -491,9 +587,11 @@ class AcousticReview:
                     else:
                         parsed=spoken_units(cue['text'],language)
                         result.append(model.infer(audio,a,parsed,
-                            dict(cue,aligned_start=start,aligned_end=end),decoder='ctc')['units'])
+                            dict(cue,aligned_start=start,aligned_end=end),decoder=decoder,
+                            use_word_priors=False)['units'])
                 return result
-            return self.cached('prediction',[language,cue['text'],windows],compute)
+            return self.cached('prediction',[language,cue['text'],windows,
+                'phonemes' if language=='English' else decoder],compute)
         return run
 
 
@@ -508,10 +606,13 @@ def main():
     parser.add_argument('--input',type=Path,required=True)
     parser.add_argument('--lyrics',type=Path,required=True)
     parser.add_argument('--audio',type=Path,required=True)
+    parser.add_argument('--lead',type=Path)
     parser.add_argument('--original',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--device',choices=['cpu','mps','cuda'],required=True)
     parser.add_argument('--playback-fallback',action='store_true')
+    parser.add_argument('--defer-constraints',action='store_true',
+                        help='Save preliminary evidence; the pipeline must enforce constraints before publication')
     args=parser.parse_args()
     out=args.output;out.mkdir(parents=True,exist_ok=True)
     read=lambda p:json.loads(p.read_text())
@@ -539,12 +640,30 @@ def main():
     torch.set_num_threads(4);torch.set_grad_enabled(False)
     review=AcousticReview(args.original,args.device,out.parent/'timing-cache',identity,protocol)
     started=time.perf_counter()
-    repaired,report=reconcile_timing(cues,wave,review.observe,review.predict(wave),protocol,
-                                     lyrics['language'],constraints,playback=args.playback_fallback)
+    def observations():
+        yield 'vocals_ctc', wave, review.observe, review.predict(wave)
+        if lyrics['language'] != 'English':
+            yield 'vocals_phonemes', wave, review.observe, review.predict(wave,decoder='phonemes')
+        if args.lead is not None:
+            lead, lead_rate=sf.read(args.lead,dtype='float32',always_2d=True)
+            if abs(len(lead)/lead_rate-duration) > 1/lead_rate:
+                raise ValueError('Alternate acoustic view does not match the source duration')
+            divisor=np.gcd(lead_rate,44100)
+            lead=resample_poly(lead.mean(axis=1),44100//divisor,lead_rate//divisor).astype('float32')
+            lead_review=AcousticReview(args.original,args.device,out.parent/'timing-cache',
+                dict(identity,lead_sha256=sha(args.lead)),protocol)
+            yield 'lead_ctc', lead, lead_review.observe, lead_review.predict(lead)
+            if lyrics['language'] != 'English':
+                yield 'lead_phonemes', lead, lead_review.observe, lead_review.predict(lead,decoder='phonemes')
+    repaired,report=reconcile_views(cues,observations(),protocol,lyrics['language'],constraints,
+                                   playback=args.playback_fallback)
+    if args.lead is not None:
+        report['lead_sha256']=sha(args.lead)
     report.update(seconds=time.perf_counter()-started,source=source,input_sha256=sha(args.input))
     write(ledger_file,dict(source=source,constraints=report['constraints']))
     write(out/'cues.json',repaired);write(out/'report.json',report)
-    validate_timeline(repaired,lyrics['lines'],duration,report['constraints'],lyrics['language'])
+    validate_timeline(repaired,lyrics['lines'],duration,
+                      () if args.defer_constraints else report['constraints'],lyrics['language'])
     print(json.dumps(dict(lines=len(cues),reviewed_lines=len({r['line'] for r in report['lines']}),
                          review_attempts=len(report['lines']),
                          constraints=len(report['constraints']),seconds=report['seconds'])),flush=True)

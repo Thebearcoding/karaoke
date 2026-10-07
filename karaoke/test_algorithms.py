@@ -207,6 +207,28 @@ class SubtitleIntegrity(unittest.TestCase):
         self.assertGreater(scores[-1, ids[3]], scores[-1, ids[1]])
         np.testing.assert_array_equal(scores[:, 0], 0.)
 
+    def test_unbiased_phoneme_review_does_not_reuse_a_previous_word_prior(self):
+        from types import SimpleNamespace
+        import torch
+        from align_lyric_phonemes import SingingAligner
+        model = SimpleNamespace(vocab={'SP': 0, 'a': 1})
+        def decode(ids, probabilities, edges):
+            return float(np.argmax(probabilities[:, ids[1]]))
+        def infer(mel, duration, phones, words, owners):
+            scores = np.array([[0., 0.], [0., 0.], [0., 0.], [0., 1.]])
+            start = model._decode(np.array([0, 1, 0]), scores, None)
+            return np.array(phones), np.array([[start, start+.2]]), words, [[start, start+.2]], 1., None, None
+        model._decode, model._infer_once = decode, infer
+        aligner = object.__new__(SingingAligner)
+        aligner.model, aligner.decode, aligner.device = model, decode, 'cpu'
+        aligner.config = dict(hop_length=44100, scale_factor=1)
+        aligner.extract = lambda audio: torch.zeros(1, 2, 4)
+        unit = dict(text='啊', first=0, stop=1, phones=['a'], start=0., end=.2)
+        for guided in (True, False, False, True):
+            with self.subTest(guided=guided):
+                result = aligner.infer(np.ones(100), 0., [unit], dict(units=[unit]), use_word_priors=guided)
+                self.assertEqual(result['units'][0]['start'], 0. if guided else 3.)
+
     def test_collapsed_character_retains_prior_timing_and_text(self):
         cue = {'text': '甲乙丙', 'aligned_start': 1., 'aligned_end': 2.4,
                'units': [dict(first=i, stop=i+1, text=c, start=t, end=t+.3)
@@ -342,6 +364,45 @@ class SubtitleIntegrity(unittest.TestCase):
                     self.assertEqual([u['start'] for u in result[0]['units']],[u['start'] for u in old])
                     self.assertFalse(report['constraints'])
 
+    def test_alternate_acoustic_views_only_revisit_unsettled_lines(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_views, validate_timeline
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        cues = [dict(text=text, start=start, end=start+2, units=[
+            dict(first=0, stop=1, text=text[0], start=start, end=start+.2, timing_source='prior_word_fallback'),
+            dict(first=1, stop=2, text=text[1], start=start+1.7, end=start+2, timing_source='singing_phonemes')])
+            for text, start in [('甲乙', 1.), ('丙丁', 5.)]]
+        for mode in ('recover', 'still_disagrees', 'silent', 'wrong_text'):
+            with self.subTest(mode=mode):
+                calls = []
+                wave = np.ones(44100*8)*.1
+                if mode == 'silent':wave[round(6*44100):round(6.3*44100)] = 0
+                def witness(cue, audio, **kwargs):
+                    found = deepcopy(cue['units'])
+                    found[0].update(start=2. if cue['text']=='甲乙' else 6., end=2.3 if cue['text']=='甲乙' else 6.3)
+                    return [found, deepcopy(found)]
+                def prediction(name):
+                    def run(cue, views, bounds, language):
+                        calls.append((name, cue['text']))
+                        values = [deepcopy(views[0]) for _ in range(3)]
+                        if cue['text']=='丙丁' and (name=='primary' or mode=='still_disagrees'):
+                            values[0][0]['start'] -= .2
+                        if name=='alternate' and mode=='wrong_text':values[0][0]['text']='错'
+                        return values
+                    return run
+                def observations():
+                    yield 'primary', wave, witness, prediction('primary')
+                    yield 'alternate', wave, witness, prediction('alternate')
+                    if mode=='recover':self.fail('Loaded another model after all displaced onsets were resolved')
+                result, report = reconcile_views(cues, observations(), protocol, 'Chinese', playback=True)
+                self.assertIn(('alternate', '丙丁'), calls)
+                self.assertNotIn(('alternate', '甲乙'), calls)
+                self.assertEqual(result[0]['units'][0]['start'], 2.)
+                self.assertEqual(result[1]['units'][0]['start'], 6. if mode=='recover' else 5.)
+                self.assertEqual(report['pending_review_lines'], [] if mode=='recover' else [2])
+                validate_timeline(result, ['甲乙', '丙丁'], 8, report['constraints'], 'Chinese')
+                self.assertEqual([c['units'][0]['start'] for c in cues], [1., 5.])
+
     def test_timing_contract_checks_middle_words_and_all_languages(self):
         from copy import deepcopy
         from timing_validation import reconcile_timing
@@ -413,27 +474,35 @@ class SubtitleIntegrity(unittest.TestCase):
         units=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
                for i,(c,t) in enumerate(zip('甲乙',[1.,4.]))]
         cue=dict(text='甲乙',start=1.,end=4.2,units=units)
-        for mode in ('recovered','still_disagrees','one_bad_view','held_note','bad_prediction','no_support'):
+        for mode in ('recovered','coarse_agrees','coarse_agrees_still_unstable',
+                     'still_disagrees','one_bad_view','held_note','bad_prediction','no_support'):
             with self.subTest(mode=mode):
                 calls=[]
                 def witness(context,*args,**kwargs):
                     calls.append(context['aligned_start'])
                     self.assertEqual(context['units'][0]['start'],1.)
                     first,second=(3.,3.14) if len(calls)==1 or mode=='still_disagrees' else (3.02,3.06)
+                    if mode.startswith('coarse_agrees'):first,second=3.02,3.06
                     if mode=='one_bad_view':first=1.
                     if mode=='held_note':first,second=1.,1.02
                     return [[dict(units[0],start=t,end=t+.2),dict(units[1])] for t in (first,second)]
                 predictions=[[dict(units[0],start=3.04,end=3.24),dict(units[1])] for _ in range(3)]
                 if mode=='bad_prediction':predictions[0][0].update(start=3.2,end=3.4)
+                def predict(*args):
+                    result=deepcopy(predictions)
+                    if mode.startswith('coarse_agrees') and (len(calls)==1 or mode.endswith('unstable')):
+                        result[0][0].update(start=2.6,end=2.8)
+                    return result
                 wave=np.ones(44100*5)*(.0 if mode=='no_support' else .1)
-                result,report=reconcile_timing([cue],wave,witness,lambda *a:deepcopy(predictions),
+                result,report=reconcile_timing([cue],wave,witness,predict,
                                                 protocol,'Chinese')
-                self.assertEqual(calls,[1.] if mode in ('one_bad_view','held_note') else [1.,3.])
+                self.assertEqual(calls,[1.] if mode in ('one_bad_view','held_note') else
+                                 [1.,3.02 if mode.startswith('coarse_agrees') else 3.])
                 self.assertEqual(cue['units'][0]['start'],1.)
                 self.assertEqual(result[0]['units'][1],dict(units[1],acoustic_end=4.2))
-                if mode=='recovered':
+                if mode in ('recovered','coarse_agrees'):
                     self.assertEqual(result[0]['units'][0]['start'],3.04)
-                    self.assertEqual(report['lines'][-1]['context_retry'],[3.,4.2])
+                    self.assertEqual(report['lines'][-1]['context_retry'],[calls[-1],4.2])
                     self.assertFalse(report['unresolved'])
                 else:
                     self.assertEqual(result[0]['units'][0]['start'],1.)
@@ -475,6 +544,39 @@ class SubtitleIntegrity(unittest.TestCase):
                     validate_timeline(result,[text],9.,report['constraints'],'Chinese')
                 else:
                     self.assertTrue(report['unresolved'])
+
+    def test_short_onset_events_can_form_a_verified_playback_group(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
+        cue=dict(text='甲乙丙',start=.2,end=3.5,units=[
+            dict(first=0,stop=1,text='甲',start=.2,end=.4,timing_source='prior_word_fallback'),
+            dict(first=1,stop=2,text='乙',start=2.02,end=2.5),
+            dict(first=2,stop=3,text='丙',start=3.,end=3.5)])
+        measured=[dict(u,start=t,end=e) for u,t,e in zip(cue['units'],[2.,2.02,3.],[2.02,2.5,3.5])]
+        for mode in ('valid','silent_onset','disagreement','missing_text','protected_interior','strict'):
+            with self.subTest(mode=mode):
+                views=[deepcopy(measured),deepcopy(measured)]
+                predictions=[[dict(u,timing_evidence='ctc_event',emission_end=u['start']+.01)
+                              for u in measured] for _ in range(3)]
+                if mode=='disagreement':predictions[0][0]['start']=1.8
+                if mode=='missing_text':predictions[0].pop(1)
+                wave=np.ones(44100*4)*.1
+                if mode=='silent_onset':wave[2*44100:round(2.035*44100)]=0.
+                constraints=([dict(line=1,text=cue['text'],first=1,stop=2,onset=2.02,
+                                   start_min=2.,start_max=2.04)] if mode=='protected_interior' else [])
+                result,report=reconcile_timing([cue],wave,lambda *a,**k:views,
+                    lambda *a:predictions,protocol,'Chinese',constraints,
+                    playback=mode!='strict',_retry_context=False)
+                if mode=='valid':
+                    self.assertEqual([(u['text'],u['start']) for u in result[0]['units']],[('甲乙',2.),('丙',3.)])
+                    self.assertEqual(result[0]['units'][0]['timing_source'],'linear_fallback')
+                    self.assertIsNone(result[0]['units'][0]['acoustic_end'])
+                    self.assertEqual(report['constraints'][0]['onset'],2.)
+                else:
+                    self.assertEqual(result[0]['units'][0]['start'],.2)
+                validate_timeline(result,[cue['text']],4,report['constraints'],'Chinese')
+                self.assertEqual(cue['units'][0]['start'],.2)
 
     def test_countdown_uses_singing_offsets_and_does_not_invent_them_from_ctc(self):
         # The first word stays visible until the next word, but its singing
