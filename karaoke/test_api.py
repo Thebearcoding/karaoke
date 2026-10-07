@@ -1750,7 +1750,8 @@ def test_published_lyrics_strip_only_leading_metadata_identity(title, artist, he
         assert published_lyric_lines('\n'.join([line, *body]), title, [artist]) == ([line, *body], [])
 
 
-@pytest.mark.parametrize('credit', ['音频助理', '音頻工程師', '录音助理', 'Audio Engineer', 'Assistant Engineer'])
+@pytest.mark.parametrize('credit', ['音频助理', '音頻工程師', '录音助理', 'Audio Engineer', 'Assistant Engineer',
+    '配唱制作人', '人聲錄音師', '童声', '合唱', '和音', '伴唱编配', '主唱指导'])
 def test_translated_production_footer_cannot_change_the_lyric_language(credit):
     from karaoke.lyric_lookup import published_candidate
     body = ['Stars above the quiet shore', 'I will sing once more']
@@ -3503,7 +3504,8 @@ def test_prepared_lyrics_preserve_provenance_and_reject_different_inputs(tmp_pat
             assert json.loads((pipeline.output/'anchors.json').read_text()) == []
 
 
-@pytest.mark.parametrize('mode', ['success', 'other_recording', 'all_fail', 'resource_failure', 'stale', 'supplied', 'soft'])
+@pytest.mark.parametrize('mode', ['success', 'other_recording', 'all_fail', 'resource_failure', 'stale', 'supplied', 'soft',
+                                'missing_language', 'null_language'])
 @pytest.mark.parametrize('prepared', [False, True])
 def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeypatch, mode, prepared):
     from karaoke.lyric_lookup import prepared_lyrics_identity
@@ -3518,6 +3520,8 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
     if mode == 'other_recording':
         packet['crosscheck']['eligible_sources'] = [0]
         packet['crosscheck']['sources'][1]['recording_mismatches'] = ['duration']
+    if mode == 'missing_language': packet['crosscheck']['sources'][1].pop('language')
+    if mode == 'null_language': packet['crosscheck']['sources'][1]['language'] = None
     if mode == 'stale':packet['candidate_texts'][0] = ['Old lyrics']
     prepared_path = None
     if prepared:
@@ -3536,6 +3540,7 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
     calls = []
     def align(candidate, duration):
         calls.append(candidate['lines'])
+        assert candidate['language'] == 'English'
         if mode == 'resource_failure':raise StageFailure('align_words', 'CUDA out of memory')
         (pipeline.checkpoints.directory/'align_words.json').write_text('{}')
         cues = [dict(text=t,start=1.+i*2,end=2.+i*2,status='candidate')
@@ -3549,11 +3554,11 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
         (tmp_path/'cues.json').write_text(json.dumps(cues))
         if failing:raise ValueError('Unresolved alignment')
     monkeypatch.setattr(pipeline, 'align', align)
-    if mode in ('success', 'other_recording', 'soft'):
+    if mode in ('success', 'other_recording', 'soft', 'missing_language', 'null_language'):
         selected, error = pipeline.align_candidates(lyrics, {}, 6.)
         assert selected['lines'] == (primary if mode=='soft' else alternative)
         assert calls == ([primary] if mode=='soft' else [primary,alternative])
-        if mode in ('success', 'other_recording'):
+        if mode in ('success', 'other_recording', 'missing_language', 'null_language'):
             from karaoke.tools.playback_sweep import soft_failures
             quality=json.loads((tmp_path/'quality.json').read_text())
             assert soft_failures(dict(quality=quality), {}) == [dict(module='lyrics',

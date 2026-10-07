@@ -2005,6 +2005,7 @@ class AlignmentIntegrity(unittest.TestCase):
         import shutil
         from unittest.mock import Mock, patch
         from align_lyrics_whisper import main
+        from timing_validation import validate_timeline
 
         result = dict(segments=[dict(text='extra word', start=1., end=2., words=[
             dict(word='extra word', start=1., end=2., probability=.8)])])
@@ -2021,17 +2022,19 @@ class AlignmentIntegrity(unittest.TestCase):
             with patch('stable_whisper.load_model', return_value=model), patch(
                     'align_lyrics_whisper.sha', return_value='test-model-hash') as hash_file, patch('sys.argv',
                     ['align', '--jobs', str(root/'jobs.json'), '--device', 'cpu']):
-                with self.assertRaisesRegex(ValueError, 'exactly cover'):
-                    main()
+                main()
                 shutil.rmtree(root/'alignment')
                 model._buffers = {'alignment_heads': None}
-                with self.assertRaisesRegex(ValueError, 'exactly cover'):
-                    main()
+                main()
             self.assertEqual(model.transcribe.call_count, 1)
             self.assertEqual(sum(Path(call.args[0]).suffix == '.pt' for call in hash_file.call_args_list), 2)
             self.assertEqual(json.loads((root/'alignment/raw.json').read_text())[0]['result'], result)
             self.assertEqual(json.loads((root/'alignment/units.json').read_text())[0]['text'], 'extra word')
-            self.assertFalse((root/'alignment/cues.json').exists())
+            cues = json.loads((root/'alignment/cues.json').read_text())
+            self.assertEqual(cues[0]['text'], 'word')
+            self.assertNotEqual(cues[0]['status'], 'candidate')
+            with self.assertRaises(ValueError):
+                validate_timeline(cues, ['word'], 3.)
             jobs = json.loads((root/'jobs.json').read_text())
             jobs[0]['localize_with_asr'] = False
             (root/'jobs.json').write_text(json.dumps(jobs))
@@ -2040,14 +2043,12 @@ class AlignmentIntegrity(unittest.TestCase):
             with patch('stable_whisper.load_model', return_value=model), patch(
                     'align_lyrics_whisper.sha', return_value='test-model-hash'), patch('sys.argv',
                     ['align', '--jobs', str(root/'jobs.json'), '--device', 'cpu']):
-                with self.assertRaisesRegex(ValueError, 'exactly cover'):
-                    main()
+                main()
             self.assertEqual(model.transcribe.call_count, 1)
             self.assertFalse(json.loads((root/'alignment/raw.json').read_text())[0].get('asr_localizations'))
             # Deliberately rejected word timings are not a text mutation. Keep
             # the unresolved candidate for source fallback, but never publish it.
             result['segments'] = [dict(text='word', words=[])]
-            from timing_validation import validate_timeline
             for language in ('English', 'Chinese'):
                 (root/'lyrics.json').write_text(json.dumps(dict(language=language, lines=['word'])))
                 shutil.rmtree(root/'alignment')
