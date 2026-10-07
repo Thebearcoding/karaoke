@@ -306,10 +306,11 @@ def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, proto
                  for u in guard]
         suffix, source = guard+units[hi+1:], 'cross_model_onsets'
     else:
-        # The last word has no following onset. Compare actual alignment
-        # ends, never a padded display hold, at the output's millisecond
-        # resolution. The conservative envelope is a text-span boundary;
-        # it must not become a claimed singing offset for countdowns.
+        # The last word has no following onset. Phoneme and grapheme CTC
+        # events need not end together: require a stable terminal event and
+        # an overlapping independent word event, not equal token durations.
+        # The conservative envelope is only a playback boundary, never a
+        # claimed singing offset for countdowns.
         tails = [v[-1] for v in [*report['predictions'], *views]]
         if any((u['first'],u['stop'],u['text']) != (tails[0]['first'],tails[0]['stop'],tails[0]['text'])
                or normalized(cue['text'][u['stop']:]) for u in tails):
@@ -320,10 +321,13 @@ def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, proto
             return None, None
         ends = [round(e,3) for e in values]
         center = float(np.median(ends[:3]))
+        starts = [round(u['start'],3) for u in tails[:3]]
+        event_start = float(np.median(starts))
         if (not np.isfinite(ends).all() or any(not anchor['start']<e<=bounds[1] for e in ends)
                 or round(max(ends[:3])-min(ends[:3]),3)>protocol['maximum_spread_seconds']
-                or round(abs(ends[3]-ends[4]),3)>.1
-                or any(round(abs(e-center),3)>.1 for e in ends[3:])):
+                or round(max(starts)-min(starts),3)>protocol['maximum_spread_seconds']
+                or any(round(e-center,3)>.1 for e in ends[3:])
+                or not any(u['start']<=center+.1 and e>=event_start-.1 for u,e in zip(tails[3:],ends[3:]))):
             return None, None
         hi, stop, end = len(units), len(cue['text']), max(ends)
         suffix, source = [], 'cross_model_span_end'

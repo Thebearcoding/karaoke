@@ -665,7 +665,8 @@ class SubtitleIntegrity(unittest.TestCase):
                  for i,(c,t) in enumerate(zip('甲乙丙丁',[.2,1.,1.5,2.]))]
         cue = dict(text='甲乙丙丁',start=.2,end=3.9,units=units)
         measured = [dict(u,start=t,end=t+.2) for u,t in zip(units,[.2,3.,3.3,3.6])]
-        for mode in ('valid','display_hold','strict','end_disagreement','context_end_disagreement',
+        for mode in ('valid','short_word_event','display_hold','strict','end_disagreement','context_end_disagreement',
+                     'context_start_disagreement','disjoint_word_events',
                      'missing_emission_end','wrong_tail_text','interior_constraint','neighbor_overlap'):
             with self.subTest(mode=mode):
                 views = [deepcopy(measured),deepcopy(measured)]
@@ -681,7 +682,12 @@ class SubtitleIntegrity(unittest.TestCase):
                 if mode=='display_hold':
                     for v in predictions:v[-1]['end']=5.
                 if mode=='end_disagreement':views[1][-1]['end']=4.2
+                if mode=='short_word_event':
+                    for v in predictions:v[-1].update(end=4.05,emission_end=4.05)
                 if mode=='context_end_disagreement':predictions[0][-1].update(end=4.2,emission_end=4.2)
+                if mode=='context_start_disagreement':predictions[0][-1]['start']=3.3
+                if mode=='disjoint_word_events':
+                    for v in predictions:v[-1].update(start=4.2,end=4.45,emission_end=4.45)
                 if mode=='missing_emission_end':predictions[0][-1]['emission_end']=None
                 if mode=='wrong_tail_text':predictions[0][-1]['text']='錯'
                 if mode=='interior_constraint':
@@ -691,8 +697,9 @@ class SubtitleIntegrity(unittest.TestCase):
                     lambda c,*a,**k:views,lambda *a:predictions,protocol,'Chinese',constraints,
                     playback=mode!='strict',_retry_context=False)
                 groups=[u for u in result[0]['units'] if u.get('timing_source')=='linear_fallback']
-                if mode in ('valid','display_hold'):
-                    self.assertEqual([(g['text'],g['start'],g['end']) for g in groups],[('乙丙丁',3.,3.9)])
+                if mode in ('valid','short_word_event','display_hold'):
+                    self.assertEqual([(g['text'],g['start'],g['end']) for g in groups],
+                                     [('乙丙丁',3.,4.05 if mode=='short_word_event' else 3.9)])
                     self.assertIsNone(groups[0]['acoustic_end'])
                     self.assertEqual(groups[0]['bounds_source'],'cross_model_span_end')
                     self.assertFalse(report['unresolved'])
