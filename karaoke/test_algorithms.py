@@ -1011,10 +1011,22 @@ class SubtitleIntegrity(unittest.TestCase):
         self.assertTrue(report['overlap_adjustments'])
         self.assertTrue(all(0 <= c['start'] < c['end'] <= 10. for c in display))
 
-    def test_display_policy_does_not_hide_large_alignment_errors(self):
-        cues = [{'text': '甲', 'start': 1., 'end': 3., 'status': 'candidate'},
-                {'text': '乙', 'start': 1.8, 'end': 4., 'status': 'candidate'}]
-        with self.assertRaisesRegex(ValueError, 'needs review'):
+    def test_display_holds_allow_overlapping_tails_but_never_crossed_word_onsets(self):
+        from copy import deepcopy
+        for tail in (3., 6.):
+            cues = [{'text': '甲', 'start': 1., 'end': tail, 'status': 'candidate',
+                     'units': [dict(text='甲', start=1., end=tail)]},
+                    {'text': '乙', 'start': 1.8, 'end': 4., 'status': 'candidate',
+                     'units': [dict(text='乙', start=1.8, end=4.)]}]
+            original = deepcopy(cues)
+            display, _ = presentation_cues(cues, 10., lead=0)
+            self.assertEqual(cues, original)
+            self.assertEqual(display[0]['end'], display[1]['start'])
+            self.assertEqual(display[1]['start'], 1.8)
+            self.assertEqual(display[0]['aligned_end'], tail)
+            self.assertEqual([c['units'] for c in display], [c['units'] for c in cues])
+        cues[0]['units'].append(dict(text='丙', start=2., end=2.2))
+        with self.assertRaisesRegex(ValueError, 'Unordered'):
             presentation_cues(cues, 10.)
 
     def test_read_ahead_keeps_current_line_while_previewing_next(self):
@@ -1833,9 +1845,9 @@ class AlignmentIntegrity(unittest.TestCase):
         raw = [dict(range=[0, 1], context=[0, 2], source_range=[0., 6.], result=dict(segments=[
                    segment('first', 0., 1.), segment('middle', 1.2, 2.)])),
                dict(range=[1, 2], context=[1, 2], source_range=[0., 6.], result=dict(segments=[
-                   segment('middle', 1.2, 5.)])),
+                   segment('middle', 2.6, 5.)])),
                dict(range=[2, 3], context=[1, 3], source_range=[0., 6.], result=dict(segments=[
-                   segment('middle', .2, 2.), segment('last', 2.5, 3.5)]))]
+                   segment('middle', 0., 2.), segment('last', 2.5, 3.5)]))]
         cues, stitched, repairs = stitch_blocks(lines, raw, 6., 'English')
         presentation_cues(cues, 6., lead=0, tail=0, bridge_gap=0)
         words, report = build_progress(cues, stitched, 'English')
@@ -1918,8 +1930,8 @@ class AlignmentIntegrity(unittest.TestCase):
     def test_joint_repair_extends_crop_when_crossing_reaches_context_edge(self):
         from copy import deepcopy
         lines = ['alpha','bravo','charlie','delta','echo','foxtrot','golf','hotel']
-        old = [(1.,1.8),(3.,5.1),(5.,5.8),(7.,7.8),(9.,9.8),(6.,6.8),(13.,13.8),(15.,15.8)]
-        new = [(1.,1.8),(3.,3.8),(4.4,5.),(5.,5.6),(5.6,6.2),(6.2,6.8),(13.,13.8),(15.,15.8)]
+        old = [(1.,1.8),(4.5,5.1),(5.,5.8),(7.,7.8),(9.,9.8),(6.,6.8),(13.,13.8),(15.,15.8)]
+        new = [(1.,1.8),(4.,4.2),(4.4,5.),(5.,5.6),(5.6,6.2),(6.2,6.8),(13.,13.8),(15.,15.8)]
         def segment(text,times,offset=0.):
             return dict(text=text,words=[dict(word=text,start=times[0]-offset,end=times[1]-offset)])
         raw = dict(range=[0,8],context=[0,8],source_range=[0.,18.],result=dict(segments=[
@@ -1958,23 +1970,28 @@ class AlignmentIntegrity(unittest.TestCase):
         self.assertFalse(protect_line_order(words, words)[1])
         self.assertEqual(stitch_blocks(lines, stitched, 10., 'English')[2], [])
 
-        # Reject new conflicts in either word onsets or line ends, even when
-        # the replacement resolves the original crossing.
+        # A new word crossing remains invalid. A long overlapping tail only
+        # shortens the display hold; it does not invalidate measured onsets.
         for middle, end in [(3.5, 4.), (1.6, 5.)]:
             with self.subTest(middle=middle, end=end):
                 raw[0]['result']['segments'][1] = segment(lines[1], 1.2, middle, end)
                 cues, unchanged, repairs = stitch_blocks(lines, raw, 10., 'English')
-                self.assertEqual(repairs, [])
                 words, _ = build_progress(cues, unchanged, 'English')
-                with self.assertRaisesRegex(ValueError, 'Coarse lyric onsets'):
-                    protect_line_order(words, words)
+                if middle == 3.5:
+                    self.assertEqual(repairs, [])
+                    with self.assertRaisesRegex(ValueError, 'Coarse lyric onsets'):
+                        protect_line_order(words, words)
+                else:
+                    self.assertTrue(repairs)
+                    self.assertEqual([[u['start'] for u in c['units']] for c in words],
+                                     [[2., 3.], [3.2, 3.6], [5., 6.]])
 
     def test_unresolved_crossing_realigns_with_context_but_changes_only_core_lines(self):
         from copy import deepcopy
         from unittest.mock import Mock
 
         lines = ['left', 'context', 'first', 'second', 'after', 'tail']
-        old_times = [(1., 1.5), (2., 2.5), (3., 5.4), (4.7, 6.4), (7., 7.5), (8., 8.5)]
+        old_times = [(1., 1.5), (2., 2.5), (4.9, 5.4), (4.7, 6.4), (7., 7.5), (8., 8.5)]
         def result(times, offset=0.):
             return dict(segments=[dict(text=text, words=[dict(word=text, start=a-offset, end=b-offset)])
                                   for text, (a, b) in zip(lines, times)])
@@ -1986,7 +2003,7 @@ class AlignmentIntegrity(unittest.TestCase):
             with self.subTest(failure=failure):
                 candidate = result(new_times, .4)
                 if failure == 'text': candidate['segments'][2]['words'][0]['word'] = 'changed'
-                if failure == 'crossing': candidate['segments'][3]['words'][0]['start'] = 3.6
+                if failure == 'crossing': candidate['segments'][3]['words'][0]['start'] = 2.7
                 if failure == 'neighbour': candidate['segments'][2]['words'][0]['start'] = 1.6
                 if failure == 'outside_audio': candidate['segments'][-1]['words'][0]['end'] = 9.
                 if failure == 'missing': candidate = None
@@ -2018,7 +2035,7 @@ class AlignmentIntegrity(unittest.TestCase):
                     again.assert_not_called()
                 else:
                     self.assertEqual([(c['start'], c['end']) for c in cues], old_times)
-                    with self.assertRaisesRegex(ValueError, 'overlap'):
+                    with self.assertRaisesRegex(ValueError, 'Unordered'):
                         presentation_cues(cues, 10., lead=0, tail=0, bridge_gap=0)
 
     def test_distant_context_does_not_block_a_bounded_boundary_repair(self):
@@ -2026,11 +2043,11 @@ class AlignmentIntegrity(unittest.TestCase):
         lines = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot']
         for gap in ('before', 'after', 'inside_core'):
             with self.subTest(gap=gap):
-                times = ([(1.,2.), (10.,11.), (82.,93.4), (92.7,94.4), (96.,97.), (110.,111.)]
+                times = ([(1.,2.), (10.,11.), (93.,93.4), (92.7,94.4), (96.,97.), (110.,111.)]
                          if gap == 'before' else
-                         [(1.,2.), (10.,11.), (12.,23.4), (22.7,24.4), (96.,97.), (110.,111.)])
+                         [(1.,2.), (10.,11.), (23.,23.4), (22.7,24.4), (96.,97.), (110.,111.)])
                 if gap == 'inside_core':
-                    times[2:4] = [(12.,93.4), (92.7,94.4)]
+                    times[2:4] = [(93.,93.4), (12.,94.4)]
                 segments = [dict(text=t,words=[dict(word=t,start=a,end=b)]) for t,(a,b) in zip(lines,times)]
                 raw = dict(range=[0,6],context=[0,6],source_range=[0.,120.],result=dict(segments=segments))
                 original, calls = deepcopy(raw), []
@@ -2040,7 +2057,7 @@ class AlignmentIntegrity(unittest.TestCase):
                     selected = deepcopy([segments[lines.index(t)] for t in text.splitlines()])
                     for segment in selected:
                         word = segment['words'][0]
-                        if word['word'] == 'charlie':word['end'] -= .6
+                        if word['word'] == 'charlie':word['start'] -= .6
                         if word['word'] == 'delta':word['start'] += .2
                         word['start'] -= begin
                         word['end'] -= begin

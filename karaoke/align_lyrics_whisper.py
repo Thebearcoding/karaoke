@@ -605,8 +605,8 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
             if left_words and right_words and right_words[0]['start']-left_words[-1]['start'] < .015-1e-9:
                 bad.add(i)
             try:
-                # Share the downstream gate: repairing word starts must not
-                # introduce invalid line ends or excessive overlap elsewhere.
+                # Share the display gate while keeping acoustic word ordering
+                # above: held tails may overlap, but onsets may not cross.
                 presentation_cues([left, right], duration, lead=0, tail=0, bridge_gap=0)
             except ValueError:
                 bad.add(i)

@@ -2302,6 +2302,7 @@ def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(part
             tokens = [*s['text'][:3],s['text'][3:]]
             s['words'] = [dict(word=t,start=float(i),end=i+(.05 if j==3 else 0)) for j,t in enumerate(tokens)]
     if asr_gap.startswith('boundary_'):
+        starts['echo'] = 58.5
         ends['echo'] = 59.
         for i in range(5,8):
             start = starts[lines[i]]-(2 if i==5 else 0)
@@ -2326,7 +2327,7 @@ def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(part
         if asr_gap == 'boundary_unresolved':
             for segment in segments:
                 if segment['text'] == 'foxtrot':
-                    segment['words'][0]['start'] -= 2  # No existing context fixes this boundary either.
+                    segment['words'][0]['start'] -= 2  # Still crosses the preceding word onset.
         if asr_gap == 'reuse_context' and text.splitlines() == lines[2:7]:
             segments[1]['words'][0]['start'] = starts['charlie']-.5-begin
         return dict(segments=segments)
@@ -3333,7 +3334,7 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
         assert calls == ([primary,alternative] if mode=='all_fail' else [primary])
 
 
-@pytest.mark.parametrize('overlap', [.02, .1, .16, .32])
+@pytest.mark.parametrize('overlap', [.02, .1, .16, .32, .75])
 def test_playback_fallback_keeps_overlapping_word_tails_without_moving_onsets(tmp_path, overlap):
     pipeline = Pipeline(dict(url=URL), tmp_path)
     lines = ['First phrase', 'Next phrase']
@@ -3372,7 +3373,7 @@ def test_playback_fallback_rejects_collapsed_phrase_without_rejecting_fast_lyric
     assert [c['text'] for c in result] == ([lines[0],lines[2]] if seconds==.06 else lines)
 
 
-@pytest.mark.parametrize('bad', ['text', 'overlap', 'missing', 'nan'])
+@pytest.mark.parametrize('bad', ['text', 'onset_order', 'missing', 'nan'])
 def test_playback_fallback_omits_only_phrases_without_usable_times(tmp_path, bad):
     pipeline = Pipeline(dict(url=URL), tmp_path)
     (tmp_path/'lyrics.json').write_text(json.dumps(dict(title='Example', artist='', language='English',
@@ -3381,7 +3382,7 @@ def test_playback_fallback_omits_only_phrases_without_usable_times(tmp_path, bad
     cues = [dict(text=text, start=start, end=end, status='candidate')
             for text, start, end in [('First line', 0, 1), ('Next line', 2, 3)]]
     if bad == 'text': cues[0]['text'] = 'Wrong lyric'
-    if bad == 'overlap': cues[1]['start'] = .4
+    if bad == 'onset_order': cues[1]['start'] = 0.
     if bad == 'missing': cues[0]['start'] = None
     if bad == 'nan': cues[0]['start'] = float('nan')
     (tmp_path/'alignment/cues.json').write_text(json.dumps(cues))
@@ -3389,12 +3390,12 @@ def test_playback_fallback_omits_only_phrases_without_usable_times(tmp_path, bad
     with pytest.raises(StageFailure, match='1 行歌词未能定位'):
         pipeline.playback_fallback({}, 4, StageFailure('align_words', 'unresolved'))
     output = json.loads((tmp_path/'cues.json').read_text())
-    retained = 0 if bad == 'overlap' else 1
+    retained = 0 if bad == 'onset_order' else 1
     assert len(output) == 1 and output[0]['text'] == cues[retained]['text']
     assert output[0]['start'] == cues[retained]['start'] and output[0]['end'] == cues[retained]['end']
     warning = json.loads((tmp_path/'quality.json').read_text())['playback_fallback']
     assert warning['subtitle_mode'] == 'estimated_word'
-    assert warning['omitted_lines'] == [2 if bad == 'overlap' else 1]
+    assert warning['omitted_lines'] == [2 if bad == 'onset_order' else 1]
 
 
 @pytest.mark.parametrize('bad', ['merged', 'text', 'span', 'nan', 'outside', 'backward'])

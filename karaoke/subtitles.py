@@ -177,14 +177,15 @@ def presentation_cues(cues, duration, lead=.2, tail=.4, bridge_gap=1.5):
             raise ValueError(f'Unresolved alignment on line {i+1}')
         cue['aligned_start'], cue['aligned_end'] = cue['start'], cue['end']
     for i, (left, right) in enumerate(zip(adjusted, adjusted[1:])):
-        if not left['start'] < right['start'] or not left['end'] < right['end']:
+        if not left['start'] < right['start'] or (left.get('units') and right.get('units') and
+                left['units'][-1]['start'] >= right['units'][0]['start']):
             raise ValueError(f'Unordered alignment at line {i+1}')
         overlap = left['end']-right['start']
-        if overlap > .5:
-            raise ValueError(f'Alignment overlap needs review at line {i+1}: {overlap:.3f}s')
         if overlap > 0:
-            boundary = round((left['end']+right['start'])/2, 3)
-            left['end'] = right['start'] = boundary
+            # A held note can outlive the next line's entrance. End its display
+            # hold there; neither acoustic boundary nor the next onset moves.
+            boundary = right['start']
+            left['end'] = boundary
             changes.append({'lines': [i+1, i+2], 'overlap_seconds': round(overlap, 3), 'boundary': boundary})
     starts = [max(0., cue['start']-lead) for cue in adjusted]
     for i, cue in enumerate(adjusted):
