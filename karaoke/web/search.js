@@ -26,14 +26,35 @@ export function createVideoSearch(onChange, fetcher = fetch, getLocal = () => []
     controller?.abort();
     active = null;
   }
-  async function search(query, mode = 'youtube') {
+  function activate(query, mode, providers, autoSelectArtist = false) {
     cancel();
+    for (const info of Object.values(providers)) info.loadingMore = false;
     controller = new AbortController();
+    active = {query, mode, providers, autoSelectArtist, generation, signal:controller.signal};
+    onChange(providers, mode);
+    return active;
+  }
+  async function search(query, mode = 'youtube') {
     const providers = {local:{loading:false, results:getLocal(query), error:''}};
     if (mode !== 'local') providers[mode] = {loading:true, results:[], error:''};
-    active = {query, mode, providers, generation, signal:controller.signal};
-    onChange(providers);
-    if (mode !== 'local') await loadPage(active, false);
+    if (mode === 'artists') providers.artists.query = query;
+    const request = activate(query, mode, providers, mode === 'artists');
+    if (mode !== 'local') await loadPage(request, false);
+  }
+  async function selectArtist(id, refresh = false) {
+    const providers = active?.providers;
+    const artist = providers?.artists?.results.find(item => item.browse_id === id);
+    if (!artist) return;
+    const previous = providers.artist;
+    if (refresh || previous?.selection?.browse_id !== id || previous.loading || previous.error) {
+      providers.artist = {loading:true, results:[], error:'', metadata:artist, selection:artist};
+    }
+    const request = activate(id, 'artist', providers);
+    if (providers.artist.loading) await loadPage(request, false);
+  }
+  function showArtists() {
+    const providers = active?.providers;
+    if (providers?.artists) activate(providers.artists.query, 'artists', providers);
   }
   async function loadMore() {
     const info = active?.providers[active.mode];
@@ -44,7 +65,7 @@ export function createVideoSearch(onChange, fetcher = fetch, getLocal = () => []
     const {query, mode, providers, signal} = request;
     const info = providers[mode];
     const cursor = append ? info.nextCursor : null;
-    const notify = () => { if (request.generation === generation) onChange(providers); };
+    const notify = () => { if (request.generation === generation) onChange(providers, mode); };
     if (append) {
       info.loadingMore = true; info.moreError = ''; info.expired = false;
       notify();
@@ -65,6 +86,9 @@ export function createVideoSearch(onChange, fetcher = fetch, getLocal = () => []
       info.autoBlocked = append && added.length === 0;
       info.loading = false; info.loadingMore = false;
       info.error = ''; info.moreError = '';
+      if (request.autoSelectArtist && !append && info.results[0]?.browse_id) {
+        return selectArtist(info.results[0].browse_id);
+      }
     } catch (error) {
       if (signal.aborted || request.generation !== generation) return;
       if (append) {
@@ -80,31 +104,29 @@ export function createVideoSearch(onChange, fetcher = fetch, getLocal = () => []
     const results = getLocal(active.query);
     if (JSON.stringify(results) === JSON.stringify(active.providers.local.results)) return;
     active.providers.local = {loading:false, results, error:''};
-    onChange(active.providers);
+    onChange(active.providers, active.mode);
   }
   function snapshot() {
     if (!active) return null;
-    return structuredClone({query:active.query, mode:active.mode, providers:active.providers,
+    return structuredClone({query:active.query, mode:active.mode, providers:active.providers, autoSelectArtist:active.autoSelectArtist,
       albums:[...albums].filter(([,record]) => record.data).map(([id,record]) => [id,record.data])});
   }
   function restore(saved) {
     const info = saved?.providers?.[saved.mode];
     if (!['local','youtube','songs','artists','artist','album'].includes(saved?.mode) ||
         typeof saved?.query !== 'string' || !Array.isArray(info?.results)) return false;
-    cancel();
     for (const [id,data] of saved.albums || []) albums.set(id, {data, pending:Promise.resolve(data)});
     while (albums.size > 32) albums.delete(albums.keys().next().value);
-    if (info.loading && !info.results.length) { search(saved.query, saved.mode); return true; }
-    controller = new AbortController();
     const providers = structuredClone(saved.providers);
-    providers[saved.mode].loading = false;
-    providers[saved.mode].loadingMore = false;
+    if (saved.mode === 'artists') providers.artists.query ??= saved.query;
+    const restart = info.loading && !info.results.length;
+    providers[saved.mode].loading = restart;
     providers.local = {loading:false, results:getLocal(saved.query), error:''};
-    active = {query:saved.query, mode:saved.mode, providers, generation, signal:controller.signal};
-    onChange(providers);
+    const request = activate(saved.query, saved.mode, providers, saved.autoSelectArtist ?? (saved.mode === 'artists' && restart));
+    if (restart) loadPage(request, false);
     return true;
   }
-  return {search, loadMore, cancel, refreshLocal, snapshot, restore};
+  return {search, selectArtist, showArtists, loadMore, cancel, refreshLocal, snapshot, restore};
 }
 
 // One browser-history entry per navigation; refresh restores the same search scene.

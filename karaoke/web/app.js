@@ -171,7 +171,10 @@ function renderDiscovery() {
   $('frequent-artists').innerHTML = `<h2>常唱歌手</h2><div>${artists.map(artist => `<button data-search-artist="${escape(artist.name)}" aria-label="找歌手：${escape(artist.name)}">${escape(artist.name)}<span>唱过 ${artist.count} 次</span></button>`).join('')}</div>`;
 }
 
-function renderVideoResults(providers) {
+function renderVideoResults(providers, mode = videoSource) {
+  videoSource = mode;
+  if (mode === 'artist' && providers.artist.selection) catalogueSelection = {...providers.artist.selection, returnMode:'artists'};
+  else if (mode === 'artists') catalogueSelection = null;
   searchSnapshot = providers;
   $('library-view').classList.add('searching');
   $('video-results').hidden = false;
@@ -182,7 +185,7 @@ function renderVideoResults(providers) {
   const artists = videoSource === 'artists', album = videoSource === 'album', catalogue = album || videoSource === 'artist';
   const metadata = info.metadata || catalogueSelection || {};
   const catalogueHeading = metadata.catalogue_section === 'videos' ? '歌手视频' : metadata.catalogue_section === 'releases' ? '歌手作品' : '热门歌曲';
-  $('clear-search').textContent = catalogue ? '返回上一级' : '返回曲库';
+  $('clear-search').textContent = catalogue || (artists && providers.artist?.selection) ? '返回上一级' : '返回曲库';
   const popularityAvailable = info.results.some(song => playCount(song.views) !== null);
   if (searchOrder === 'popular' && !popularityAvailable) searchOrder = 'relevance';
   $('search-order').value = searchOrder;
@@ -196,7 +199,8 @@ function renderVideoResults(providers) {
     videoSource === 'local' ? '本地曲库 · 现场版靠后' : videoSource === 'songs' ? '歌曲优先 · 现场版靠后' : 'YouTube 原顺序 · 现场版靠后';
   $('search-status').innerHTML = `<span class="${info.error ? 'search-error' : ''}">${info.loading ? '正在查找…' : info.error ? escape(info.error) : info.results.length ? `${videoSource === 'local' ? '' : '已加载 '}${info.results.length} ${artists ? '位歌手' : videoSource === 'youtube' || metadata.catalogue_section === 'videos' ? '个视频' : videoSource === 'songs' || metadata.catalogue_section === 'releases' ? '项' : '首'}${catalogue && info.metadata?.complete === false ? ' · 歌手页精选' : ''}` : catalogue ? '这个页面暂未提供可点播作品' : '没有找到，试试另一个关键词或搜索类型'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`;
   $('artist-summary').hidden = !catalogue;
-  if (catalogue) $('artist-summary').innerHTML = `${metadata.thumbnail ? `<img src="${escape(metadata.thumbnail)}" alt="" referrerpolicy="no-referrer">` : ''}<div><p>${album ? '专辑' : '歌手'}</p><h3>${escape(metadata.title)}</h3>${metadata.monthly_listeners ? `<p>${escape(metadata.monthly_listeners)} · YouTube Music</p>` : ''}</div>`;
+  const otherArtists = !album && (providers.artists?.results.length > 1 || providers.artists?.nextCursor);
+  if (catalogue) $('artist-summary').innerHTML = `${metadata.thumbnail ? `<img src="${escape(metadata.thumbnail)}" alt="" referrerpolicy="no-referrer">` : ''}<div><p>${album ? '专辑' : '歌手'}</p><h3>${escape(metadata.title)}</h3>${metadata.monthly_listeners ? `<p>${escape(metadata.monthly_listeners)} · YouTube Music</p>` : ''}${otherArtists ? '<button class="text-button" data-other-artists>其他歌手 →</button>' : ''}</div>`;
   renderSearchMore(info);
   searchSongs = orderResults(info.results.map(song => ({...song,
     status:library.find(item => item.url === song.url)?.status || song.status})), album && searchOrder === 'relevance' ? 'album' : searchOrder);
@@ -298,6 +302,12 @@ function formatPlays(value) {
 
 function openCatalogue(item) {
   navigation.push();
+  if ((item.kind || 'artist') === 'artist' && searchSnapshot?.artists?.results.some(artist => artist.browse_id === item.browse_id)) {
+    searchOrder = 'relevance';
+    videoSearch.selectArtist(item.browse_id);
+    window.scrollTo(0, 0);
+    return;
+  }
   const query = $('song-input').value.trim();
   clearVideoSearch();
   const returnMode = catalogueSelection?.returnMode || videoSource;
@@ -359,6 +369,10 @@ function searchVideos(force = false) {
   clearTimeout(searchTimer);
   const query = $('song-input').value.trim();
   if (!query || /^https?:\/\//i.test(query) || (!force && query === searchQuery)) return;
+  if (force && query === searchQuery && videoSource === 'artist' && searchSnapshot?.artist?.selection) {
+    videoSearch.selectArtist(searchSnapshot.artist.selection.browse_id, true);
+    return;
+  }
   clearVideoSearch();
   searchQuery = query;
   if (query.length > 160) { toast('搜索关键词请控制在 160 字以内'); return; }
@@ -676,11 +690,19 @@ $('search-order').onchange = () => { searchOrder = $('search-order').value; if (
 $('song-input').oncompositionstart = () => { composing = true; clearVideoSearch(); };
 $('song-input').oncompositionend = () => { composing = false; editSearch(); };
 $('clear-search').onclick = () => {
-  if (['artist','album'].includes(videoSource)) {
-    if (!navigation.back()) changeSearchMode(catalogueSelection?.returnMode || 'songs');
+  if (videoSource === 'artists' && searchSnapshot?.artist?.selection) {
+    if (!navigation.back()) videoSearch.selectArtist(searchSnapshot.artist.selection.browse_id);
+  } else if (['artist','album'].includes(videoSource)) {
+    if (!navigation.back()) changeSearchMode(videoSource === 'artist' ? 'songs' : catalogueSelection?.returnMode || 'songs');
   } else {
     navigation.push(); $('song-input').value = ''; editSearch(); $('song-input').focus();
   }
+};
+$('artist-summary').onclick = event => {
+  if (!event.target.closest('[data-other-artists]')) return;
+  navigation.push();
+  videoSearch.showArtists();
+  window.scrollTo(0, 0);
 };
 const searchObserver = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
   const info = searchSnapshot?.[videoSource];

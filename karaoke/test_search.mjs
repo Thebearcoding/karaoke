@@ -139,22 +139,23 @@ test('YouTube view keeps provider order and has no result count or local dedupli
   assert.deepEqual(visibleResults(songs,'local'), [local]);
 });
 
-test('song, artist and catalogue searches stay separate and discard stale mode responses', async () => {
+test('artist searches open the first provider result directly without matching its displayed name', async () => {
   const {search, requests, snapshots} = setup();
   const song = search.search('Singer', 'songs');
   assert.equal(new URL(requests[0].url, 'http://localhost').searchParams.get('kind'), 'songs');
   const artist = search.search('Singer', 'artists');
   assert.ok(requests[0].signal.aborted);
-  requests[1].finish([{title:'Singer',browse_id:'UC'+'a'.repeat(22)}]);
+  requests[1].finish([{title:'Translated name',browse_id:'UC'+'a'.repeat(22)}]);
+  await flush();
+  assert.equal(requests[2].url, '/v1/music/artists/UC'+'a'.repeat(22));
+  assert.equal(snapshots.at(-1).artist.metadata.title, 'Translated name');
+  assert.equal(search.snapshot().mode, 'artist');
+  requests[2].finish(Array.from({length:150}, (_,i) => ({title:`Song ${i}`})));
   await artist;
   const count = snapshots.length;
   requests[0].finish([{title:'stale song'}]);
   await song;
   assert.equal(snapshots.length, count);
-  const catalogue = search.search('UC'+'a'.repeat(22), 'artist');
-  assert.equal(requests[2].url, '/v1/music/artists/UC'+'a'.repeat(22));
-  requests[2].finish(Array.from({length:150}, (_,i) => ({title:`Song ${i}`})));
-  await catalogue;
   assert.equal(snapshots.at(-1).artist.results.length, 150);
   const album = search.search('MPREexample', 'album');
   assert.equal(requests[3].url, '/v1/music/albums/MPREexample');
@@ -347,20 +348,125 @@ test('changing query or mode cancels pending pagination and an empty page never 
   await more;
   assert.equal(snapshots.length, count);
   requests[2].finish([{browse_id:'artist-one'}], true, 'artist-next');
+  await flush();
+  requests[3].finish([{url:'first-song'}]);
   await artists;
+  search.showArtists();
   const empty = search.loadMore();
-  requests[3].finish([], true, 'artist-next-again');
+  requests[4].finish([], true, 'artist-next-again');
   await empty;
   assert.equal(snapshots.at(-1).artists.autoBlocked, true);
   assert.equal(snapshots.at(-1).artists.nextCursor, 'artist-next-again');
-  assert.equal(requests.length, 4);
+  assert.equal(requests.length, 5);
   const manual = search.loadMore();
-  requests[4].finish([{browse_id:'artist-two'}]);
+  requests[5].finish([{browse_id:'artist-two'}]);
   await manual;
   assert.equal(snapshots.at(-1).artists.results.length, 2);
   await search.search('local', 'local');
   await search.loadMore();
+  assert.equal(requests.length, 6);
+});
+
+test('artist choices retain provider order and pagination without automatically reopening the first artist', async () => {
+  const {search, requests, snapshots} = setup();
+  const pending = search.search('Common name', 'artists');
+  const first = {title:'First result',browse_id:'artist-one'};
+  const second = {title:'Common name',browse_id:'artist-two'};
+  requests[0].finish([first,second], true, 'more-artists');
+  await flush();
+  requests[1].finish([{url:'one'}], true, 'more-songs');
+  await pending;
+  const more = search.loadMore();
+  assert.equal(requests[2].url, '/v1/music/artists/artist-one?cursor=more-songs');
+  requests[2].finish([{url:'two'}]);
+  await more;
+  search.showArtists();
+  assert.equal(search.snapshot().mode, 'artists');
+  assert.deepEqual(snapshots.at(-1).artists.results, [first,second]);
+  const saved = JSON.parse(JSON.stringify(search.snapshot()));
+  assert.ok(search.restore(saved));
+  assert.equal(requests.length, 3);
+  const cancelled = search.loadMore();
+  const params = new URL(requests[3].url, 'http://localhost').searchParams;
+  assert.equal(params.get('q'), 'Common name');
+  assert.equal(params.get('cursor'), 'more-artists');
+  await search.selectArtist(first.browse_id);
+  assert.ok(requests[3].signal.aborted);
+  requests[3].finish([{browse_id:'stale-artist'}]);
+  await cancelled;
+  search.showArtists();
+  assert.equal(snapshots.at(-1).artists.loadingMore, false);
+  const choices = search.loadMore();
+  assert.equal(requests[4].url, requests[3].url);
+  requests[4].finish([{browse_id:'artist-three',title:'Another result'}]);
+  await choices;
+  assert.equal(search.snapshot().mode, 'artists');
+  assert.equal(snapshots.at(-1).artists.results.length, 3);
+  await search.selectArtist(first.browse_id);
   assert.equal(requests.length, 5);
+  assert.deepEqual(snapshots.at(-1).artist.results, [{url:'one'},{url:'two'}]);
+  const restored = setup();
+  assert.ok(restored.search.restore(JSON.parse(JSON.stringify(search.snapshot()))));
+  assert.equal(restored.requests.length, 0);
+  restored.search.showArtists();
+  assert.equal(restored.snapshots.at(-1).artists.results.length, 3);
+});
+
+test('switching artists cancels the old catalogue, and retries keep the artist search context', async () => {
+  const {search, requests, snapshots} = setup();
+  const pending = search.search('Singer', 'artists');
+  requests[0].finish([{title:'First',browse_id:'one'},{title:'Second',browse_id:'two'}]);
+  await flush();
+  search.showArtists();
+  assert.ok(requests[1].signal.aborted);
+  const next = search.selectArtist('two');
+  requests[2].finish([], false);
+  await next;
+  assert.equal(snapshots.at(-1).artist.error, 'Provider failed');
+  const count = snapshots.length;
+  requests[1].finish([{url:'stale'}]);
+  await pending;
+  assert.equal(snapshots.length, count);
+  const retry = search.selectArtist('two', true);
+  assert.equal(requests[3].url, '/v1/music/artists/two');
+  requests[3].finish([{url:'current'}]);
+  await retry;
+  assert.equal(snapshots.at(-1).artist.metadata.title, 'Second');
+  assert.equal(snapshots.at(-1).artists.results.length, 2);
+  assert.deepEqual(snapshots.at(-1).artist.results, [{url:'current'}]);
+});
+
+test('reloading an automatically selected artist resumes only its pending catalogue', async () => {
+  const first = setup();
+  const pending = first.search.search('Singer', 'artists');
+  first.requests[0].finish([{title:'Singer',browse_id:'one'},{title:'Other',browse_id:'two'}]);
+  await flush();
+  const next = setup();
+  assert.ok(next.search.restore(JSON.parse(JSON.stringify(first.search.snapshot()))));
+  assert.equal(next.requests[0].url, '/v1/music/artists/one');
+  assert.equal(next.snapshots.at(-1).artist.metadata.title, 'Singer');
+  next.requests[0].finish([{url:'fresh'}]);
+  await flush();
+  assert.deepEqual(next.snapshots.at(-1).artist.results, [{url:'fresh'}]);
+  next.search.showArtists();
+  assert.equal(next.search.snapshot().query, 'Singer');
+  assert.equal(next.snapshots.at(-1).artists.results.length, 2);
+  first.requests[1].finish([]);
+  await pending;
+});
+
+test('empty or failed artist discovery does not request a catalogue or silently switch search type', async () => {
+  const {search, requests, snapshots} = setup();
+  let pending = search.search('Nobody', 'artists');
+  requests[0].finish([]);
+  await pending;
+  assert.equal(search.snapshot().mode, 'artists');
+  assert.deepEqual(snapshots.at(-1).artists.results, []);
+  pending = search.search('Failure', 'artists');
+  requests[1].finish([], false);
+  await pending;
+  assert.equal(requests.length, 2);
+  assert.equal(snapshots.at(-1).artists.error, 'Provider failed');
 });
 
 test('artist pages keep their metadata and expired cursors leave existing songs available', async () => {
