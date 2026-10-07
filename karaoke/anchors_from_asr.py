@@ -45,18 +45,23 @@ def _match_words(lines, words, units):
         for (first, stop), (begin, end) in zip(*alignment.aligned):
             for i, j in zip(range(first, stop), range(begin, end)):
                 if expected[i] == observed[j]:
-                    correspondence[i] = owners[j]
+                    correspondence[i] = j
     position = 0
     cues = []
     for line, key in zip(lines, keys):
         matched = [correspondence[i] for i in range(position, position+len(key)) if i in correspondence]
         coverage = len(matched)/len(key) if key else 0.
-        if coverage < .5:
+        density = len(matched)/(max(matched)-min(matched)+1) if matched else 0.
+        # When ASR omits a lyric, global edit distance can collect its letters
+        # across unrelated dialogue. Coverage alone does not locate a phrase.
+        # Measure text density, not duration: a genuinely held note is valid.
+        if coverage < .5 or density < .5:
             cue = {'text': line, 'start': None, 'end': None,
-                   'matched_fraction': coverage, 'status': 'unresolved_text'}
+                   'matched_fraction': coverage, 'matched_density': density, 'status': 'unresolved_text'}
             prefix = []
             for i in range(position, position+len(key)):
-                owner = correspondence.get(i)
+                observed_index = correspondence.get(i)
+                owner = owners[observed_index] if observed_index is not None else None
                 if owner is None or (prefix and owner > prefix[-1]+1):
                     break
                 prefix.append(owner)
@@ -68,9 +73,10 @@ def _match_words(lines, words, units):
             cues.append(cue)
             position += len(key)
             continue
-        start, end = words[min(matched)]['start'], words[max(matched)]['end']
+        start, end = words[owners[min(matched)]]['start'], words[owners[max(matched)]]['end']
         cues.append({'text': line, 'start': round(start, 3), 'end': round(end, 3),
-                     'matched_fraction': coverage, 'status': 'candidate' if end > start else 'unresolved_timing',
+                     'matched_fraction': coverage, 'matched_density': density,
+                     'status': 'candidate' if end > start else 'unresolved_timing',
                      'source': 'asr_rough_anchor'})
         position += len(key)
     return cues
@@ -108,7 +114,8 @@ def anchors_from_words(lines, words, language, allow_missing=False):
     if not allow_missing:
         for i, cue in enumerate(cues, 1):
             if cue['status'] == 'unresolved_text':
-                raise ValueError(f"Insufficient ASR support for lyric line {i}: {cue['matched_fraction']:.1%}")
+                raise ValueError(f"Insufficient ASR support for lyric line {i}: coverage "
+                                 f"{cue['matched_fraction']:.1%}, text density {cue['matched_density']:.1%}")
             if cue['status'] == 'unresolved_timing':
                 raise ValueError(f'Collapsed ASR interval for lyric line {i}')
     return cues

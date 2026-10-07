@@ -1253,6 +1253,24 @@ class SubtitleIntegrity(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'Insufficient ASR support'):
                     anchors_from_words(['abc'], words, 'English')
 
+    def test_omitted_lyric_cannot_be_located_by_scattered_dialogue_matches(self):
+        lines = ['star light', 'clear sky', 'the closing phrase']
+        dialogue = 'qzxqzx'.join('starlightclearsky')
+        words = [dict(word=char, start=float(i), end=float(i+1)) for i,char in enumerate(dialogue)]
+        words.append(dict(word=lines[-1],start=150.,end=151.))
+        cues = anchors_from_words(lines,words,'English',allow_missing=True)
+        self.assertTrue(all(c['matched_fraction']==1. and c['matched_density']<.5 for c in cues[:2]))
+        self.assertEqual([c['status'] for c in cues],['unresolved_text','unresolved_text','candidate'])
+        self.assertTrue(all(c['start'] is None and 'search_start' not in c for c in cues[:2]))
+        self.assertEqual((cues[-1]['start'],cues[-1]['end']),(150.,151.))
+
+    def test_text_density_preserves_partial_recognition_and_long_held_notes(self):
+        words = [dict(word=text,start=t,end=t+10.) for text,t in [('star',1.),('light',20.)]]
+        cue = anchors_from_words(['star lights'],words,'English')[0]
+        self.assertGreater(cue['matched_fraction'],.5)
+        self.assertEqual(cue['matched_density'],1.)
+        self.assertEqual((cue['start'],cue['end']),(1.,30.))
+
     def test_split_video_cards_match_one_lyric_line(self):
         self.assertEqual(caption_similarity('星光落在心里面', '星光落在'), 1.)
         self.assertEqual(caption_similarity('星光落在心里面', '心里面'), 1.)
