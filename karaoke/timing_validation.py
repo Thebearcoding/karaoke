@@ -246,19 +246,30 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             reports.extend(dict(r, context_retry=windows[r['line']-1]) for r in reviewed['lines'])
             ledger = reviewed['constraints']
     if playback:
-        for row in reports:
-            index = row['line']-1
-            proofs = [v['proof'] for v in timing_violations(result, ledger) if v['proof']['line']==index+1]
-            if not proofs or 'predictions' not in row:
-                continue
-            bounds = [result[index-1]['units'][-1]['start']+.015 if index else 0.,
-                      result[index+1]['units'][0]['start'] if index+1<len(result) else len(wave)/44100]
-            for proof in proofs:
-                candidate, repair = grouped_timing_fallback(result[index], row, proof, ledger,
-                    wave, bounds, protocol, language)
-                if candidate is not None:
-                    result[index] = candidate
-                    row['repairs'].append(repair)
+        # A repaired neighbour can make an earlier rejected local edit fit.
+        # Reuse the same evidence until no more constraints are resolved;
+        # never rerun models or discard a constraint to make progress.
+        remaining = len(timing_violations(result, ledger))
+        while remaining:
+            for row in reports:
+                index = row['line']-1
+                proofs = [v['proof'] for v in timing_violations(result, ledger) if v['proof']['line']==index+1]
+                if not proofs or 'predictions' not in row:
+                    continue
+                bounds = [result[index-1]['units'][-1]['start']+.015 if index else 0.,
+                          result[index+1]['units'][0]['start'] if index+1<len(result) else len(wave)/44100]
+                for proof in proofs:
+                    if not timing_violations(result, [proof]):
+                        continue
+                    candidate, repair = grouped_timing_fallback(result[index], row, proof, ledger,
+                        wave, bounds, protocol, language)
+                    if candidate is not None:
+                        result[index] = candidate
+                        row['repairs'].append(repair)
+            unresolved = len(timing_violations(result, ledger))
+            if unresolved >= remaining:
+                break
+            remaining = unresolved
     return result,dict(lines=reports,constraints=ledger,unresolved=timing_violations(result,ledger),
                        accuracy=None)
 

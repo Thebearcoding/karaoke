@@ -568,6 +568,41 @@ class SubtitleIntegrity(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError,'contradicted'):
                         validate_timeline(result,[text],4.,report['constraints'],'Chinese')
 
+    def test_grouped_timing_revisits_an_edit_after_its_neighbour_is_repaired(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
+        text='甲乙丙丁戊己'
+        units=[dict(first=i,stop=i+1,text=c,start=t,end=t+.15,timing_source='prior_word_fallback')
+               for i,(c,t) in enumerate(zip(text,[1.,1.2,1.4,1.6,3.5,4.2]))]
+        cue=dict(text=text,start=1.,end=4.35,units=units)
+        measured=[dict(u,start=t,end=t+.1) for u,t in zip(units,[1.,2.,2.7,3.2,3.5,4.2])]
+        views=[deepcopy(measured),deepcopy(measured)]
+        views[1][3].update(start=3.35,end=3.45)
+        for mode in ('playback','strict','contradicted_interior'):
+            with self.subTest(mode=mode):
+                calls=[]
+                def witness(*args,**kwargs):
+                    calls.append('witness');return views
+                def predict(*args):
+                    calls.append('predict');return [measured]*3
+                constraints=([dict(line=1,text=text,first=3,stop=4,start_min=3.,start_max=3.4,onset=3.2)]
+                             if mode=='contradicted_interior' else [])
+                result,report=reconcile_timing([cue],np.ones(5*44100)*.1,witness,predict,protocol,
+                    'Chinese',constraints,playback=mode!='strict',_retry_context=False)
+                self.assertEqual(calls,['witness','predict'])
+                self.assertEqual(cue['units'],units)
+                if mode=='playback':
+                    self.assertFalse(report['unresolved'])
+                    self.assertEqual([(u['text'],u['start']) for u in result[0]['units']],
+                                     [('甲',1.),('乙',2.),('丙丁',2.7),('戊',3.5),('己',4.2)])
+                    self.assertEqual([r['first'] for r in report['lines'][0]['repairs'] if r.get('accepted')],[2,1])
+                    validate_timeline(result,[text],5.,report['constraints'],'Chinese')
+                else:
+                    self.assertTrue(report['unresolved'])
+                    with self.assertRaisesRegex(ValueError,'contradicted'):
+                        validate_timeline(result,[text],5.,report['constraints'],'Chinese')
+
     def test_timing_repair_closes_over_different_token_boundaries(self):
         from copy import deepcopy
         from timing_validation import reconcile_timing
