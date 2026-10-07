@@ -527,7 +527,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
         from .local_asr import configuration
         settings = {key: os.getenv(key) for key in ('KARAOKE_TEXT_MODEL', 'KARAOKE_ASR_FALLBACK_MODEL', 'KARAOKE_DEVICE',
             'KARAOKE_DISABLE_LYRIC_CATALOG', 'KARAOKE_FONT_FILE', 'KARAOKE_SEPARATOR_PYTHON',
-            'KARAOKE_SEPARATION_BATCH_SIZE')}
+            'KARAOKE_SEPARATION_BATCH_SIZE', 'KARAOKE_COMPUTE_CONCURRENCY')}
         settings['asr'] = configuration()
         version = hashlib.sha256((pipeline_fingerprint()+json.dumps(settings, sort_keys=True)).encode()).hexdigest()
     if worker_concurrency == 'env':

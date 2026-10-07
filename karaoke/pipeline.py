@@ -1,6 +1,6 @@
 """URL-to-karaoke adapter for the existing, versioned separation/alignment stages."""
 import argparse
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
@@ -180,6 +180,9 @@ class Pipeline:
         default_separator = ROOT.parent.parent/'audio/.venv-separator-local/bin/python'
         self.separator_python = separator_python or (str(default_separator) if default_separator.exists() else sys.executable)
         self.device, self.text_model = device, text_model
+        self.compute_concurrency = int(os.getenv('KARAOKE_COMPUTE_CONCURRENCY', '1'))
+        if self.compute_concurrency < 1:
+            raise ValueError('Compute concurrency must be positive')
         self.max_duration, self.catalog_root = max_duration, catalog_root
         self.cookies_file = Path(cookies_file).expanduser() if cookies_file else self.output.parent/'private/youtube-cookies.txt'
         self.audio_only = audio_only
@@ -251,7 +254,7 @@ class Pipeline:
         inputs, outputs, code = specs[name]
         if name in ('package_two_stems', 'package_three_stems') and '--source-pcm' in command:
             inputs = [*inputs, 'source-native.wav', 'source-native.json']
-        config = dict(command=[str(a) for a in command])
+        config = dict(command=[str(a) for a in command], compute_concurrency=self.compute_concurrency)
         if name == 'validate_timing':
             from .timing_validation import acoustic_model_files
             constraints = self.output/'timing-constraints.json'
@@ -360,7 +363,7 @@ class Pipeline:
 
     @contextmanager
     def stage_slot(self, name):
-        """Different songs overlap stages, but share each expensive model lane."""
+        """Bound simultaneous compute while retaining a single download/render lane."""
         directory = os.getenv('KARAOKE_STAGE_LOCK_DIR')
         lane = ('separation' if name.startswith('separate_') else
                 'alignment' if name in ('transcribe', 'validate_timing') or name.startswith('align_') else
@@ -376,7 +379,11 @@ class Pipeline:
         folder.mkdir(parents=True, exist_ok=True)
         stamp = time.time_ns()
         request = folder/f'{lane}.{os.getpid()}.{threading.get_ident()}.{stamp}.json'
-        with request.open('x+') as registration, (folder/(lane+'.lock')).open('a') as slot:
+        capacity = self.compute_concurrency if lane in ('separation', 'alignment', 'packaging') else 1
+        with request.open('x+') as registration, ExitStack() as handles:
+            slots = [handles.enter_context((folder/(lane+('' if i == 0 else f'.{i}')+'.lock')).open('a'))
+                     for i in range(capacity)]
+            slot = None
             fcntl.flock(registration, fcntl.LOCK_EX)
             json.dump(dict(job=self.output.name, ready=stamp, url=self.request['url']), registration)
             registration.flush()
@@ -384,7 +391,15 @@ class Pipeline:
                 waiting = False
                 while True:
                     try:
-                        fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        for candidate in slots:
+                            try:
+                                fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            except BlockingIOError:
+                                continue
+                            slot = candidate
+                            break
+                        else:
+                            raise BlockingIOError
                         try:
                             order = json.loads((folder/'priority.json').read_text())
                         except (OSError, ValueError):
@@ -424,7 +439,8 @@ class Pipeline:
                 yield
             finally:
                 request.unlink(missing_ok=True)
-                fcntl.flock(slot, fcntl.LOCK_UN)
+                if slot is not None:
+                    fcntl.flock(slot, fcntl.LOCK_UN)
 
     def run_subprocess(self, name, command, timeout=3600):
         self.phase(name, True)

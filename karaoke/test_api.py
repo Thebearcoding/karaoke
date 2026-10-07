@@ -3126,6 +3126,50 @@ while not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)
     assert not first.active and not second.active
 
 
+@pytest.mark.parametrize('stage,capacity', [('separate_music', 2), ('align_words', 2),
+                                             ('package_three_stems', 2), ('download', 1)])
+def test_compute_slots_overlap_up_to_capacity_and_keep_downloads_serial(tmp_path, monkeypatch, stage, capacity):
+    from concurrent.futures import ThreadPoolExecutor
+    monkeypatch.setenv('KARAOKE_STAGE_LOCK_DIR', str(tmp_path/'slots'))
+    monkeypatch.setenv('KARAOKE_COMPUTE_CONCURRENCY', '2')
+    pipelines = [Pipeline(dict(url=URL), tmp_path/str(i)) for i in range(3)]
+    code = ("import pathlib,sys,time;pathlib.Path(sys.argv[1]).touch();"
+            "\nwhile not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)")
+    def run(i):
+        pipelines[i].run_process(stage, [sys.executable, '-c', code,
+            str(tmp_path/f'{i}.started'), str(tmp_path/f'{i}.release')], timeout=10)
+    def wait_for(check):
+        deadline = time.monotonic()+8
+        while not check() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert check()
+    def started(i):
+        return (tmp_path/f'{i}.started').exists()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = []
+        try:
+            futures.append(pool.submit(run, 0))
+            wait_for(lambda: started(0))
+            futures.append(pool.submit(run, 1))
+            wait_for(lambda: started(1) if capacity == 2 else pipelines[1].stage_progress.get(stage, {}).get('waiting'))
+            futures.append(pool.submit(run, 2))
+            wait_for(lambda: pipelines[2].stage_progress.get(stage, {}).get('waiting'))
+            assert not started(2)
+            assert started(1) == (capacity == 2)
+            (tmp_path/'0.release').touch()
+            if capacity == 1:
+                wait_for(lambda: started(1))
+                assert not started(2)
+                (tmp_path/'1.release').touch()
+            wait_for(lambda: started(2))
+        finally:
+            for i in range(3):
+                (tmp_path/f'{i}.release').touch()
+        for future in futures:
+            future.result()
+    assert all(not pipeline.active for pipeline in pipelines)
+
+
 def test_started_pipelines_respect_provider_backoff_before_taking_download_lane(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from karaoke.job_schema import download_backoff
