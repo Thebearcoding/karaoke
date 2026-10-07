@@ -2189,6 +2189,43 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
         lambda *a:pytest.fail('A complete alignment ran ASR'),align) is good
 
 
+@pytest.mark.parametrize('support', ['agree', 'disagree', 'unavailable'])
+def test_local_unrecognized_phrase_uses_acoustic_evidence_without_repeating_recognition(support):
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines, starts = ['alpha', 'bravo', 'charlie'], [1.,12.,25.]
+    def segment(text, begin, collapsed=False):
+        start=starts[lines.index(text)]-begin
+        return dict(words=[dict(word=text,start=start,end=start+(0 if collapsed else .8))])
+    original=[segment(t,0.,i==1) for i,t in enumerate(lines)]
+    block=dict(range=[0,3],context=[0,3],source_range=[0.,30.],result=dict(segments=original))
+    recognition=[]
+    def recognize(begin,end):
+        recognition.append((begin,end))
+        return dict(segments=[segment(lines[i],begin) for i in (0,2)])
+    def align(begin,end,text,**options):
+        return dict(segments=[segment(t,begin,text== '\n'.join(lines) and t==lines[1])
+                              for t in text.splitlines()])
+    acoustic=[]
+    def localize(begin,end,text):
+        acoustic.append((begin,end))
+        assert recognition[0]==(begin,end) and text=='\n'.join(lines)
+        if support=='unavailable':raise ValueError('No pronunciation evidence')
+        words,offset=[],0
+        for t,s in zip(lines,starts):
+            words.append(dict(text=t,first=offset,stop=offset+len(t),start=s,end=s+.8))
+            offset+=len(t)+1
+        shift=1 if support=='disagree' else .1
+        return dict(views=[words,[dict(w,start=w['start']+shift,end=w['end']+shift) for w in words]])
+    result=recover_with_local_asr(block,lines,np.zeros(30*16000),'English',recognize,align,
+                                 localize=localize,max_alignment_attempts=8)
+    assert acoustic and recognition.count(recognition[0])==1
+    assert result['result']['segments'][0]==original[0] and result['result']['segments'][2]==original[2]
+    if support=='agree':
+        assert result['result']['segments'][1]['words']==segment('bravo',0.)['words']
+    else:
+        assert result['result']==block['result']
+
+
 def test_local_recognition_cannot_search_outside_its_observed_crop():
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines, starts = ['alpha', 'bravo', 'charlie', 'delta', 'omega'], [10.,30.,31.,32.,50.]
@@ -2424,7 +2461,7 @@ def test_failed_global_alignment_relocalizes_only_the_independently_bounded_regi
         assert result['result']==original['result']
 
 
-@pytest.mark.parametrize('support', ['complete', 'missing', 'unavailable', 'acoustic',
+@pytest.mark.parametrize('support', ['complete', 'partial', 'missing', 'unavailable', 'acoustic', 'acoustic_partial',
                                      'acoustic_disagrees', 'acoustic_invalid', 'acoustic_unavailable'])
 def test_failed_long_recognition_uses_bounded_overlapping_context_without_duplicating_words(support):
     from karaoke.align_lyrics_whisper import recover_with_local_asr
@@ -2436,13 +2473,15 @@ def test_failed_long_recognition_uses_bounded_overlapping_context_without_duplic
     narrow, acoustic_calls=[], []
     def recognize(begin,end):
         if end-begin>30:
-            return dict(segments=[dict(words=[dict(word=lines[0],start=20-begin,end=21-begin)])])
+            indexes = [0,2] if support=='partial' and begin>0 else [0]
+            return dict(segments=[dict(words=[dict(word=lines[i],start=starts[i]-begin,end=starts[i]+1-begin)
+                                             for i in indexes])])
         narrow.append((begin,end))
         assert 19 <= begin < end <= 110 and end-begin<=30
         if support=='unavailable':
             raise ValueError('short recognition unavailable')
         return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+1-begin)
-            for t,s in zip(lines,starts) if support=='complete' and begin<=s<s+1<=end])])
+            for t,s in zip(lines,starts) if support in ('complete','partial') and begin<=s<s+1<=end])])
     def align(begin,end,text,**kwargs):
         texts=text.splitlines()
         return dict(segments=[dict(words=[dict(word=t,start=starts[lines.index(t)]-begin,
@@ -2459,6 +2498,8 @@ def test_failed_long_recognition_uses_bounded_overlapping_context_without_duplic
         second=[dict(w,start=w['start']+shift,end=w['end']+shift) for w in words]
         if support=='acoustic_invalid':
             second[1]['text']='Unrelated words'
+        if support=='acoustic_partial':
+            words,second=words[1:],second[1:]
         return dict(views=[words,second])
     result=recover_with_local_asr(block,lines,np.zeros(120*16000),'English',recognize,align,
                                  force_global=True,max_alignment_attempts=24,
@@ -2467,7 +2508,7 @@ def test_failed_long_recognition_uses_bounded_overlapping_context_without_duplic
     assert all(a[1]>b[0] for a,b in zip(narrow,narrow[1:]))
     assert result['result']['segments'][0]==original[0]
     assert len(acoustic_calls)==int(support.startswith('acoustic'))
-    if support in ('complete','acoustic'):
+    if support in ('complete','partial','acoustic','acoustic_partial'):
         assert [s['words'][0]['start'] for s in result['result']['segments']]==starts
         assert result['asr_localizations'][0]['accepted_lines']==[2,3]
         assert all(s['words'][0]['end']>s['words'][0]['start'] for s in result['result']['segments'])

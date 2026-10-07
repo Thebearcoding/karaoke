@@ -320,12 +320,12 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 attempt['error'] = str(error)
                 candidate = None
             attempt['result'] = candidate
-            if (global_recovery and budget >= cost+1 and
+            if (budget >= cost+1 and
                     not relocalized.intersection(range(start, stop_line)) and
                     all(anchors[i]['status'] != 'candidate' for i in range(start, stop_line)) and
-                    (ab > begin+.001 or ae < end-.001) and
+                    (not global_recovery or ab > begin+.001 or ae < end-.001) and
                     not valid_recovery(candidate, lines[cf+left:cs+left], ae-ab)):
-                # A global recognition pass can skip a quiet verse. Revisit
+                # A recognition pass can skip a quiet verse. Revisit
                 # only its independently bounded region before forcing text
                 # through the same failed attention path again.
                 relocalized.update(range(start, stop_line))
@@ -333,16 +333,16 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 regional = dict(context=[cf+left, cs+left], source_range=[ab, ae])
                 attempt['regional_localization'] = regional
                 try:
-                    response = recognize(ab, ae)
+                    response = report['recognition'] if (ab, ae) == (begin, end) else recognize(ab, ae)
                     local = recovery_anchors(anchors_from_words(lines[cf+left:cs+left],
                         recognized_words(ab, response, ae), language, allow_missing=True))
                     regional.update(recognition=response, anchors=local)
                     chunks = int(np.ceil((ae-ab)/20))
                     if (ae-ab > 30 and budget >= chunks+cost and
-                            not any(local[i-cf]['status']=='candidate' for i in range(start, stop_line))):
-                        # Retrying the same leading 30-second decoder context
-                        # cannot recover a verse it skipped. Overlap shorter
-                        # views and retain only each view's central region.
+                            any(local[i-cf]['status']!='candidate' for i in range(start, stop_line))):
+                        # A partly recognized passage still has missing lyrics.
+                        # Overlap shorter views instead of repeating its leading
+                        # decoder context; retain only each view's central region.
                         budget -= chunks
                         words, views = recognize_in_windows(recognize, ab, ae, chunks)
                         local = recovery_anchors(anchors_from_words(lines[cf+left:cs+left],
@@ -528,14 +528,15 @@ def recognize_in_windows(recognize, begin, end, chunks):
 def acoustic_line_anchors(lines, views, begin, end):
     """Use agreeing original/vocal phrase bounds as search hints, not captions."""
     text = '\n'.join(lines)
-    if (len(views) != 2 or any(normalized(''.join(u['text'] for u in v)) != normalized(text) for v in views)
-            or any(u['text'] != text[u['first']:u['stop']] or
+    if (len(views) != 2 or any(u['text'] != text[u['first']:u['stop']] or
                    not np.isfinite([u['start'], u['end']]).all() or
                    not begin <= u['start'] < u['end'] <= end for v in views for u in v)
             or any(a['start'] >= b['start'] for v in views for a,b in zip(v,v[1:]))):
         raise ValueError('Invalid acoustic localization evidence')
     anchors, offset = [], 0
     for line in lines:
+        # Missing pronunciation coverage invalidates this line, not every
+        # independently measured neighbouring phrase in the same model call.
         spans = [[u for u in v if offset <= u['first'] < u['stop'] <= offset+len(line)] for v in views]
         anchor = dict(text=line, start=None, end=None, status='unresolved_text')
         if all(s and normalized(''.join(u['text'] for u in s)) == normalized(line) for s in spans):
