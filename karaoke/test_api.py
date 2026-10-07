@@ -181,6 +181,121 @@ def test_failures_are_visible_and_retry_creates_new_job(tmp_path):
         finished(client, second['id'])
 
 
+@pytest.mark.parametrize('stage', ['download', 'download_video'])
+def test_download_retry_survives_restart_without_blocking_other_songs(tmp_path, stage):
+    from karaoke.stage_cache import StageCache
+    calls = []
+
+    def command(folder):
+        calls.append(folder.name)
+        if calls.count(folder.name) == 1 and len(calls) == 1:
+            source = folder/'source.wav'
+            output = folder/'separated.wav'
+            source.write_bytes(b'source')
+            with StageCache(folder).stage('separate', inputs=[source], outputs=[output]):
+                output.write_bytes(b'expensive output')
+            return [sys.executable, '-c',
+                f"import pathlib,json,sys;p=pathlib.Path(sys.argv[1]);"
+                f"(p/'{stage}.log').write_text('HTTP Error 403: Forbidden');"
+                f"(p/'error.json').write_text(json.dumps({{'code':'{stage}_failed',"
+                "'message':'视频站点拒绝下载（403）；请检查下载器与登录信息后重试'}));sys.exit(1)", str(folder)]
+        return fake_worker(folder)
+
+    app = create_app(tmp_path, worker_command=command, version='test')
+    with TestClient(app) as client:
+        first = client.post('/v1/room/entries', json={'url':URL}).json()['entries'][0]
+        deadline = time.monotonic()+5
+        while not app.state.store.read(first['job_id']).get('download_retry') and time.monotonic()<deadline:
+            time.sleep(.02)
+        job = app.state.store.read(first['job_id'])
+        retry = job['download_retry']
+        assert job['status'] == 'queued' and retry['count'] == 1
+        assert 290 < retry['next_retry_at']-time.time() <= 300
+        assert (tmp_path/job['id']/'separated.wav').read_bytes() == b'expensive output'
+        assert len(client.get('/v1/room').json()['entries']) == 1
+        assert client.get('/v1/room').json()['entries'][0]['next_retry_at'] == retry['next_retry_at']
+        assert client.post('/v1/jobs', json={'url':URL}).json()['id'] == job['id']
+        other = client.post('/v1/jobs', json={'url':'https://youtu.be/C0ppulkmXPw'}).json()
+        assert finished(client, other['id'])['status'] == 'completed'
+        assert calls.count(job['id']) == 1
+    restarted = create_app(tmp_path, worker_command=command, version='test')
+    with TestClient(restarted) as client:
+        assert restarted.state.store.read(job['id'])['download_retry'] == retry
+        # Advance the persisted timer to its deadline without waiting five minutes.
+        restarted.state.store.update(job['id'], download_retry={**retry, 'next_retry_at':time.time()-.1})
+        result = finished(client, job['id'])
+        assert result['status'] == 'completed' and calls.count(job['id']) == 2
+        assert result['error'] is None and result['download_retry']['next_retry_at'] is None
+        assert len(result['download_retry']['history']) == 1
+        assert client.get('/v1/room').json()['entries'][0]['job_id'] == job['id']
+
+
+@pytest.mark.parametrize('last_error,expected_attempts', [('download_failed', 4), ('alignment_failed', 2)])
+def test_automatic_download_retry_is_bounded_and_does_not_retry_other_failures(tmp_path, monkeypatch,
+                                                                            last_error, expected_attempts):
+    from karaoke import api
+    original = api.retry_fields
+    def short_retry(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if result['next_retry_at']:
+            result['next_retry_at'] = time.time()+.05
+        return result
+    monkeypatch.setattr(api, 'retry_fields', short_retry)
+    calls = []
+    def command(folder):
+        calls.append(folder.name)
+        error = dict(code='download_failed' if len(calls) == 1 else last_error, message='连接超时')
+        return [sys.executable, '-c', "import json,pathlib,sys;p=pathlib.Path(sys.argv[1]);"
+            "(p/'error.json').write_text(sys.argv[2]);sys.exit(1)", str(folder), json.dumps(error)]
+    with TestClient(create_app(tmp_path, worker_command=command, version='test')) as client:
+        job_id = client.post('/v1/jobs', json={'url':URL}).json()['id']
+        result = finished(client, job_id)
+        assert result['status'] == 'failed' and len(calls) == expected_attempts
+        assert result['error']['code'] == last_error
+        assert result['download_retry']['next_retry_at'] is None
+
+
+def test_removing_last_room_entry_cancels_pending_download_retry(tmp_path):
+    app = create_app(tmp_path, worker_command=fake_worker, version='test')
+    (tmp_path/'preparation.pause').touch()
+    with TestClient(app) as client:
+        entry = client.post('/v1/room/entries', json={'url':URL}).json()['entries'][0]
+        duplicate = client.post('/v1/room/entries', json={'url':URL}).json()['entries'][1]
+        job = app.state.store.read(entry['job_id'])
+        app.state.worker.download_failed(job, dict(code='download_failed',message='连接超时'), True)
+        client.post('/v1/room/commands', json={'action':'remove','entry_id':entry['id']})
+        assert app.state.store.read(job['id'])['status'] == 'queued'
+        client.post('/v1/room/commands', json={'action':'remove','entry_id':duplicate['id']})
+        result = app.state.store.read(job['id'])
+        assert result['status'] == 'failed' and result['download_retry']['next_retry_at'] is None
+        assert app.state.worker.queue.empty()
+        # Removing while a download is running also prevents a later auto retry.
+        app.state.worker.download_failed(result, dict(code='download_failed',message='连接超时'), True)
+        assert app.state.store.read(job['id'])['status'] == 'failed'
+        assert app.state.worker.queue.empty()
+
+
+def test_provider_limit_and_login_hold_survive_restart_and_allow_other_providers(tmp_path):
+    from karaoke.job_schema import download_backoff
+    app = create_app(tmp_path, worker_command=fake_worker, version='test')
+    job, _ = app.state.store.create(JobRequest(url=URL), 'test')
+    folder = tmp_path/job['id']
+    (folder/'download.log').write_text('HTTP Error 429: Too Many Requests\nRetry-After: 420\nSign in to confirm')
+    app.state.worker.download_failed(job, dict(code='download_failed',message='登录验证'), False)
+    result = app.state.store.read(job['id'])
+    assert result['status'] == 'failed' and result['download_retry']['next_retry_at'] is None
+    until = download_backoff(URL, tmp_path/'stage-locks')
+    assert 410 < until-time.time() <= 420
+    assert download_backoff(URL, tmp_path/'stage-locks', until=time.time()+10) == until
+    restarted = create_app(tmp_path, worker_command=fake_worker, version='test')
+    with TestClient(restarted) as client:
+        waiting = client.post('/v1/jobs', json={'url':'https://youtu.be/C0ppulkmXPw'}).json()
+        other = client.post('/v1/jobs', json={'url':'https://www.bilibili.com/video/BV1bK411W797'}).json()
+        assert finished(client, other['id'])['status'] == 'completed'
+        assert client.get(f"/v1/jobs/{waiting['id']}").json()['status'] == 'queued'
+        assert client.get(f"/v1/jobs/{job['id']}").json()['status'] == 'failed'
+
+
 @pytest.mark.parametrize('rejected', [False, True])
 def test_external_failures_retain_safe_causes_and_do_not_retry_as_software_bugs(tmp_path, rejected):
     import httpx
@@ -246,6 +361,11 @@ def test_rate_limit_uses_server_hint_and_distinguishes_request_errors(message, h
     ('Failed to resolve www.youtube.com','external',False),
     ('Sign in to confirm you are not a bot','blocked',False),
     ('HTTP Error 429: Too Many Requests\nTry again in 120 seconds\nSign in to confirm you are not a bot','blocked',True),
+    ('HTTP Error 503: Service Unavailable','external',False),
+    ('The read operation timed out','external',False),
+    ('HTTP Error 404: Not Found','blocked',False),
+    ('Video unavailable','blocked',False),
+    ('Unable to connect to proxy','blocked',False),
 ])
 def test_video_retry_does_not_apply_one_resource_error_to_every_song(diagnostic,status,global_limit):
     from karaoke.tools.soak import retry_fields
@@ -254,6 +374,18 @@ def test_video_retry_does_not_apply_one_resource_error_to_every_song(diagnostic,
     assert policy['next_retry_at'] is None if status=='blocked' and not global_limit else 1000<policy['next_retry_at']<=1300
     if 'Try again in 120 seconds' in diagnostic:
         assert policy['next_retry_at']==1120
+
+
+@pytest.mark.parametrize('code', ['download_failed', 'download_video_failed'])
+def test_download_retry_distinguishes_login_advice_and_respects_long_server_delays(code):
+    from karaoke.job_schema import retry_fields
+    error = dict(code=code, message='视频站点拒绝下载（403）；请检查下载器与登录信息后重试')
+    policy = retry_fields(error, '', 1, failed_at=1000)
+    assert policy['status'] == 'external' and policy['next_retry_at'] == 1300
+    policy = retry_fields(error, 'HTTP Error 429: Too Many Requests\nRetry-After: 3600', 1, failed_at=1000)
+    assert policy['provider_blocked'] and policy['next_retry_at'] == 4600
+    policy = retry_fields(error, 'HTTP Error 429: Too Many Requests\nRetry-After: 3600\nLogin required', 1, failed_at=1000)
+    assert policy['status'] == 'blocked' and policy['provider_blocked'] and policy['next_retry_at'] == 4600
 
 
 def test_asr_child_preserves_server_retry_header_for_parent(tmp_path, monkeypatch):
@@ -2332,6 +2464,32 @@ while not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)
         if two is not None:
             two.result()
     assert not first.active and not second.active
+
+
+def test_started_pipelines_respect_provider_backoff_before_taking_download_lane(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from karaoke.job_schema import download_backoff
+    slots = tmp_path/'slots'
+    monkeypatch.setenv('KARAOKE_STAGE_LOCK_DIR', str(slots))
+    first = Pipeline(dict(url=URL), tmp_path/'first')
+    with pytest.raises(StageFailure, match='429'):
+        first.run_process('download', [sys.executable, '-c',
+            "import sys;print('HTTP Error 429: Too Many Requests');print('Retry-After: 125');sys.exit(1)"])
+    assert 120 < download_backoff(URL)-time.time() <= 125
+    second = Pipeline(dict(url=URL), tmp_path/'second')
+    other = Pipeline(dict(url='https://www.bilibili.com/video/BV1bK411W797'), tmp_path/'other')
+    def download(pipeline):
+        with pipeline.stage_slot('download_video'):
+            return pipeline.output.name
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        waiting = pool.submit(download, second)
+        try:
+            assert pool.submit(download, other).result(timeout=3) == 'other'
+            assert not waiting.done()
+        finally:
+            # Expire the recorded limit; the existing child resumes naturally.
+            (slots/'youtube.retry.json').write_text('0')
+        assert waiting.result(timeout=3) == 'second'
 
 
 def test_waiting_stages_follow_playlist_priority_without_interrupting_work(tmp_path, monkeypatch):

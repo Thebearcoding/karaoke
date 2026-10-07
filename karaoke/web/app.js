@@ -237,7 +237,7 @@ function songRow(song, index, {artists = false, videos = false, local = false, i
     `<${tag} class="music-add" ${open}>${song.kind === 'album' ? '查看专辑' : catalogueAction ? '查看歌曲' : '打开'} ${icon('arrow')}</${tag}>`;
   const credits = song.artists?.length ? song.artists.map(a => a.id ? `<button data-artist-id="${escape(a.id)}" data-artist-name="${escape(a.name)}">${escape(a.name)}</button>` : escape(a.name)).join(' · ') : local && song.uploader ? `<button data-search-artist="${escape(song.uploader)}">${escape(song.uploader)}</button>` : escape(song.uploader || '—');
   const kind = song.kind === 'album' ? '专辑' : song.kind === 'artist' ? '歌手' : song.version || '';
-  const status = inLibrary ? song.status === 'completed' ? '已准备' : song.status === 'video_evicted' ? '待补视频' : song.status === 'queued' ? '等待准备' : song.status === 'failed' ? '准备失败' : song.status === 'running' ? '' : '需准备' : '';
+  const status = inLibrary ? song.status === 'completed' ? '已准备' : song.status === 'video_evicted' ? '待补视频' : song.status === 'queued' ? queuedStatus(song) : song.status === 'failed' ? '准备失败' : song.status === 'running' ? '' : '需准备' : '';
   const availability = inLibrary ? `<span class="library-status ${song.status === 'completed' ? 'is-ready' : song.status === 'failed' ? 'is-failed' : ''}">${status}</span>` : '<span class="music-availability"></span>';
   return `<article class="music-row" ${inLibrary ? `data-card="${escape(song.id)}"` : `data-result="${index}"`} role="row"><span class="music-rank" role="cell">${String(index+1).padStart(2,'0')}</span>
     <div class="music-song" role="cell"><${tag} class="music-cover" ${open} aria-label="${playable ? '预览' : '打开'}：${escape(song.title)}">${thumbnail}<span>${icon(playable ? 'play' : 'arrow')}</span></${tag}>
@@ -346,7 +346,7 @@ function updateAddButtons() {
   document.querySelectorAll('.music-availability').forEach(label => {
     const song = searchSongs[label.closest('[data-result]').dataset.result];
     const cached = library.find(item => item.url === song.url);
-    label.textContent = cached?.status === 'completed' ? '已准备' : cached?.status === 'running' ? '准备中' : cached?.status === 'queued' ? '等待准备' : cached?.status === 'video_evicted' ? '待补视频' : '';
+    label.textContent = cached?.status === 'completed' ? '已准备' : cached?.status === 'running' ? '准备中' : cached?.status === 'queued' ? queuedStatus(cached) : cached?.status === 'video_evicted' ? '待补视频' : '';
     label.classList.toggle('is-ready', cached?.status === 'completed');
   });
 }
@@ -437,10 +437,14 @@ function previewVideo(song) {
   $('video-preview').showModal();
 }
 
+function queuedStatus(entry) {
+  return entry.next_retry_at ? '等待自动重试' : '等待准备';
+}
+
 function statusText(entry) {
   if (entry.status === 'failed') return entry.error?.message || '准备失败，请重试';
   if (entry.status === 'completed') return entry.id === state.current_id ? (state.playing ? '正在播放' : '已暂停') : '已准备';
-  if (entry.status === 'queued') return '等待准备';
+  if (entry.status === 'queued') return queuedStatus(entry);
   return (entry.active_stages || []).map(s => stages[s] || '正在准备').join(' · ') || '开始准备';
 }
 

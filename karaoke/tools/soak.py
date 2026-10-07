@@ -19,7 +19,7 @@ import time
 
 import httpx
 
-from karaoke.job_schema import provider_error, retry_after_seconds, video_url
+from karaoke.job_schema import provider_error, retry_fields, video_url
 from karaoke.local_asr import offline
 
 
@@ -161,37 +161,6 @@ def resolved_audio_failure(case, version):
     return (error.get('code') == 'download_failed' and download.get('status') == 'downloaded_audio'
             and bool(download.get('finished_at')) and bool(last.get('finished_at'))
             and datetime.fromisoformat(download['finished_at']) > datetime.fromisoformat(last['finished_at']))
-
-
-def retry_fields(error, diagnostic, number, *, failed_at):
-    """Scope retries to the failure and respect explicit server delays."""
-    exponent = 2**min(10, max(0, number-1))
-    fields = dict(status='failed', provider_blocked=False, next_retry_at=None)
-    if error.get('provider') == 'openai':
-        scope = 'openai'+(':'+error['model'] if error.get('model') else '')
-        fields.update(status='external' if error['retryable'] else 'blocked', retry_provider=scope,
-                      provider_blocked=error['code'] == 'openai_rate_limit')
-        if error['retryable']:
-            fields['next_retry_at'] = failed_at+max(error.get('retry_after_seconds', 0), min(900, 30*exponent))
-        return fields
-    if error['code'] == 'interrupted' or re.search(r'^ImportError: dlopen\(.*system is shutting down', diagnostic, re.M):
-        return dict(fields, status='external', retry_provider='local', next_retry_at=failed_at+min(900, 60*exponent))
-    if error['code'] != 'download_failed':
-        return fields
-    text = (str(error)+' '+diagnostic).lower()
-    blocked = any(s in text for s in ('sign in', 'login', '登录', 'risk control', '-352', 'captcha',
-                                     'video unavailable', 'private video', '无法访问'))
-    rate_limited = bool(re.search(r'(?:http error|error code:|http/\d(?:\.\d)?)\s*429\b', text))
-    if blocked and not rate_limited:
-        return dict(fields, status='blocked')
-    forbidden = bool(re.search(r'(?:http error|error code:|http/\d(?:\.\d)?)\s*403\b', text))
-    if rate_limited or forbidden or any(s in text for s in ('timed out', 'connection reset',
-            'proxy', '代理', '超时', 'failed to resolve', 'temporary failure in name resolution',
-            'nodename nor servname', 'name or service not known', 'dns')):
-        delay = max(retry_after_seconds(diagnostic) or 0, min(1800, (300 if forbidden else 60)*exponent))
-        return dict(fields, status='blocked' if blocked else 'external',
-                    provider_blocked=rate_limited, next_retry_at=failed_at+delay)
-    return fields
 
 
 def verify_stems(paths, duration):

@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from .job_schema import JobRequest, provider_error, song_language, video_url
+from .job_schema import JobRequest, download_backoff, provider_error, retry_fields, song_language, video_url
 from .song_sources import (independent_transcript_support, lyric_coverage, missing_repetitions, prepare_song_text,
                            restore_repetitions, transcript_lines, video_song_info)
 from .stage_progress import parse_progress
@@ -361,7 +361,7 @@ class Pipeline:
         request = folder/f'{lane}.{os.getpid()}.{threading.get_ident()}.{stamp}.json'
         with request.open('x+') as registration, (folder/(lane+'.lock')).open('a') as slot:
             fcntl.flock(registration, fcntl.LOCK_EX)
-            json.dump(dict(job=self.output.name, ready=stamp), registration)
+            json.dump(dict(job=self.output.name, ready=stamp, url=self.request['url']), registration)
             registration.flush()
             try:
                 waiting = False
@@ -388,8 +388,10 @@ class Pipeline:
                                         continue
                             except (OSError, ValueError):
                                 continue
-                            candidates.append((rank.get(item['job'], len(rank)), item['ready'], path.name))
-                        if not candidates or min(candidates)[2] == request.name:
+                            if lane != 'download' or download_backoff(item.get('url', ''), folder) <= time.time():
+                                candidates.append((rank.get(item['job'], len(rank)), item['ready'], path.name))
+                        limited = lane == 'download' and download_backoff(self.request['url'], folder) > time.time()
+                        if not limited and (not candidates or min(candidates)[2] == request.name):
                             break
                         fcntl.flock(slot, fcntl.LOCK_UN)
                     except BlockingIOError:
@@ -451,7 +453,13 @@ class Pipeline:
                     log.seek(max(0, log.tell()-16384))
                     diagnostic = log.read().decode(errors='replace')
                 if name in ('download', 'download_video'):
-                    raise StageFailure(name, download_failure(diagnostic))
+                    message = download_failure(diagnostic)
+                    policy = retry_fields(dict(code=name+'_failed', message=message), diagnostic, 1, failed_at=time.time())
+                    if policy['provider_blocked']:
+                        # Publish while still holding the download lane, before
+                        # another song can make a request to the same provider.
+                        download_backoff(self.request['url'], until=policy['next_retry_at'])
+                    raise StageFailure(name, message)
                 if name == 'align_words' and any(message in diagnostic for message in (
                         'Empty alignment audio', 'FFmpeg failed to read "[]"')):
                     raise StageFailure(name, '歌词对齐失败：歌词时间范围内没有有效音频，请检查歌词与视频版本')

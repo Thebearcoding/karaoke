@@ -15,6 +15,7 @@ import re
 import signal
 import sqlite3
 import sys
+import time
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -25,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .cache import CacheFull, GIB, SongCache, can_restore_video
-from .job_schema import JobRequest
+from .job_schema import JobRequest, download_backoff, retry_fields
 from .room import AddSong, Room, RoomCommand, Updates, artifact_url
 from .video_search import SearchCursorExpired, VideoSearch
 
@@ -183,6 +184,8 @@ class Store:
                         doc.update(status='queued', active_stages=[], stage_progress={}, timings={},
                                    error=None, updated_at=now(), last_accessed_at=now(), pipeline_version=version,
                                    attempt_count=doc.get('attempt_count', 1)+1)
+                        if doc.get('download_retry'):
+                            doc['download_retry']['count'] = 0
                         (folder/'request.json').write_text(json.dumps(doc['input'], ensure_ascii=False)+'\n')
                         db.execute('UPDATE jobs SET cache_key=?, status=?, doc=? WHERE id=?',
                                    (key, 'queued', json.dumps(doc, ensure_ascii=False), doc['id']))
@@ -196,6 +199,8 @@ class Store:
                                 continue
                             doc.update(status='queued', active_stages=[], stage_progress={}, timings={},
                                        error=None, updated_at=now(), last_accessed_at=now())
+                            if doc.get('download_retry'):
+                                doc['download_retry']['count'] = 0
                             (folder/'request.json').write_text(json.dumps(doc['input'], ensure_ascii=False)+'\n')
                             db.execute('UPDATE jobs SET cache_key=?, status=?, doc=? WHERE id=?',
                                        (key, 'queued', json.dumps(doc, ensure_ascii=False), doc['id']))
@@ -276,8 +281,46 @@ class Worker:
             self.queue.task_done()
         rank = {job_id: index for index, job_id in reversed(list(enumerate(job_ids)))}
         for job_id in sorted(dict.fromkeys(pending), key=lambda key: rank.get(key, len(rank))):
-            if (self.store.read(job_id) or {}).get('status') == 'queued':
+            job = self.store.read(job_id) or {}
+            retry = job.get('download_retry') or {}
+            if job.get('status') == 'queued' and retry.get('room_managed') and job_id not in rank:
+                self.store.update(job_id, status='failed', download_retry={**retry, 'next_retry_at': None})
+            elif job.get('status') == 'queued':
                 self.queue.put_nowait(job_id)
+
+    def in_room(self, job_id):
+        with self.store.connect() as db:
+            row = db.execute('SELECT state FROM room WHERE id=1').fetchone()
+        return any(e['job_id'] == job_id for e in json.loads(row[0])['entries'])
+
+    def download_failed(self, job, error, room_managed):
+        """Persist a bounded retry without occupying a worker during backoff."""
+        folder = self.store.root/job['id']
+        log = folder/(error['code'].removesuffix('_failed')+'.log')
+        diagnostic = ''
+        if log.exists():
+            with log.open('rb') as stream:
+                stream.seek(max(0, log.stat().st_size-16384))
+                diagnostic = stream.read().decode(errors='replace')
+        previous = job.get('download_retry') or {}
+        count = previous.get('count', 0)+1
+        failed_at = time.time()
+        policy = retry_fields(error, diagnostic, count, failed_at=failed_at)
+        provider_until = max(previous.get('provider_until', 0),
+            policy['next_retry_at'] if policy['provider_blocked'] else 0)
+        download_backoff(job['input']['url'], self.store.root/'stage-locks', until=provider_until)
+        retry_at = policy['next_retry_at'] if policy['status'] == 'external' and count <= 3 else None
+        if room_managed and not self.in_room(job['id']):
+            retry_at = None
+        history = [*previous.get('history', []), dict(at=failed_at, error=error, **policy)]
+        retry = dict(count=count, next_retry_at=retry_at, provider_until=provider_until,
+                     room_managed=room_managed, history=history)
+        with (folder/'download-retries.log').open('a') as stream:
+            stream.write(json.dumps(dict(at=failed_at, error=error, diagnostic=diagnostic), ensure_ascii=False)+'\n')
+        self.store.update(job['id'], status='queued' if retry_at else 'failed',
+                          active_stages=[], error=error, download_retry=retry)
+        if retry_at:
+            self.queue.put_nowait(job['id'])
 
     async def start(self):
         for job in self.store.list(100000, 'running'):
@@ -304,9 +347,24 @@ class Worker:
             while ((self.store.root/'preparation.pause').exists() or self.queue.empty() or
                    (self.concurrency is not None and len(self.tasks) >= self.concurrency)):
                 await asyncio.sleep(.2)
-            task = asyncio.create_task(self.consume(self.queue.get_nowait()))
-            self.tasks.add(task)
-            task.add_done_callback(self.tasks.discard)
+            for _ in range(self.queue.qsize()):
+                job_id = self.queue.get_nowait()
+                job = self.store.read(job_id)
+                if (job or {}).get('status') != 'queued':
+                    self.queue.task_done()
+                    continue
+                deadline = max((job.get('download_retry') or {}).get('next_retry_at') or 0,
+                    download_backoff(job['input']['url'], self.store.root/'stage-locks'))
+                if deadline > time.time():
+                    self.queue.put_nowait(job_id)
+                    self.queue.task_done()
+                    continue
+                task = asyncio.create_task(self.consume(job_id))
+                self.tasks.add(task)
+                task.add_done_callback(self.tasks.discard)
+                break
+            else:
+                await asyncio.sleep(.2)
 
     async def terminate(self, process):
         if process and process.returncode is None:
@@ -327,8 +385,10 @@ class Worker:
             return
         process = self.processes[job_id] = None
         folder = self.store.root/job_id
+        room_managed = self.in_room(job_id)
         version = {'pipeline_version': self.version} if self.version and not job.get('restore_video') else {}
-        job = self.store.update(job_id, status='running', started_at=now(), **version)
+        retry = {'download_retry': {**job['download_retry'], 'next_retry_at': None}} if job.get('download_retry') else {}
+        job = self.store.update(job_id, status='running', error=None, started_at=now(), **version, **retry)
         try:
             (folder/'error.json').unlink(missing_ok=True)
             if not self.store.cache.enforce(self.reserve):
@@ -339,7 +399,7 @@ class Worker:
                 (folder/'result.json').write_text(json.dumps(job['result'], ensure_ascii=False)+'\n')
                 if not self.command:
                     command.append('--restore-video')
-            with (folder/'worker.log').open('wb') as log:
+            with (folder/'worker.log').open('ab') as log:
                 process = await asyncio.create_subprocess_exec(*command, cwd=ROOT.parent,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                     env={**os.environ, 'KARAOKE_EVENTS_STDOUT': '1',
@@ -365,7 +425,10 @@ class Worker:
                 error_path = folder/'error.json'
                 error = json.loads(error_path.read_text()) if error_path.exists() else dict(
                     code='worker_failed', message='处理进程退出；请检查该任务的 worker.log')
-                self.store.update(job_id, status='failed', active_stages=[], error=error)
+                if error['code'] in ('download_failed', 'download_video_failed'):
+                    self.download_failed(job, error, room_managed)
+                else:
+                    self.store.update(job_id, status='failed', active_stages=[], error=error)
         except CacheFull as error:
             await self.terminate(process)
             self.store.update(job_id, status='failed', active_stages=[],

@@ -1,12 +1,74 @@
 """Public job inputs, safe provider errors and single-video platform URLs."""
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+import fcntl
+import json
 import math
+import os
+from pathlib import Path
 import re
 from typing import Literal
 from urllib.parse import parse_qs, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def download_backoff(url, directory=None, *, until=0):
+    """Share explicit provider limits with already-started pipeline children."""
+    directory = directory or os.getenv('KARAOKE_STAGE_LOCK_DIR')
+    if not directory:
+        return 0
+    folder = Path(directory)
+    provider = 'youtube' if 'youtube.com/' in url else 'bilibili'
+    path = folder/(provider+'.retry.json')
+
+    def read():
+        return json.loads(path.read_text()) if path.exists() else 0
+
+    if not until:
+        return read()
+    folder.mkdir(parents=True, exist_ok=True)
+    with (folder/(provider+'.retry.lock')).open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        deadline = max(read(), until)
+        temporary = path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(deadline))
+        temporary.replace(path)
+    return deadline
+
+
+def retry_fields(error, diagnostic, number, *, failed_at):
+    """Scope retries to the failure and respect explicit server delays."""
+    exponent = 2**min(10, max(0, number-1))
+    fields = dict(status='failed', provider_blocked=False, next_retry_at=None)
+    if error.get('provider') == 'openai':
+        scope = 'openai'+(':'+error['model'] if error.get('model') else '')
+        fields.update(status='external' if error['retryable'] else 'blocked', retry_provider=scope,
+                      provider_blocked=error['code'] == 'openai_rate_limit')
+        if error['retryable']:
+            fields['next_retry_at'] = failed_at+max(error.get('retry_after_seconds', 0), min(900, 30*exponent))
+        return fields
+    if error['code'] == 'interrupted' or re.search(r'^ImportError: dlopen\(.*system is shutting down', diagnostic, re.M):
+        return dict(fields, status='external', retry_provider='local', next_retry_at=failed_at+min(900, 60*exponent))
+    if error['code'] not in ('download_failed', 'download_video_failed'):
+        return fields
+    # A suggested remedy ("check login settings") is not a login challenge.
+    text = (diagnostic or error.get('message', '')).lower()
+    blocked = any(s in text for s in ('sign in', 'login required', 'login_required', '登录验证',
+        'risk control', '-352', 'captcha', 'video unavailable', 'video is unavailable', 'private video', '无法访问',
+        'unsupported url', 'requested format is not available', 'not a live video',
+        'no such file or directory', 'unable to connect to proxy', 'proxyerror', 'tunnel connection failed'))
+    http_status = r'(?:http error|error code:|http/\d(?:\.\d)?|[（(])\s*'
+    blocked |= text.strip() == 'unavailable'
+    rate_limited = bool(re.search(http_status+r'429\b', text))
+    blocked |= bool(re.search(http_status+r'(?:400|401|404|407|410|451)\b', text))
+    if blocked and not rate_limited:
+        return dict(fields, status='blocked')
+    forbidden = bool(re.search(http_status+r'403\b', text))
+    delay = max(error.get('retry_after_seconds') or 0, retry_after_seconds(diagnostic) or 0,
+                min(1800, (300 if forbidden and not rate_limited else 60)*exponent))
+    return dict(fields, status='blocked' if blocked else 'external',
+                provider_blocked=rate_limited, next_retry_at=failed_at+delay)
 
 
 def retry_after_seconds(value):
@@ -25,6 +87,14 @@ def retry_after_seconds(value):
                 pass
     for amount, unit in re.findall(r'try again in\s+(\d+(?:\.\d+)?)\s*(ms|seconds?|s|minutes?|m)\b', str(value), re.I):
         hints.append(float(amount)*(.001 if unit.lower() == 'ms' else 60 if unit.lower().startswith('m') else 1))
+    for name, raw in re.findall(r'^\s*(retry-after(?:-ms)?):\s*([^\r\n]+)', str(value), re.I | re.M):
+        try:
+            hints.append(float(raw)*(.001 if name.lower().endswith('-ms') else 1))
+        except ValueError:
+            try:
+                hints.append((parsedate_to_datetime(raw)-datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError):
+                pass
     return max((v for v in hints if math.isfinite(v) and v >= 0), default=None)
 
 

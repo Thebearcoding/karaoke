@@ -118,6 +118,7 @@ class SongCache:
                 'lyrics.json', 'timing-constraints.json', 'timing-checked/report.json'}
         keep.update(p.relative_to(folder).as_posix() for p in (folder/'lyric-source-attempts').rglob('*.json'))
         if (job['status'] in ('failed', 'audio_ready', 'source_ready') or
+                (job['status'] == 'queued' and job.get('download_retry')) or
                 (job.get('result') or {}).get('validation_scope') == 'playback_audio_preview'):
             keep.update(retained_files(folder))
             keep.update(p.relative_to(folder).as_posix() for p in folder.rglob('*.json'))
