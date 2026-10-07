@@ -1611,7 +1611,7 @@ class AlignmentIntegrity(unittest.TestCase):
         self.assertEqual(repaired, good)
         full.assert_called_once_with()
 
-    def test_localization_recognizes_foreign_lyrics_in_a_japanese_song(self):
+    def test_foreign_lyrics_retry_alignment_in_clip_language_before_asr(self):
         import json
         from types import SimpleNamespace
         from unittest.mock import Mock, patch
@@ -1626,7 +1626,7 @@ class AlignmentIntegrity(unittest.TestCase):
                 start = starts[lines.index(line)]-begin
                 words = [dict(word=word, start=start+i*.4, end=start+(i+1)*.4, probability=.9)
                          for i, word in enumerate(line.split())]
-                if line == lines[1] and not recognized:
+                if line == lines[1] and not (recognized or options.get('language') == 'de'):
                     for word in words:
                         word.update(start=start, end=start)
                 segments.append(dict(text=line, start=words[0]['start'], end=words[-1]['end'], words=words))
@@ -1641,6 +1641,8 @@ class AlignmentIntegrity(unittest.TestCase):
                 segments=[dict(words=words)]))
         model = Mock()
         model._buffers = {'alignment_heads': None}
+        model.dims.n_mels, model.device = 80, 'cpu'
+        model.detect_language.return_value = (None, {'de': .9, 'ja': .1})
         model.align.side_effect, model.transcribe.side_effect = align, transcribe
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1655,7 +1657,8 @@ class AlignmentIntegrity(unittest.TestCase):
             cues = json.loads((root/'alignment/cues.json').read_text())
             self.assertEqual([c['text'] for c in cues], lines)
             np.testing.assert_allclose([c['start'] for c in cues], starts, atol=.001)
-            self.assertEqual(model.transcribe.call_count, 1)
+            model.transcribe.assert_not_called()
+            self.assertEqual(json.loads((root/'alignment/run.json').read_text())['local_alignment_languages'][0]['language'], 'de')
 
     def test_rejected_alignment_retains_raw_evidence_without_publishing_captions(self):
         import json

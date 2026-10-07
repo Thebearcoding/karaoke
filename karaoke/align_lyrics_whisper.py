@@ -153,7 +153,7 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
         try:
             candidate = align_candidate(align, begin, end, '\n'.join(lines[left:right]),
                               gap_padding=None, dynamic_heads=True,
-                              max_word_dur=None, word_dur_factor=None)
+                              max_word_dur=None, word_dur_factor=None, detect_language=True)
         except ValueError as error:
             report.update(reason='local_alignment_failed', error=str(error))
             continue
@@ -673,7 +673,8 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
                     attempted.add(request)
                     try:
                         result = align_candidate(align, begin, end, '\n'.join(lines[first:stop]),
-                            gap_padding=None, dynamic_heads=True, max_word_dur=None, word_dur_factor=None)
+                            gap_padding=None, dynamic_heads=True, max_word_dur=None, word_dur_factor=None,
+                            detect_language=True)
                     except ValueError as error:
                         repairs.append(dict(method='joint_context_retry', accepted=False,
                             range=[index-1, index+1], context=[first, stop],
@@ -810,14 +811,22 @@ def main():
             assert [cue['text'] for cue in anchors] == lyrics['lines']
             blocks = alignment_blocks(anchors, audio)
         started = time.perf_counter()
-        raw_blocks, units = [], []
+        raw_blocks, units, language_detections = [], [], []
         for first, stop, context_first, context_stop, begin, end in progress_items(blocks, 'blocks'):
             print(json.dumps({'song': Path(job['lyrics']).stem, 'lines': [first+1, stop],
                               'window': [begin, end]}), flush=True)
             piece = audio[round(begin*16000):round(end*16000)]
 
             def align_audio(start, stop, text, **options):
-                aligned = model.align(audio[round(start*16000):round(stop*16000)], text, language=language,
+                clip = audio[round(start*16000):round(stop*16000)]
+                alignment_language = language
+                if options.pop('detect_language', False):
+                    import whisper
+                    mel = whisper.log_mel_spectrogram(whisper.pad_or_trim(clip), n_mels=model.dims.n_mels).to(model.device)
+                    _, probabilities = model.detect_language(mel)
+                    alignment_language = max(probabilities, key=probabilities.get)
+                    language_detections.append(dict(source_range=[start, stop], language=alignment_language))
+                aligned = model.align(clip, text, language=alignment_language,
                     original_split=True, regroup=False, token_step=80, max_word_dur=options.pop('max_word_dur', 4.),
                     word_dur_factor=options.pop('word_dur_factor', 3.), nonspeech_skip=5., suppress_silence=True,
                     dynamic_heads=options.pop('dynamic_heads', args.dynamic_heads), verbose=None, **options)
@@ -902,6 +911,7 @@ def main():
             'lyrics': str(Path(job['lyrics']).resolve()), 'lyrics_sha256': sha(job['lyrics']),
             'model_sha256': model_hash, 'runner_sha256': sha(__file__),
             'dynamic_heads': args.dynamic_heads,
+            'local_alignment_languages': language_detections,
             'boundary_reconciliations': boundary_repairs,
             'line_recoveries': [r for block in raw_blocks for r in block.get('line_recoveries', [])],
             'asr_localizations': [r for block in raw_blocks for r in block.get('asr_localizations', [])],
