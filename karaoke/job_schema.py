@@ -67,6 +67,22 @@ def song_language(value):
             'en': 'English', 'english': 'English'}.get(key)
 
 
+def thumbnail_url(value):
+    """Only display artwork served by the supported source platforms."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = urlsplit(value)
+        if (parsed.scheme == 'https' and not parsed.username and not parsed.password
+                and parsed.port in (None, 443) and any(
+                    parsed.hostname == host or (parsed.hostname or '').endswith('.'+host)
+                    for host in ('ytimg.com', 'googleusercontent.com', 'hdslb.com'))):
+            return value
+    except ValueError:
+        pass
+    return None
+
+
 def video_url(value: str) -> str:
     parsed = urlsplit(value.strip())
     if parsed.scheme not in ('http', 'https') or parsed.username or parsed.password:

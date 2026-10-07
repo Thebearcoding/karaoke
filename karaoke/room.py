@@ -10,7 +10,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from .job_schema import JobRequest
+from .job_schema import JobRequest, thumbnail_url
 from .cache import can_restore_video
 
 PRESETS = {
@@ -51,6 +51,7 @@ class AddSong(BaseModel):
     job_id: str | None = None
     title: str | None = Field(default=None, max_length=200)
     source_title: str | None = Field(default=None, max_length=500)
+    source_thumbnail: str | None = Field(default=None, max_length=4096)
     force: bool = False
     if_absent: bool = False
 
@@ -146,7 +147,8 @@ class Room:
             return dict(**entry, title='歌曲已不可用', artist='', status='failed', artifacts={})
         result, inputs = job.get('result') or {}, job['input']
         artifacts = {key: artifact_url(job['id'], key, value)
-                     for key, value in result.get('artifacts', {}).items()}
+                     for key, value in result.get('artifacts', {}).items()
+                     if key != 'poster' or (self.store.root/job['id']/value['path']).is_file()}
         song_info = job.get('song_info') or {}
         featured = next((s for s in self.featured() if s['url'] == inputs['url']), {})
         return dict(**entry,
@@ -160,7 +162,7 @@ class Room:
             error=job.get('error'), duration=result.get('duration_seconds') or song_info.get('duration_seconds', 0),
             poster=(artifacts['poster']
                     if (job['status'] == 'completed' or job.get('restore_video')) and 'poster' in artifacts
-                    else featured.get('poster')), lyrics_need_review=result.get('quality', {}).get(
+                    else thumbnail_url(song_info.get('thumbnail')) or featured.get('poster')), lyrics_need_review=result.get('quality', {}).get(
                 'lyrics_provenance', {}).get('needs_review', False),
             lyrics_unavailable=result.get('quality', {}).get('playback_fallback', {}).get('subtitle_mode') == 'unavailable',
             opening_countdown=result.get('quality', {}).get('opening_countdown'),
@@ -187,7 +189,7 @@ class Room:
             result = job.get('result') or {}
             artifacts = result.get('artifacts', {})
             ready = job['status'] == 'completed' and bool(artifacts) and all(
-                (self.store.root/job['id']/a['path']).is_file() for a in artifacts.values())
+                (self.store.root/job['id']/a['path']).is_file() for name, a in artifacts.items() if name != 'poster')
             priority = 2 if ready else int(bool(job.get('restore_video')) and
                 can_restore_video(self.store.root/job['id'], result))
             if url in seen and priority <= seen[url]:
@@ -234,7 +236,7 @@ class Room:
             elif not job or job['status'] not in ('completed', 'queued', 'running'):
                 raise HTTPException(404, '这首歌的任务已不可用，请重新提交链接')
             if job['status'] == 'completed' and not all((self.store.root/job['id']/a['path']).is_file()
-                       for a in job['result']['artifacts'].values()):
+                       for name, a in job['result']['artifacts'].items() if name != 'poster'):
                 raise HTTPException(409, '这首歌的文件已不可用，请重新提交链接')
         else:
             try:
@@ -246,6 +248,8 @@ class Room:
                 if request.source_title and not (job.get('song_info') or {}).get('title'):
                     job = self.store.update(job['id'], song_info={'title': request.source_title})
                 self.worker.queue.put_nowait(job['id'])
+        if thumbnail_url(request.source_thumbnail) and not (job.get('song_info') or {}).get('thumbnail'):
+            job = self.store.update(job['id'], song_info={'thumbnail': request.source_thumbnail})
         state['entries'].append(dict(id=str(uuid4()), job_id=job['id']))
         self.store.touch(job['id'])
         self.save(state)

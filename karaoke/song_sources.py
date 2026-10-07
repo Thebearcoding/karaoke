@@ -9,7 +9,7 @@ import re
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, Field
 
-from .job_schema import provider_error, song_language, video_url
+from .job_schema import provider_error, song_language, thumbnail_url, video_url
 from .subtitles import highlight_spans
 from .local_asr import offline
 
@@ -250,6 +250,10 @@ def video_song_info(metadata):
     info = dict(title=metadata.get('track') or metadata.get('title') or '',
                 artist=metadata.get('artist') or ' · '.join(metadata.get('artists') or []),
                 duration_seconds=metadata.get('duration') or 0)
+    thumbnail = thumbnail_url(metadata.get('thumbnail')) or next((url for row in
+        reversed(metadata.get('thumbnails') or []) if (url := thumbnail_url(row.get('url')))), None)
+    if thumbnail:
+        info['thumbnail'] = thumbnail
     # Explicit credits in a video title are usable even when the metadata API is down.
     credit = re.fullmatch(r'\s*([^【】]+?)\s*【([^【】]+)】\s*[-–—|]?\s*'
                          r'(?:Official\s+(?:Music\s+)?Video|Official\s+MV|官方(?:完整版)?\s*MV)\s*',

@@ -78,6 +78,21 @@ def test_reject_non_video_or_local_targets(value):
         video_url(value)
 
 
+@pytest.mark.parametrize('missing', ['poster', 'mv'])
+def test_optional_cover_failure_does_not_hide_valid_media(tmp_path, missing):
+    def worker(folder):
+        command = fake_worker(folder)
+        command[2] += f"\nr=json.loads((p/'result.json').read_text());r['artifacts'][{missing!r}]={{'path':'missing.jpg','bytes':100,'sha256':'absent'}}\n(p/'result.json').write_text(json.dumps(r))\n"
+        return command
+    with TestClient(create_app(tmp_path, worker_command=worker, version='test')) as client:
+        job_id = client.post('/v1/jobs', json={'url':URL}).json()['id']
+        job = finished(client, job_id)
+        assert job['status'] == ('completed' if missing == 'poster' else 'failed')
+        if missing == 'poster':
+            assert 'poster' not in job['result']['artifacts']
+            assert client.get(f'/v1/jobs/{job_id}/artifacts/mv').content == b'0123456789'
+
+
 def test_submission_outputs_cache_and_range_requests(tmp_path):
     app = create_app(tmp_path, worker_command=fake_worker, version='test')
     with TestClient(app) as client:
@@ -944,6 +959,24 @@ def test_lyric_sources_run_concurrently_and_one_failure_does_not_erase_agreement
     assert lines == body and set(calls) == {'line_music','lrclib','netease','youtube_music'}
     assert report['crosscheck']['independent_sources'] == (3 if provider_fails else 4)
     assert bool(report['crosscheck']['unavailable_sources']) == provider_fails
+
+
+@pytest.mark.parametrize('missing_identity', [False, True])
+def test_description_failure_keeps_other_published_lyrics(tmp_path, monkeypatch, missing_identity):
+    from karaoke import lyric_consensus as module
+    from karaoke.stage_cache import StageCache
+    body = ['Stars above the quiet shore', 'I will sing once more']
+    monkeypatch.setattr(module.lookup, 'fetch_published_lyrics', lambda *a:
+        (body, dict(provider='line_music', language='English')))
+    monkeypatch.setattr(module.lookup, 'fetch_lyrics', lambda *a: dict(status='unavailable'))
+    monkeypatch.setattr(module, 'fetch_additional_lyrics', lambda provider, *a:
+        (None, dict(provider=provider, status='unavailable')))
+    def broken_description(*args):
+        raise TypeError('Malformed description response')
+    song = dict(title='Evening', artist='' if missing_identity else 'Singer')
+    lines, report = module.fetch_lyric_consensus(song, {}, 30, StageCache(tmp_path), broken_description)
+    assert lines == body and report['provider'] == 'line_music'
+    assert dict(provider='video_description', status='unavailable', error='TypeError') in report['crosscheck']['unavailable_sources']
 
 
 def test_source_disagreements_keep_published_text_and_full_diagnostics(tmp_path, monkeypatch):
@@ -2538,7 +2571,8 @@ def test_download_publishes_metadata_before_separation(tmp_path, monkeypatch, ca
     def download(*args, **kwargs):
         pipeline.source.write_bytes(b'video fixture')
         (tmp_path/'download/source.info.json').write_text(json.dumps(dict(
-            title='A new video', uploader='Not necessarily the singer', duration=120, **tags)))
+            title='A new video', uploader='Not necessarily the singer', duration=120,
+            thumbnail='https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg', **tags)))
 
     probe = dict(streams=[dict(codec_type='video'), dict(codec_type='audio')], format=dict(duration='120'))
     with patch.object(pipeline, 'run', side_effect=download), patch(
@@ -2547,7 +2581,8 @@ def test_download_publishes_metadata_before_separation(tmp_path, monkeypatch, ca
     pipeline.phase('separate_music', True)
     events = [json.loads(line.removeprefix('KARAOKE_PROGRESS '))
               for line in capsys.readouterr().out.splitlines()]
-    info = dict(title=expected[0], artist=expected[1], duration_seconds=120)
+    info = dict(title=expected[0], artist=expected[1], duration_seconds=120,
+                thumbnail='https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg')
     assert events[0]['song_info'] == events[1]['song_info'] == info
     assert events[0]['active_stages'] == [] and events[1]['active_stages'] == ['separate_music']
     assert json.loads((tmp_path/'progress.json').read_text())['song_info'] == info
@@ -3029,6 +3064,53 @@ def test_playback_fallback_prefers_existing_word_times_to_coarse_lines(tmp_path,
     from karaoke.tools.playback_sweep import soft_failures
     events = soft_failures(dict(quality=quality),{})
     assert next(e for e in events if e['code']=='alignment_localized_with_asr')['windows'] == 1
+
+
+@pytest.mark.parametrize('long_credits', [False, True])
+def test_intro_fits_long_metadata_without_truncating_lyrics(monkeypatch, long_credits):
+    from karaoke import subtitle_style as style
+    info = dict(title='夜空の歌', artist='歌手', version='Studio')
+    if long_credits:
+        info = {key: value*40 for key, value in info.items()}
+    original = dict(info)
+    caption = style.caption_image
+    accepted = []
+    def record(text, **kwargs):
+        image = caption(text, **kwargs)
+        accepted.append(text)
+        assert image.getbbox() is not None
+        return image
+    monkeypatch.setattr(style, 'caption_image', record)
+    image = style.song_intro_image(info, width=640)
+    assert image.mode == 'RGBA' and image.getbbox() is not None
+    assert image.getpixel((0, 0))[3] == 0 and info == original
+    if long_credits:
+        assert any(text.endswith('…') and text != '…' for text in accepted)
+        with pytest.raises(style.CaptionOverflow):
+            caption(info['title'], width=640)
+    else:
+        assert accepted == [info['title'], '演唱 · '+info['artist'], info['version']]
+
+
+@pytest.mark.parametrize('info', ['{invalid', '{}', json.dumps(dict(title='\U0010ffff'))])
+def test_auxiliary_intro_and_long_preview_cannot_abort_valid_lyric_video(tmp_path, info):
+    from pathlib import Path
+    source, output = tmp_path/'source.mp4', tmp_path/'output.mp4'
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=320x180:r=30:d=0.4',
+        '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.4', '-c:v', 'libx264', '-c:a', 'aac', str(source)], check=True)
+    cues = [dict(text=text, start=i*.2, end=(i+1)*.2,
+                 units=[dict(first=0, stop=len(text), start=i*.2, end=(i+1)*.2)])
+            for i, text in enumerate(['Hello', '星'*42])]
+    (tmp_path/'cues.json').write_text(json.dumps(cues))
+    (tmp_path/'info.json').write_text(info)
+    subprocess.run([sys.executable, str(Path(__file__).with_name('render_lyric_progress.py')),
+        '--video', str(source), '--cues', str(tmp_path/'cues.json'), '--song-info', str(tmp_path/'info.json'),
+        '--language', 'Japanese', '--duration', '0.4', '--bottom-margin', '96', '--output', str(output)],
+        check=True, capture_output=True)
+    report = json.loads(output.with_suffix('.render.json').read_text())
+    assert report['song_intro']['status'] == 'omitted' and report['song_intro']['reason']
+    assert report['shown_lines'] == [1, 2] and report['decode_check'] == 'passed'
+    assert json.loads((tmp_path/'cues.json').read_text()) == cues
 
 
 def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatch):
@@ -4910,6 +4992,8 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
             before[name] = path.read_bytes()
     (folder/'result.json').write_text(json.dumps(result))
     (folder/'mv.mp4').unlink()
+    result['artifacts']['poster'] = dict(path='missing-poster.jpg', bytes=100, sha256='missing')
+    (folder/'result.json').write_text(json.dumps(result))
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
     pipeline = Pipeline(job['input'], folder, separator_python='/missing/python')
     def download(**kwargs):
@@ -5857,6 +5941,8 @@ def test_compaction_keeps_outputs_and_bounded_logs_without_following_symlinks(tm
     (folder/'worker.log').write_bytes(b'l'*100000)
     crosscheck = dict(candidate_texts=[['Stars above the quiet shore']], crosscheck=dict(status='corroborated'))
     (folder/'lyric-crosscheck.json').write_text(json.dumps(crosscheck))
+    render_report = dict(song_intro=dict(status='omitted', reason='Missing title glyph'))
+    (folder/'captioned-picture.render.json').write_text(json.dumps(render_report))
     outside = tmp_path/'precious.wav'
     outside.write_bytes(b'keep me')
     (folder/'raw/link').symlink_to(outside)
@@ -5865,6 +5951,7 @@ def test_compaction_keeps_outputs_and_bounded_logs_without_following_symlinks(tm
     assert (folder/'request.json').exists() and (folder/'worker.log').stat().st_size == 65536
     assert not (folder/'raw').exists() and outside.read_bytes() == b'keep me'
     assert json.loads((folder/'lyric-crosscheck.json').read_text()) == crosscheck
+    assert json.loads((folder/'captioned-picture.render.json').read_text()) == render_report
     store.update(job['id'], status='failed', result=None, error=dict(code='cache_full'))
     (folder/'asr').mkdir()
     (folder/'asr/transcription.json').write_text('{"words": []}')
@@ -5933,7 +6020,8 @@ def test_video_search_normalizes_results_and_rejects_unplayable_links():
     assert search_results('youtube', [dict(item, thumbnail='https://localhost/cover')])[0]['thumbnail'] is None
 
 
-def test_music_catalogue_keeps_provider_order_versions_and_distinct_artist_ids(monkeypatch):
+@pytest.mark.parametrize('catalogue_section', ['songs', 'videos'])
+def test_music_catalogue_keeps_provider_order_versions_and_distinct_artist_ids(monkeypatch, catalogue_section):
     from karaoke.video_search import music_entries
     artist_id = 'UC'+'a'*22
     namesake_id = 'UC'+'b'*22
@@ -5956,7 +6044,9 @@ def test_music_catalogue_keeps_provider_order_versions_and_distinct_artist_ids(m
                 continuationEndpoint=dict(continuationCommand=dict(token='playlist-next'))))])))
         def get_artist(self, identifier):
             calls.append(('artist', identifier))
-            return dict(name='Singer', songs=dict(browseId='VLpopular', results=rows[:5]), monthlyListeners='8M')
+            artist = dict(name='Singer', songs=dict(browseId=None), monthlyListeners='8M')
+            artist[catalogue_section] = dict(browseId='VLpopular', results=rows[:5])
+            return artist
         def get_playlist(self, identifier, limit, **kwargs):
             assert identifier == 'VLpopular' and limit == 0
             self._send_request('browse', dict(browseId=identifier))
@@ -5973,9 +6063,37 @@ def test_music_catalogue_keeps_provider_order_versions_and_distinct_artist_ids(m
     assert [a['browse_id'] for a in artists] == [namesake_id, artist_id]
     catalogue = music_entries('artist', artists[1]['browse_id'])
     assert calls[-1] == ('artist', artist_id)
-    assert catalogue['complete'] and catalogue['order'] == 'youtube_music_top_songs'
+    assert catalogue['complete'] and catalogue['catalogue_section'] == catalogue_section
+    assert catalogue['order'] == ('youtube_music_top_songs' if catalogue_section == 'songs' else 'youtube_music_videos')
     assert catalogue['results'] == songs
     assert catalogue['continuation'] == dict(token='playlist-next')
+
+
+@pytest.mark.parametrize('section', ['songs', 'videos', 'releases', 'empty'])
+def test_artist_without_playlist_keeps_native_available_works(monkeypatch, section):
+    from ytmusicapi import YTMusic
+    from karaoke.video_search import music_entries
+    artist = dict(name='Singer', songs=dict(browseId=None),
+                  albums=dict(results=[dict(title='Album', browseId='MPREalbum')]),
+                  singles=dict(results=[dict(title='Single', browseId='MPREsingle')]))
+    if section in ('songs', 'videos'):
+        artist[section] = dict(results=[dict(title='Native track', videoId='abcdefghijk')])
+    if section == 'songs':
+        artist['videos'] = dict(results=[dict(title='Other shelf', videoId='12345678901')])
+    if section == 'empty':
+        artist.pop('albums'); artist.pop('singles')
+    monkeypatch.setattr(YTMusic, 'get_artist', lambda *args: artist)
+    monkeypatch.setattr(YTMusic, 'get_playlist', lambda *a, **kw: pytest.fail('No playlist link was provided'))
+    page = music_entries('artist', 'UC'+'a'*22)
+    assert page['complete'] is False and page['continuation'] is None
+    if section in ('songs', 'videos'):
+        assert page['catalogue_section'] == section
+        assert [r['title'] for r in page['results']] == ['Native track']
+        assert page['results'][0]['url'] == 'https://www.youtube.com/watch?v=abcdefghijk'
+    else:
+        assert page['catalogue_section'] == 'releases'
+        assert [r['title'] for r in page['results']] == ([] if section == 'empty' else ['Album', 'Single'])
+        assert all(r['kind'] == 'album' and r['uploader'] == 'Singer' for r in page['results'])
 
 
 def test_music_metadata_does_not_expose_arbitrary_links_or_invent_missing_counts():

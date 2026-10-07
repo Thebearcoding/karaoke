@@ -149,7 +149,10 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
         if name in prefetched:
             return prefetched[name]
         try:
-            lines, report = request()
+            result = request()
+            if result is None:
+                return None, dict(provider=name, status='unavailable')
+            lines, report = result
             return lines, dict(report, provider=name)
         except Exception as error:
             return None, dict(provider=name, status='unavailable', error=type(error).__name__)
@@ -170,9 +173,9 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
         key == 'title' and raw_title and song[key] == metadata.get('title') and not recording.get('title')]
     if callable(description) and missing_identity:
         # Only unresolved identity needs the model before name-based queries.
-        description = description(missing_identity)
+        description = fetch(('video_description', lambda: description(missing_identity)))
     with ThreadPoolExecutor(max_workers=len(sources)+1) as pool:
-        pending = pool.submit(description) if callable(description) else None
+        pending = pool.submit(fetch, ('video_description', description)) if callable(description) else None
         results = list(pool.map(fetch, sources))
         if pending is not None:
             description = pending.result()

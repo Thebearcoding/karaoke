@@ -60,6 +60,13 @@ def test_poster_survives_cleanup_and_browsing_does_not_refresh_lru(tmp_path):
         assert not store.cache.leases
         entry = client.post('/v1/room/entries', json={'job_id':job['id']}).json()['entries'][0]
         assert entry['poster'] == poster
+        (folder/'poster.jpg').unlink()
+        entry = client.post('/v1/room/entries', json={'job_id':job['id']}).json()['entries'][-1]
+        assert entry['status'] == 'completed' and entry['poster'] is None
+        song = next(s for s in client.get('/v1/library').json()['songs'] if s['job_id'] == job['id'])
+        assert song['status'] == 'completed'
+        reused, cached = store.create(JobRequest(url=URL), 'test')
+        assert cached and reused['id'] == job['id']
         store.update(job['id'], status='evicted')
         assert client.get(poster).status_code == 410
         song = next(s for s in client.get('/v1/library').json()['songs'] if s['id'] == job['id'])
@@ -591,8 +598,10 @@ def test_song_info_updates_push_to_room_and_preserve_user_overrides(tmp_path):
         queued = entry(await anext(stream))
         assert queued['title'] == '新点的歌' and queued['preparation_started_at'] is None
         started_at = '2026-10-05T22:00:00+00:00'
-        store.update(job['id'], status='running', started_at=started_at)
-        assert entry(await anext(stream))['preparation_started_at'] == started_at
+        thumbnail = 'https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg'
+        store.update(job['id'], status='running', started_at=started_at, song_info=dict(thumbnail=thumbnail))
+        preparing = entry(await anext(stream))
+        assert preparing['preparation_started_at'] == started_at and preparing['poster'] == thumbnail
         for done, title in enumerate(('Video title', 'Resolved song title'), 1):
             counters = {'separate_music': dict(completed=done, total=4, unit='chunks')}
             store.update(job['id'], status='running', song_info=dict(title=title, artist='Singer', language='English'),
@@ -601,16 +610,19 @@ def test_song_info_updates_push_to_room_and_preserve_user_overrides(tmp_path):
             visible = entry(event)
             assert visible['title'] == title and visible['stage_progress'] == counters
             assert visible['preparation_started_at'] == started_at
+            assert visible['poster'] == thumbnail
             song = next(s for s in json.loads(event.split('data: ', 1)[1])['library'] if s['url'] == URL)
             assert song['title'] == title and song['language'] == 'English'
             assert song['stage_progress'] == counters
             assert song['preparation_started_at'] == started_at
+            assert song['poster'] == thumbnail
         # Reconnecting/reloading reads the persisted start, not the last progress update.
         assert room.snapshot()['entries'][0]['preparation_started_at'] == started_at
         store.update(job['id'], status='failed', error=dict(code='test', message='Test failure'))
         visible = entry(await anext(stream))
         assert visible['title'] == 'Resolved song title' and visible['stage_progress'] == {}
         assert visible['preparation_started_at'] is None
+        assert visible['poster'] == thumbnail
         # A queued retry must not inherit the previous attempt's clock.
         store.update(job['id'], status='queued')
         assert entry(await anext(stream))['preparation_started_at'] is None
@@ -652,6 +664,32 @@ def test_search_title_is_immediate_but_does_not_override_metadata_or_cache(tmp_p
         assert again['entries'][-1]['job_id'] == job['id']
         assert again['entries'][-1]['title'] == 'Clean song title'
         assert len(app.state.store.list()) == 1
+
+
+@pytest.mark.parametrize('thumbnail', [
+    'https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg',
+    'https://lh3.googleusercontent.com/cover',
+    'http://i.ytimg.com/cover', 'https://ytimg.com.attacker.test/cover', 'https://localhost/cover',
+])
+def test_search_cover_is_immediate_persistent_and_replaced_by_local_artwork(tmp_path, thumbnail):
+    app = create_app(tmp_path, version='test')
+    (tmp_path/'preparation.pause').touch()
+    expected = thumbnail if thumbnail.startswith(('https://i.ytimg.com/', 'https://lh3.googleusercontent.com/')) else None
+    with TestClient(app) as client:
+        entry = client.post('/v1/room/entries', json=dict(url=URL, source_thumbnail=thumbnail)).json()['entries'][0]
+        assert entry['status'] == 'queued' and entry['poster'] == expected
+        store = app.state.store
+        store.update(entry['job_id'], song_info=dict(title='Known song', thumbnail=None))
+        assert client.get('/v1/room').json()['entries'][0]['poster'] == expected
+    # Refresh/restart and a new attempt keep known artwork without fetching metadata again.
+    app = create_app(tmp_path, version='new')
+    with TestClient(app) as client:
+        entry = client.post('/v1/room/entries', json=dict(url=URL)).json()['entries'][-1]
+        assert entry['poster'] == expected and entry['title'] == 'Known song'
+        (tmp_path/entry['job_id']/'poster.jpg').write_bytes(b'cover')
+        app.state.store.update(entry['job_id'], status='completed', result=dict(artifacts=dict(
+            poster=dict(path='poster.jpg', bytes=5, sha256='local'))))
+        assert client.get('/v1/room').json()['entries'][-1]['poster'] == f"/v1/jobs/{entry['job_id']}/artifacts/poster?v=local"
 
 
 @pytest.mark.parametrize('recreate', ['force', 'version', 'evicted'])

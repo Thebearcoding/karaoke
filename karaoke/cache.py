@@ -27,7 +27,7 @@ def can_restore_video(folder, result):
         if not video.is_relative_to(folder):
             return False
         for name, artifact in artifacts.items():
-            if name == 'mv':
+            if name in ('mv', 'poster'):
                 continue
             path = (folder/artifact['path']).resolve()
             if path == video or not path.is_relative_to(folder) or not path.is_file() or path.stat().st_size != artifact['bytes']:
@@ -113,6 +113,7 @@ class SongCache:
         """Keep published outputs and bounded diagnostics; discard working audio."""
         folder = self.folder(job['id'])
         keep = {'request.json', 'result.json', 'error.json', 'worker.log', 'lyric-crosscheck.json',
+                'captioned-picture.render.json',
                 'song-metadata.json', 'checkpoints/extract_song_metadata.json',
                 'lyrics.json', 'timing-constraints.json', 'timing-checked/report.json'}
         if (job['status'] in ('failed', 'audio_ready', 'source_ready') or

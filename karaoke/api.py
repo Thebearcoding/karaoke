@@ -202,7 +202,7 @@ class Store:
                             return doc, False
                     if doc['status'] != 'completed' or all(
                             (self.root/doc['id']/item['path']).is_file()
-                            for item in doc['result']['artifacts'].values()):
+                            for name, item in doc['result']['artifacts'].items() if name != 'poster'):
                         doc['last_accessed_at'] = now()
                         db.execute('UPDATE jobs SET doc=? WHERE id=?', (json.dumps(doc, ensure_ascii=False), doc['id']))
                         return doc, True
@@ -351,9 +351,13 @@ class Worker:
                 result = json.loads(result_path.read_text())
                 if not {'mv', 'instrumental', 'backing_vocals', 'lead_vocals'} <= result['artifacts'].keys():
                     raise ValueError('Pipeline omitted a required output')
-                for artifact in result['artifacts'].values():
+                for name, artifact in list(result['artifacts'].items()):
                     path = (folder/artifact['path']).resolve()
                     if not path.is_relative_to(folder) or not path.is_file() or path.stat().st_size != artifact['bytes']:
+                        if name == 'poster':
+                            logging.getLogger(__name__).warning('Job %s: optional poster unavailable', job_id)
+                            result['artifacts'].pop(name)
+                            continue
                         raise ValueError('Invalid result artifact')
                 self.store.update(job_id, status='completed', active_stages=[], result=result, restore_video=False, error=None,
                                   completed_at=now(), last_accessed_at=now())

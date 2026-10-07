@@ -8,7 +8,7 @@ import time
 
 from PIL import Image, ImageChops, ImageColor, ImageDraw
 
-from subtitle_style import TOKENS, STYLES, caption_image, song_intro_image
+from subtitle_style import TOKENS, STYLES, caption_image, compact_caption_image, song_intro_image
 from subtitles import countdown_events, countdown_state, read_ahead_state
 from stage_progress import progress_items, report_progress
 
@@ -128,16 +128,21 @@ def main():
     intro = None
     intro_path = None
     if args.song_info:
-        info = json.loads(args.song_info.read_text())
-        first_onset = (cues[0]['units'][0]['start'] if cues and cues[0].get('units')
-                       else cues[0].get('aligned_start', cues[0]['start']) if cues else float('inf'))
-        end = min(TOKENS['intro']['maximum_seconds'], max(TOKENS['intro']['minimum_seconds'], first_onset))
-        intro = {'information': info, 'start': 0., 'end': end, 'top': TOKENS['intro']['top'],
-                 'policy': 'Credits above the always-visible lyrics; no audio or lyric timing offset',
-                 'visible_in_this_export': args.start < end}
-        if intro['visible_in_this_export']:
-            intro_path = args.output.with_suffix('.intro.png')
-            song_intro_image(info, width=width, style=args.style).save(intro_path)
+        try:
+            info = json.loads(args.song_info.read_text())
+            first_onset = (cues[0]['units'][0]['start'] if cues and cues[0].get('units')
+                           else cues[0].get('aligned_start', cues[0]['start']) if cues else float('inf'))
+            end = min(TOKENS['intro']['maximum_seconds'], max(TOKENS['intro']['minimum_seconds'], first_onset))
+            intro = {'information': info, 'start': 0., 'end': end, 'top': TOKENS['intro']['top'],
+                     'policy': 'Credits above the always-visible lyrics; no audio or lyric timing offset',
+                     'visible_in_this_export': args.start < end}
+            if intro['visible_in_this_export']:
+                intro_path = args.output.with_suffix('.intro.png')
+                song_intro_image(info, width=width, style=args.style).save(intro_path)
+        except (OSError, ValueError, TypeError, AttributeError) as error:
+            intro_path = None
+            intro = dict(status='omitted', error=type(error).__name__, reason=str(error),
+                         visible_in_this_export=False)
     command = ['ffmpeg', '-v', 'error', '-nostdin', '-ss', str(args.start), '-i', str(args.video),
         '-f', 'rawvideo', '-pixel_format', 'rgba', '-video_size', f'{width}x{height}',
         '-framerate', str(fps), '-i', 'pipe:0']
@@ -207,7 +212,7 @@ def main():
                     shown.add(index)
                 if preview is not None:
                     if preview_previous != preview:
-                        preview_image = caption_image(cues[preview]['text'], height=preview_height,
+                        preview_image = compact_caption_image(cues[preview]['text'], height=preview_height,
                             style=args.style, language=args.language, style_overrides={
                                 'size': 34, 'minimum_size': 26, 'single_line_floor': 34,
                                 'maximum_lines': 1, 'balanced_wrap': False, 'baseline_inset': 22})

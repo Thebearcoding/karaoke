@@ -275,16 +275,23 @@ def music_entries(kind, query, continuation=None):
             entries = playlist_entries(contents)
         else:
             artist = music.get_artist(query)
-            shelf = artist.get('songs') or {}
+            section = next((name for name in ('songs', 'videos')
+                            if (artist.get(name) or {}).get('browseId') or
+                            (artist.get(name) or {}).get('results')), 'releases')
+            shelf = artist.get(section) or {}
             playlist_id = shelf.get('browseId')
             metadata = dict(title=artist['name'], browse_id=query, thumbnail=music_thumbnail(artist),
                 url='https://music.youtube.com/channel/'+query, monthly_listeners=artist.get('monthlyListeners'),
-                order='youtube_music_top_songs', complete=bool(playlist_id))
+                catalogue_section=section, order='youtube_music_top_songs' if section == 'songs' else
+                'youtube_music_'+section, complete=bool(playlist_id))
             entries = (music.get_playlist(playlist_id, limit=0, related=False, suggestions_limit=0)['tracks']
                        if playlist_id else shelf.get('results', []))
             contents = (_renderer(music.response, 'musicPlaylistShelfRenderer') or {}).get('contents', []) if playlist_id else []
             if any('musicResponsiveListItemRenderer' in row for row in contents):
                 entries = playlist_entries(contents)
+            if section == 'releases':
+                entries = [dict(row, resultType='album', artists=[dict(name=artist['name'], id=query)])
+                           for name in ('albums', 'singles') for row in (artist.get(name) or {}).get('results', [])]
         token = get_continuation_token(contents) if contents else None
         next_page = dict(token=token) if token else None
     elif kind == 'album' and re.fullmatch(r'MPRE[\w-]+', query):

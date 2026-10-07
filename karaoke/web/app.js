@@ -181,6 +181,7 @@ function renderVideoResults(providers) {
   if (!info) return;
   const artists = videoSource === 'artists', album = videoSource === 'album', catalogue = album || videoSource === 'artist';
   const metadata = info.metadata || catalogueSelection || {};
+  const catalogueHeading = metadata.catalogue_section === 'videos' ? '歌手视频' : metadata.catalogue_section === 'releases' ? '歌手作品' : '热门歌曲';
   $('clear-search').textContent = catalogue ? '返回上一级' : '返回曲库';
   const popularityAvailable = info.results.some(song => playCount(song.views) !== null);
   if (searchOrder === 'popular' && !popularityAvailable) searchOrder = 'relevance';
@@ -188,12 +189,12 @@ function renderVideoResults(providers) {
   $('search-order').querySelector('[value="popular"]').disabled = !popularityAvailable;
   $('search-order').querySelector('[value="relevance"]').textContent = album ? '专辑顺序' : '默认';
   $('search-order-label').hidden = artists || info.loading || !info.results.length;
-  $('search-heading').textContent = album ? '专辑曲目' : catalogue ? '热门歌曲' : artists ? '找一位歌手' : '搜索结果';
+  $('search-heading').textContent = album ? '专辑曲目' : catalogue ? catalogueHeading : artists ? '找一位歌手' : '搜索结果';
   $('search-order-note').textContent = artists ? '选一位歌手，看看有哪些歌想唱' :
     searchOrder === 'popular' ? '已加载结果按播放量排序 · YouTube 提供' : searchOrder === 'ready' ? '已加载结果中，已准备歌曲排在前面' :
     searchOrder === 'title' ? '已加载结果按歌名排序' : album ? 'YouTube Music 专辑曲目顺序' :
     videoSource === 'local' ? '本地曲库 · 现场版靠后' : videoSource === 'songs' ? '歌曲优先 · 现场版靠后' : 'YouTube 原顺序 · 现场版靠后';
-  $('search-status').innerHTML = `<span class="${info.error ? 'search-error' : ''}">${info.loading ? '正在查找…' : info.error ? escape(info.error) : info.results.length ? `${videoSource === 'local' ? '' : '已加载 '}${info.results.length} ${artists ? '位歌手' : videoSource === 'youtube' ? '个视频' : videoSource === 'songs' ? '项' : '首'}${catalogue && info.metadata?.complete === false ? ' · 歌手页精选' : ''}` : '没有找到，试试另一个关键词或搜索类型'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`;
+  $('search-status').innerHTML = `<span class="${info.error ? 'search-error' : ''}">${info.loading ? '正在查找…' : info.error ? escape(info.error) : info.results.length ? `${videoSource === 'local' ? '' : '已加载 '}${info.results.length} ${artists ? '位歌手' : videoSource === 'youtube' || metadata.catalogue_section === 'videos' ? '个视频' : videoSource === 'songs' || metadata.catalogue_section === 'releases' ? '项' : '首'}${catalogue && info.metadata?.complete === false ? ' · 歌手页精选' : ''}` : catalogue ? '这个页面暂未提供可点播作品' : '没有找到，试试另一个关键词或搜索类型'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`;
   $('artist-summary').hidden = !catalogue;
   if (catalogue) $('artist-summary').innerHTML = `${metadata.thumbnail ? `<img src="${escape(metadata.thumbnail)}" alt="" referrerpolicy="no-referrer">` : ''}<div><p>${album ? '专辑' : '歌手'}</p><h3>${escape(metadata.title)}</h3>${metadata.monthly_listeners ? `<p>${escape(metadata.monthly_listeners)} · YouTube Music</p>` : ''}</div>`;
   renderSearchMore(info);
@@ -380,7 +381,7 @@ async function addVideo(song, {title, repeat = false} = {}) {
   try {
     const cached = library.find(item => queueKey(item) === key && item.job_id);
     const previous = new Set(state.entries.map(entry => entry.id));
-    const updated = await request('/v1/room/entries', {if_absent:!repeat, ...(cached ? {job_id:cached.job_id} :
+    const updated = await request('/v1/room/entries', {if_absent:!repeat, source_thumbnail:song.thumbnail, ...(cached ? {job_id:cached.job_id} :
       {url:song.url, ...(title !== undefined ? {title} : {source_title:song.title})})});
     acceptState(updated);
     if ($('video-preview').open) $('video-preview').close();

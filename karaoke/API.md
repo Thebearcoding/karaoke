@@ -416,11 +416,11 @@ ASR 固定宽度断行若留下孤立的单字或单词，会在同一短句内�
 
 `GET /v1/music/search?q=关键词&kind=songs|artists` 用 ytmusicapi 按页读取 YouTube Music 搜索结果，默认参数名保留 songs 以兼容已有客户端，但请求不再添加类型筛选，只向平台传递原始关键词，保留所有类型结果；artists 为用户明确选择的歌手搜索。使用 `zh_CN` 获取平台提供的中文名称。歌曲包含标准 YouTube `url`、`title`、`artists`（名称与可用的频道 ID）、`album`、`version`、`duration`、平台提供的 `views`（可能带万／亿等单位）、`available`、`thumbnail` 和原始 `rank`。歌手返回 `title`、`browse_id`、频道 `url`、`thumbnail`、`rank`；`provider=youtube_music`。不自行翻译名称、自动选择同名歌手或删改版本。
 
-`GET /v1/music/artists/{browse_id}` 只接受 YouTube 频道 ID，读取歌手页及其热门歌单的第一页，返回歌手元数据、`results`、`order=youtube_music_top_songs`、`complete`。没有歌单链接时保留页面精选并标 `complete=false`。平台未提供播放量时保留空值。前端默认平台顺序并将明确标注的现场版后置；播放量排序仅作用于已加载的、计数可知的结果，未知计数排后。`GET /v1/music/albums/{browse_id}` 接受 MPRE 专辑 ID，返回专辑元数据及完整曲目列表；专辑内默认沿用曲目顺序。以上接口复用视频搜索的限流、超时、缓存与去重，不下载音视频或创建准备任务。
+`GET /v1/music/artists/{browse_id}` 只接受 YouTube 频道 ID，读取歌手页及其热门歌单的第一页，返回歌手元数据、`results`、`catalogue_section`、`order`、`complete`。优先歌曲栏目（`songs` / `youtube_music_top_songs`），没有时读取视频栏目（`videos` / `youtube_music_videos`），再没有则保留专辑和单曲发行（`releases` / `youtube_music_releases`），发行仍以专辑类型进入曲目列表。没有歌单链接时保留页面精选并标 `complete=false`。平台未提供播放量时保留空值。前端默认平台顺序并将明确标注的现场版后置；播放量排序仅作用于已加载的、计数可知的结果，未知计数排后。`GET /v1/music/albums/{browse_id}` 接受 MPRE 专辑 ID，返回专辑元数据及完整曲目列表；专辑内默认沿用曲目顺序。以上接口复用视频搜索的限流、超时、缓存与去重，不下载音视频或创建准备任务。
 
 以上三个接口均返回 `results` 和 `next_cursor`（没有下一页为 `null`）；后续请求在相同接口、相同查询参数上附加 `cursor=next_cursor`。歌手元数据仅在第一页返回；`complete` 表示取得热门歌单入口而非只有页面精选，是否加载到底应看 `next_cursor`。每页保留原始顺序，`rank` 连续编号；前端仅跳过与已加载页面重复的同一来源链接，不合并不同版本。游标与查询／类型绑定，只接受服务端签发的随机句柄，有效期 30 分钟，最多保留 256 个；过期、淘汰或不匹配返回 410，重新搜索即可。游标不包含登录凭据，也不接受客户端指定外部地址。前端在列表末尾附近通过 IntersectionObserver 请求下一页，不轮询；同一页只保留一个在途请求。错误不清空已加载结果，不自动循环重试；空页或全重复页但仍有 continuation 时保留手动加载入口。
 
-从结果点歌使用 `POST /v1/room/entries`，例如 `{"url":"视频链接","source_title":"搜索返回的视频标题"}`。`source_title` 只给新任务提供临时展示标题（最多 500 字），不参与缓存键，不覆盖后续元数据；用户显式传入的 `title` 仍是优先标题。处理中的 `song_info` 按字段合并，空对象、空字符串或 `null` 不清除已知信息；下载进度、语言识别等更新不能把已有歌名变回占位文字。已有准备任务优先用 `job_id` 加入。
+从结果点歌使用 `POST /v1/room/entries`，例如 `{"url":"视频链接","source_title":"搜索返回的视频标题","source_thumbnail":"https://i.ytimg.com/vi/视频ID/hqdefault.jpg"}`。`source_title` 只给新任务提供临时展示标题（最多 500 字），不参与缓存键，不覆盖后续元数据；用户显式传入的 `title` 仍是优先标题。`source_thumbnail` 只接受来源平台图片域名的 HTTPS 地址，立即保存到 `song_info.thumbnail`；下载元数据也会补充此字段。房间的 `poster` 优先采用可用成品封面，再回退到来源图片，准备状态不阻止显示。处理中的 `song_info` 按字段合并，空对象、空字符串或 `null` 不清除已知信息；下载进度、语言识别等更新不能把已有歌名变回占位文字。已有准备任务优先用 `job_id` 加入。
 
 ### 直接对齐的局部恢复
 

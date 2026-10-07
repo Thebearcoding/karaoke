@@ -16,6 +16,10 @@ STYLES = TOKENS['styles']
 DEFAULT_STYLE = TOKENS['default_style']
 
 
+class CaptionOverflow(ValueError):
+    pass
+
+
 @lru_cache(maxsize=32)
 def system_font(name):
     path = Path('/System/Library/Fonts')/name
@@ -76,7 +80,7 @@ def wrap_lines(text, font, tracking, maximum):
 
 def balanced_lines(text, font, tracking, maximum):
     lines = wrap_lines(text, font, tracking, maximum)
-    if '\n' in text or len(lines) < 2:
+    if '\n' in text or len(lines) != 2:
         return lines
     candidates = []
     for index in range(1, len(text)):
@@ -118,7 +122,7 @@ def caption_image(text, width=1280, height=None, font_file=None,
         if len(lines) <= spec.get('maximum_lines', 2) and all(line_width(line, font, tracking) <= maximum for line in lines):
             break
     else:
-        raise ValueError('Caption exceeds the readable line limit; split the lyric cue')
+        raise CaptionOverflow('Caption exceeds the readable line limit; split the lyric cue')
     mask = Image.new('L', image.size)
     draw = ImageDraw.Draw(mask)
     baseline = (height-spec.get('baseline_inset', 36)*scale)*supersample
@@ -167,6 +171,24 @@ def with_opacity(image, opacity):
     return result
 
 
+def compact_caption_image(text, **options):
+    """Fit auxiliary text; the current lyric caption always uses caption_image."""
+    try:
+        return caption_image(text, **options)
+    except CaptionOverflow:
+        low, high = 0, len(text)-1
+        row = caption_image('…', **options)
+        while low <= high:
+            middle = (low+high)//2
+            try:
+                candidate = caption_image(text[:middle].rstrip()+'…', **options)
+            except CaptionOverflow:
+                high = middle-1
+            else:
+                row, low = candidate, middle+1
+        return row
+
+
 def song_intro_image(info, width=1280, style=DEFAULT_STYLE):
     """Transparent song credits, using the same typefaces as the lyrics."""
     title = info.get('title', '').strip()
@@ -183,7 +205,7 @@ def song_intro_image(info, width=1280, style=DEFAULT_STYLE):
     if version:
         rows.append((version, 310, 52, spec['version_size'], 20, 18, 1))
     for text, top, height, size, minimum, inset, lines in rows:
-        row = caption_image(text, width=width, height=round(height*scale), style=style,
+        row = compact_caption_image(text, width=width, height=round(height*scale), style=style,
             style_overrides={'size': size, 'minimum_size': minimum, 'single_line_floor': minimum,
                 'maximum_lines': lines, 'baseline_inset': inset, 'alignment': 'center',
                 'balanced_wrap': True})
