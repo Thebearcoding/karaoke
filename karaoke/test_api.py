@@ -1815,6 +1815,60 @@ def test_published_lyrics_match_both_languages_of_bilingual_credits(title, artis
         assert published_candidate([dict(row, **change)], dict(title='Evening Wind', artist='Lin Lin'), '')[0] is None
 
 
+@pytest.mark.parametrize('problem', [None, 'artist', 'text', 'short', 'repetitive', 'version'])
+def test_alternate_titles_require_independent_lyric_body_support(problem):
+    from karaoke.lyric_lookup import published_candidate
+    body = ['微風吹過山谷看見遠方河流我們牽手走過漫長季節',
+            '星光落在窗邊聽見朋友歌聲今夜等待清晨明亮天空']
+    reference = ['啦啦啦啦啦', *body, '啦啦啦啦啦']
+    row = dict(trackId=123, trackTitle='遠方之歌', artists=[dict(artistName='Singer')],
+               album={}, lyrics='\n'.join(body))
+    song = dict(title='Distant song', artist='Singer')
+    if problem == 'artist':row['artists'] = [dict(artistName='Other singer')]
+    if problem == 'text':row['lyrics'] = '另一首完全不同的歌曲' * 10
+    if problem == 'short':reference = body[:1]
+    if problem == 'repetitive':reference = ['啦' * 100]
+    if problem == 'version':row['album'] = dict(albumTitle='Remix')
+    assert published_candidate([row], song, '')[0] is None
+    lines, report = published_candidate([row], song, '', reference_lines=reference)
+    assert bool(lines) == (problem is None)
+    if problem is None:
+        assert ''.join(lines) == ''.join(body) and report['title_match'] == 'corroborated_lyric_text'
+        assert report['identity_support']['matched_units'] == sum(map(len, body))
+        exact = dict(row, trackId=124, trackTitle=song['title'])
+        assert published_candidate([row, exact], song, '', reference_lines=reference)[1]['url'].endswith('/124')
+
+
+@pytest.mark.parametrize('unavailable', [False, True])
+def test_name_mismatch_reuses_source_results_and_keeps_reference_when_recovery_fails(tmp_path, monkeypatch, unavailable):
+    from karaoke import lyric_consensus as module
+    from karaoke.stage_cache import StageCache
+    body = ['微風吹過山谷看見遠方河流我們牽手走過漫長季節',
+            '星光落在窗邊聽見朋友歌聲今夜等待清晨明亮天空']
+    alternate = [body[0], body[1]+'啊']
+    calls = []
+    monkeypatch.setattr(module.lookup, 'fetch_published_lyrics', lambda *a:
+        (body, dict(provider='line_music',language='Chinese')))
+    monkeypatch.setattr(module.lookup, 'fetch_lyrics', lambda *a:dict(status='unavailable'))
+    def additional(provider, *args, reference_lines=()):
+        calls.append((provider, reference_lines))
+        if provider != 'netease':return None, dict(provider=provider,status='unavailable')
+        if not reference_lines:
+            return None, dict(provider=provider,status='no_matching_published_text',
+                              identity_candidates=[dict(title='遠方之歌',track_id='123')])
+        assert reference_lines == body
+        if unavailable:raise OSError('provider unavailable')
+        return alternate, dict(provider=provider,language='Chinese',title_match='corroborated_lyric_text')
+    monkeypatch.setattr(module, 'fetch_additional_lyrics', additional)
+    lines, report = module.fetch_lyric_consensus(dict(title='Distant song',artist='Singer'),{},60,StageCache(tmp_path))
+    assert lines == body
+    assert report['candidate_texts'] == ([body] if unavailable else [body,alternate])
+    assert calls.count(('netease',body)) == 1
+    if unavailable:
+        failed = next(r for r in report['crosscheck']['unavailable_sources'] if r['provider']=='netease')
+        assert failed['error'] == 'OSError' and failed['status'] == 'unavailable'
+
+
 def test_published_text_prefers_same_performance_before_studio_fallback():
     from karaoke.lyric_lookup import published_candidate
     song = dict(title='Evening', artist='Singer')

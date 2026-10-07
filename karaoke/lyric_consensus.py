@@ -50,7 +50,7 @@ def compare_lyrics(candidates):
     return (candidates[ordered[0][0]][0] if agreed else None), report
 
 
-def fetch_additional_lyrics(provider, song, metadata, cache, duration=None):
+def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, reference_lines=()):
     """Read source-bound Music lyrics or an identity-matched NetEase release."""
     if provider != 'youtube_music' and (not song.get('title') or not song.get('artist')):
         return None, dict(provider=provider, status='missing_identity')
@@ -65,7 +65,7 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None):
         pass
     with cache.stage(stage, inputs=[Path(__file__)], outputs=[path],
                      config=dict(song=song, video_id=metadata.get('id'), source_title=metadata.get('title'), duration=duration,
-                                 locale='zh_CN' if provider == 'youtube_music' else None),
+                                 locale='zh_CN' if provider == 'youtube_music' else None, reference_lines=reference_lines),
                      code=[Path(__file__), Path(__file__).with_name('lyric_lookup.py'),
                            Path(__file__).with_name('source_captions.py')]) as reused:
         if not reused:
@@ -89,7 +89,7 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None):
                         data = lookup.cached_lyric_request(provider, url, cache, lambda: read_document(url, timeout=10))
                         return data.get('lrc', {}).get('lyric')
                     lines, report = lookup.published_candidate(rows, song, metadata.get('title'),
-                        read_lyrics=lyrics, allow_recording_mismatch=True, duration=duration)
+                        read_lyrics=lyrics, allow_recording_mismatch=True, duration=duration, reference_lines=reference_lines)
                     if lines:
                         report['url'] = 'https://music.163.com/#/song?id='+report['url'].rsplit('/',1)[-1]
                 else:
@@ -214,6 +214,28 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
             description = pending.result()
     if description:
         results.append(description)
+    reference = next((lines for lines, _ in results if lines), None)
+    if reference:
+        # Search engines may return a native/translated title that does not
+        # share characters with ours. Confirm that alias from another source's
+        # actual lyric body, rather than guessing a translation or pronunciation.
+        for index, (lines, report) in enumerate(results):
+            if lines or not report.get('identity_candidates'):
+                continue
+            provider = report.get('provider')
+            try:
+                if provider == 'line_music':
+                    retry = lookup.fetch_published_lyrics(song, metadata.get('title'), cache, duration,
+                                                         reference_lines=reference)
+                elif provider == 'netease':
+                    retry = fetch_additional_lyrics(provider, song, metadata, cache, duration, reference_lines=reference)
+                else:
+                    continue
+            except Exception as error:
+                results[index] = (None, dict(lookup.lyric_request_error(error), provider=provider,
+                                            identity_candidates=report['identity_candidates']))
+                continue
+            results[index] = retry
     candidates = [(lines, report) for lines, report in results if lines]
     _, review = compare_lyrics(candidates)
     lines = None

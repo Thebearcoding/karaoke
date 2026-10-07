@@ -321,9 +321,11 @@ def short_lyric_text(lines, duration):
 
 
 def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_recording_mismatch=False,
-                        duration=None):
+                        duration=None, reference_lines=()):
     """Select published text; recording onsets still come entirely from our audio."""
-    candidates = []
+    reference = text_units(''.join(reference_lines), text_language(''.join(reference_lines)) or 'English')
+    usable_reference = len(reference) >= 40 and len(set(reference)) >= 10
+    candidates, identity_candidates = [], []
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -334,9 +336,13 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
         album = row['album'].get('albumTitle', '')
         if not isinstance(album, str):
             continue
-        if (not identity(song['title'], title=True) & identity(title, title=True) or
-                not any(identity(song['artist']) & identity(a) for a in artists)):
+        if not any(identity(song['artist']) & identity(a) for a in artists):
             continue
+        title_match = bool(identity(song['title'], title=True) & identity(title, title=True))
+        if not title_match:
+            identity_candidates.append(dict(title=title, track_id=str(row.get('trackId', ''))))
+            if not usable_reference:
+                continue
         mismatch = recording_mismatches(song, source_title, title, album)
         if mismatch is None:
             continue
@@ -348,12 +354,16 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
         if mismatch and not allow_recording_mismatch:
             continue
         album_match = bool(identity(song.get('album')) & identity(album))
-        rank = (len(mismatch), not album_match, difference)
-        candidates.append((rank, mismatch, row, title, artists, album, seconds))
+        rank = (not title_match, len(mismatch), not album_match, difference)
+        candidates.append((rank, mismatch, row, title, artists, album, seconds, title_match))
     # A title can have different release edits. Use known recording metadata
     # before provider order, while retaining complete text from other releases.
-    rejected = []
-    for _, mismatch, row, title, artists, album, seconds in sorted(candidates, key=lambda c: c[0]):
+    rejected, identity_attempts = [], 0
+    for _, mismatch, row, title, artists, album, seconds, title_match in sorted(candidates, key=lambda c: c[0]):
+        if not title_match:
+            if identity_attempts >= 5:
+                continue
+            identity_attempts += 1
         try:
             text = row.get('lyrics')
             if text is None and read_lyrics is not None:
@@ -371,6 +381,17 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
         language = song.get('language') or text_language('\n'.join(lines))
         if not lines or language is None:
             continue
+        identity_support = None
+        if not title_match:
+            left = text_units(''.join(lines), language)
+            right = text_units(''.join(reference_lines), language)
+            matched = sum(o.src_end-o.src_start for o in Levenshtein.opcodes(left, right) if o.tag == 'equal')
+            if min(len(left), len(right)) < 40 or min(len(set(left)), len(set(right))) < 10 or (
+                    matched < .9*min(len(left), len(right)) or matched < .65*max(len(left), len(right))):
+                rejected.append(dict(reason='unconfirmed_title_alias', track_id=str(row.get('trackId', ''))))
+                continue
+            identity_support = dict(matched_units=matched, candidate_units=len(left), reference_units=len(right),
+                reference_sha256=hashlib.sha256('\n'.join(reference_lines).encode()).hexdigest())
         lines = transcript_lines(dict(text='\n'.join(lines)), language)
         track_id = str(row.get('trackId', ''))
         if not track_id.isdigit() or len(lines) > 1000 or any(len(line) > 200 for line in lines):
@@ -382,13 +403,15 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
             url='https://music-tw.line.me/track/'+track_id, track=title, artists=artists, album=album,
             text_sha256=hashlib.sha256(text.encode()).hexdigest(), excluded_credit_lines=excluded,
             recording_mismatches=mismatch, duration_seconds=seconds,
+            title_match='title' if title_match else 'corroborated_lyric_text', identity_support=identity_support,
             rejected_candidates=rejected,
             text_transform='html_entities_decoded_credit_header_footer_removed_then_whitespace_only',
             provider_timestamps_used=False)
-    return None, dict(status='no_matching_published_text', provider='line_music', rejected_candidates=rejected)
+    return None, dict(status='no_matching_published_text', provider='line_music', rejected_candidates=rejected,
+                      identity_candidates=identity_candidates)
 
 
-def fetch_published_lyrics(song, source_title, cache, duration=None):
+def fetch_published_lyrics(song, source_title, cache, duration=None, *, reference_lines=()):
     if not song.get('title') or not song.get('artist'):
         return None, dict(status='missing_identity', provider='line_music')
     path, stage = cache.root/'published-lyrics.json', 'fetch_published_lyrics'
@@ -401,7 +424,7 @@ def fetch_published_lyrics(song, source_title, cache, duration=None):
     except (OSError, ValueError, TypeError):
         pass
     with cache.stage(stage, inputs=[Path(__file__)], outputs=[path],
-                     config=dict(song=song, source_title=source_title, duration=duration),
+                     config=dict(song=song, source_title=source_title, duration=duration, reference_lines=reference_lines),
                      code=[Path(__file__), Path(__file__).with_name('source_captions.py')]) as reused:
         if not reused:
             try:
@@ -416,7 +439,7 @@ def fetch_published_lyrics(song, source_title, cache, duration=None):
                         raise ValueError('Invalid published lyric response')
                     attempted.append(dict(query=query, results=rows))
                     lines, report = published_candidate(rows, song, source_title,
-                        allow_recording_mismatch=True, duration=duration)
+                        allow_recording_mismatch=True, duration=duration, reference_lines=reference_lines)
                     rejected.extend(report.get('rejected_candidates', []))
                     if lines:
                         break
