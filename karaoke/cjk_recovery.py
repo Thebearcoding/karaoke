@@ -71,7 +71,11 @@ class AcousticWitness:
             with torch.inference_mode():
                 emissions, _ = self.model(torch.from_numpy(audio).unsqueeze(0).to(self.device))
             emissions = emissions.cpu()
-            aligned = self.bundle.get_aligner()(emissions[0], self.bundle.get_tokenizer()(['*', *tokens, '*']))[1:-1]
+            encoded = self.bundle.get_tokenizer()(['*', *tokens, '*'])
+            targets = [token for word in encoded for token in word]
+            if emissions.shape[1] < len(targets)+sum(a==b for a,b in zip(targets,targets[1:])):
+                raise ValueError('Insufficient acoustic frames for required phonemes')
+            aligned = self.bundle.get_aligner()(emissions[0], encoded)[1:-1]
             if len(aligned) != len(spans) or any(not times for times in aligned):
                 raise ValueError('Independent aligner omitted characters')
             step = len(audio)/16000/emissions.shape[1]

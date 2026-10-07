@@ -913,6 +913,12 @@ class SubtitleIntegrity(unittest.TestCase):
                 self.assertEqual(tokens, [['*', 'kimi', 'ga', 'wara', 'u', '*']]*2)
                 self.assertEqual([(u['first'], u['stop'], u['text']) for u in japanese[0]],
                                  [(0, 1, '君'), (1, 2, 'が'), (2, 3, '笑'), (3, 4, 'う')])
+                witness.model = lambda audio: (torch.zeros(1, 1, 3), None)
+                with self.assertRaisesRegex(ValueError, 'Insufficient acoustic frames'):
+                    witness(cue, voice)
+                with patch.object(witness, 'model', side_effect=RuntimeError('CUDA out of memory')):
+                    with self.assertRaisesRegex(RuntimeError, 'CUDA out of memory'):
+                        witness(cue, voice)
 
     def test_joint_recovery_rechecks_stale_neighbor_without_moving_foreign_words(self):
         from cjk_recovery import recover_context_groups
@@ -1105,6 +1111,18 @@ class SubtitleIntegrity(unittest.TestCase):
             self.assertEqual(result[1]['end'], result[2]['start'])
             self.assertAlmostEqual(result[1]['emission_end']-result[1]['start'], .01)
             self.assertEqual([u['text'] for u in result], list('甲乙丙'))
+        with self.assertRaisesRegex(ValueError, 'Insufficient acoustic frames'):
+            ctc_word_units(logits[:, :3], units, vocab, 10., .01)
+        repeats = [dict(text=c, first=i, stop=i+1, phones=['a']) for i,c in enumerate('甲乙')]
+        with self.assertRaisesRegex(ValueError, 'Insufficient acoustic frames'):
+            ctc_word_units(logits[:, :2], repeats, vocab, 10., .01)
+        from align_english_onsets import EnglishOnsetAligner
+        aligner = EnglishOnsetAligner.__new__(EnglishOnsetAligner)
+        aligner.method, aligner.device = 'wav2vec2', 'cpu'
+        aligner.tokenize = lambda words: ([1, 1], [(0, 2)])
+        aligner.model = lambda audio: (torch.zeros(1, 1, 3), None)
+        with self.assertRaisesRegex(ValueError, 'Insufficient acoustic frames'):
+            aligner.align(np.zeros(400, dtype='float32'), ['keep'])
         logits[0, 0, 0] = float('nan')
         with self.assertRaisesRegex(ValueError, 'Invalid CTC'):
             ctc_word_units(logits, units, vocab, 10., .01)

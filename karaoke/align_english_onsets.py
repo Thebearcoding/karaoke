@@ -141,6 +141,8 @@ class EnglishOnsetAligner:
             step = 256/22050*3
             logits = logits[:, :int(len(audio)/16000/step)]
         emissions = logits.log_softmax(-1).cpu()
+        if emissions.shape[1] < len(targets)+sum(a==b for a,b in zip(targets,targets[1:])):
+            raise ValueError('Insufficient acoustic frames for required phonemes')
         path, scores = torchaudio.functional.forced_align(
             emissions, torch.tensor([targets], dtype=torch.int64), blank=self.blank)
         spans = torchaudio.functional.merge_tokens(path[0], scores[0].exp(), blank=self.blank)

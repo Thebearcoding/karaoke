@@ -118,6 +118,8 @@ def ctc_word_units(logits, units, vocab, begin, frame_seconds):
             or frame_seconds <= 0):
         raise ValueError('Invalid CTC acoustic evidence')
     targets = [vocab[phone] for phone, _ in content]
+    if logits.shape[1] < len(targets)+sum(a==b for a,b in zip(targets,targets[1:])):
+        raise ValueError('Insufficient acoustic frames for required phonemes')
     paths, scores = torchaudio.functional.forced_align(
         logits.detach().float().cpu().log_softmax(-1), torch.tensor([targets]), blank=vocab['SP'])
     spans = torchaudio.functional.merge_tokens(paths[0], scores[0].exp(), blank=vocab['SP'])
