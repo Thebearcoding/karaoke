@@ -1,19 +1,23 @@
 """One pass over a frozen corpus using the normal playback policy, without video."""
 import argparse
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import fcntl
 import hashlib
 import json
+import math
 from pathlib import Path
 import shutil
 import sys
+import subprocess
+import threading
 import time
 
 import httpx
 
 from karaoke.api import Store
 from karaoke.stage_cache import digest
-from karaoke.tools.soak import record_failure, run_probe, save, stamp, verify_outputs
+from karaoke.tools.soak import ProbeSession, record_failure, run_probe, save, stamp, verify_outputs
 
 
 def soft_failures(result, prepared):
@@ -104,7 +108,39 @@ def summarize(cases):
                 soft_failure_songs=dict(soft_songs))
 
 
-def run_once(manifest, data_dir, report, prepared_dir, base, *, case_urls=()):
+def working_bytes(store, case):
+    """Conservative audio-only peak for admission; the live cache remains authoritative."""
+    for job in store.list(-1):
+        if job['input']['url'] != case['url']:
+            continue
+        folder = store.root/job['id']
+        if not (folder/'download/source.mkv').is_file():
+            continue
+        try:
+            # Reuse local decode metadata; never make a provider request.
+            if (folder/'source-native.json').is_file():
+                native = json.loads((folder/'source-native.json').read_text())
+                rate, channels = native['sample_rate'], native['channels']
+                duration = native['frames']/rate
+            else:
+                probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-select_streams', 'a:0',
+                    '-show_entries', 'stream=sample_rate,channels:format=duration', '-of', 'json',
+                    str(folder/'download/source.mkv')], timeout=30))
+                rate, channels = int(probe['streams'][0]['sample_rate']), probe['streams'][0]['channels']
+                duration = float(probe['format']['duration'])
+            if not all(math.isfinite(v) and v > 0 for v in (rate, channels, duration)):
+                return None
+            # Six native float64 files + two temporary int24 previews; five
+            # stereo float32 separation files; compressed previews/local clips.
+            return math.ceil(duration*(rate*channels*54 + 44100*2*20 + 256000) + 64*1024**2)
+        except (OSError, ValueError, KeyError, IndexError, ZeroDivisionError, subprocess.SubprocessError):
+            return None  # Unknown size runs alone, with the ordinary live monitor.
+    return None
+
+
+def run_once(manifest, data_dir, report, prepared_dir, base, *, case_urls=(), concurrency=1):
+    if concurrency < 1:
+        raise ValueError('Survey concurrency must be positive')
     frozen = json.loads(manifest.read_text())
     selection = [dict(url=c['url'], language=c['language']) for c in frozen['cases']]
     selection_hash = hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest()
@@ -131,50 +167,43 @@ def run_once(manifest, data_dir, report, prepared_dir, base, *, case_urls=()):
         if any((c.get('audio_attempts') or [{}])[-1].get('outcome') == 'running' for c in state['cases']):
             raise ValueError('Reconcile the interrupted attempt; never resubmit it automatically')
         store = Store(data_dir)
-        for case in state['cases']:
-            if case['audio_attempts']:
-                continue
-            if report.with_suffix('.pause').exists():
-                break
-            if client.get(base+'/health').raise_for_status().json()['pipeline_version'] != version:
-                raise ValueError('Pipeline changed during the one-pass survey')
-            packet_path = prepared_dir/(hashlib.sha256(case['url'].encode()).hexdigest()+'.json')
-            while not packet_path.exists():
-                state.update(waiting_for_lyrics=case['url'], summary=summarize(state['cases']), updated_at=stamp())
+        state_lock = threading.RLock()
+        pending, peaks = {}, {}
+        remaining = iter(c for c in state['cases'] if not c['audio_attempts'])
+        next_case = next(remaining, None)
+
+        def run_case(case, packet_path, packet):
+            started = time.perf_counter()
+            with state_lock:
+                attempt = dict(outcome='running', submitted_at=stamp(), pipeline_version=version,
+                               prepared_lyrics_sha256=digest(packet_path), lookup_seconds=packet['seconds'])
+                case['audio_attempts'].append(attempt)
+                state.update(summary=summarize(state['cases']), updated_at=stamp())
                 save(report, state)
-                if report.with_suffix('.pause').exists() or (prepared_dir/'aborted.json').exists():
-                    return
-                time.sleep(5)
-            state.pop('waiting_for_lyrics', None)
-            packet = json.loads(packet_path.read_text())
-            attempt = dict(outcome='running', submitted_at=stamp(), pipeline_version=version,
-                           prepared_lyrics_sha256=digest(packet_path), lookup_seconds=packet['seconds'])
-            case['audio_attempts'].append(attempt)
-            state.update(summary=summarize(state['cases']), updated_at=stamp())
-            save(report, state)
             entry, job, folder, probe_finished = None, None, None, False
             try:
-                room = client.get(base+'/v1/room').raise_for_status().json()
-                existing = {e['id'] for e in room['entries']}
-                # Reuse audio checkpoints, but leave an existing full MV intact.
-                force = any(j['input']['url'] == case['url'] and
-                            (j['status'] == 'completed' or j.get('restore_video'))
-                            for j in store.list(-1))
-                room = client.post(base+'/v1/room/entries', json=dict(
-                    url=case['url'], source_title=case['title'], force=force)).raise_for_status().json()
-                entry = next(e for e in room['entries'] if e['id'] not in existing)
-                job = client.get(f'{base}/v1/jobs/{entry["job_id"]}').raise_for_status().json()
-                folder = data_dir/job['id']
-                attempt.update(job_id=job['id'], entry_id=entry['id'])
-                save(report, state)
-                if not (folder/'download/source.mkv').is_file():
-                    store.cache.reuse_download(folder, case['url'])
-                if digest(folder/'download/source.mkv') != packet['source_sha256']:
-                    raise RuntimeError('Cached audio does not match the prepared lyric source')
-                shutil.copy2(packet_path, folder/'prepared-lyrics.json')
+                with state_lock:
+                    room = client.get(base+'/v1/room').raise_for_status().json()
+                    existing = {e['id'] for e in room['entries']}
+                    # Reuse audio checkpoints, but leave an existing full MV intact.
+                    force = any(j['input']['url'] == case['url'] and
+                                (j['status'] == 'completed' or j.get('restore_video'))
+                                for j in store.list(-1))
+                    room = client.post(base+'/v1/room/entries', json=dict(
+                        url=case['url'], source_title=case['title'], force=force)).raise_for_status().json()
+                    entry = next(e for e in room['entries'] if e['id'] not in existing)
+                    job = client.get(f'{base}/v1/jobs/{entry["job_id"]}').raise_for_status().json()
+                    folder = data_dir/job['id']
+                    attempt.update(job_id=job['id'], entry_id=entry['id'])
+                    save(report, state)
+                    if not (folder/'download/source.mkv').is_file():
+                        store.cache.reuse_download(folder, case['url'])
+                    if digest(folder/'download/source.mkv') != packet['source_sha256']:
+                        raise RuntimeError('Cached audio does not match the prepared lyric source')
+                    shutil.copy2(packet_path, folder/'prepared-lyrics.json')
                 command = [sys.executable, '-u', '-m', 'karaoke.pipeline', '--request', str(folder/'request.json'),
                            '--output', str(folder), '--playback-audio', '--prepared-lyrics', str(folder/'prepared-lyrics.json')]
-                code = run_probe(client, base, folder, command)
+                code = run_probe(client, base, folder, command, session=session)
                 probe_finished = True
                 if client.get(base+'/health').raise_for_status().json()['pipeline_version'] != version:
                     probe_finished = False
@@ -184,36 +213,111 @@ def run_once(manifest, data_dir, report, prepared_dir, base, *, case_urls=()):
                 evidence = verify_outputs(client, base, data_dir, job, audio_only=True, playback_policy=True)
                 result = json.loads((folder/'audio-result.json').read_text())
                 events = soft_failures(result, packet)
-                attempt.update(outcome='soft_fail' if events else 'clean', soft_failures=events,
-                               evidence=evidence, finished_at=stamp())
-                store.update(job['id'], status='audio_ready', pipeline_version=version, audio_result=result,
-                    song_info={k:result[k] for k in ('title','artist','language','duration_seconds')}, active_stages=[], error=None)
+                with state_lock:
+                    attempt.update(outcome='soft_fail' if events else 'clean', soft_failures=events,
+                                   evidence=evidence, finished_at=stamp())
+                    store.update(job['id'], status='audio_ready', pipeline_version=version, audio_result=result,
+                        song_info={k:result[k] for k in ('title','artist','language','duration_seconds')}, active_stages=[], error=None)
             except Exception as error:
-                details = json.loads((folder/'error.json').read_text()) if folder and (folder/'error.json').is_file() else dict(
-                    code='verification_failed' if probe_finished else 'survey_infrastructure_failed', message=str(error)[:600])
-                attempt.update(outcome='hard_fail', error=details, finished_at=stamp())
-                quality = json.loads((folder/'quality.json').read_text()) if folder and (folder/'quality.json').is_file() else {}
-                attempt['soft_failures'] = soft_failures(dict(quality=quality), packet)
-                if job:
-                    store.update(job['id'], status='failed', error=details, active_stages=[])
+                with state_lock:
+                    details = json.loads((folder/'error.json').read_text()) if folder and (folder/'error.json').is_file() else dict(
+                        code='verification_failed' if probe_finished else 'survey_infrastructure_failed', message=str(error)[:600])
+                    attempt.update(outcome='hard_fail', error=details, finished_at=stamp())
+                    quality = json.loads((folder/'quality.json').read_text()) if folder and (folder/'quality.json').is_file() else {}
+                    attempt['soft_failures'] = soft_failures(dict(quality=quality), packet)
+                    if job:
+                        store.update(job['id'], status='failed', error=details, active_stages=[])
             finally:
-                if folder:
-                    diagnostic = {}
-                    record_failure(diagnostic, dict(id=job['id'], error=attempt.get('error') or dict(
-                        code='survey_diagnostic', message=attempt['outcome'])), folder)
-                    attempt.update({k:diagnostic[k] for k in ('reproduction_file','diagnostic_sha256') if k in diagnostic})
-                if entry:
-                    room = client.get(base+'/v1/room').raise_for_status().json()
-                    if room['current_id'] != entry['id']:
-                        client.post(base+'/v1/room/commands', json=dict(action='remove', entry_id=entry['id'],
-                            revision=room['revision'])).raise_for_status()
-                state.update(summary=summarize(state['cases']), updated_at=stamp())
-                save(report, state)
-            print(json.dumps(dict(title=case['title'], **attempt, summary=state['summary']), ensure_ascii=False), flush=True)
+                with state_lock:
+                    if folder:
+                        diagnostic = {}
+                        record_failure(diagnostic, dict(id=job['id'], error=attempt.get('error') or dict(
+                            code='survey_diagnostic', message=attempt['outcome'])), folder)
+                        attempt.update({k:diagnostic[k] for k in ('reproduction_file','diagnostic_sha256') if k in diagnostic})
+                    if entry:
+                        room = client.get(base+'/v1/room').raise_for_status().json()
+                        if room['current_id'] != entry['id']:
+                            client.post(base+'/v1/room/commands', json=dict(action='remove', entry_id=entry['id'],
+                                revision=room['revision'])).raise_for_status()
+                    state.update(summary=summarize(state['cases']), updated_at=stamp())
+                    save(report, state)
+                    print(json.dumps(dict(title=case['title'], **attempt, summary=state['summary']), ensure_ascii=False), flush=True)
             if not probe_finished:
-                break
+                session.cancelled.set()
+
+            with state_lock:
+                attempt['wall_seconds'] = round(time.perf_counter()-started, 3)
+                save(report, state)
+
+        with ProbeSession(data_dir) as session, ThreadPoolExecutor(max_workers=concurrency) as pool:
+            state['concurrency'] = concurrency
+            try:
+                while next_case is not None or pending:
+                    for future in list(pending):
+                        if future.done():
+                            future.result()
+                            del pending[future]
+                    if session.cancelled.is_set() or report.with_suffix('.pause').exists():
+                        break
+                    if client.get(base+'/health').raise_for_status().json()['pipeline_version'] != version:
+                        session.cancelled.set()
+                        raise ValueError('Pipeline changed during the one-pass survey')
+                    if next_case is not None and len(pending) < concurrency:
+                        case = next_case
+                        packet_path = prepared_dir/(hashlib.sha256(case['url'].encode()).hexdigest()+'.json')
+                        with state_lock:
+                            old_wait = (state.get('waiting_for_lyrics'), state.get('waiting_for_cache'))
+                            can_start = packet_path.exists()
+                            state.pop('waiting_for_lyrics', None)
+                            state.pop('waiting_for_cache', None)
+                            if not can_start:
+                                state['waiting_for_lyrics'] = case['url']
+                                if (prepared_dir/'aborted.json').exists():
+                                    break
+                            if concurrency > 1 and can_start and case['url'] not in peaks:
+                                peaks[case['url']] = working_bytes(store, case)
+                            peak = peaks.get(case['url'])
+                            if can_start and pending:
+                                sizes = []
+                                for active, estimate in pending.values():
+                                    attempt = (active['audio_attempts'] or [{}])[-1]
+                                    size = store.cache.size(data_dir/attempt['job_id']) if attempt.get('job_id') else 0
+                                    sizes.append((estimate, size))
+                                # Read storage after sizes: ongoing writes must over-reserve,
+                                # not make remaining growth look smaller than it really is.
+                                storage = client.get(base+'/v1/storage').raise_for_status().json()
+                                reserved = sum(max(0, (estimate or storage['limit_bytes'])-size)
+                                               for estimate, size in sizes)
+                                growth = reserved+(peak or storage['limit_bytes'])+store.cache.headroom
+                                can_start = (peak is not None and storage['protected_bytes']+growth <= storage['limit_bytes']
+                                             and storage['free_bytes'] >= store.cache.minimum_free+growth)
+                                if not can_start:
+                                    state['waiting_for_cache'] = case['url']
+                            if can_start:
+                                packet = json.loads(packet_path.read_text())
+                                future = pool.submit(run_case, case, packet_path, packet)
+                                pending[future] = (case, peak)
+                                next_case = next(remaining, None)
+                            if can_start or old_wait != (state.get('waiting_for_lyrics'), state.get('waiting_for_cache')):
+                                state.update(summary=summarize(state['cases']), updated_at=stamp())
+                                save(report, state)
+                        if can_start:
+                            continue
+                    if pending:
+                        wait(pending, timeout=1, return_when=FIRST_COMPLETED)
+                    elif next_case is not None:
+                        time.sleep(1)
+                # A pause stops admission; already-started songs finish normally.
+                # Infrastructure cancellation is observed by every probe monitor.
+                for future in pending:
+                    future.result()
+            except BaseException:
+                session.cancelled.set()
+                raise
         if all(c['audio_attempts'] and c['audio_attempts'][-1]['outcome'] != 'running' for c in state['cases']):
             state['finished_at'] = stamp()
+        state.pop('waiting_for_lyrics', None)
+        state.pop('waiting_for_cache', None)
         state.update(summary=summarize(state['cases']), updated_at=stamp())
         save(report, state)
 
@@ -224,9 +328,10 @@ def main():
         parser.add_argument('--'+name, required=True, type=Path)
     parser.add_argument('--base-url', default='http://127.0.0.1:8746')
     parser.add_argument('--case-url', action='append', default=[], help='Recheck only this URL from the unchanged fixed manifest')
+    parser.add_argument('--concurrency', type=int, default=1, help='Maximum in-flight songs; shared cache and stage locks still apply')
     args = parser.parse_args()
     args.report.parent.mkdir(parents=True, exist_ok=True)
-    run_once(args.manifest, args.data_dir, args.report, args.prepared_dir, args.base_url.rstrip('/'), case_urls=args.case_url)
+    run_once(args.manifest, args.data_dir, args.report, args.prepared_dir, args.base_url.rstrip('/'), case_urls=args.case_url, concurrency=args.concurrency)
 
 
 if __name__ == '__main__':

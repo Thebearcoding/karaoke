@@ -1,7 +1,7 @@
 """Reproducible whole-song acceptance runs through the room's song queue."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from datetime import datetime, timezone
 import fcntl
 import gzip
@@ -15,6 +15,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 
 import httpx
@@ -299,7 +300,34 @@ def wait_job(client, base, job_id):
     raise ConnectionError('Room event stream ended before completion')
 
 
-def run_probe(client, base, folder, command, *, resume_preparation=None):
+class ProbeSession:
+    """One controller owns all its probes; infrastructure failure cancels the group."""
+    def __init__(self, root):
+        self.root = Path(root).resolve()
+        self.cancelled = threading.Event()
+        self.lock = None
+
+    def __enter__(self):
+        self.lock = (self.root/'focused-probe.lock').open('a')
+        try:
+            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BaseException:
+            self.lock.close()
+            raise
+        return self
+
+    def check(self, folder):
+        if self.lock is None or self.lock.closed or folder.parent.resolve() != self.root:
+            raise ValueError('Probe session does not own this data directory')
+        if self.cancelled.is_set():
+            raise ValueError('Probe session stopped after an infrastructure failure')
+
+    def __exit__(self, *error):
+        self.cancelled.set()
+        self.lock.close()
+
+
+def run_probe(client, base, folder, command, *, resume_preparation=None, session=None):
     """Run one registered job under the live service's shared cache budget."""
     health = client.get(base+'/health').raise_for_status().json()
     job = client.get(f'{base}/v1/jobs/{folder.name}').raise_for_status().json()
@@ -313,8 +341,10 @@ def run_probe(client, base, folder, command, *, resume_preparation=None):
         from karaoke.api import Store
         store = Store(folder.parent)
         store.on_change = lambda: client.post(base+'/v1/room/events').raise_for_status()
-    with (folder.parent/'focused-probe.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    if session is not None and resume_preparation is not None:
+        raise ValueError('A shared probe session must keep ordinary preparation paused')
+    with (ProbeSession(folder.parent) if session is None else nullcontext(session)) as session:
+        session.check(folder)
         (folder/'error.json').unlink(missing_ok=True)
         with (folder/'probe.log').open('ab') as log, ThreadPoolExecutor(max_workers=1) as reader:
             process = subprocess.Popen(command, cwd=folder.parent.parent.parent,
@@ -341,6 +371,7 @@ def run_probe(client, base, folder, command, *, resume_preparation=None):
                                     ('active_stages', 'stage_progress', 'timings', 'song_info') if key in progress})
                     output = reader.submit(read_output)
                 while True:
+                    session.check(folder)
                     storage = client.get(base+'/v1/storage').raise_for_status().json()
                     if storage['used_bytes'] > storage['limit_bytes'] or not storage['can_prepare']:
                         raise ValueError('Focused probe reached the shared cache or free-space limit')
@@ -355,6 +386,9 @@ def run_probe(client, base, folder, command, *, resume_preparation=None):
                             output.result()
                         return result
                     time.sleep(1)
+            except BaseException:
+                session.cancelled.set()
+                raise
             finally:
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGTERM)

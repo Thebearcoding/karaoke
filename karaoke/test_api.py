@@ -7578,7 +7578,8 @@ def test_playback_survey_records_source_disagreements_and_actual_provider_failur
 @pytest.mark.parametrize('hard_code', ['separate_music_failed', 'subtitles_failed'])
 @pytest.mark.parametrize('has_full_mv', [False, True])
 @pytest.mark.parametrize('targeted', [False, True])
-def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monkeypatch, hard_code, has_full_mv, targeted):
+@pytest.mark.parametrize('mode', ['serial', 'parallel', 'cache_limited', 'pause'])
+def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monkeypatch, hard_code, has_full_mv, targeted, mode):
     from contextlib import nullcontext
     from karaoke.tools import playback_sweep as sweep
     data = tmp_path/'data'
@@ -7608,8 +7609,27 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
         (prepared/(hashlib.sha256(case['url'].encode()).hexdigest()+'.json')).write_text(json.dumps(
             dict(seconds=1, source_sha256=file_hash(media))))
     calls = []
-    def process(client, base, folder, command):
-        calls.append(folder.name)
+    import threading
+    barrier = threading.Barrier(2)
+    counter_lock = threading.Lock()
+    active, maximum = 0, 0
+    peak = app.state.store.cache.limit if mode == 'cache_limited' else 1024**2
+    monkeypatch.setattr(sweep, 'working_bytes', lambda *a:peak)
+    def process(client, base, folder, command, **kwargs):
+        nonlocal active, maximum
+        with counter_lock:
+            calls.append(folder.name)
+            active += 1
+            maximum = max(active, maximum)
+            number = len(calls)
+        if mode in ('parallel', 'pause') and number <= 2:
+            barrier.wait(timeout=5)
+            if mode == 'pause':
+                report.with_suffix('.pause').touch()
+        else:
+            time.sleep(.05)
+        with counter_lock:
+            active -= 1
         url = json.loads((folder/'request.json').read_text())['url']
         if url == cases[1]['url']:
             (folder/'error.json').write_text(json.dumps(dict(code=hard_code, message='test')))
@@ -7629,20 +7649,22 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
             app.state.store.update(source_jobs[0], status='completed', result=dict(artifacts={}))
         user_queue = api.post('/v1/room/entries',json=dict(url=URL)).json()['entries']
         monkeypatch.setattr(sweep.httpx,'Client',lambda **k:nullcontext(api))
-        sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=requested)
-        sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=requested)
-        assert len(calls) == (2 if targeted else 3)
-        assert calls[1:] == (source_jobs[2:] if targeted else source_jobs[1:])
+        sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=requested, concurrency=1 if mode == 'serial' else 2)
+        sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=requested, concurrency=1 if mode == 'serial' else 2)
+        assert len(calls) == (2 if targeted or mode == 'pause' else 3)
+        assert set(calls[1:]) == set(source_jobs[2:] if targeted else source_jobs[1:2] if mode == 'pause' else source_jobs[1:])
+        assert maximum == (2 if mode in ('parallel', 'pause') else 1)
         assert (calls[0] != source_jobs[0]) == has_full_mv
         if has_full_mv:
             assert app.state.store.read(source_jobs[0])['status'] == 'completed'
         assert [e['id'] for e in api.get('/v1/room').json()['entries']] == [e['id'] for e in user_queue]
         result = json.loads(report.read_text())
         assert result['fixed_selection_size'] == 3
-        assert result['summary']['outcomes'] == (dict(clean=1,soft_fail=1) if targeted else dict(clean=1,hard_fail=1,soft_fail=1))
+        assert result['summary']['outcomes'] == (dict(clean=1,soft_fail=1) if targeted else
+            dict(clean=1,hard_fail=1,pending=1) if mode == 'pause' else dict(clean=1,hard_fail=1,soft_fail=1))
         assert result['summary']['hard_failures'] == ({} if targeted else {hard_code:1})
-        assert result['summary']['soft_failures'] == dict(align_words_failed=1)
-        assert all(len(c['audio_attempts']) == 1 for c in result['cases'])
+        assert result['summary']['soft_failures'] == ({} if mode == 'pause' and not targeted else dict(align_words_failed=1))
+        assert all(len(c['audio_attempts']) == (0 if mode == 'pause' and not targeted and c['url'] == cases[2]['url'] else 1) for c in result['cases'])
         with pytest.raises(ValueError,match='requested cases'):
             sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=[cases[1]['url']])
         with pytest.raises(ValueError,match='outside the fixed selection'):
@@ -7650,6 +7672,52 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
         result['cases'][0]['audio_attempts'][0]['outcome']='running'
         report.write_text(json.dumps(result))
         with pytest.raises(ValueError,match='Reconcile'):
-            sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=requested)
-        assert len(calls) == (2 if targeted else 3)
+            sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=requested, concurrency=1 if mode == 'serial' else 2)
+        assert len(calls) == (2 if targeted or mode == 'pause' else 3)
     assert manifest.read_bytes() == original_manifest
+
+
+@pytest.mark.parametrize('oversized', [False, True])
+def test_probe_session_overlaps_children_and_stops_them_together(tmp_path, oversized):
+    from concurrent.futures import ThreadPoolExecutor
+    import httpx
+    import os
+    from karaoke.tools.soak import ProbeSession, run_probe
+    folders = [tmp_path/name for name in ('one', 'two')]
+    for folder in folders:
+        folder.mkdir()
+        (folder/'checkpoint').write_bytes(b'keep')
+    pids = [folder/'pid' for folder in folders]
+    def respond(request):
+        if request.url.path == '/health':
+            data = dict(preparation_paused=True, running_job=None)
+        elif request.url.path == '/v1/storage':
+            both = all(p.exists() for p in pids)
+            data = dict(used_bytes=200 if oversized and both else 20, limit_bytes=100, can_prepare=True)
+        else:
+            data = dict(status='queued')
+        return httpx.Response(200, json=data)
+    def command(folder):
+        code = ('import os,pathlib,time;'
+                f'pathlib.Path({str(folder/"pid")!r}).write_text(str(os.getpid()));'
+                'time.sleep(2)')
+        return [sys.executable, '-c', code]
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client, ProbeSession(tmp_path) as session:
+        with pytest.raises(BlockingIOError):
+            run_probe(client, 'http://test', folders[0], command(folders[0]))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(run_probe, client, 'http://test', folder, command(folder), session=session)
+                       for folder in folders]
+            for future in futures:
+                if oversized:
+                    with pytest.raises(ValueError, match='cache or free-space|infrastructure failure'):
+                        future.result(timeout=10)
+                else:
+                    assert future.result(timeout=10) == 0
+    assert all(p.exists() for p in pids)
+    for pid in pids:
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(pid.read_text()), 0)
+    assert all((folder/'checkpoint').read_bytes() == b'keep' for folder in folders)
+    with pytest.raises(ValueError, match='does not own'):
+        session.check(folders[0])
