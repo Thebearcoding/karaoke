@@ -343,6 +343,50 @@ def test_room_can_force_full_revalidation_without_reusing_a_completed_job(tmp_pa
         assert finished(client, entry['job_id'])['status'] == 'completed'
 
 
+@pytest.mark.parametrize('by_id', [False, True])
+@pytest.mark.parametrize('already_queued', [False, True])
+def test_pointing_to_old_completed_song_refreshes_it_once(tmp_path, by_id, already_queued):
+    app = create_app(tmp_path, worker_command=fake_worker, version='new')
+    old = ready_job(app.state.store)
+    if already_queued:
+        state = app.state.room.read()
+        state['entries'] = [dict(id='waiting',job_id=old['id'])]
+        app.state.room.save(state)
+    (tmp_path/'preparation.pause').touch()
+    with TestClient(app) as client:
+        request = {'job_id':old['id']} if by_id else {'url':URL}
+        request['if_absent'] = True
+        first = client.post('/v1/room/entries',json=request).json()
+        assert len(first['entries']) == 1
+        entry = first['entries'][0]
+        job = app.state.store.read(entry['job_id'])
+        assert job['status']=='queued' and job['pipeline_version']=='new'
+        assert client.post('/v1/room/entries',json=request).json()['entries']==first['entries']
+        assert len(app.state.store.list(-1)) == 1
+        if already_queued:
+            assert entry['id']=='waiting'
+        (tmp_path/'preparation.pause').unlink()
+        assert finished(client,entry['job_id'])['status']=='completed'
+
+
+def test_refresh_does_not_replace_current_or_leased_media(tmp_path):
+    app = create_app(tmp_path, version='new')
+    old = ready_job(app.state.store)
+    state = app.state.room.read()
+    state.update(entries=[dict(id='current',job_id=old['id'])],current_id='current',playing=True,position=4,started_at=time.time())
+    app.state.room.save(state)
+    first = app.state.room.add(AddSong(job_id=old['id'],if_absent=True))
+    assert len(first['entries'])==1 and first['playing']
+    second = app.state.room.add(AddSong(job_id=old['id']))
+    assert second['entries'][0]['job_id']==old['id'] and second['entries'][1]['job_id']!=old['id']
+    assert app.state.store.read(old['id'])['status']=='completed'
+    assert second['current_id']=='current' and second['playing']
+    leased = ready_job(app.state.store,url='https://www.youtube.com/watch?v=2Vv-BfVoq4g')
+    app.state.store.cache.acquire(leased['id'])
+    fresh,_ = app.state.store.create(JobRequest(url=leased['input']['url']),'new')
+    assert fresh['id']!=leased['id'] and app.state.store.read(leased['id'])['status']=='completed'
+
+
 def test_wait_for_preparation_then_play_pause_seek_mix_and_persist(tmp_path):
     app = create_app(tmp_path, worker_command=fake_worker, version='test')
     with TestClient(app) as client:
@@ -704,7 +748,8 @@ def test_recreated_song_keeps_known_metadata_before_any_worker_runs(tmp_path, re
     with TestClient(app) as client:
         entry = client.post('/v1/room/entries', json=dict(
             url=URL, force=recreate == 'force', source_title='Less useful search title')).json()['entries'][0]
-        assert entry['job_id'] != old['id'] and entry['status'] == 'queued'
+        assert (entry['job_id'] == old['id']) == (recreate == 'version')
+        assert entry['status'] == 'queued'
         assert (entry['title'], entry['artist'], entry['duration']) == ('Test song', 'Singer', 10)
         from karaoke.pipeline import Pipeline
         pipeline = Pipeline(dict(url=URL), tmp_path/entry['job_id'])

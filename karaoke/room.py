@@ -213,6 +213,7 @@ class Room:
         if bool(request.url) == bool(request.job_id):
             raise HTTPException(422, '请提供视频链接或已准备好的歌曲')
         state = self.read()
+        existing = None
         if request.if_absent:
             if request.job_id:
                 requested = self.store.read(request.job_id)
@@ -225,12 +226,17 @@ class Room:
             for entry in state['entries']:
                 job = self.store.read(entry['job_id'])
                 if job and job['input']['url'] == url:
-                    return self.snapshot()
-        if len(state['entries']) >= 100:
+                    if job['status'] != 'completed' or job.get('pipeline_version') == self.version or entry['id'] == state['current_id']:
+                        return self.snapshot()
+                    existing = entry
+                    request = request.model_copy(update={'url': None, 'job_id': job['id']})
+                    break
+        if existing is None and len(state['entries']) >= 100:
             raise HTTPException(409, '歌单最多保留 100 首，请先移除一些歌曲')
         if request.job_id:
             job = self.store.read(request.job_id)
-            if job and (job['status'] in ('evicted', 'video_evicted') or job.get('restore_video')):
+            if job and (job['status'] in ('evicted', 'video_evicted') or job.get('restore_video') or
+                        (job['status'] == 'completed' and job.get('pipeline_version') != self.version)):
                 job, cached = self.store.create(JobRequest(**{**job['input'], 'force': False}), self.version)
                 if not cached:
                     self.worker.queue.put_nowait(job['id'])
@@ -251,7 +257,10 @@ class Room:
                 self.worker.queue.put_nowait(job['id'])
         if thumbnail_url(request.source_thumbnail) and not (job.get('song_info') or {}).get('thumbnail'):
             job = self.store.update(job['id'], song_info={'thumbnail': request.source_thumbnail})
-        state['entries'].append(dict(id=str(uuid4()), job_id=job['id']))
+        if existing is None:
+            state['entries'].append(dict(id=str(uuid4()), job_id=job['id']))
+        else:
+            existing['job_id'] = job['id']
         self.store.touch(job['id'])
         self.save(state)
         return self.snapshot()

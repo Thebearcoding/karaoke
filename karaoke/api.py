@@ -88,6 +88,12 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def known_song_info(job):
+    return {**(job.get('song_info') or {}), **{
+        key: value for key, value in (job.get('result') or {}).items()
+        if key in ('title', 'artist', 'language', 'duration_seconds') and value}}
+
+
 class Store:
     def __init__(self, root, cache_limit_bytes=None):
         self.on_change = lambda: None
@@ -160,26 +166,39 @@ class Store:
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             if not payload.force:
+                in_use = set(self.cache.leases)
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='room'").fetchone():
+                    state = json.loads(db.execute('SELECT state FROM room WHERE id=1').fetchone()[0])
+                    in_use.update(e['job_id'] for e in state['entries'] if e['id'] == state['current_id'])
                 rows = db.execute("""SELECT doc FROM jobs WHERE
                     (cache_key=? AND status IN ('queued','running','completed'))
-                    OR status IN ('queued','failed','audio_ready','source_ready') OR json_extract(doc, '$.restore_video')=1
-                    ORDER BY (status='completed') DESC, COALESCE(json_extract(doc, '$.restore_video'), 0) DESC,
-                             created_at DESC""", (key,)).fetchall()
+                    OR status IN ('queued','failed','audio_ready','source_ready','completed') OR json_extract(doc, '$.restore_video')=1
+                    ORDER BY (cache_key=?) DESC, (status='completed') DESC,
+                             COALESCE(json_extract(doc, '$.restore_video'), 0) DESC, created_at DESC""", (key, key)).fetchall()
                 for row in rows:
                     doc = json.loads(row[0])
-                    if doc['status'] == 'queued':
-                        if {k:v for k,v in doc['input'].items() if k != 'force'} != key_payload:
+                    if {k: v for k, v in doc['input'].items() if k != 'force'} != key_payload:
+                        continue
+                    refresh = doc.get('pipeline_version') != version and (
+                        doc['status'] == 'completed' or doc.get('restore_video'))
+                    if refresh:
+                        # Revalidation must not replace media underneath a player or transfer.
+                        if doc['id'] in in_use or doc['status'] == 'running' or not (self.root/doc['id']).is_dir():
                             continue
+                        doc['restore_video'] = False
+                        doc['song_info'] = known_song_info(doc)
+                        (self.root/doc['id']/'progress.json').write_text(
+                            json.dumps({'song_info': doc['song_info']}, ensure_ascii=False)+'\n')
+                    if doc['status'] == 'queued':
                         # Pending work has not executed the old pipeline yet.
                         doc.update(pipeline_version=version, updated_at=now())
                         db.execute('UPDATE jobs SET cache_key=? WHERE id=?', (key, doc['id']))
-                    if doc['status'] in ('failed', 'audio_ready', 'source_ready') and not doc.get('restore_video'):
-                        if {k: v for k, v in doc['input'].items() if k != 'force'} != key_payload:
-                            continue
+                    if (doc['status'] in ('failed', 'audio_ready', 'source_ready') or
+                            (refresh and doc['status'] != 'queued')) and not doc.get('restore_video'):
                         folder = self.root/doc['id']
                         source_ready = doc['status'] == 'source_ready' and all((folder/name).is_file()
                             for name in ('source.json', 'download/source.mkv', 'download/source.info.json'))
-                        if not source_ready and not any((folder/'checkpoints').glob('*.json')):
+                        if not refresh and not source_ready and not any((folder/'checkpoints').glob('*.json')):
                             continue
                         doc.update(status='queued', active_stages=[], stage_progress={}, timings={},
                                    error=None, updated_at=now(), last_accessed_at=now(), pipeline_version=version,
@@ -191,8 +210,6 @@ class Store:
                                    (key, 'queued', json.dumps(doc, ensure_ascii=False), doc['id']))
                         return doc, False
                     if doc.get('restore_video'):
-                        if {k: v for k, v in doc['input'].items() if k != 'force'} != key_payload:
-                            continue
                         if doc['status'] not in ('queued', 'running'):
                             folder = self.root/doc['id']
                             if not can_restore_video(folder, doc.get('result')):
@@ -218,9 +235,7 @@ class Store:
                                   (payload.url,)).fetchall()
             for row in previous:
                 old = json.loads(row[0])
-                info = {**(old.get('song_info') or {}), **{
-                    k: v for k, v in (old.get('result') or {}).items()
-                    if k in ('title', 'artist', 'language', 'duration_seconds') and v}}
+                info = known_song_info(old)
                 doc['song_info'] = {**{k: v for k, v in info.items() if v is not None and v != ''},
                                     **doc.get('song_info', {})}
                 if old.get('metadata_cache') and not doc.get('metadata_cache'):
@@ -401,7 +416,11 @@ class Worker:
         process = self.processes[job_id] = None
         folder = self.store.root/job_id
         room_managed = self.in_room(job_id)
-        version = {'pipeline_version': self.version} if self.version and not job.get('restore_video') else {}
+        # A queued video-only restore can survive a service upgrade. Its old
+        # audio/subtitles must enter the normal checkpoint validation path too.
+        version = {'pipeline_version': self.version} if self.version else {}
+        if job.get('restore_video') and self.version and job.get('pipeline_version') != self.version:
+            version['restore_video'] = False
         retry = {'download_retry': {**job['download_retry'], 'next_retry_at': None}} if job.get('download_retry') else {}
         job = self.store.update(job_id, status='running', error=None, started_at=now(), **version, **retry)
         try:

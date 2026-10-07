@@ -6176,7 +6176,7 @@ def test_video_restore_reuses_job_and_recovers_from_failure(tmp_path):
         assert app.state.store.read(folder.name)['restore_video']
         return [sys.executable, '-c', "import pathlib,sys; p=pathlib.Path(sys.argv[1]);"
                 "(p/'mv.mp4').write_bytes(b'partial');sys.exit(1)", str(folder)]
-    app = create_app(tmp_path, worker_command=failed_download, version='new-renderer')
+    app = create_app(tmp_path, worker_command=failed_download, version='test')
     store = app.state.store
     job = cache_fixture(store, '1', restorable=True)
     folder = tmp_path/job['id']
@@ -6224,12 +6224,56 @@ def test_video_restore_url_deduplicates_across_renderer_versions(tmp_path):
     restored, cached = store.create(request, 'new-renderer')
     duplicate, duplicate_cached = store.create(request, 'new-renderer')
     assert restored['id'] == duplicate['id'] == original['id']
-    assert not cached and duplicate_cached and restored['restore_video']
+    assert not cached and duplicate_cached and not restored['restore_video']
+    assert restored['pipeline_version'] == 'new-renderer'
     assert restored['result'] == original['result']
     changed, _ = store.create(request.model_copy(update={'mv_audio':'instrumental'}), 'new-renderer')
     assert changed['id'] != original['id']
     forced, _ = store.create(request.model_copy(update={'force':True}), 'new-renderer')
     assert forced['id'] != original['id']
+
+
+def test_completed_version_refresh_keeps_valid_stage_checkpoints(tmp_path):
+    from karaoke.stage_cache import StageCache
+    store = Store(tmp_path)
+    old = cache_fixture(store, '1', restorable=True)
+    folder = tmp_path/old['id']
+    source, separated, aligned, code = [folder/name for name in ('input', 'separated', 'aligned', 'align.py')]
+    source.write_bytes(b'audio')
+    code.write_text('version = 1')
+    cache = StageCache(folder)
+    with cache.stage('separate', inputs=[source], outputs=[separated]):
+        separated.write_bytes(b'computed stem')
+    with cache.stage('align', inputs=[separated], outputs=[aligned], code=[code]):
+        aligned.write_bytes(b'old timings')
+    refreshed, hit = store.create(JobRequest(**{**old['input'],'force':False}), 'new')
+    assert not hit and refreshed['id']==old['id'] and refreshed['status']=='queued'
+    code.write_text('version = 2')
+    with StageCache(folder).stage('separate', inputs=[source], outputs=[separated]) as hit:
+        assert hit and separated.read_bytes()==b'computed stem'
+    with StageCache(folder).stage('align', inputs=[separated], outputs=[aligned], code=[code]) as hit:
+        assert not hit and not aligned.exists()
+        aligned.write_bytes(b'new timings')
+
+
+@pytest.mark.parametrize('queued', [False, True])
+def test_outdated_video_restore_revalidates_stages_before_completion(tmp_path, queued):
+    def check_refresh(folder):
+        job = app.state.store.read(folder.name)
+        assert not job['restore_video'] and job['pipeline_version'] == 'new'
+        return fake_worker(folder)
+    app = create_app(tmp_path, worker_command=check_refresh, version='new')
+    store = app.state.store
+    old = cache_fixture(store, '1', restorable=True)
+    store.update(old['id'], status='queued' if queued else 'video_evicted', restore_video=True)
+    (tmp_path/old['id']/'mv.mp4').unlink()
+    with TestClient(app) as client:
+        if not queued:
+            response = client.post('/v1/room/entries', json={'job_id':old['id']})
+            assert response.status_code == 201
+        fresh = finished(client, old['id'])
+        assert fresh['status'] == 'completed' and fresh['pipeline_version'] == 'new'
+        assert not fresh['restore_video']
 
 
 @pytest.mark.parametrize('source_matches', [True, False])
