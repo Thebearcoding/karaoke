@@ -240,7 +240,7 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
         if agreeing:
             index, selection = min(agreeing), 'agreement'
         else:
-            # Three close, independently published texts outweigh an outlier.
+            # A majority of close, independently published texts outweighs an outlier.
             # Similarity only selects a whole candidate; differences stay soft
             # failures and are never reported as exact agreement or accuracy.
             support = [{i} for i in range(len(candidates))]
@@ -257,7 +257,8 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
                             similarities[i][peer] = max(similarities[i].get(peer, 0), comparison['similarity'])
             votes = [len({candidates[i][1].get('publisher') or candidates[i][1]['provider'] for i in group & eligible})
                      for group in support]
-            if max(votes[i] for i in eligible) >= 3:
+            publishers = {candidates[i][1].get('publisher') or candidates[i][1]['provider'] for i in eligible}
+            if max(votes[i] for i in eligible) >= max(2, len(publishers)//2+1):
                 # Equally supported versions can still differ in completeness.
                 # Prefer the closest whole text, counting each publisher once.
                 agreement = [sum(s.values())/len(s) if s else 0 for s in similarities]
@@ -276,6 +277,8 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
         if rejected or any(r.get('rejected_candidates') for r in review['unavailable_sources']):
             review.update(status='lyrics_incomplete', agreeing_sources=[], independent_sources=0)
         report = dict(status=review['status'], crosscheck=review)
-    (cache.root/'lyric-crosscheck.json').write_text(json.dumps(dict(report,
-        candidate_texts=[text for text, _ in candidates]), ensure_ascii=False)+'\n')
+    # Keep eligible alternatives with the source-bound packet, so preparing
+    # lyrics on another host does not silently remove alignment fallback.
+    report = dict(report, candidate_texts=[text for text, _ in candidates])
+    (cache.root/'lyric-crosscheck.json').write_text(json.dumps(report, ensure_ascii=False)+'\n')
     return lines, report

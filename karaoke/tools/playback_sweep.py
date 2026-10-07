@@ -33,6 +33,9 @@ def soft_failures(result, prepared):
     if quality.get('asr_localization_windows'):
         events.append(dict(module='alignment', code='alignment_localized_with_asr',
                            windows=quality['asr_localization_windows']))
+    if fallback := quality.get('lyric_source_fallback'):
+        events.append(dict(module='lyrics', code='lyric_source_fallback',
+            rejected_sources=len(fallback['rejected']), selected_provider=fallback['selected']['provider']))
     lookup = prepared.get('lookup') or {}
     for key in ('identity_recovery', 'metadata_language_corrected'):
         recovery = lookup.get(key)

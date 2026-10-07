@@ -1310,7 +1310,8 @@ def test_lyric_excerpt_yields_to_fuller_source_for_same_recording(tmp_path, monk
 
 @pytest.mark.parametrize('independent', [True, False])
 @pytest.mark.parametrize('other_performance', [False, True])
-def test_three_similar_lyric_sources_respect_recording_identity(tmp_path, monkeypatch, independent, other_performance):
+@pytest.mark.parametrize('with_description', [False, True])
+def test_similar_lyric_majority_respects_recording_identity(tmp_path, monkeypatch, independent, other_performance, with_description):
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
     outlier = ['A different lyric in another language']
@@ -1324,11 +1325,11 @@ def test_three_similar_lyric_sources_respect_recording_identity(tmp_path, monkey
             recording_mismatches=['live_performance'] if other_performance else [],
             publisher=provider if independent else 'shared')))
     lines, report = module.fetch_lyric_consensus(dict(title='Evening', artist='Singer'), {}, 30, StageCache(tmp_path),
-        ([variants[2]], dict(provider='video_description', language='English', publisher='youtube',
-                            recording_mismatches=['live_performance'] if other_performance else [])))
+        ([variants[2]], dict(provider='video_description', language='English', publisher='youtube' if independent else 'shared',
+                            recording_mismatches=['live_performance'] if other_performance else [])) if with_description else None)
     review = report['crosscheck']
     assert review['status'] == 'conflicting' and not review['agreeing_sources']
-    assert lines == ([variants[0]] if independent and not other_performance else outlier)
+    assert lines == ([variants[0 if with_description else 1]] if independent and not other_performance else outlier)
     assert review['selection'] == ('similarity_support' if independent and not other_performance else 'published_source')
 
 
@@ -1362,6 +1363,7 @@ def test_equally_supported_lyrics_choose_closest_whole_text_before_provider_prio
         (texts[provider], dict(provider=provider, language='English')))
     lines, report = module.fetch_lyric_consensus(dict(title='Evening',artist='Singer'), {}, 30, StageCache(tmp_path))
     assert lines == texts['youtube_music']
+    assert report['candidate_texts'] == [texts[p] for p in ('line_music','netease','youtube_music')]
     assert report['crosscheck']['selection'] == 'similarity_support'
     assert len(report['crosscheck']['supporting_sources']) == 3
     assert all(p['similarity'] >= .9 for p in report['crosscheck']['comparisons'])
@@ -3247,7 +3249,9 @@ def test_prepared_lyrics_preserve_provenance_and_reject_different_inputs(tmp_pat
 
 
 @pytest.mark.parametrize('mode', ['success', 'all_fail', 'resource_failure', 'stale', 'supplied', 'soft'])
-def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize('prepared', [False, True])
+def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeypatch, mode, prepared):
+    from karaoke.lyric_lookup import prepared_lyrics_identity
     primary, alternative = ['First phrase', 'Missing phrase'], ['First phrase', 'Different phrase']
     lyrics = dict(title='Evening', artist='Singer', language='English', lines=primary,
         provenance=dict(kind='user_supplied' if mode=='supplied' else 'online_lyric_text',
@@ -3256,9 +3260,20 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
         crosscheck=dict(selected_source=0, eligible_sources=[0,1,2], status='conflicting',
             sources=[dict(provider=p,language='English') for p in ('primary','alternate','duplicate','rejected')]))
     if mode == 'stale':packet['candidate_texts'][0] = ['Old lyrics']
-    (tmp_path/'lyric-crosscheck.json').write_text(json.dumps(packet))
+    prepared_path = None
+    if prepared:
+        lyrics['source_url'] = URL
+        lyrics['provenance']['lyric_lookup'].update(packet)
+        prepared_path = tmp_path/'prepared.json'
+        prepared_path.write_text(json.dumps(dict(identity=prepared_lyrics_identity(URL, {}), lyrics=lyrics)))
+    else:
+        (tmp_path/'lyric-crosscheck.json').write_text(json.dumps(packet))
     (tmp_path/'lyrics.json').write_text(json.dumps(lyrics))
-    pipeline = Pipeline(dict(url=URL), tmp_path)
+    pipeline = Pipeline(dict(url=URL), tmp_path, audio_only=prepared, playback_policy=prepared,
+                        prepared_lyrics=prepared_path)
+    if prepared:
+        lyrics = pipeline.prepare_text({}, 6.)
+        assert not (tmp_path/'lyric-crosscheck.json').exists()
     calls = []
     def align(candidate, duration):
         calls.append(candidate['lines'])
@@ -3280,7 +3295,10 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
         assert selected['lines'] == (primary if mode=='soft' else alternative)
         assert calls == ([primary] if mode=='soft' else [primary,alternative])
         if mode == 'success':
+            from karaoke.tools.playback_sweep import soft_failures
             quality=json.loads((tmp_path/'quality.json').read_text())
+            assert soft_failures(dict(quality=quality), {}) == [dict(module='lyrics',
+                code='lyric_source_fallback', rejected_sources=1, selected_provider='alternate')]
             rejected=quality['lyric_source_fallback']['rejected']
             assert len(rejected)==1 and rejected[0]['source']['provider']=='primary'
             saved=tmp_path/rejected[0]['diagnostics']

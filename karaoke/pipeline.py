@@ -907,11 +907,13 @@ class Pipeline:
 
     def align_candidates(self, lyrics, metadata, duration):
         from .lyric_consensus import alternative_lyric_candidates
+        packet = lyrics.get('provenance', {}).get('lyric_lookup', {}) if not self.strict_audio else {}
         path = self.output/'lyric-crosscheck.json'
-        try:
-            packet = json.loads(path.read_text()) if not self.strict_audio else {}
-        except (OSError, ValueError):
-            packet = {}
+        if not self.strict_audio and 'candidate_texts' not in packet:
+            try:
+                packet = json.loads(path.read_text())
+            except (OSError, ValueError):
+                packet = {}
         candidates = [lyrics, *alternative_lyric_candidates(lyrics, packet)]
         attempts = []
         for index, candidate in enumerate(candidates):
