@@ -406,6 +406,43 @@ class SubtitleIntegrity(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, 'contradicted'):
                         validate_timeline(result, ['甲乙', '丙'], 6, report['constraints'], 'Chinese')
 
+    def test_internal_merged_word_reobserves_a_stale_phrase_window_once(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
+        text='甲乙丙丁'
+        units=[dict(first=0,stop=1,text='甲',start=1.,end=3.1),
+               dict(first=1,stop=2,text='乙',start=3.12,end=3.3),
+               dict(first=2,stop=4,text='丙丁',start=7.,end=8.,timing_source='linear_fallback')]
+        cue=dict(text=text,start=1.,end=8.,aligned_start=1.,aligned_end=8.,units=units)
+        measured=[dict(first=i,stop=i+1,text=c,start=t,end=t+.1)
+                  for i,(c,t) in enumerate(zip(text,[2.,2.9,3.1,3.3]))]
+        predictions=[deepcopy(measured) for _ in range(3)]
+        # The start of the first word remains unconfirmed. Only the interior
+        # has a proved conflict, so the old first-word-only retry missed it.
+        predictions[0][0].update(start=1.6,end=1.7)
+        for recovers in (True,False):
+            with self.subTest(recovers=recovers):
+                calls=[]
+                def witness(context,*args,**kwargs):
+                    calls.append((context['aligned_start'],context['aligned_end']))
+                    self.assertEqual(context['units'],[dict(u,acoustic_end=None if u.get('timing_source')=='linear_fallback' else u['end']) for u in units])
+                    views=[deepcopy(measured),deepcopy(measured)]
+                    if len(calls)==1 or not recovers:
+                        views[1][-1].update(start=3.6,end=3.7)
+                    return views
+                result,report=reconcile_timing([cue],np.ones(9*44100)*.1,witness,
+                    lambda *args:predictions,protocol,'Chinese')
+                self.assertEqual(calls,[(1.,8.),(2.,3.7)])
+                self.assertEqual(report['lines'][-1]['context_retry'],[2.,3.7])
+                self.assertEqual(cue['units'],units)
+                if recovers:
+                    self.assertEqual([u['start'] for u in result[0]['units']],[1.,2.9,3.1,3.3])
+                    self.assertFalse(report['unresolved'])
+                    validate_timeline(result,[text],9.,report['constraints'],'Chinese')
+                else:
+                    self.assertTrue(report['unresolved'])
+
     def test_countdown_uses_singing_offsets_and_does_not_invent_them_from_ctc(self):
         # The first word stays visible until the next word, but its singing
         # has ended. Extending the display must not erase a real vocal gap.

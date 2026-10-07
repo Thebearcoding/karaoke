@@ -188,6 +188,20 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                     0 < cue['aligned_end']-proof['onset'] <= 30):
                 windows[index] = [proof['onset'], cue['aligned_end']]
                 cue['aligned_start'] = proof['onset']
+            elif proof['first'] != cue['units'][0]['first']:
+                row = next((r for r in reversed(reports) if r['line']==index+1 and
+                            r.get('status')=='reviewed' and r.get('predictions')), None)
+                if row is None:
+                    continue
+                views = row['witnesses']
+                begin, end = min(v[0]['start'] for v in views), max(v[-1]['end'] for v in views)
+                # An internal merged word can also inherit an obsolete long
+                # crop. Reobserve the whole measured phrase once; its boundary
+                # envelope is only context, never an assigned word time.
+                if (0 < end-begin <= 30 and
+                        max(abs(begin-cue['aligned_start']), abs(end-cue['aligned_end'])) > protocol['maximum_change_seconds']):
+                    windows[index] = [begin, end]
+                    cue.update(aligned_start=begin, aligned_end=end)
         if windows:
             retry, reviewed = reconcile_timing(retry, wave, witness, predict, protocol, language, ledger,
                                                _retry_context=False, _review_lines=windows)
