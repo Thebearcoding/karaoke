@@ -2483,26 +2483,69 @@ def test_isolated_missing_lines_preserve_budget_for_global_localization():
     assert result['result'] == block['result']
 
 
-def test_local_recognition_keeps_context_predictions_through_global_retry():
+@pytest.mark.parametrize('force_global', [False, True])
+def test_missing_lyric_timing_takes_priority_over_collapsed_refinement(force_global):
+    from copy import deepcopy
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    from karaoke.lyric_progress import partial_alignment_cues
+    lines = ['line'+str(i) for i in range(12)]
+    lines[1] = 'early collapsed phrase here'
+    starts = [1.+i*8 for i in range(12)]
+    segments = [dict(words=[dict(word=t,start=s,end=s+(.8 if i!=8 else 0))])
+                for i,(t,s) in enumerate(zip(lines,starts))]
+    segments[1]['words'] = [dict(word=word+' ',start=starts[1],end=starts[1]+(.12 if i==3 else 0))
+                            for i,word in enumerate(lines[1].split())]
+    block = dict(range=[0,12],context=[0,12],source_range=[0.,100.],result=dict(segments=segments))
+    original = deepcopy(block)
+    cues = partial_alignment_cues(lines,[block],100.,'English')
+    assert cues[1]['status']=='collapsed_timing' and cues[8]['status']=='unresolved_timing'
+    recognized, aligned = [], []
+    def recognize(begin,end):
+        recognized.append((begin,end))
+        # Old local bounds have no lyric evidence; a global pass can locate
+        # the neighbours without guessing the missing or collapsed phrases.
+        return dict(segments=[dict(words=[dict(word=t,start=s,end=s+.8)
+            for i,(t,s) in enumerate(zip(lines,starts)) if i not in (1,8)])]
+            if (begin,end)==(0.,100.) else [])
+    def align(begin,end,text,**options):
+        aligned.append(text.splitlines())
+        if lines[8] not in text.splitlines():
+            return None
+        return dict(segments=[dict(words=[dict(word=t,start=starts[lines.index(t)]-begin,
+            end=starts[lines.index(t)]+.8-begin)]) for t in text.splitlines()])
+    result = recover_with_local_asr(block,lines,np.zeros(100*16000),'English',recognize,align,
+                                   force_global=force_global,max_alignment_attempts=1)
+    assert block==original
+    assert aligned==[lines[7:10]]
+    assert recognized[-1]==(0.,100.) and len(recognized)==(1 if force_global else 2)
+    assert result['result']['segments'][8]['words'][0]==dict(word=lines[8],start=65.,end=65.8)
+    assert result['result']['segments'][1]==segments[1]
+
+
+@pytest.mark.parametrize('located', [1, 3])
+def test_local_recognition_keeps_context_predictions_through_global_retry(located):
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines, starts = ['alpha', 'bravo', 'charlie', 'delta', 'omega'], [1.,4.,8.,12.,16.]
     segments = [dict(words=[dict(word=t,start=s,end=s+(0 if i in (1,3) else .8))])
                 for i,(t,s) in enumerate(zip(lines,starts))]
     block = dict(range=[0,5],context=[0,5],source_range=[0.,20.],result=dict(segments=segments))
+    selected = slice(located-1, located+2)
     def recognize(begin,end):
         return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+.8-begin)
-            for t,s in zip(lines[:3],starts[:3])])] if end < 10 else [])
+            for t,s in zip(lines[selected],starts[selected])])]
+            if (end < 10 if located==1 else begin > 5) else [])
     def align(begin,end,text,**options):
-        if text.splitlines() != lines[:3]:
+        if text.splitlines() != lines[selected]:
             return None
         return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+.8-begin)])
-                             for t,s in zip(lines[:3],starts[:3])])
+                             for t,s in zip(lines[selected],starts[selected])])
     result = recover_with_local_asr(block,lines,np.zeros(20*16000),'English',recognize,align)
     assert any(r['global_localization'] for r in result['asr_localizations'])
-    assert result['result']['segments'][1]['words'][0] == dict(word='bravo',start=4.,end=4.8)
-    assert result['result']['segments'][3] == segments[3]
+    assert result['result']['segments'][located]['words'][0] == dict(
+        word=lines[located],start=starts[located],end=starts[located]+.8)
+    assert result['result']['segments'][4-located] == segments[4-located]
     assert len(result['recovery_contexts']) == 1
-    assert result['recovery_contexts'][0]['context'] == [0,3]
+    assert result['recovery_contexts'][0]['context'] == [located-1,located+2]
 
 
 def test_local_recognition_broadens_once_when_old_neighbours_miss_the_verse():

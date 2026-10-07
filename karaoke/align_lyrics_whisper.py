@@ -309,14 +309,21 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         end = min(duration, cues[right-1]['end']+.6) if cues[right-1]['status'] == 'candidate' else duration
         windows.append((left, right, begin, end))
     global_recovery = force_global or len(bad) >= max(4, (stop-first+4)//5) or any(e-b > 45 for _, _, b, e in windows)
+    untimed = {i for i in bad if cues[i]['status'] == 'unresolved_timing'}
     if global_recovery:
         windows = [(first, stop, block['source_range'][0], block['source_range'][1])]
+    else:
+        windows.sort(key=lambda window: not untimed.intersection(range(window[0], window[1])))
     result, reports, budget = deepcopy(block), [], max_alignment_attempts
     contexts = [] if recovery_contexts is None else recovery_contexts
+    needs_relocation = False
     for left, right, begin, end in windows[:8]:
         report = dict(context=[left, right], source_range=[begin, end], global_localization=global_recovery,
                       accepted_lines=[], attempts=[])
         reports.append(report)
+        if needs_relocation and not untimed.intersection(range(left, right)):
+            report['reason'] = 'deferred_until_missing_lines_are_located'
+            continue
         if not 0 <= begin < end <= duration or end-begin > 600:
             report['reason'] = 'localization_budget_exceeded'
             continue
@@ -334,6 +341,8 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         report['anchors'] = anchors
         if not any(a['status'] == 'candidate' for a in anchors):
             report['reason'] = 'insufficient_recognition_support'
+            if not global_recovery and untimed.intersection(range(left, right)):
+                needs_relocation = True
             continue
         targets = bad.intersection(range(left, right))
         mislocalized = set()
@@ -360,6 +369,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         except ValueError:
             report['reason'] = 'invalid_recognition_anchors'
             continue
+        blocks.sort(key=lambda block: not untimed.intersection(range(block[0]+left, block[1]+left)))
         relocalized = set()
         for block_index, (start, stop_line, cf, cs, ab, ae) in enumerate(blocks):
             selected = targets.intersection(range(start+left, stop_line+left))
