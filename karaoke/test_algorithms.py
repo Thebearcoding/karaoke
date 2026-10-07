@@ -980,6 +980,9 @@ class SubtitleIntegrity(unittest.TestCase):
             def model(audio):
                 observed.append((audio.shape[1], audio.mean().item()))
                 return torch.zeros(1, 100, 3), None
+            model.model = SimpleNamespace(feature_extractor=SimpleNamespace(conv_layers=[
+                SimpleNamespace(conv=torch.nn.Conv1d(1, 1, kernel, stride=stride))
+                for kernel, stride in [(10,5),(3,2),(3,2),(3,2),(3,2),(2,2),(2,2)]]))
             witness = AcousticWitness(root/'original.wav', 'cpu')
             witness.model = model
             witness.bundle = SimpleNamespace(get_tokenizer=lambda: lambda words: words,
@@ -1001,10 +1004,22 @@ class SubtitleIntegrity(unittest.TestCase):
                 self.assertEqual(tokens, [['*', 'kimi', 'ga', 'wara', 'u', '*']]*2)
                 self.assertEqual([(u['first'], u['stop'], u['text']) for u in japanese[0]],
                                  [(0, 1, '君'), (1, 2, 'が'), (2, 3, '笑'), (3, 4, 'う')])
-                witness.model = lambda audio: (torch.zeros(1, 1, 3), None)
+                for duration in (.000001, .024):
+                    with self.subTest(duration=duration):
+                        observed.clear()
+                        with self.assertRaisesRegex(ValueError, 'Insufficient acoustic samples'):
+                            witness(dict(cue, audio_bounds=[2.,2.+duration]), voice)
+                        self.assertFalse(observed)
+                observed.clear()
+                witness(dict(cue, audio_bounds=[2.,2.025]), voice)
+                self.assertEqual([n for n, _ in observed], [400,400])
+                short_emissions = lambda audio: (torch.zeros(1, 1, 3), None)
+                short_emissions.model = model.model
+                witness.model = short_emissions
                 with self.assertRaisesRegex(ValueError, 'Insufficient acoustic frames'):
                     witness(cue, voice)
-                with patch.object(witness, 'model', side_effect=RuntimeError('CUDA out of memory')):
+                with patch.object(witness, 'model', side_effect=RuntimeError('CUDA out of memory')) as broken:
+                    broken.model = model.model
                     with self.assertRaisesRegex(RuntimeError, 'CUDA out of memory'):
                         witness(cue, voice)
 

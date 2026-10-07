@@ -64,8 +64,15 @@ class AcousticWitness:
         mixture, rate = sf.read(self.original_audio, start=round(begin*original.samplerate),
                                 stop=round(end*original.samplerate), dtype='float32', always_2d=True)
         views = [(wave[round(begin*44100):round(end*44100)], 44100), (mixture.mean(axis=1), rate)]
+        minimum_samples = 1
+        for layer in reversed(self.model.model.feature_extractor.conv_layers):
+            conv = layer.conv
+            minimum_samples = ((minimum_samples-1)*conv.stride[0]-2*conv.padding[0]
+                               + conv.dilation[0]*(conv.kernel_size[0]-1)+1)
         result = []
         for audio, rate in views:
+            if (len(audio)*16000+rate-1)//rate < minimum_samples:
+                raise ValueError('Insufficient acoustic samples for the encoder')
             divisor = np.gcd(rate, 16000)
             audio = resample_poly(audio, 16000//divisor, rate//divisor).astype('float32')
             with torch.inference_mode():
