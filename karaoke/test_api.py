@@ -1067,6 +1067,43 @@ def test_unmatched_lyrics_retry_cached_native_identity_once_without_repeating_bl
         assert not report.get('identity_recovery',{}).get('recovered',False)
 
 
+@pytest.mark.parametrize('corroborated', [True, False])
+def test_isolated_lyric_source_reuses_native_metadata_but_requires_corroboration(tmp_path, monkeypatch, corroborated):
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    original=['古い街を歩いている', '知らない道を進んでいる']
+    recovered=['星空に色を重ねて', '夜の向こうで歌っている']
+    metadata_calls, limited_calls, queries=[],[],[]
+    def extract(*args):
+        metadata_calls.append(1)
+        return dict(parsed=dict(title='夜の色',artist='はる',lyric_line_numbers=[]))
+    def published(song, *args):
+        queries.append(song['artist'])
+        return (recovered if song['artist']=='はる' else None), dict(provider='line_music',language='Japanese')
+    def lrclib(song, *args):
+        body=original if song['artist']=='Haru' else recovered if corroborated else None
+        return dict(status='ok',results=[] if body is None else [dict(id=1,trackName='夜の色',
+            artistName=song['artist'],duration=30,plainLyrics='\n'.join(body),instrumental=False)])
+    def additional(provider, *args):
+        if provider=='netease':
+            limited_calls.append(1)
+            return None,dict(provider=provider,status='unavailable',http_status=429,error='HTTPStatusError')
+        return None,dict(provider=provider,status='unavailable')
+    monkeypatch.setattr(lyric_lookup,'extract_song_metadata',extract)
+    monkeypatch.setattr(lyric_lookup,'fetch_published_lyrics',published)
+    monkeypatch.setattr(lyric_lookup,'fetch_lyrics',lrclib)
+    monkeypatch.setattr(lyric_consensus,'fetch_additional_lyrics',additional)
+    result=lyric_lookup.prepare_online_lyrics(dict(url=URL),
+        dict(track='夜の色',artist='Haru',description='はるの公開作品情報'),30,StageCache(tmp_path),'unused',None)
+    assert result['lines']==(recovered if corroborated else original)
+    assert result['artist']==('はる' if corroborated else 'Haru')
+    assert queries==['Haru','はる'] and metadata_calls==[1] and limited_calls==[1]
+    recovery=result['provenance']['lyric_lookup']['identity_recovery']
+    assert recovery['recovered']==corroborated
+    assert recovery['previous_lookup']['candidate_texts']==[original]
+    assert recovery['attempts'][0]['lookup']['candidate_texts'][0]==recovered
+
+
 @pytest.mark.parametrize('failure', ['timeout', 'server', 'long_backoff', 'authentication'])
 def test_missing_lyrics_retry_transient_metadata_and_keep_confirmed_artist(tmp_path, monkeypatch, failure):
     import httpx

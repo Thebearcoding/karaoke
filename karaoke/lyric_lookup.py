@@ -522,9 +522,10 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 text_sha256=hashlib.sha256('\n'.join(text).encode()).hexdigest())
         from .lyric_consensus import fetch_lyric_consensus
         lines, report = fetch_lyric_consensus(song, metadata, duration, cache, read_description, preserve_title)
-        if not lines:
+        if not lines or (parsed and report.get('crosscheck', {}).get('status') == 'insufficient_sources'):
+            retained_lines, retained_report, retained_song = lines, report, dict(song)
             original = {key: song.get(key) for key in ('title', 'artist')}
-            previous, attempts = report, []
+            previous, attempts, accepted = report, [], False
             # Retain a platform-confirmed performer while resolving an upload
             # title. A description can also credit producers or session players.
             for key in ('title', 'artist'):
@@ -541,11 +542,21 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 lines, report = fetch_lyric_consensus(song, metadata, duration, cache, description_text, True,
                                                       prefetched=blocked)
                 attempts.append(dict(identity={key: song.get(key) for key in original}, lookup=report))
-                if lines:
+                # A source can attach another song's text to valid metadata.
+                # Reuse already-read native credits to seek corroboration;
+                # a second isolated guess cannot replace the first candidate.
+                review = report.get('crosscheck', {})
+                accepted = bool(lines) and (not retained_lines or review.get('status') == 'corroborated' or
+                                           review.get('selection') == 'similarity_support')
+                if accepted:
                     break
+            if retained_lines and not accepted:
+                lines, report = retained_lines, retained_report
+                song.clear()
+                song.update(retained_song)
             if attempts:
                 report = dict(report, identity_recovery=dict(original=original,
-                    resolved={key: song.get(key) for key in original}, recovered=bool(lines),
+                    resolved={key: song.get(key) for key in original}, recovered=accepted,
                     attempts=attempts, previous_lookup=previous))
         if metadata_language and report.get('language') and metadata_language != report['language']:
             report = dict(report, metadata_language_corrected=dict(original=metadata_language, resolved=report['language']))
