@@ -189,7 +189,8 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
 
 
 def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
-                          force_global=False, max_alignment_attempts=24, recovery_contexts=None, localize=None):
+                          force_global=False, max_alignment_attempts=24, recovery_contexts=None, localize=None,
+                          align_original=None):
     """Use recognition only to locate failed lyrics, never as replacement text."""
     from anchors_from_asr import anchors_from_words
     from lyric_progress import partial_alignment_cues
@@ -277,7 +278,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             report['reason'] = 'invalid_recognition_anchors'
             continue
         relocalized = set()
-        for start, stop_line, cf, cs, ab, ae in blocks:
+        for block_index, (start, stop_line, cf, cs, ab, ae) in enumerate(blocks):
             selected = targets.intersection(range(start+left, stop_line+left))
             # The recognizer only observed this crop. Missing edge anchors
             # must not turn a local repair into a search through other verses.
@@ -320,6 +321,20 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 attempt['error'] = str(error)
                 candidate = None
             attempt['result'] = candidate
+            if (align_original is not None and ae-ab <= 45 and budget and
+                    not valid_recovery(candidate, lines[cf+left:cs+left], ae-ab)):
+                # Separation can suppress a real choir/quiet voice. Change the
+                # audio view within the same known bounds, not the lyric text.
+                budget -= 1
+                try:
+                    alternate = align_candidate(align_original, ab, ae, '\n'.join(lines[cf+left:cs+left]),
+                        gap_padding=None, dynamic_heads=True, max_word_dur=None, word_dur_factor=None)
+                    accepted = valid_recovery(alternate, lines[cf+left:cs+left], ae-ab)
+                    attempt['original_mix_alignment'] = dict(result=alternate, accepted=accepted)
+                    if accepted:
+                        candidate = alternate
+                except ValueError as error:
+                    attempt['original_mix_alignment'] = dict(error=str(error), accepted=False)
             if (budget >= cost+1 and
                     not relocalized.intersection(range(start, stop_line)) and
                     all(anchors[i]['status'] != 'candidate' for i in range(start, stop_line)) and
@@ -373,8 +388,10 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                         refined_blocks = alignment_blocks(refined, audio)
                         anchors[:] = refined
                         targets.update(range(start+left, stop_line+left))
-                        blocks.extend(b for b in refined_blocks
-                                      if b[0] < stop_line and b[1] > start)
+                        # Finish the narrowed search we already paid for before
+                        # unrelated regions can consume its remaining budget.
+                        blocks[block_index+1:block_index+1] = [b for b in refined_blocks
+                            if b[0] < stop_line and b[1] > start]
                         continue
                 except ValueError as error:
                     regional['error'] = str(error)
@@ -491,7 +508,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         # that never contained them. Broaden once, sharing the remaining budget.
         result = recover_with_local_asr(result, lines, audio, language, recognize, align,
                                        force_global=True, max_alignment_attempts=budget, recovery_contexts=contexts,
-                                       localize=localize)
+                                       localize=localize, align_original=align_original)
         reports.extend(result.get('asr_localizations', []))
     result['asr_localizations'] = reports
     result['recovery_contexts'] = contexts
@@ -963,7 +980,15 @@ def main():
             piece = audio[round(begin*16000):round(end*16000)]
 
             def align_audio(start, stop, text, **options):
-                clip = audio[round(start*16000):round(stop*16000)]
+                if options.pop('original_mix', False):
+                    from scipy.signal import resample_poly
+                    info = sf.info(job['original_audio'])
+                    original, rate = sf.read(job['original_audio'], start=round(start*info.samplerate),
+                        stop=round(stop*info.samplerate), dtype='float32', always_2d=True)
+                    divisor = np.gcd(rate, 16000)
+                    clip = resample_poly(original.mean(axis=1), 16000//divisor, rate//divisor)
+                else:
+                    clip = audio[round(start*16000):round(stop*16000)]
                 selected_language = language
                 if options.pop('detect_language', False):
                     detected, probes = detect_whisper_language(model, clip)
@@ -1021,7 +1046,10 @@ def main():
                 (output/'before-localization.json').write_text(json.dumps(block, ensure_ascii=False, default=json_number)+'\n')
                 block = recover_with_local_asr(block, lyrics['lines'], audio, lyrics['language'],
                                                recognize_audio, align_audio,
-                                               localize=localize_audio if job.get('original_audio') else None)
+                                               localize=localize_audio if job.get('original_audio') else None,
+                                               align_original=(lambda a, b, text, **options:
+                                                   align_audio(a, b, text, original_mix=True, **options))
+                                               if job.get('original_audio') else None)
             result, begin = block['result'], block['source_range'][0]
             local_units = [{'text': word['word'], 'start': round(word['start']+begin, 3),
                             'end': round(word['end']+begin, 3), 'probability': word['probability']}
@@ -1043,13 +1071,15 @@ def main():
         elapsed = time.perf_counter()-started
         refinements = refine_chinese_onsets(cues, raw_blocks, audio, language)
         for cue in cues:
-            cue['source'] = 'stable-ts forced alignment of supplied lyrics to vocal audio'
+            cue['source'] = 'stable-ts forced alignment of supplied lyrics to audio'
         summary = write_captions(cues, output)
         summary['zero_duration_units'] = sum(unit['end'] <= unit['start'] for unit in units)
         summary['unit_count'] = len(units)
         report = {'model': args.model, 'device': args.device, 'dtype': 'float32',
             'model_loading_seconds': loading, 'alignment_seconds': elapsed,
             'audio': str(Path(job['audio']).resolve()), 'audio_sha256': sha(job['audio']),
+            'original_audio': job.get('original_audio'),
+            'original_audio_sha256': sha(job['original_audio']) if job.get('original_audio') else None,
             'lyrics': str(Path(job['lyrics']).resolve()), 'lyrics_sha256': sha(job['lyrics']),
             'model_sha256': model_hash, 'runner_sha256': sha(__file__),
             'dynamic_heads': args.dynamic_heads,

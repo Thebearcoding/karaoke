@@ -2189,7 +2189,7 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
         lambda *a:pytest.fail('A complete alignment ran ASR'),align) is good
 
 
-@pytest.mark.parametrize('support', ['agree', 'disagree', 'unavailable'])
+@pytest.mark.parametrize('support', ['agree', 'disagree', 'unavailable', 'original', 'original_wrong', 'original_outside'])
 def test_local_unrecognized_phrase_uses_acoustic_evidence_without_repeating_recognition(support):
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines, starts = ['alpha', 'bravo', 'charlie'], [1.,12.,25.]
@@ -2209,21 +2209,61 @@ def test_local_unrecognized_phrase_uses_acoustic_evidence_without_repeating_reco
     def localize(begin,end,text):
         acoustic.append((begin,end))
         assert recognition[0]==(begin,end) and text=='\n'.join(lines)
-        if support=='unavailable':raise ValueError('No pronunciation evidence')
+        if support=='unavailable' or support.startswith('original'):raise ValueError('No pronunciation evidence')
         words,offset=[],0
         for t,s in zip(lines,starts):
             words.append(dict(text=t,first=offset,stop=offset+len(t),start=s,end=s+.8))
             offset+=len(t)+1
         shift=1 if support=='disagree' else .1
         return dict(views=[words,[dict(w,start=w['start']+shift,end=w['end']+shift) for w in words]])
+    originals=[]
+    def original_mix(begin,end,text,**options):
+        originals.append((begin,end))
+        assert recognition[-1][0]<=begin<end<=recognition[-1][1] and text=='\n'.join(lines)
+        result=[segment(t,begin) for t in lines]
+        if support=='original_wrong':result[1]['words'][0]['word']='unrelated'
+        if support=='original_outside':result[1]['words'][0]['end']=end-begin+1
+        return dict(segments=result)
     result=recover_with_local_asr(block,lines,np.zeros(30*16000),'English',recognize,align,
-                                 localize=localize,max_alignment_attempts=8)
-    assert acoustic and recognition.count(recognition[0])==1
+        localize=localize,max_alignment_attempts=8,align_original=original_mix if support.startswith('original') else None)
+    assert acoustic or originals
+    if originals:assert originals[0]==recognition[0]
+    assert recognition.count(recognition[0])==1
     assert result['result']['segments'][0]==original[0] and result['result']['segments'][2]==original[2]
-    if support=='agree':
+    if support in ('agree','original'):
         assert result['result']['segments'][1]['words']==segment('bravo',0.)['words']
     else:
         assert result['result']==block['result']
+
+
+def test_narrowed_acoustic_search_finishes_before_unrelated_regions_spend_its_budget():
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines,starts=['alpha','bravo','charlie','delta','omega'],[1.,12.,25.,45.,60.]
+    def segment(text,begin,collapsed=False):
+        start=starts[lines.index(text)]-begin
+        return dict(words=[dict(word=text,start=start,end=start+(0 if collapsed else .8))])
+    original=[segment(t,0.,i in (1,3)) for i,t in enumerate(lines)]
+    block=dict(range=[0,5],context=[0,5],source_range=[0.,65.],result=dict(segments=original))
+    def recognize(begin,end):
+        return dict(segments=[segment(lines[i],begin)for i in (0,2,4) if begin<=starts[i]<end])
+    calls=[]
+    def align(begin,end,text,**options):
+        calls.append(text)
+        return dict(segments=[segment(t,begin,len(text.splitlines())>1 and t in ('bravo','delta'))
+                              for t in text.splitlines()])
+    def localize(begin,end,text):
+        units,offset=[],0
+        for t in text.splitlines():
+            start=starts[lines.index(t)]
+            units.append(dict(text=t,first=offset,stop=offset+len(t),start=start,end=start+.8))
+            offset+=len(t)+1
+        return dict(views=[units,units])
+    result=recover_with_local_asr(block,lines,np.zeros(65*16000),'English',recognize,align,
+        localize=localize,force_global=True,max_alignment_attempts=5)
+    assert calls==['\n'.join(lines[:3]),'bravo']
+    assert result['result']['segments'][1]['words']==segment('bravo',0.)['words']
+    assert result['result']['segments'][3]==original[3]
+    assert result['asr_localizations'][0]['accepted_lines']==[2]
 
 
 def test_local_recognition_cannot_search_outside_its_observed_crop():
