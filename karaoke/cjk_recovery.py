@@ -99,7 +99,8 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *,
         events = [u.get('timing_evidence') == 'ctc_event' for u in primary]
         if any(events) and not all(events):
             return None, 'inconsistent onset evidence types'
-        if all(events) and any(not np.isfinite(u.get('emission_end', np.nan))
+        if all(events) and any(not isinstance(u.get('emission_end'), (int, float))
+                               or not np.isfinite(u['emission_end'])
                                or not u['start'] < u['emission_end'] <= u['end'] for u in primary):
             return None, 'invalid CTC onset event'
         if any(not np.isfinite([u['start'], u['end']]).all() or u['end'] <= u['start']

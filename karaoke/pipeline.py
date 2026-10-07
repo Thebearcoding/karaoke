@@ -1107,7 +1107,8 @@ class Pipeline:
                 report_sha256=file_hash(self.output/'timing-checked/report.json'),
                 repaired_ranges=sum(r['accepted'] for line in report['lines'] for r in line['repairs']),
                 estimated_spans=[dict(line=i+1, **u) for i,c in enumerate(checked) for u in c['units']
-                                 if u.get('timing_source')=='linear_fallback' and u.get('bounds_source')=='cross_model_onsets'],
+                                 if u.get('timing_source')=='linear_fallback' and
+                                 u.get('bounds_source') in ('cross_model_onsets','cross_model_span_end')],
                 unverified_lines=sorted({r['line'] for r in report['lines'] if r['status']=='unverified'})),
             onset_accuracy=None)
         quality['fallback_units'] = sum(u.get('timing_source') == 'prior_word_fallback'

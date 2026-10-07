@@ -484,6 +484,52 @@ class SubtitleIntegrity(unittest.TestCase):
                         self.assertEqual([u['start'] for u in result[0]['units']],[1.5,2.5,4.5])
                     self.assertEqual(result[0]['units'][-1]['start'],old[-1]['start'])
 
+    def test_playback_timing_can_close_a_tail_group_without_inventing_a_next_onset(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        units = [dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
+                 for i,(c,t) in enumerate(zip('甲乙丙丁',[.2,1.,1.5,2.]))]
+        cue = dict(text='甲乙丙丁',start=.2,end=3.9,units=units)
+        measured = [dict(u,start=t,end=t+.2) for u,t in zip(units,[.2,3.,3.3,3.6])]
+        for mode in ('valid','display_hold','strict','end_disagreement','context_end_disagreement',
+                     'missing_emission_end','wrong_tail_text','interior_constraint','neighbor_overlap'):
+            with self.subTest(mode=mode):
+                views = [deepcopy(measured),deepcopy(measured)]
+                views[0][-1]['end']=3.85
+                views[1][2].update(start=3.6,end=3.75)
+                views[1][3].update(start=3.75,end=3.9)
+                predictions = [[dict(u,timing_evidence='ctc_event',emission_end=u['start']+.1)
+                                for u in measured] for _ in range(3)]
+                for v in predictions:v[-1].update(end=3.85,emission_end=3.85)
+                constraints=[]
+                neighbour=dict(text='戊',start=5.,end=5.5,
+                    units=[dict(first=0,stop=1,text='戊',start=5.,end=5.5,timing_source='singing_phonemes')])
+                if mode=='display_hold':
+                    for v in predictions:v[-1]['end']=5.
+                if mode=='end_disagreement':views[1][-1]['end']=4.2
+                if mode=='context_end_disagreement':predictions[0][-1].update(end=4.2,emission_end=4.2)
+                if mode=='missing_emission_end':predictions[0][-1]['emission_end']=None
+                if mode=='wrong_tail_text':predictions[0][-1]['text']='錯'
+                if mode=='interior_constraint':
+                    constraints=[dict(line=1,text=cue['text'],first=2,stop=3,start_min=3.2,start_max=3.4,onset=3.3)]
+                if mode=='neighbor_overlap':neighbour['units'][0]['start']=3.88
+                result,report=reconcile_timing([cue,neighbour],np.ones(44100*6)*.1,
+                    lambda c,*a,**k:views,lambda *a:predictions,protocol,'Chinese',constraints,
+                    playback=mode!='strict',_retry_context=False)
+                groups=[u for u in result[0]['units'] if u.get('timing_source')=='linear_fallback']
+                if mode in ('valid','display_hold'):
+                    self.assertEqual([(g['text'],g['start'],g['end']) for g in groups],[('乙丙丁',3.,3.9)])
+                    self.assertIsNone(groups[0]['acoustic_end'])
+                    self.assertEqual(groups[0]['bounds_source'],'cross_model_span_end')
+                    self.assertFalse(report['unresolved'])
+                    validate_timeline(result,['甲乙丙丁','戊'],6,report['constraints'],'Chinese')
+                else:
+                    self.assertFalse(groups)
+                self.assertEqual(result[0]['units'][0]['start'],.2)
+                self.assertEqual(result[1]['units'],[dict(neighbour['units'][0],acoustic_end=5.5)])
+                self.assertEqual([u['start'] for u in units],[.2,1.,1.5,2.])
+
     def test_cross_model_recovery_preserves_foreign_words_and_rejects_unverified_changes(self):
         import copy
         from unittest.mock import patch

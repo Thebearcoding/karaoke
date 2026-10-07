@@ -217,7 +217,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
 
 
 def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, protocol, language):
-    """Sweep an uncertain interior only between independently measured onsets.
+    """Sweep an uncertain interior only within corroborated acoustic bounds.
 
     This is a playback group, never a replacement word-accuracy measurement.
     The first corroborated following word closes the smallest possible group.
@@ -241,29 +241,58 @@ def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, proto
                 break
         elif group['first']==first:
             return None, None
-    if len(measured)!=2 or measured[0]['first']!=first or measured[1]['first'] not in positions:
+    if not measured or measured[0]['first']!=first:
         return None, None
-    anchor, guard = measured
-    lo, hi = positions[first], positions[guard['first']]
-    if hi <= lo+1 or guard['stop']!=units[hi]['stop']:
+    anchor, lo = measured[0], positions[first]
+    guard = measured[1] if len(measured)==2 else None
+    if guard is not None:
+        if guard['first'] not in positions:
+            return None, None
+        hi, stop, end = positions[guard['first']], guard['first'], guard['start']
+        if guard['stop']!=units[hi]['stop']:
+            return None, None
+        limit = units[hi+1]['start'] if hi+1<len(units) else bounds[1]
+        if (guard['start']+.015 >= limit or
+                guard.get('timing_evidence')=='ctc_event' and guard['emission_end']>limit):
+            return None, None
+        guard = dict(guard, end=min(guard['end'],limit), acoustic_end=acoustic_end(guard),
+                     timing_source='cross_model_ctc' if guard.get('timing_evidence')=='ctc_event' else 'cross_model_phonemes')
+        suffix, source = [guard]+units[hi+1:], 'cross_model_onsets'
+    else:
+        # The last word has no following onset. Compare actual alignment
+        # ends, never a padded display hold, at the output's millisecond
+        # resolution. The conservative envelope is a text-span boundary;
+        # it must not become a claimed singing offset for countdowns.
+        tails = [v[-1] for v in [*report['predictions'], *views]]
+        if any((u['first'],u['stop'],u['text']) != (tails[0]['first'],tails[0]['stop'],tails[0]['text'])
+               or normalized(cue['text'][u['stop']:]) for u in tails):
+            return None, None
+        values = [u.get('emission_end') if u.get('timing_evidence')=='ctc_event' else u['end'] for u in tails]
+        if any(not isinstance(e,(int,float)) or not np.isfinite(e) or e<=u['start']
+               for e,u in zip(values,tails)):
+            return None, None
+        ends = [round(e,3) for e in values]
+        center = float(np.median(ends[:3]))
+        if (not np.isfinite(ends).all() or any(not anchor['start']<e<=bounds[1] for e in ends)
+                or round(max(ends[:3])-min(ends[:3]),3)>protocol['maximum_spread_seconds']
+                or round(abs(ends[3]-ends[4]),3)>.1
+                or any(round(abs(e-center),3)>.1 for e in ends[3:])):
+            return None, None
+        hi, stop, end = len(units), len(cue['text']), max(ends)
+        suffix, source = [], 'cross_model_span_end'
+    if hi <= lo+1:
         return None, None
     # Never hide another established onset inside a coarse group, or span
     # words that the acoustic witnesses place outside these two boundaries.
-    covered = [p for p in constraints if p['line']==proof['line'] and first<=p['first']<=guard['first']]
-    if any(first<p['first']<guard['first'] for p in covered) or any(
-            not anchor['start']<u['start']<guard['start']
-            for view in views for u in view if first<u['first']<guard['first']):
+    covered = [p for p in constraints if p['line']==proof['line'] and first<=p['first']<=stop]
+    if any(first<p['first']<stop for p in covered) or any(
+            not anchor['start']<u['start']<end
+            for view in views for u in view if first<u['first']<stop):
         return None, None
-    limit = units[hi+1]['start'] if hi+1<len(units) else bounds[1]
-    if (guard['start']+.015 >= limit or
-            guard.get('timing_evidence')=='ctc_event' and guard['emission_end']>limit):
-        return None, None
-    guard = dict(guard, end=min(guard['end'],limit), acoustic_end=acoustic_end(guard),
-                 timing_source='cross_model_ctc' if guard.get('timing_evidence')=='ctc_event' else 'cross_model_phonemes')
-    group = dict(first=first, stop=guard['first'], text=cue['text'][first:guard['first']],
-                 start=anchor['start'], end=guard['start'], acoustic_end=None,
-                 timing_source='linear_fallback', bounds_source='cross_model_onsets')
-    candidate = dict(cue, units=units[:lo]+[group,guard]+units[hi+1:])
+    group = dict(first=first, stop=stop, text=cue['text'][first:stop],
+                 start=anchor['start'], end=end, acoustic_end=None,
+                 timing_source='linear_fallback', bounds_source=source)
+    candidate = dict(cue, units=units[:lo]+[group]+suffix)
     candidate.update(start=candidate['units'][0]['start'], aligned_start=candidate['units'][0]['start'],
                      end=candidate['units'][-1]['end'], aligned_end=candidate['units'][-1]['end'])
     try:
@@ -271,8 +300,8 @@ def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, proto
                           [dict(p,line=1) for p in covered], language)
     except ValueError:
         return None, None
-    return candidate, dict(first=first, stop=guard['first'], accepted=True,
-        reason='uncertain interior swept between corroborated onsets', mode='grouped_fallback')
+    return candidate, dict(first=first, stop=stop, accepted=True,
+        reason='uncertain interior swept within corroborated acoustic bounds', mode='grouped_fallback')
 
 
 def validate_timeline(cues, lines, duration, constraints=(), language='English'):
