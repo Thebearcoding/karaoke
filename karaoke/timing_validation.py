@@ -228,11 +228,12 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                     continue
                 views = row['witnesses']
                 begin, end = min(v[0]['start'] for v in views), max(v[-1]['end'] for v in views)
-                # An internal merged word can also inherit an obsolete long
-                # crop. Reobserve the whole measured phrase once; its boundary
-                # envelope is only context, never an assigned word time.
+                # Reobserve a conflicting interior in its measured phrase
+                # once, even when the crop changed less than the displacement
+                # threshold. Crop sensitivity is not an onset error threshold.
                 if (0 < end-begin <= 30 and
-                        max(abs(begin-cue['aligned_start']), abs(end-cue['aligned_end'])) > protocol['maximum_change_seconds']):
+                        any(round(a*44100) != round(b*44100) for a,b in
+                            zip((begin,end),(cue['aligned_start'],cue['aligned_end'])))):
                     windows[index] = [begin, end]
                     cue.update(aligned_start=begin, aligned_end=end)
         if windows:

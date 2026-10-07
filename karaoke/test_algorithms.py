@@ -408,6 +408,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_internal_merged_word_reobserves_a_stale_phrase_window_once(self):
         from copy import deepcopy
+        from itertools import product
         from timing_validation import reconcile_timing, validate_timeline
         protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
         text='甲乙丙丁'
@@ -421,22 +422,33 @@ class SubtitleIntegrity(unittest.TestCase):
         # The start of the first word remains unconfirmed. Only the interior
         # has a proved conflict, so the old first-word-only retry missed it.
         predictions[0][0].update(start=1.6,end=1.7)
-        for recovers in (True,False):
-            with self.subTest(recovers=recovers):
+        for recovers, window in product((True,False), ('long','near','same')):
+            with self.subTest(recovers=recovers,window=window):
+                candidate=deepcopy(cue)
+                observed=deepcopy(measured)
+                predicted=deepcopy(predictions)
+                if window!='long':
+                    candidate.update(end=3.8,aligned_end=3.8)
+                    candidate['units'][-1].update(start=3.6,end=3.8)
+                    observed[0].update(start=1.2,end=1.3)
+                    for view in predicted[1:]:view[0].update(start=1.2,end=1.3)
+                    if window=='same':candidate.update(aligned_start=1.2,aligned_end=3.7)
+                expected_window=(observed[0]['start'],3.7)
                 calls=[]
                 def witness(context,*args,**kwargs):
                     calls.append((context['aligned_start'],context['aligned_end']))
-                    self.assertEqual(context['units'],[dict(u,acoustic_end=None if u.get('timing_source')=='linear_fallback' else u['end']) for u in units])
-                    views=[deepcopy(measured),deepcopy(measured)]
+                    self.assertEqual(context['units'],[dict(u,acoustic_end=None if u.get('timing_source')=='linear_fallback' else u['end']) for u in candidate['units']])
+                    views=[deepcopy(observed),deepcopy(observed)]
                     if len(calls)==1 or not recovers:
                         views[1][-1].update(start=3.6,end=3.7)
                     return views
-                result,report=reconcile_timing([cue],np.ones(9*44100)*.1,witness,
-                    lambda *args:predictions,protocol,'Chinese')
-                self.assertEqual(calls,[(1.,8.),(2.,3.7)])
-                self.assertEqual(report['lines'][-1]['context_retry'],[2.,3.7])
+                result,report=reconcile_timing([candidate],np.ones(9*44100)*.1,witness,
+                    lambda *args:predicted,protocol,'Chinese')
+                self.assertEqual(calls,[(candidate['aligned_start'],candidate['aligned_end'])]+
+                                 ([expected_window] if window!='same' else []))
+                if window!='same':self.assertEqual(report['lines'][-1]['context_retry'],list(expected_window))
                 self.assertEqual(cue['units'],units)
-                if recovers:
+                if recovers and window!='same':
                     self.assertEqual([u['start'] for u in result[0]['units']],[1.,2.9,3.1,3.3])
                     self.assertFalse(report['unresolved'])
                     validate_timeline(result,[text],9.,report['constraints'],'Chinese')
