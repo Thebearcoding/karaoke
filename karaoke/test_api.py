@@ -4024,6 +4024,9 @@ def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success
         output=tmp_path/'timing-checked';output.mkdir()
         checked=json.loads(json.dumps(cue))
         if not old_time:checked['units'][0]['start']=4.
+        if not strict_audio:
+            checked['units'][0].update(timing_source='linear_fallback',
+                                      bounds_source='cross_model_onset_prior_acoustic_end')
         (output/'cues.json').write_text(json.dumps([checked]))
         (output/'report.json').write_text(json.dumps(dict(
             lines=[dict(line=1, status='reviewed', repairs=[]),
@@ -4040,6 +4043,10 @@ def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success
         review = json.loads((tmp_path/'quality.json').read_text())['timing_review']
         assert len(review['onset_constraints']) == review['reviewed_lines'] == review['repaired_ranges'] == 1
         assert review['review_attempts'] == 2
+        if not strict_audio:
+            from karaoke.tools.playback_sweep import soft_failures
+            assert len(review['estimated_spans'])==1
+            assert soft_failures(dict(quality=dict(timing_review=review)),{})[0]['code']=='timing_group_fallback'
 
 
 def test_playback_fallback_recovers_each_phrase_from_available_stages(tmp_path):

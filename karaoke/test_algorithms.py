@@ -443,51 +443,6 @@ class SubtitleIntegrity(unittest.TestCase):
                 else:
                     self.assertTrue(report['unresolved'])
 
-    def test_timing_conflict_reobserves_only_failed_text_inside_preserved_neighbours(self):
-        from copy import deepcopy
-        from timing_validation import reconcile_timing, validate_timeline
-        protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
-        text='甲乙丙丁戊己庚'
-        old=[dict(first=a,stop=b,text=text[a:b],start=t,end=t+.15,timing_source='prior_word_fallback')
-             for a,b,t in [(0,1,1.),(1,2,1.3),(2,3,2.1),(3,4,2.5),(4,6,2.7),(6,7,3.4)]]
-        cue=dict(text=text,start=1.,end=3.55,units=old)
-        measured=[dict(first=i,stop=i+1,text=c,start=t,end=t+.05)
-                  for i,(c,t) in enumerate(zip(text,[1.,1.3,1.65,1.9,2.,2.3,3.4]))]
-        for mode in ('recovered','disagrees','outside','unavailable','text_mismatch'):
-            with self.subTest(mode=mode):
-                calls=[]
-                def witness(context,*args,**kwargs):
-                    calls.append(context['text'])
-                    if context['text']==text:
-                        views=[deepcopy(measured),deepcopy(measured)]
-                        for i,shift in ((2,-.15),(3,-.15),(5,.2)):
-                            views[1][i].update(start=measured[i]['start']+shift,end=measured[i]['end']+shift)
-                        return views
-                    self.assertEqual(context['text'],text[2:6])
-                    self.assertEqual(context['audio_bounds'],[1.315,3.4])
-                    if mode=='unavailable':raise ValueError('No local evidence')
-                    part=[dict(u,first=u['first']-2,stop=u['stop']-2) for u in measured[2:6]]
-                    views=[deepcopy(part),deepcopy(part)]
-                    if mode=='disagrees':views[1][-1].update(start=2.55,end=2.6)
-                    if mode=='outside':views[0][0].update(start=1.1,end=1.15)
-                    if mode=='text_mismatch':views[0][0]['text']='錯'
-                    return views
-                def predict(context,*args):
-                    part=measured if context['text']==text else [dict(u,first=u['first']-2,stop=u['stop']-2) for u in measured[2:6]]
-                    return [deepcopy(part) for _ in range(3)]
-                result,report=reconcile_timing([cue],np.ones(4*44100)*.1,witness,predict,protocol,'Chinese')
-                self.assertEqual(calls,[text,text[2:6]])
-                self.assertEqual(cue['units'],old)
-                self.assertEqual(result[0]['units'][0]['start'],old[0]['start'])
-                self.assertEqual(result[0]['units'][-1]['start'],old[-1]['start'])
-                self.assertEqual(not report['unresolved'],mode=='recovered')
-                if mode=='recovered':
-                    self.assertEqual([u['start'] for u in result[0]['units']],[1.,1.3,1.65,1.9,2.,2.3,3.4])
-                    validate_timeline(result,[text],4.,report['constraints'],'Chinese')
-                else:
-                    with self.assertRaisesRegex(ValueError,'contradicted'):
-                        validate_timeline(result,[text],4.,report['constraints'],'Chinese')
-
     def test_countdown_uses_singing_offsets_and_does_not_invent_them_from_ctc(self):
         # The first word stays visible until the next word, but its singing
         # has ended. Extending the display must not erase a real vocal gap.
@@ -547,12 +502,16 @@ class SubtitleIntegrity(unittest.TestCase):
         cue = dict(text=text, start=1., end=4.5, units=old)
         measured = [dict(first=a, stop=b, text=text[a:b], start=t, end=t+.2)
                     for a,b,t in [(0,2,.5),(3,6,1.5),(7,11,2.5),(12,15,3.5),(16,19,4.)]]
-        for mode in ('grouped', 'missing_guard_word', 'contradicted_interior'):
+        for mode in ('grouped', 'partial_guard', 'partial_guard_constraint', 'missing_guard_word', 'contradicted_interior'):
             with self.subTest(mode=mode):
                 views = [deepcopy(measured),deepcopy(measured)]
                 views[1][2]['start']+=.15
                 constraints = []
                 if mode == 'missing_guard_word': views[1].pop()
+                if mode.startswith('partial_guard'):
+                    views[1][-1].update(start=4.2,end=4.4)
+                    if mode=='partial_guard_constraint':
+                        constraints=[dict(line=1,text=text,first=16,stop=19,start_min=3.9,start_max=4.3,onset=4.1)]
                 if mode == 'contradicted_interior':
                     constraints = [dict(line=1,text=text,first=7,stop=11,start_min=2.1,start_max=2.9,onset=2.5)]
                 result, report = reconcile_timing([cue], np.ones(44100*6)*.1,
@@ -563,9 +522,51 @@ class SubtitleIntegrity(unittest.TestCase):
                                      [('We are here ',.5,3.5),('for',3.5,3.7),('you',4.,4.2)])
                     self.assertFalse(report['unresolved'])
                     validate_timeline(result,[text],6,report['constraints'])
+                elif mode=='partial_guard':
+                    self.assertEqual([(u['text'],u['start'],u['end']) for u in result[0]['units']],
+                                     [('We are here ',.5,3.5),('for you',3.5,4.5)])
+                    self.assertIsNone(result[0]['units'][-1]['acoustic_end'])
+                    self.assertFalse(report['unresolved'])
+                    validate_timeline(result,[text],6,report['constraints'])
                 else:
                     self.assertEqual(result[0]['units'][0]['start'],1.)
                 self.assertEqual(cue['units'],old)
+
+    def test_playback_timing_closes_left_conflict_at_confirmed_onsets_without_splitting_guard(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
+        text='甲乙丙丁戊己庚'
+        old=[dict(first=a,stop=b,text=text[a:b],start=t,end=t+.15,timing_source='prior_word_fallback')
+             for a,b,t in [(0,1,1.),(1,2,1.3),(2,3,2.1),(3,4,2.5),(4,6,2.7),(6,7,3.4)]]
+        cue=dict(text=text,start=1.,end=3.55,units=old)
+        measured=[dict(first=i,stop=i+1,text=c,start=t,end=t+.05)
+                  for i,(c,t) in enumerate(zip(text,[1.,1.3,1.65,1.9,2.,2.3,3.4]))]
+        for mode in ('playback','strict','missing_prefix','guard_constraint'):
+            with self.subTest(mode=mode):
+                views=[deepcopy(measured),deepcopy(measured)]
+                for i,shift in ((2,-.15),(3,-.15),(5,.2)):
+                    views[1][i].update(start=measured[i]['start']+shift,end=measured[i]['end']+shift)
+                constraints=[]
+                if mode=='missing_prefix':
+                    for i in (0,1):views[1][i].update(start=measured[i]['start']+.11,end=measured[i]['end']+.11)
+                if mode=='guard_constraint':
+                    constraints=[dict(line=1,text=text,first=5,stop=6,start_min=2.2,start_max=2.6,onset=2.4)]
+                result,report=reconcile_timing([cue],np.ones(4*44100)*.1,lambda *a,**k:views,
+                    lambda *a:[measured]*3,protocol,'Chinese',constraints,playback=mode!='strict',_retry_context=False)
+                self.assertEqual(cue['units'],old)
+                self.assertEqual(result[0]['units'][0]['start'],old[0]['start'])
+                self.assertEqual(result[0]['units'][-1]['start'],old[-1]['start'])
+                if mode=='playback':
+                    self.assertEqual([(u['text'],u['start'],u['end']) for u in result[0]['units'][1:-1]],
+                                     [('乙丙丁',1.3,2.),('戊己',2.,2.85)])
+                    self.assertFalse(report['unresolved'])
+                    self.assertIsNone(report['accuracy'])
+                    validate_timeline(result,[text],4.,report['constraints'],'Chinese')
+                else:
+                    self.assertTrue(report['unresolved'])
+                    with self.assertRaisesRegex(ValueError,'contradicted'):
+                        validate_timeline(result,[text],4.,report['constraints'],'Chinese')
 
     def test_timing_repair_closes_over_different_token_boundaries(self):
         from copy import deepcopy
