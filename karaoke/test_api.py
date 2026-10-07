@@ -2118,14 +2118,16 @@ def test_direct_alignment_has_a_shared_local_retry_budget():
     assert result['result']['segments'][3:] == segments[3:]
 
 
-@pytest.mark.parametrize('failure', [None, 'changed_text', 'outside', 'collapsed', 'missing_neighbour'])
+@pytest.mark.parametrize('failure', [None, 'changed_text', 'outside', 'collapsed', 'missing_neighbour',
+                                   'acoustic', 'acoustic_missing', 'acoustic_outside', 'acoustic_oom'])
 def test_isolated_gap_recovery_keeps_both_neighbours_and_prior_diagnostics(failure):
     from copy import deepcopy
     from karaoke.align_lyrics_whisper import recover_unresolved_lines
     lines = ['Before', 'Quiet repeated phrase', 'After']
     segments = [dict(text=t, words=[dict(word=t, start=a, end=b)])
                 for t,a,b in zip(lines, [1.,4.,8.], [2.,4.,9.])]
-    if failure == 'missing_neighbour': segments[0]['words']=[]
+    if failure == 'missing_neighbour':
+        segments[0]['words']=segments[2]['words']=[]
     block = dict(context=[0,3], range=[0,3], source_range=[0.,10.], result=dict(segments=segments),
                  line_recoveries=[dict(accepted=False,reason='earlier_context_failure')])
     original = deepcopy(block)
@@ -2138,18 +2140,59 @@ def test_isolated_gap_recovery_keeps_both_neighbours_and_prior_diagnostics(failu
         if failure == 'changed_text':words[0]['word']='Different'
         if failure == 'outside':words[-1]['end']=7.
         if failure == 'collapsed':words[-1]['end']=words[-1]['start']
+        if failure and failure.startswith('acoustic'):
+            words[0]['end']=words[0]['start']
         return dict(segments=[dict(text=text,words=words)])
-    result=recover_unresolved_lines(block,lines,10.,'English',align,isolated=True)
+    def localize(begin,end,text):
+        assert (begin,end,text) == (2.,8.,lines[1])
+        if failure == 'acoustic_oom':raise RuntimeError('CUDA out of memory')
+        words=[dict(first=a,stop=b,text=text[a:b],start=t,end=t+.5)
+               for a,b,t in ((0,5,3.),(6,14,4.),(15,21,5.))]
+        if failure == 'acoustic_missing':words.pop()
+        if failure == 'acoustic_outside':words[-1]['end']=9.
+        return dict(model='test_acoustic_decoder', views=[[],words])
+    if failure == 'acoustic_oom':
+        with pytest.raises(RuntimeError, match='CUDA out of memory'):
+            recover_unresolved_lines(block,lines,10.,'English',align,isolated=True,localize=localize)
+        return
+    result=recover_unresolved_lines(block,lines,10.,'English',align,isolated=True,
+                                   localize=localize if failure and failure.startswith('acoustic') else None)
     assert block == original
     assert result['line_recoveries'][0] == block['line_recoveries'][0]
-    assert result['line_recoveries'][-1]['accepted'] == (failure is None)
+    assert result['line_recoveries'][-1]['accepted'] == (failure in (None,'acoustic'))
     assert len(calls) == (0 if failure == 'missing_neighbour' else 1)
     assert result['result']['segments'][0] == segments[0]
     assert result['result']['segments'][2] == segments[2]
-    if failure is None:
+    if failure in (None,'acoustic'):
         assert [w['start'] for w in result['result']['segments'][1]['words']] == [3.,4.,5.]
+        if failure == 'acoustic':
+            proof=result['line_recoveries'][-1]
+            assert proof['acoustic_selected_view']==1
+            assert proof['result']['segments'][0]['words'][0]['start']==proof['result']['segments'][0]['words'][0]['end']
     else:
         assert result['result'] == block['result']
+
+
+@pytest.mark.parametrize('edge', ['opening', 'ending'])
+def test_isolated_recovery_uses_recording_edge_only_as_an_audio_search_bound(edge):
+    from karaoke.align_lyrics_whisper import recover_unresolved_lines
+    lines = ['First phrase', 'Last phrase']
+    segments=[dict(text=t,words=[dict(word=t,start=a,end=b)])
+              for t,a,b in zip(lines,[1.,8.],[3.,10.])]
+    bad = 0 if edge=='opening' else 1
+    segments[bad]['words'][0]['end']=segments[bad]['words'][0]['start']
+    block=dict(context=[0,2],range=[0,2],source_range=[10.,30.],result=dict(segments=segments))
+    calls=[]
+    def align(begin,end,text,**options):
+        calls.append((begin,end,text))
+        return dict(segments=[dict(text=text,words=[dict(word=w,start=i+1.,end=i+1.5)
+                                                  for i,w in enumerate(text.split())])])
+    result=recover_unresolved_lines(block,lines,40.,'English',align,isolated=True)
+    assert calls==[(10.,18.,lines[0])] if edge=='opening' else calls==[(13.,30.,lines[1])]
+    assert result['line_recoveries'][-1]['accepted']
+    assert result['result']['segments'][1-bad]==segments[1-bad]
+    measured_start=result['result']['segments'][bad]['words'][0]['start']+10.
+    assert measured_start==calls[0][0]+1.  # The model's onset, never the crop edge.
 
 
 @pytest.mark.parametrize('far_neighbour', [False, True])

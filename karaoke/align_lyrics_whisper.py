@@ -118,7 +118,7 @@ def recover_unresolved_block(block, lines, anchors, duration, align):
     return block
 
 
-def recover_unresolved_lines(block, lines, duration, language, align, max_attempts=8, *, isolated=False):
+def recover_unresolved_lines(block, lines, duration, language, align, max_attempts=8, *, isolated=False, localize=None):
     """Re-align only broken runs inside their measured neighbouring phrases."""
     from lyric_progress import partial_alignment_cues
     first, stop = block['context']
@@ -139,14 +139,12 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
         begin = max(block['source_range'][0], cues[left]['start']-.6) if left < begin_line else block['source_range'][0]
         end = min(block['source_range'][1], cues[right-1]['end']+.6) if right > end_line else block['source_range'][1]
         call_left, call_right = (begin_line, end_line) if isolated else (left, right)
-        if isolated and left < begin_line and right > end_line:
-            begin, end = cues[left]['end'], cues[right-1]['start']
+        if isolated:
+            begin = cues[left]['end'] if left < begin_line else block['source_range'][0]
+            end = cues[right-1]['start'] if right > end_line else block['source_range'][1]
         report = dict(lines=[begin_line+1, end_line], context=[call_left, call_right],
                       source_range=[begin, end], accepted=False, isolated=isolated)
         reports.append(report)
-        if isolated and (left == begin_line or right == end_line):
-            report['reason'] = 'no_bounded_gap'
-            continue
         if left == begin_line and right == end_line:
             report['reason'] = 'no_measured_neighbour'
             continue
@@ -165,6 +163,22 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
             report.update(reason='local_alignment_failed', error=str(error))
             continue
         report['result'] = candidate
+        if isolated and localize is not None and not valid_recovery(candidate, lines[call_left:call_right], end-begin):
+            # Repeated syllables can collapse the attention path even in an
+            # isolated crop. Use a different acoustic decoder on the same text
+            # and bounds, preferring the original mix over a separated view.
+            try:
+                evidence = localize(begin, end, '\n'.join(lines[call_left:call_right]))
+                report['acoustic_fallback'] = evidence
+                for view_index in reversed(range(len(evidence['views']))):
+                    view = evidence['views'][view_index]
+                    alternate = acoustic_segments(lines[call_left:call_right], view, begin, end)
+                    if alternate is not None:
+                        report['acoustic_result'] = candidate = alternate
+                        report['acoustic_selected_view'] = view_index
+                        break
+            except ValueError as error:
+                report['acoustic_error'] = str(error)
         if not valid_recovery(candidate, lines[call_left:call_right], end-begin):
             report['reason'] = 'invalid_acoustic_result'
             continue
@@ -192,6 +206,21 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
     if reports:
         result['line_recoveries'] = result.get('line_recoveries', [])+reports
     return result
+
+
+def acoustic_segments(lines, units, begin, end):
+    """Adapt measured acoustic units to the shared, text-preserving contract."""
+    text = '\n'.join(lines)
+    if any(u['text'] != text[u['first']:u['stop']] for u in units):
+        return None
+    segments, offset = [], 0
+    for line in lines:
+        words = [dict(word=u['text'], start=u['start']-begin, end=u['end']-begin, probability=None)
+                 for u in units if offset <= u['first'] < u['stop'] <= offset+len(line)]
+        segments.append(dict(text=line, words=words))
+        offset += len(line)+1
+    candidate = dict(segments=segments)
+    return candidate if valid_recovery(candidate, lines, end-begin) else None
 
 
 def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
@@ -1077,10 +1106,11 @@ def main():
             if job.get('original_audio'):
                 # A repeated/quiet phrase can be swallowed by neighbouring
                 # attention or by separation. Retry only the remaining bounded
-                # gap on the original mix; neither neighbour moves.
+                # gap on the original mix; neither neighbour moves. At a song
+                # edge, the recording boundary limits the search, not timing.
                 block = recover_unresolved_lines(block, lyrics['lines'], duration, lyrics['language'],
                     lambda a, b, text, **options: align_audio(a, b, text, original_mix=True, **options),
-                    isolated=True)
+                    isolated=True, localize=localize_audio)
             result, begin = block['result'], block['source_range'][0]
             local_units = [{'text': word['word'], 'start': round(word['start']+begin, 3),
                             'end': round(word['end']+begin, 3), 'probability': word['probability']}
