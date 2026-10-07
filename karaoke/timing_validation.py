@@ -157,7 +157,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                 continue
             predictions = predict(cue, views, bounds, review_language)
             report['predictions'] = predictions
-            confirmed = {}
+            confirmed, proposals = {}, {}
             for group in views[0]:
                 choose = lambda vs: [[u for u in v if (u['first'],u['stop'])==(group['first'],group['stop'])] for v in vs]
                 replacement, reason = corroborated_group(group, choose(predictions), choose(views), wave,
@@ -178,7 +178,8 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                 proof = dict(line=index+1,text=cue['text'],first=group['first'],stop=group['stop'],
                     start_min=max(0.,start-protocol['maximum_change_seconds']),
                     start_max=start+protocol['maximum_change_seconds'],onset=start)
-                if proof not in ledger:ledger.append(proof)
+                proposals[group['first']] = proof
+                report.setdefault('proposed_constraints', []).append(proof)
             for first, anchor in sorted(confirmed.items()):
                 # A merged old token can contain several measured words. Use
                 # all corroborated words inside its replacement, but only a
@@ -211,9 +212,11 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                         hi+=1;continue
                     break
                 reason=None
+                localized=False
                 if not members:reason='incomplete local replacement'
                 else:
                     other={u['first']:u for u in views[1]}
+                    localized=all(abs(u['start']-other[u['first']]['start'])<=protocol['maximum_change_seconds'] for u in members)
                     if any(abs(u['start']-other[u['first']]['start'])>.1 for u in members):
                         reason='original and vocal localization disagree'
                     limit=units[hi]['start'] if hi<len(units) else bounds[1]
@@ -243,6 +246,12 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                                 first=unit['first'], stop=unit['stop'], start=unit['start'], end=unit['end']))
                 attempt=dict(first=units[lo]['first'],stop=units[hi-1]['stop'],accepted=reason is None,reason=reason)
                 report['repairs'].append(attempt)
+                # An isolated matching syllable is not a durable constraint
+                # when the surrounding replacement maps to different words
+                # in the two recordings. Keep that proposal for a bounded
+                # group retry; only a coherent local span establishes it.
+                if localized and proposals[first] not in ledger:
+                    ledger.append(proposals[first])
                 if reason is not None:continue
                 candidate=dict(cue,units=units[:lo]+members+units[hi:])
                 if highlight_coverage_errors([candidate],language) and not highlight_coverage_errors([cue],language):
@@ -310,12 +319,15 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             index = row['line']-1
             bounds = [result[index-1]['units'][-1]['start']+.015 if index else 0.,
                       result[index+1]['units'][0]['start'] if index+1<len(result) else len(wave)/44100]
-            for rejected in row.get('unconfirmed', []):
-                if rejected['reason'] not in ('insufficient time between onset events', 'collapsed phonetic span'):
-                    continue
-                first = rejected['first']
+            candidates = {p['first'] for p in row.get('proposed_constraints', [])}
+            candidates.update(p['first'] for p in row.get('unconfirmed', []) if
+                p['reason'] in ('insufficient time between onset events', 'collapsed phonetic span'))
+            for first in sorted(candidates):
                 old = next((u for u in result[index]['units'] if u['first']==first), None)
                 if old is None:
+                    continue
+                if any(p['first']==first and p['start_min']<=old['start']<=p['start_max']
+                       for p in row.get('proposed_constraints', [])):
                     continue
                 proof = dict(line=index+1,text=result[index]['text'],first=first)
                 candidate, repair = grouped_timing_fallback(result[index], row, proof, ledger,
@@ -439,6 +451,20 @@ def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, proto
                 guard = [dict(first=units[hi]['first'],stop=units[hi]['stop'],text=units[hi]['text'],
                     start=known[0]['start'],end=units[hi]['end'],acoustic_end=None,
                     timing_source='linear_fallback',bounds_source='cross_model_onset_prior_acoustic_end')]
+        if not guard:
+            # The right boundary can itself begin with an inseparable short
+            # phoneme. Apply the same minimal-group rule on both sides, and
+            # retain the existing display end rather than inventing an offset.
+            for last in range(hi+1, len(units)):
+                group = dict(first=units[hi]['first'], stop=units[last]['stop'],
+                             text=cue['text'][units[hi]['first']:units[last]['stop']])
+                joined = corroborate(group, boundary=True)
+                if joined and joined[0]['start'] < units[last]['end']:
+                    guard = [dict(group, start=joined[0]['start'], end=units[last]['end'],
+                        acoustic_end=None, timing_source='linear_fallback',
+                        bounds_source='cross_model_onset_prior_acoustic_end')]
+                    hi = last
+                    break
         if guard:
             break
     if guard is not None:

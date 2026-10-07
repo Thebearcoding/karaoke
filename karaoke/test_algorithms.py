@@ -364,6 +364,50 @@ class SubtitleIntegrity(unittest.TestCase):
                     self.assertEqual([u['start'] for u in result[0]['units']],[u['start'] for u in old])
                     self.assertFalse(report['constraints'])
 
+    def test_isolated_matching_syllable_does_not_establish_a_conflicting_phrase(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_views
+        protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
+        text='甲乙丙丁戊'
+        units=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
+               for i,(c,t) in enumerate(zip(text,[.1,.5,3.,4.,4.5]))]
+        cue=dict(text=text,start=.1,end=4.7,units=units)
+        ambiguous=[dict(u,start=t,end=t+.2) for u,t in zip(units,[.1,.5,1.,2.,4.5])]
+        other=deepcopy(ambiguous);other[2].update(start=1.8,end=1.9)
+        uncertain=[deepcopy(ambiguous) for _ in range(3)]
+        for j in (0,1):uncertain[0][j]['start']+=.1
+        stable=deepcopy(units);stable[3].update(start=3.5,end=3.7)
+        wave=np.ones(5*44100)*.1
+        for playback in (True,False):
+            with self.subTest(playback=playback):
+                observations=[('ambiguous',wave,lambda *a,**k:[ambiguous,other],lambda *a:uncertain),
+                              ('localized',wave,lambda *a,**k:[stable,stable],lambda *a:[stable]*3)]
+                result,report=reconcile_views([cue],observations,protocol,'Chinese',playback=playback)
+                self.assertEqual(result[0]['units'][3]['start'],3.5)
+                self.assertFalse(report['unresolved'])
+                self.assertTrue(any(p['onset']==2. for r in report['lines'] for p in r.get('proposed_constraints',[])))
+                self.assertEqual([p['onset'] for p in report['constraints']],[3.5])
+
+    def test_short_phoneme_can_start_the_right_boundary_group(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
+        text='甲乙丙丁戊'
+        old=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
+             for i,(c,t) in enumerate(zip(text,[1.,1.2,3.4,3.8,4.3]))]
+        cue=dict(text=text,start=1.,end=4.5,units=old)
+        measured=[dict(u,start=t,end=t+.2) for u,t in zip(old,[3.,3.2,3.4,3.8,4.3])]
+        views=[deepcopy(measured),deepcopy(measured)];views[1][1].update(start=3.35,end=3.38)
+        predictions=[dict(u,timing_evidence='ctc_event',emission_end=u['start']+.01) for u in measured]
+        predictions[2]['end']=3.42
+        result,report=reconcile_timing([cue],np.ones(5*44100)*.1,lambda *a,**k:views,
+            lambda *a:[predictions]*3,protocol,'Chinese',playback=True,_retry_context=False)
+        self.assertFalse(report['unresolved'])
+        self.assertEqual([(u['text'],u['start']) for u in result[0]['units']],
+                         [('甲乙',3.),('丙丁',3.4),('戊',4.3)])
+        self.assertEqual(result[0]['units'][1]['timing_source'],'linear_fallback')
+        validate_timeline(result,[text],5.,report['constraints'],'Chinese')
+
     def test_alternate_acoustic_views_only_revisit_unsettled_lines(self):
         from copy import deepcopy
         from timing_validation import reconcile_views, validate_timeline
