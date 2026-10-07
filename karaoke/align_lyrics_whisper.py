@@ -455,13 +455,14 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                             regional['acoustic_error'] = str(error)
                     chunks = int(np.ceil((ae-ab)/20))
                     if (ae-ab > 30 and budget >= chunks+cost and
-                            not any(local[i-cf]['status']=='candidate' for i in range(start, stop_line))):
-                        # Try short recognition only when known-text acoustic
-                        # localization did not produce a narrower region.
+                            any(local[i-cf]['status']!='candidate' for i in range(start, stop_line))):
+                        # Revisit only an incompletely located region. Keep
+                        # existing anchors when short recognition misses them.
                         budget -= chunks
                         words, views = recognize_in_windows(recognize, ab, ae, chunks)
-                        local = recovery_anchors(anchors_from_words(lines[cf+left:cs+left],
+                        narrowed = recovery_anchors(anchors_from_words(lines[cf+left:cs+left],
                             words, language, allow_missing=True))
+                        local = [new if new['status']=='candidate' else old for old,new in zip(local,narrowed)]
                         regional.update(overlapping_recognition=views, anchors=local)
                     recovered = [i for i in range(start, stop_line) if local[i-cf]['status'] == 'candidate']
                     if recovered:
@@ -641,10 +642,13 @@ def acoustic_line_anchors(lines, views, begin, end):
         anchor = dict(text=line, start=None, end=None, status='unresolved_text')
         if all(s and normalized(''.join(u['text'] for u in s)) == normalized(line) for s in spans):
             starts, ends = [s[0]['start'] for s in spans], [s[-1]['end'] for s in spans]
-            # Agreement locates the entry. A sustained tail may differ between
-            # mixture and separated audio: keep its full union as search room,
+            # One agreed first token cannot validate a phrase whose interior
+            # drifts through unrelated speech. Compare corresponding onsets;
+            # a sustained tail may differ between mixture and separated audio.
+            # Keep its full union as search room,
             # never use either endpoint as a published word/phrase timing.
-            if max(starts)-min(starts) <= .4:
+            if ([(u['first'],u['stop']) for u in spans[0]] == [(u['first'],u['stop']) for u in spans[1]] and
+                    all(abs(a['start']-b['start']) <= .4 for a,b in zip(*spans))):
                 anchor.update(start=min(starts), end=max(ends), status='candidate', source='dual_audio_acoustic_search')
         anchors.append(anchor)
         offset += len(line)+1

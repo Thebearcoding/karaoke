@@ -2676,7 +2676,7 @@ def test_failed_global_alignment_relocalizes_only_the_independently_bounded_regi
 
 
 @pytest.mark.parametrize('support', ['complete', 'partial', 'missing', 'unavailable', 'acoustic', 'acoustic_partial', 'acoustic_tail',
-                                     'acoustic_disagrees', 'acoustic_invalid', 'acoustic_unavailable'])
+                                     'acoustic_disagrees', 'acoustic_interior_disagrees', 'acoustic_invalid', 'acoustic_unavailable'])
 def test_failed_long_recognition_uses_bounded_overlapping_context_without_duplicating_words(support):
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines=['anchor phrase','quiet verse begins','quiet verse ends']
@@ -2695,7 +2695,8 @@ def test_failed_long_recognition_uses_bounded_overlapping_context_without_duplic
         if support=='unavailable':
             raise ValueError('short recognition unavailable')
         return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+1-begin)
-            for t,s in zip(lines,starts) if support in ('complete','partial') and begin<=s<s+1<=end])])
+            for t,s in zip(lines,starts) if (support in ('complete','partial') or
+                support=='acoustic_interior_disagrees' and t==lines[1]) and begin<=s<s+1<=end])])
     def align(begin,end,text,**kwargs):
         texts=text.splitlines()
         return dict(segments=[dict(words=[dict(word=t,start=starts[lines.index(t)]-begin,
@@ -2708,8 +2709,15 @@ def test_failed_long_recognition_uses_bounded_overlapping_context_without_duplic
         for t,s in zip(lines,starts):
             words.append(dict(text=t,first=offset,stop=offset+len(t),start=s-.2,end=s+1.2))
             offset+=len(t)+1
+        if support=='acoustic_interior_disagrees':
+            unit=words[1]
+            split=unit['first']+len('quiet')
+            words[1:2]=[dict(unit,text='quiet',stop=split,end=72.4),
+                        dict(unit,text='verse begins',first=split+1,start=72.4)]
         shift=2 if support=='acoustic_disagrees' else .1
         second=[dict(w,start=w['start']+shift,end=w['end']+shift) for w in words]
+        if support=='acoustic_interior_disagrees':
+            second[2].update(start=74.4,end=75.2)
         if support=='acoustic_tail':
             second=[dict(w,end=w['end']+1.) for w in second]
         if support=='acoustic_invalid':
@@ -2727,7 +2735,7 @@ def test_failed_long_recognition_uses_bounded_overlapping_context_without_duplic
     assert all(a[1]>b[0] for a,b in zip(narrow,narrow[1:]))
     assert result['result']['segments'][0]==original[0]
     assert len(acoustic_calls)==int(support.startswith('acoustic'))
-    if support in ('complete','partial','acoustic','acoustic_partial','acoustic_tail'):
+    if support in ('complete','partial','acoustic','acoustic_partial','acoustic_tail','acoustic_interior_disagrees'):
         assert [s['words'][0]['start'] for s in result['result']['segments']]==starts
         assert result['asr_localizations'][0]['accepted_lines']==[2,3]
         assert all(s['words'][0]['end']>s['words'][0]['start'] for s in result['result']['segments'])
