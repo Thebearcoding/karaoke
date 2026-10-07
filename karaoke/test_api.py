@@ -2207,21 +2207,30 @@ def test_ambiguous_refrains_need_independent_bounds_and_cannot_bootstrap_them():
     assert [a['status'] for a in anchors] == ['ambiguous_repeat','ambiguous_repeat','candidate']
 
 
-def test_unrecognized_run_does_not_use_its_drifted_times_as_search_bounds():
+@pytest.mark.parametrize('duration,budget,recovers', [(20.,24,True),(70.,2,True),(70.,1,False),(110.,24,False)])
+def test_unrecognized_run_does_not_use_its_drifted_times_as_search_bounds(duration,budget,recovers):
     from karaoke.align_lyrics_whisper import recover_with_local_asr
-    lines, starts = ['alpha', 'la la', 'na na', 'ta ta', 'omega'], [1., 4., 7., 10., 15.]
+    lines = ['alpha', 'la la', 'na na', 'ta ta', 'omega']
+    starts = [1.,duration*.2,duration*.35,duration*.5,duration-5]
     def segment(text, start, length=.8):
         return dict(words=[dict(word=text, start=start, end=start+length)])
-    segments = [segment(t,s,0 if i==2 else .8) for i,(t,s) in enumerate(zip(lines,[1.,10.,12.,13.,15.]))]
-    block = dict(range=[0,5], context=[0,5], source_range=[0.,20.], result=dict(segments=segments))
+    old = [1.,duration*.5,duration*.6,duration*.65,duration-5]
+    segments = [segment(t,s,0 if i==2 else .8) for i,(t,s) in enumerate(zip(lines,old))]
+    block = dict(range=[0,5], context=[0,5], source_range=[0.,duration], result=dict(segments=segments))
     calls = []
     def recognize(begin,end):
         return dict(segments=[dict(words=[dict(word=lines[i], start=starts[i], end=starts[i]+.8) for i in (0,4)])])
     def align(begin,end,text,**options):
         calls.append((begin,end,text))
-        assert begin < 1 and end > 15  # Old, drifted neighbouring predictions cannot crop the real phrase away.
+        assert begin < 1 and end > starts[-1]  # Old predictions cannot crop the real phrase away.
         return dict(segments=[segment(t,s-begin) for t,s in zip(lines,starts)])
-    result = recover_with_local_asr(block,lines,np.zeros(20*16000),'English',recognize,align,force_global=True)
+    result = recover_with_local_asr(block,lines,np.zeros(int(duration*16000)),'English',recognize,align,
+                                   force_global=True,max_alignment_attempts=budget)
+    if not recovers:
+        assert calls == [] and result['result']['segments'] == segments
+        assert result['asr_localizations'][0]['attempts'][0]['reason'] == (
+            'window_exceeds_limit' if duration > 90 else 'local_retry_budget_exhausted')
+        return
     assert len(calls) == 1
     assert result['result']['segments'][0] == segments[0] and result['result']['segments'][-1] == segments[-1]
     assert [s['words'][0]['start'] for s in result['result']['segments']] == starts
@@ -7105,7 +7114,8 @@ def test_playback_survey_records_source_disagreements_and_actual_provider_failur
 
 @pytest.mark.parametrize('hard_code', ['separate_music_failed', 'subtitles_failed'])
 @pytest.mark.parametrize('has_full_mv', [False, True])
-def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monkeypatch, hard_code, has_full_mv):
+@pytest.mark.parametrize('targeted', [False, True])
+def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monkeypatch, hard_code, has_full_mv, targeted):
     from contextlib import nullcontext
     from karaoke.tools import playback_sweep as sweep
     data = tmp_path/'data'
@@ -7137,11 +7147,12 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
     calls = []
     def process(client, base, folder, command):
         calls.append(folder.name)
-        if len(calls) == 2:
+        url = json.loads((folder/'request.json').read_text())['url']
+        if url == cases[1]['url']:
             (folder/'error.json').write_text(json.dumps(dict(code=hard_code, message='test')))
             return 1
         quality = dict(playback_fallback=dict(error=dict(code='align_words_failed', message='test'),
-            subtitle_mode='estimated_word', estimated_spans=[{}])) if len(calls) == 3 else {}
+            subtitle_mode='estimated_word', estimated_spans=[{}])) if url == cases[2]['url'] else {}
         (folder/'audio-result.json').write_text(json.dumps(dict(title='Song', artist='Singer',
             language='English', duration_seconds=10, quality=quality)))
         return 0
@@ -7149,27 +7160,33 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
     monkeypatch.setattr(sweep, 'verify_outputs', lambda *a,**k:dict(validation_scope='playback_audio'))
     monkeypatch.setattr(sweep, 'record_failure', lambda *a:None)
     report = tmp_path/'report.json'
+    requested = [cases[0]['url'], cases[2]['url']] if targeted else []
     with TestClient(app) as api:
         if has_full_mv:
             app.state.store.update(source_jobs[0], status='completed', result=dict(artifacts={}))
         user_queue = api.post('/v1/room/entries',json=dict(url=URL)).json()['entries']
         monkeypatch.setattr(sweep.httpx,'Client',lambda **k:nullcontext(api))
-        sweep.run_once(manifest,data,report,prepared,'http://testserver')
-        sweep.run_once(manifest,data,report,prepared,'http://testserver')
-        assert len(calls) == 3
-        assert calls[1:] == source_jobs[1:]  # Reuse the registered audio job and its stage cache.
+        sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=requested)
+        sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=requested)
+        assert len(calls) == (2 if targeted else 3)
+        assert calls[1:] == (source_jobs[2:] if targeted else source_jobs[1:])
         assert (calls[0] != source_jobs[0]) == has_full_mv
         if has_full_mv:
             assert app.state.store.read(source_jobs[0])['status'] == 'completed'
         assert [e['id'] for e in api.get('/v1/room').json()['entries']] == [e['id'] for e in user_queue]
         result = json.loads(report.read_text())
-        assert result['summary']['outcomes'] == dict(clean=1,hard_fail=1,soft_fail=1)
-        assert result['summary']['hard_failures'] == {hard_code:1}
+        assert result['fixed_selection_size'] == 3
+        assert result['summary']['outcomes'] == (dict(clean=1,soft_fail=1) if targeted else dict(clean=1,hard_fail=1,soft_fail=1))
+        assert result['summary']['hard_failures'] == ({} if targeted else {hard_code:1})
         assert result['summary']['soft_failures'] == dict(align_words_failed=1)
         assert all(len(c['audio_attempts']) == 1 for c in result['cases'])
+        with pytest.raises(ValueError,match='requested cases'):
+            sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=[cases[1]['url']])
+        with pytest.raises(ValueError,match='outside the fixed selection'):
+            sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=[URL])
         result['cases'][0]['audio_attempts'][0]['outcome']='running'
         report.write_text(json.dumps(result))
         with pytest.raises(ValueError,match='Reconcile'):
-            sweep.run_once(manifest,data,report,prepared,'http://testserver')
-        assert len(calls) == 3
+            sweep.run_once(manifest,data,report,prepared,'http://testserver',case_urls=requested)
+        assert len(calls) == (2 if targeted else 3)
     assert manifest.read_bytes() == original_manifest

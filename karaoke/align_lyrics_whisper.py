@@ -301,14 +301,18 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                     ab = max(ab, ae-45)
                 elif cf < start and cs == stop_line:
                     ae = min(ae, ab+45)
-            # One recognized line can straddle an MV's long spoken interlude.
-            # Give that isolated line one bounded acoustic search, not a skip.
-            limit = 90 if stop_line-start == 1 and cf == start and cs == stop_line and anchors[start]['status'] == 'candidate' else 45
-            if not selected or not 0 < ae-ab <= limit or budget <= 0:
+            if not selected:
                 continue
-            budget -= 1
             attempt = dict(lines=[start+left+1, stop_line+left], context=[cf+left, cs+left], source_range=[ab, ae])
             report['attempts'].append(attempt)
+            # Independent anchors can enclose a verse plus an instrumental
+            # gap. Charge longer windows to the same total work budget instead
+            # of silently skipping every unresolved verse longer than 45 s.
+            cost = 2 if ae-ab > 45 else 1
+            if not 0 < ae-ab <= 90 or budget < cost:
+                attempt['reason'] = 'window_exceeds_limit' if not 0 < ae-ab <= 90 else 'local_retry_budget_exhausted'
+                continue
+            budget -= cost
             try:
                 candidate = align_candidate(align, ab, ae, '\n'.join(lines[cf+left:cs+left]), gap_padding=None,
                                   dynamic_heads=True, max_word_dur=None, word_dur_factor=None)
@@ -589,6 +593,7 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
             owners[index] = block_index
     if None in owners:
         raise ValueError('Raw alignment does not cover exactly the displayed lyrics')
+    original_owners = owners.copy()
 
     def conflicts(selection):
         selected = [predictions[owner][i] for i, owner in enumerate(selection)]
@@ -727,6 +732,10 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
             stitched[-1]['range'][1] = index+1
         else:
             stitched.append({**raw_blocks[owner], 'range': [index, index+1]})
+            if 'stitch_recovered_lines' in stitched[-1]:
+                stitched[-1]['stitch_recovered_lines'] = list(stitched[-1]['stitch_recovered_lines'])
+        if owner != original_owners[index]:
+            stitched[-1].setdefault('stitch_recovered_lines', []).append(index+1)
     return [predictions[owner][i][0] for i, owner in enumerate(owners)], stitched, repairs
 
 

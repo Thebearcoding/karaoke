@@ -144,16 +144,21 @@ def create_poster(source, output, *, thumbnail=None, seconds=30):
 
 def alignment_recovery_summary(raw):
     localized = [report for block in raw for report in block.get('asr_localizations', [])]
-    recovered = {i for block in raw for report in block.get('line_recoveries', []) if report['accepted']
-                 for i in range(report['lines'][0], report['lines'][1]+1)}
-    unresolved = set()
-    for report in localized:
-        # Later localization can repair an earlier conflict, or invalidate an
-        # earlier repair. Keep the latest result rather than merging failures.
-        unresolved.update(report.get('contradicted_lines', []))
-        unresolved.difference_update(report['accepted_lines'])
-        recovered.update(report['accepted_lines'])
-        recovered.difference_update(unresolved)
+    recovered, unresolved = set(), set()
+    for block in raw:
+        # Context retains old evidence for other lines. Only the selected
+        # prediction owns a line's current recovery status after stitching.
+        owned = set(range(block['range'][0]+1, block['range'][1]+1))
+        recovered.update(i for report in block.get('line_recoveries', []) if report['accepted']
+                         for i in range(report['lines'][0], report['lines'][1]+1) if i in owned)
+        for report in block.get('asr_localizations', []):
+            unresolved.update(owned.intersection(report.get('contradicted_lines', [])))
+            unresolved.difference_update(owned.intersection(report['accepted_lines']))
+            recovered.update(owned.intersection(report['accepted_lines']))
+        stitched = owned.intersection(block.get('stitch_recovered_lines', []))
+        unresolved.difference_update(stitched)
+        recovered.update(stitched)
+    recovered.difference_update(unresolved)
     return dict(recovered_alignment_lines=sorted(recovered),
         unresolved_localization_lines=sorted(unresolved),
         asr_localization_windows=len({tuple(r['source_range']) for r in localized if r.get('recognition')}))

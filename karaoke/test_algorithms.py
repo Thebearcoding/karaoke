@@ -1829,11 +1829,13 @@ class AlignmentIntegrity(unittest.TestCase):
 
     def test_missing_line_does_not_prevent_reusing_a_complete_context_prediction(self):
         from copy import deepcopy
+        from karaoke.pipeline import alignment_recovery_summary
         lines = ['first', 'middle', 'last']
         def segment(text, start):
             return dict(text=text, words=[dict(word=text,start=start,end=start+.5)])
         missing = dict(range=[0,3],context=[0,3],source_range=[0.,6.],result=dict(segments=[
             segment('first',1.),dict(text='middle',words=[]),segment('last',5.)]))
+        missing['asr_localizations'] = [dict(contradicted_lines=[2], accepted_lines=[])]
         context = dict(range=[0,0],context=[0,3],source_range=[0.,6.],result=dict(segments=[
             segment(text,start) for text,start in zip(lines,[1.,3.,5.])]))
         original = deepcopy(missing)
@@ -1844,6 +1846,14 @@ class AlignmentIntegrity(unittest.TestCase):
         words, report = build_progress(cues,stitched,'English')
         self.assertFalse(report['fallback_lines'])
         self.assertEqual([c['units'][0]['text'] for c in words],lines)
+        recovered = alignment_recovery_summary(stitched)
+        self.assertEqual(recovered['unresolved_localization_lines'], [])
+        self.assertIn(2, recovered['recovered_alignment_lines'])
+        self.assertEqual(alignment_recovery_summary([missing])['unresolved_localization_lines'], [2])
+        presentation_cues(cues,6.,lead=0,tail=0,bridge_gap=0)
+        context['result']['segments'][1]['words'][0]['word'] = 'different text'
+        _, rejected, _ = stitch_blocks(lines,[missing,context],6.,'English')
+        self.assertEqual(alignment_recovery_summary(rejected)['unresolved_localization_lines'], [2])
 
     def test_missing_line_can_be_recovered_inside_measured_context(self):
         lines = ['alpha','bravo','charlie','delta','echo','foxtrot']

@@ -102,12 +102,16 @@ def summarize(cases):
                 soft_failure_songs=dict(soft_songs))
 
 
-def run_once(manifest, data_dir, report, prepared_dir, base):
+def run_once(manifest, data_dir, report, prepared_dir, base, *, case_urls=()):
     frozen = json.loads(manifest.read_text())
     selection = [dict(url=c['url'], language=c['language']) for c in frozen['cases']]
     selection_hash = hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest()
     if selection_hash != frozen['selection_sha256']:
         raise ValueError('Fixed selection changed')
+    if set(case_urls)-{c['url'] for c in selection}:
+        raise ValueError('Requested cases are outside the fixed selection')
+    selected = [dict(c, title=original['title']) for c, original in zip(selection, frozen['cases'])
+                if not case_urls or c['url'] in case_urls]
     with manifest.with_suffix('.lock').open('a') as lock, httpx.Client(timeout=30) as client:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         health = client.get(base+'/health').raise_for_status().json()
@@ -117,10 +121,11 @@ def run_once(manifest, data_dir, report, prepared_dir, base):
         state = json.loads(report.read_text()) if report.exists() else dict(
             run_id=report.parent.name, started_at=stamp(), selection_sha256=selection_hash,
             pipeline_version=version, controller_sha256=digest(Path(__file__)), scope='playback_audio',
-            cases=[dict(c, title=original['title'], audio_attempts=[]) for c, original in zip(selection, frozen['cases'])])
+            fixed_selection_size=len(selection), cases=[dict(c, audio_attempts=[]) for c in selected])
         if (state['selection_sha256'] != selection_hash or state['pipeline_version'] != version or
-                state['controller_sha256'] != digest(Path(__file__))):
-            raise ValueError('A survey must keep its frozen selection and pipeline version')
+                state['controller_sha256'] != digest(Path(__file__)) or
+                [c['url'] for c in state['cases']] != [c['url'] for c in selected]):
+            raise ValueError('A survey must keep its frozen selection, requested cases and pipeline version')
         if any((c.get('audio_attempts') or [{}])[-1].get('outcome') == 'running' for c in state['cases']):
             raise ValueError('Reconcile the interrupted attempt; never resubmit it automatically')
         store = Store(data_dir)
@@ -216,9 +221,10 @@ def main():
     for name in ('manifest', 'data-dir', 'report', 'prepared-dir'):
         parser.add_argument('--'+name, required=True, type=Path)
     parser.add_argument('--base-url', default='http://127.0.0.1:8746')
+    parser.add_argument('--case-url', action='append', default=[], help='Recheck only this URL from the unchanged fixed manifest')
     args = parser.parse_args()
     args.report.parent.mkdir(parents=True, exist_ok=True)
-    run_once(args.manifest, args.data_dir, args.report, args.prepared_dir, args.base_url.rstrip('/'))
+    run_once(args.manifest, args.data_dir, args.report, args.prepared_dir, args.base_url.rstrip('/'), case_urls=args.case_url)
 
 
 if __name__ == '__main__':
