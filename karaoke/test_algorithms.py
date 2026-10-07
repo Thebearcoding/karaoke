@@ -1721,18 +1721,20 @@ class AlignmentIntegrity(unittest.TestCase):
             # Deliberately rejected word timings are not a text mutation. Keep
             # the unresolved candidate for source fallback, but never publish it.
             result['segments'] = [dict(text='word', words=[])]
-            shutil.rmtree(root/'alignment')
-            model._buffers = {'alignment_heads': None}
-            with patch('stable_whisper.load_model', return_value=model), patch(
-                    'align_lyrics_whisper.sha', return_value='test-model-hash'), patch('sys.argv',
-                    ['align', '--jobs', str(root/'jobs.json'), '--device', 'cpu']):
-                main()
-            cues = json.loads((root/'alignment/cues.json').read_text())
-            self.assertEqual(cues[0]['text'], 'word')
-            self.assertNotEqual(cues[0]['status'], 'candidate')
             from timing_validation import validate_timeline
-            with self.assertRaises(ValueError):
-                validate_timeline(cues, ['word'], 3.)
+            for language in ('English', 'Chinese'):
+                (root/'lyrics.json').write_text(json.dumps(dict(language=language, lines=['word'])))
+                shutil.rmtree(root/'alignment')
+                model._buffers = {'alignment_heads': None}
+                with patch('stable_whisper.load_model', return_value=model), patch(
+                        'align_lyrics_whisper.sha', return_value='test-model-hash'), patch('sys.argv',
+                        ['align', '--jobs', str(root/'jobs.json'), '--device', 'cpu']):
+                    main()
+                cues = json.loads((root/'alignment/cues.json').read_text())
+                self.assertEqual(cues[0]['text'], 'word')
+                self.assertNotEqual(cues[0]['status'], 'candidate')
+                with self.assertRaises(ValueError):
+                    validate_timeline(cues, ['word'], 3.)
 
     def test_skipped_refrain_requires_two_acoustic_windows_inside_the_gap(self):
         from copy import deepcopy

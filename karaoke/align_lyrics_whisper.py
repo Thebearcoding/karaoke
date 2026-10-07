@@ -753,7 +753,11 @@ def refine_chinese_onsets(cues, raw_blocks, audio, language):
             segment = segments[i-context]
             if normalized(segment['text']) != normalized(cues[i]['text']):
                 raise ValueError('Alignment refinement changed the supplied lyric text')
-            word = next(w for w in segment['words'] if w['word'].strip())
+            if cues[i]['status'] != 'candidate':
+                continue
+            word = next((w for w in segment['words'] if w['word'].strip()), None)
+            if word is None:
+                continue
             char = word['word'].strip()
             if len(char) != 1 or not '\u4e00' <= char <= '\u9fff' or word['end']-word['start'] < 1.15:
                 continue
