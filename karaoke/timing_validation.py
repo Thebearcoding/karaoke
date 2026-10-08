@@ -135,14 +135,19 @@ def reconcile_views(cues, observations, protocol, language, constraints=(), *, p
             report['constraints'], playback=playback, _review_lines=pending)
         report['lines'].extend(dict(row, observation=name) for row in reviewed['lines'])
         report.update(constraints=reviewed['constraints'], unresolved=reviewed['unresolved'], accuracy=None)
-        unresolved_lines = {v['proof']['line']-1 for v in reviewed['unresolved']}
+        unresolved_lines = pending_review_lines(result, report, protocol)
         if unresolved_lines:
             wider = deepcopy(result)
             for i in unresolved_lines:
                 bounds = [result[i-1]['units'][-1]['start']+.015 if i else 0.,
                           result[i+1]['units'][0]['start'] if i+1<len(result) else len(wave)/44100]
-                wider[i].update(aligned_start=max(bounds[0], result[i]['start']-1.5),
-                                aligned_end=min(bounds[1], result[i]['end']+1.5), audio_bounds=bounds)
+                # An uncertain old cue can cut off half of a repeated phrase.
+                # Reobserve the available neighbouring context before treating
+                # the old boundary as a limit. Only measured times are adopted.
+                begin, end = (bounds if bounds[1]-bounds[0] <= 30 else
+                              [max(bounds[0], result[i]['start']-1.5),
+                               min(bounds[1], result[i]['end']+1.5)])
+                wider[i].update(aligned_start=begin, aligned_end=end, audio_bounds=bounds)
             wider, retried = reconcile_timing(wider, wave, witness, predict, protocol, language,
                 report['constraints'], playback=playback, _retry_context=False, _review_lines=unresolved_lines)
             for i in unresolved_lines:

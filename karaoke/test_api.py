@@ -2795,6 +2795,37 @@ def test_ambiguous_global_match_cannot_displace_aligned_neighbouring_phrases(mis
     assert result['asr_localizations'][0]['contradicted_lines'] == []
 
 
+@pytest.mark.parametrize('stale_neighbour', [False, True])
+def test_global_recovery_revisits_neighbours_newly_contradicted_by_repaired_phrases(stale_neighbour):
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines = ['Opening verse', 'Drink water', 'Fall asleep then dream', 'Drink water', 'Asleep and dream']
+    actual = [0., 5., 12., 18., 24.]
+    old = [0., 3., 6., 9., 10.] if stale_neighbour else [0., 3., 6., 18., 24.]
+    segments = [dict(words=[dict(word=t, start=s, end=s+(0 if i==1 else 1))])
+                for i,(t,s) in enumerate(zip(lines, old))]
+    block = dict(range=[0,5], context=[0,5], source_range=[0.,30.], result=dict(segments=segments))
+    def recognize(begin, end):
+        # This partial match cannot itself invalidate a timed neighbour.
+        return dict(segments=[dict(words=[dict(word='Asleep dream' if i==4 else t,
+            start=s-begin, end=s+1-begin) for i,(t,s) in enumerate(zip(lines, actual))
+            if begin <= s < s+1 <= end])])
+    def align(begin, end, text, **options):
+        selected = text.splitlines()
+        first = next((i for i in range(len(lines)) if lines[i:i+len(selected)] == selected
+                      and begin <= actual[i] < actual[i+len(selected)-1]+1 <= end), None)
+        if first is None:
+            return None
+        return dict(segments=[dict(words=[dict(word=lines[i], start=actual[i]-begin,
+            end=actual[i]+1-begin)]) for i in range(first, first+len(selected))])
+    result = recover_with_local_asr(block, lines, np.zeros(30*16000), 'English',
+                                    recognize, align, force_global=True)
+    assert [s['words'][0]['start'] for s in result['result']['segments']] == actual
+    if stale_neighbour:
+        assert result['asr_localizations'][0]['unresolved_segments']
+    else:
+        assert result['result']['segments'][3:] == segments[3:]
+
+
 def test_local_recognition_broadens_once_when_old_neighbours_miss_the_verse():
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines, starts = ['alpha', 'bravo', 'charlie'], [30., 40., 50.]

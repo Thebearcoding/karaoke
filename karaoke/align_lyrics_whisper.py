@@ -330,6 +330,8 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
     result, reports, budget = deepcopy(block), [], max_alignment_attempts
     contexts = [] if recovery_contexts is None else recovery_contexts
     needs_relocation = False
+    newly_conflicting = set()
+    localized_lines = set()
     for left, right, begin, end in windows[:8]:
         report = dict(context=[left, right], source_range=[begin, end], global_localization=global_recovery,
                       accepted_lines=[], attempts=[], activity_screened_lines=sorted(i+1 for i in quiet))
@@ -588,6 +590,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 continue
             part = dict(range=[start+left, stop_line+left], context=[cf+left, cs+left],
                         source_range=[ab, ae], result=candidate)
+            localized_lines.update(range(cf+left, cs+left))
             fresh = partial_alignment_cues(lines, [dict(part, range=part['context'])], duration, language)
             supported = set()
             for i in range(cf+left, cs+left):
@@ -674,6 +677,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                         conflicts.update({i, j}-set(replaced) or {i, j})
                 if not conflicts:
                     break
+                newly_conflicting.update(conflicts-bad-localized_lines)
                 for i in conflicts:
                     segment = proposed['result']['segments'][i-first]
                     rejected[i+1] = deepcopy(segment)
@@ -688,9 +692,12 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                       original_segments={i+1: result['result']['segments'][i-first] for i in replaced})
         result, cues = proposed, fresh
         bad.difference_update(replaced)
-    if bad and not global_recovery and budget > 0:
+    if bad and (not global_recovery or newly_conflicting) and budget > 0:
         # Apparently valid neighbours can squeeze missing lyrics into a window
         # that never contained them. Broaden once, sharing the remaining budget.
+        # A repaired phrase can also expose a new conflict with an old neighbour.
+        # Revisit that changed context rather than ending with discarded lyrics.
+        # Previously failed regions alone never trigger another global pass.
         result = recover_with_local_asr(result, lines, audio, language, recognize, align,
                                        force_global=True, max_alignment_attempts=budget, recovery_contexts=contexts,
                                        localize=localize, align_original=align_original,

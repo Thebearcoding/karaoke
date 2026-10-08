@@ -415,6 +415,36 @@ class SubtitleIntegrity(unittest.TestCase):
                 self.assertTrue(any(p['onset']==2. for r in report['lines'] for p in r.get('proposed_constraints',[])))
                 self.assertEqual([p['onset'] for p in report['constraints']],[3.5])
 
+    def test_uncertain_phrase_rechecks_audio_beyond_its_stale_end(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_views, validate_timeline
+        protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
+        units=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
+               for i,(c,t) in enumerate(zip('甲乙',[1.,3.]))]
+        cue=dict(text='甲乙',start=1.,end=3.2,units=units)
+        measured=[dict(u,start=t,end=t+.2) for u,t in zip(units,[6.,7.])]
+        for agrees in (True,False):
+            with self.subTest(agrees=agrees):
+                calls=[]
+                def witness(context,*args,**kwargs):
+                    calls.append((context['aligned_start'],context['aligned_end']))
+                    if context['aligned_end']>=7.2:
+                        views=[deepcopy(measured),deepcopy(measured)]
+                        if not agrees:
+                            for unit in views[1]:
+                                unit.update(start=unit['start']+.3,end=unit['end']+.3)
+                        return views
+                    # The old crop contains a different occurrence. It can
+                    # suggest a disagreement without proving any new onset.
+                    return [[dict(u,start=u['start']+shift,end=u['end']+shift) for u in units]
+                            for shift in (.6,.8)]
+                result,report=reconcile_views([cue],[('vocals',np.ones(10*44100)*.1,witness,
+                    lambda *args:[deepcopy(measured) for _ in range(3)])],protocol,'Chinese')
+                self.assertTrue(any(end>=7.2 for _,end in calls))
+                self.assertEqual([u['start'] for u in result[0]['units']], [6.,7.] if agrees else [1.,3.])
+                self.assertEqual(cue['units'],units)
+                validate_timeline(result,['甲乙'],10.,report['constraints'],'Chinese')
+
     def test_short_phoneme_can_start_the_right_boundary_group(self):
         from copy import deepcopy
         from timing_validation import reconcile_timing, validate_timeline
