@@ -4312,6 +4312,23 @@ def test_caption_gap_review_requires_substantial_existing_lyric_evidence(gap_kin
         assert result[0]['accepted_lines']==[]  # Review does not assign timings or lyric text.
 
 
+@pytest.mark.parametrize('heard_prefix', [False, True])
+def test_repeat_proposal_keeps_source_interior_between_observed_outer_phrases(heard_prefix):
+    from karaoke.lyric_consensus import observed_repetition_candidate
+    lines=['Blue morning (ooh)', 'We trace the river through the trees',
+           'Silver lanterns carry our dreams into the night', 'Closing phrase']
+    lyrics=dict(lines=lines,language='English',provenance=dict(kind='online_lyric_text'))
+    cues=[dict(text=t,start=s,end=s+1,status='candidate') for t,s in zip(lines,[1.,3.,5.,28.])]
+    words=[dict(word='Blue morning' if heard_prefix else 'qxz',start=10.,end=12.),
+           dict(word='qxz qxz qxz',start=13.,end=16.),dict(word=lines[2],start=17.,end=21.)]
+    observed=[dict(context=[0,4],source_range=[0.,30.],recognition=dict(segments=[dict(words=words)]))]
+    candidate=observed_repetition_candidate(lyrics,cues,observed,30.)
+    copy=candidate['provenance']['repetitions'][-1]
+    assert copy['source_lines']==(lines[:3] if heard_prefix else lines[2:3])
+    assert copy['boundary_anchors'][0]['start']==(10. if heard_prefix else 17.)
+    assert lyrics['lines']==lines  # This only proposes original text; alignment must validate it.
+
+
 @pytest.mark.parametrize('observed', ['repeat', 'unrelated', 'spelling_noise'])
 @pytest.mark.parametrize('compression_ratio', [1., 3.2])
 def test_published_source_retry_requires_substantial_observed_content(observed, compression_ratio):

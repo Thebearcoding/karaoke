@@ -223,17 +223,26 @@ def observed_repetition_candidate(lyrics, cues, observations, duration):
             first, stop = item['source_range']
             anchors = item['boundary_anchors']
             covered = None
-            # A distinctive verse can be the only fully recognized part of a
-            # repeated chorus+verse. Try its preceding source context only when
-            # both outer phrases are heard in this same empty interval.
-            start = min(first, item['insertion_index'])
-            if start < first:
-                gap_words = [w for w in words if item['gap'][0]-.001 <= w['start'] and w['end'] <= item['gap'][1]+.001]
-                context = anchors_from_words(lines[start:stop], gap_words, language, allow_missing=True)
-                covered = sum(a['matched_fraction']*len(a['text']) for a in context)/max(1,sum(map(len,lines[start:stop])))
-                if covered >= .8 and all(a['status']=='candidate' and a['matched_fraction'] >= .8
-                                         for a in (context[0],context[-1])):
-                    first, anchors = start, [context[0],context[-1]]
+            # A recognizer can hear the outer phrases while garbling the
+            # interior. Use them to propose the complete source passage; the
+            # next acoustic alignment must still verify every copied line.
+            # Include neighbouring tails: an old held subtitle can overlap
+            # the first words of the omitted passage.
+            insertion = item['insertion_index']
+            low = max(0.,cues[insertion-1]['start']-.6) if insertion else 0.
+            high = min(duration,cues[insertion]['end']+.6) if insertion<len(cues) else duration
+            gap_words = [w for w in words if low-.001 <= w['start'] and w['end'] <= high+.001]
+            context = anchors_from_words(lines[:stop],gap_words,language,allow_missing=True)
+            def strong(a):
+                return a['status']=='candidate' and (a['matched_fraction']>=.8 or
+                    a.get('match_basis') in ('complete_phrase','complete_clause'))
+            starts = [i for i,a in enumerate(context[:first]) if strong(a) and a['end']<=anchors[-1]['end'] and not any(
+                normalized(c['text']).casefold()==normalized(a['text']).casefold() and
+                c['start']-2 <= a['end'] and a['start'] <= c['end']+2 for c in cues)]
+            if starts and strong(context[-1]):
+                first = min(starts)
+                anchors = [context[first],context[-1]]
+                covered = sum(a['matched_fraction']*len(a['text']) for a in context[first:])/max(1,sum(map(len,lines[first:stop])))
             copy = dict(item, source_range=[first,stop], source_lines=lines[first:stop],
                         boundary_anchors=anchors, observation_range=[begin,end],
                         seed_source_range=item['source_range'], seed_similarity=item['similarity'],
