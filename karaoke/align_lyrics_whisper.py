@@ -426,6 +426,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         priority = lambda b: not untimed.intersection(range(b[0]+left, b[1]+left))
         blocks.sort(key=priority)
         relocalized = set()
+        primary_predictions, tried_cores = {}, set()
         for block_index, (start, stop_line, cf, cs, ab, ae) in enumerate(blocks):
             selected = targets.intersection(range(start+left, stop_line+left))
             # The recognizer only observed this crop. Missing edge anchors
@@ -459,17 +460,34 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             # gap. Charge longer windows to the same total work budget instead
             # of silently skipping every unresolved verse longer than 45 s.
             cost = 2 if ae-ab > 45 else 1
-            if not 0 < ae-ab <= 90 or budget < cost:
+            cached_primary = region in primary_predictions
+            if not 0 < ae-ab <= 90 or (budget < cost and not cached_primary):
                 attempt['reason'] = 'window_exceeds_limit' if not 0 < ae-ab <= 90 else 'local_retry_budget_exhausted'
                 continue
-            budget -= cost
-            try:
-                candidate = align_candidate(align, ab, ae, '\n'.join(lines[cf+left:cs+left]), gap_padding=None,
-                                  dynamic_heads=True, max_word_dur=None, word_dur_factor=None, detect_language=True)
-            except ValueError as error:
-                attempt['error'] = str(error)
-                candidate = None
+            if cached_primary:
+                candidate = primary_predictions.pop(region)
+                attempt['reused_primary_prediction'] = True
+            else:
+                budget -= cost
+                tried_cores.add((start, stop_line))
+                try:
+                    candidate = align_candidate(align, ab, ae, '\n'.join(lines[cf+left:cs+left]), gap_padding=None,
+                                      dynamic_heads=True, max_word_dur=None, word_dur_factor=None, detect_language=True)
+                except ValueError as error:
+                    attempt['error'] = str(error)
+                    candidate = None
             attempt['result'] = candidate
+            if (not valid_recovery(candidate, lines[cf+left:cs+left], ae-ab) and
+                    any((a,b) not in tried_cores and targets.intersection(range(a+left,b+left))
+                        and any(anchors[i]['status'] == 'candidate' for i in range(a,b))
+                        for a,b,*_ in blocks[block_index+1:])):
+                # Give other located regions their basic attempt before one
+                # hard passage consumes the budget. Already narrowed searches
+                # still take priority over other wholly unlocated regions.
+                primary_predictions[region] = candidate
+                blocks.append(region)
+                attempt['fallbacks_deferred'] = True
+                continue
             if (align_original is not None and budget >= cost and
                     not valid_recovery(candidate, lines[cf+left:cs+left], ae-ab)):
                 # Separation can suppress a real choir/quiet voice. Change the

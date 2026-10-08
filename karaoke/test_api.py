@@ -2803,6 +2803,28 @@ def test_recognition_windows_keep_language_switches_and_boundary_words():
     assert [r['recognition']['language'] for r in reports]==['en','fr','fr']
 
 
+def test_local_recovery_attempts_later_regions_before_deep_retries():
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines = ['early missing phrase', 'middle missing phrase', 'late missing phrase']
+    starts = [1.,30.,60.]
+    block = dict(range=[0,3],context=[0,3],source_range=[0.,70.],result=dict(segments=[
+        dict(words=[dict(word=t,start=0.,end=0.)]) for t in lines]))
+    calls = []
+    def recognize(begin,end):
+        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+.8-begin)
+            for t,s in zip(lines,starts) if begin <= s < end])])
+    def align(begin,end,text,**options):
+        calls.append(text)
+        i = lines.index(text)
+        return dict(segments=[dict(words=[dict(word=text,start=starts[i]-begin,
+                                               end=starts[i]-begin+(0 if i==0 else .8))])])
+    result = recover_with_local_asr(block,lines,np.zeros(70*16000),'English',recognize,align,
+        force_global=True,max_alignment_attempts=3,align_original=align)
+    assert calls == lines
+    assert result['result']['segments'][-1]['words'] == [dict(word=lines[-1],start=60.,end=60.8)]
+    assert result['result']['segments'][0]['words'][0]['start'] == result['result']['segments'][0]['words'][0]['end']
+
+
 @pytest.mark.parametrize('omitted_repeat', [1, 3])
 @pytest.mark.parametrize('drifted_middle', [False, True])
 def test_incomplete_refrain_recognition_cannot_overwrite_bounded_acoustic_alignment(omitted_repeat, drifted_middle):
