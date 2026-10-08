@@ -713,6 +713,39 @@ def recognized_words(begin, response, end):
     return words
 
 
+def review_uncovered_lyrics(cues, word_views, language, duration, recognize):
+    """Recheck a caption gap when observed words resemble substantial lyrics."""
+    from anchors_from_asr import anchors_from_words, text_units
+    lines = [c['text'] for c in cues]
+    timed = [c for c in cues if c.get('status') == 'candidate']
+    edges = [dict(start=0., end=0.), *timed, dict(start=duration, end=duration)]
+    reviews = []
+    for left, right in zip(edges, edges[1:]):
+        begin, end = left['end'], right['start']
+        low, high = max(0.,left['start']-.6), min(duration,right['end']+.6)
+        if not begin < end or not 0 < high-low <= 90 or len(reviews) >= 8:
+            continue
+        supported = 0
+        for words in word_views:
+            inside = [w for w in words if w['end'] > begin+.001 and w['start'] < end-.001]
+            if sum(len(text_units(w['word'],language)) for w in inside) < 24:
+                continue
+            anchors = anchors_from_words(lines,inside,language,allow_missing=True)
+            supported = max(supported,sum(len(text_units(a['text'],language))*a['matched_fraction']
+                for a in anchors if a['status']=='candidate' and a['matched_density']>=.8))
+        if supported < 24:
+            continue
+        review = dict(context=[0,len(lines)],source_range=[low,high],gap=[begin,end],
+                      reason='uncovered_lyric_review',matched_reference_units=supported,
+                      accepted_lines=[],attempts=[])
+        try:
+            review['recognition'] = recognize(low,high)
+        except ValueError as error:
+            review['error'] = str(error)
+        reviews.append(review)
+    return reviews
+
+
 def recognize_in_windows(recognize, begin, end, chunks):
     """Keep overlapping recognition context without duplicating its words."""
     words, reports = [], []
@@ -1320,6 +1353,13 @@ def main():
         contexts = [context for block in raw_blocks for context in block.pop('recovery_contexts', [])]
         cues, raw_blocks, boundary_repairs = stitch_blocks(
             lyrics['lines'], [*raw_blocks, *contexts], duration, lyrics['language'], align_audio)
+        if job.get('original_audio') and job.get('localize_with_asr', True):
+            observed = [o for block in raw_blocks for o in block.get('asr_localizations', []) if o.get('recognition')]
+            word_views = [recognized_words(o['source_range'][0],o['recognition'],o['source_range'][1]) for o in observed]
+            reviews = review_uncovered_lyrics(cues,word_views,lyrics['language'],duration,
+                lambda a,b: recognize_audio(a,b,original_mix=True))
+            if reviews:
+                raw_blocks[-1].setdefault('asr_localizations', []).extend(reviews)
         (output/'raw.json').write_text(json.dumps(raw_blocks, ensure_ascii=False, indent=2, default=json_number)+'\n')
         # stitch_blocks already rejects mismatched text per line. Preserve its
         # unresolved cues and raw rejected predictions so the caller can try a

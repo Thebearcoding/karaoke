@@ -4290,6 +4290,28 @@ def test_observed_missing_refrain_selects_complete_published_source(tmp_path, mo
             pipeline.validate_localization(selected,15.,wrong)
 
 
+@pytest.mark.parametrize('gap_kind', ['missing', 'covered', 'unrelated'])
+def test_caption_gap_review_requires_substantial_existing_lyric_evidence(gap_kind):
+    from copy import deepcopy
+    from karaoke.align_lyrics_whisper import review_uncovered_lyrics
+    line = 'Glowing lanterns guide us through the silent forest'
+    cues = [dict(text=line,start=1.,end=3.,status='candidate'),
+            dict(text='The boats return across the silver ocean',start=30.,end=34.,status='candidate')]
+    if gap_kind=='covered':cues.insert(1,dict(cues[0],start=10.,end=13.))
+    before=deepcopy(cues)
+    words=[dict(word='zqx '*20 if gap_kind=='unrelated' else line,start=10.,end=13.)]
+    calls=[]
+    def recognize(a,b):
+        calls.append((a,b));return dict(segments=[])
+    result=review_uncovered_lyrics(cues,[words],'English',40.,recognize)
+    assert cues==before
+    assert bool(result)==bool(calls)==(gap_kind=='missing')
+    if result:
+        assert result[0]['gap']==[3.,30.]
+        assert calls==[(.4,34.6)]
+        assert result[0]['accepted_lines']==[]  # Review does not assign timings or lyric text.
+
+
 @pytest.mark.parametrize('observed', ['repeat', 'unrelated', 'spelling_noise'])
 @pytest.mark.parametrize('compression_ratio', [1., 3.2])
 def test_published_source_retry_requires_substantial_observed_content(observed, compression_ratio):
