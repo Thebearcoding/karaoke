@@ -902,21 +902,7 @@ $('storage-form').onsubmit = async event => {
 };
 $('seek').oninput = () => { renderRange($('seek')); seeking = true; $('current-time').textContent = time(Number($('seek').value)); };
 $('seek').onchange = async () => { await command('seek', {position:Number($('seek').value)}); seeking = false; };
-$('volume').oninput = () => {
-  renderRange($('volume'));
-  player.setVolume(Number($('volume').value));
-  $('volume-value').textContent = Math.round(player.volume*100);
-  try { sessionStorage.setItem('karaokeVolume', player.volume); } catch {}
-};
-try {
-  const saved = sessionStorage.getItem('karaokeVolume'), volume = Number(saved);
-  if (saved !== null && Number.isFinite(volume) && volume >= 0 && volume <= 1) {
-    $('volume').value = volume;
-    $('volume').oninput();
-  }
-} catch {}
-renderRange($('volume'));
-$('mute').onclick = () => { $('volume').value = player.volume ? 0 : 0.8; $('volume').oninput(); };
+try { sessionStorage.removeItem('karaokeVolume'); } catch {}
 async function fullscreen() {
   switchView('player');
   try { if (document.fullscreenElement) await document.exitFullscreen(); else await $('player-stage').requestFullscreen(); }

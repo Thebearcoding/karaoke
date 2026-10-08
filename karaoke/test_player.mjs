@@ -127,10 +127,12 @@ test('lead percentage preserves the mix and playback through adjustment, refresh
   local.command('play',{},entries); local.command('ready',{},entries);
   await p.apply(local.reconcile({entries}),0);
   const sources=[...p.sources], position=p.video.currentTime;
+  assert.equal(p.master.gain.value,1);
   assert.deepEqual(p.gains.map(g=>g.gain.value),[1,1,.4]);
   for (const level of [0,.25,.73,1]) {
     local.command('lead',{level},entries); await p.apply(local.reconcile({entries}),0);
     assert.deepEqual(p.gains.map(g=>g.gain.value),[1,1,level]);
+    assert.equal(p.master.gain.value,1);
     assert.deepEqual(p.sources,sources); assert.equal(p.video.currentTime,position);
     assert.deepEqual(new LocalPlayback(local.save()).state.levels,local.state.levels);
   }

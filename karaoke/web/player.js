@@ -40,7 +40,7 @@ export class Player {
     this.onTick = onTick;
     this.onEnd = onEnd;
     this.sources = [];
-    this.volume = 0.8;
+    this.volume = 1;
     this.anchor = null;
     this.unlocked = false;
     this.mode = 'karaoke';
