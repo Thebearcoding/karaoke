@@ -7182,7 +7182,6 @@ def test_local_whisper_batches_cover_the_recording_and_keep_word_times(monkeypat
 @pytest.mark.parametrize('failure', [None, 'value', 'fatal'])
 def test_local_recognizer_isolates_libraries_reuses_model_and_cleans_up(tmp_path, monkeypatch, failure):
     import os
-    import psutil
     from karaoke.local_asr import isolated_recognizer
     (tmp_path/'faster_whisper.py').write_text('''
 import os, sys
@@ -7220,7 +7219,8 @@ class BatchedInferencePipeline:
         if failure != 'fatal':
             second = recognize(np.ones(8000, dtype=np.float32))
             assert second['text'] == f'{pid}:2:8000:8000.0'
-    assert not psutil.pid_exists(pid)
+    with pytest.raises(ChildProcessError):
+        os.waitpid(pid, os.WNOHANG)
     assert not list(tmp_path.glob('recognizer-*'))
 
 
