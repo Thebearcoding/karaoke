@@ -1,4 +1,4 @@
-"""Render stationary, readable lyrics with word tint or a discreet underline."""
+"""Render stationary lyrics with a left-to-right word sweep or an underline."""
 import argparse
 from bisect import bisect_right
 import json
@@ -93,7 +93,7 @@ class Caption:
             if instant >= hold_end:
                 return self.base
         key = (mode, index)
-        sweeping = mode == 'word' and unit.get('timing_source') == 'linear_fallback'
+        sweeping = mode == 'word'
         cacheable = not sweeping or instant >= unit['end']
         if cacheable and key in self.cache:
             return self.cache[key]
@@ -104,8 +104,9 @@ class Caption:
             draw = ImageDraw.Draw(area)
             if sweeping:
                 selected = [c for c in chars if unit['first'] <= c['index'] < unit['stop']]
-                remaining = sum(c['right']-c['left']+4 for c in selected) * min(
-                    1., max(0., (instant-unit['start'])/(unit['end']-unit['start'])))
+                duration = unit['end']-unit['start']
+                fraction = min(1., max(0., (instant-unit['start'])/duration)) if duration > 0 else 1.
+                remaining = sum(c['right']-c['left']+4 for c in selected) * fraction
             for char in chars:
                 right = char['right']+2
                 if sweeping and unit['first'] <= char['index'] < unit['stop']:
@@ -287,7 +288,7 @@ def main():
         'shown_lines': sorted(i+1 for i in shown),
         'display_pages': pagination,
         'decode_check': 'pending_final_mux' if args.video_only else 'passed', 'probe': probe,
-        'motion': 'Fixed text positions; hard line cuts; measured onsets with local linear playback fallback',
+        'motion': 'Fixed text positions; hard line cuts; linear left-to-right fill within each existing timing unit',
         'next_line_enabled': args.next_line,
         'read_ahead_strategy': 'Current and next lines visible; advance at sung onsets, with white preparation during long-gap countdowns',
         'song_intro': intro,

@@ -4445,7 +4445,8 @@ def test_caption_outline_preserves_antialiasing_and_canvas_edges(radius):
             ImageFilter.MaxFilter(2*radius+1)).tobytes()
 
 
-def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatch):
+@pytest.mark.parametrize('timing_source', [None, 'cross_model_phonemes', 'linear_fallback'])
+def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatch, timing_source):
     from PIL import Image
     import karaoke.render_lyric_progress as renderer
     def caption(text, *, layout_out, **kwargs):
@@ -4458,21 +4459,27 @@ def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatc
     monkeypatch.setattr(renderer, 'caption_image', caption)
     cue = dict(text='甲乙丙丁', units=[
         dict(first=0, stop=1, start=1., end=2.),
-        dict(first=1, stop=3, start=2., end=4., timing_source='linear_fallback'),
+        dict(first=1, stop=3, start=2., end=4., **({'timing_source':timing_source} if timing_source else {})),
         dict(first=3, stop=4, start=5., end=6.),
     ])
     caption = renderer.Caption(cue, 'cinema_focus', 'Chinese')
     white, amber = (255, 255, 255, 255), caption.color+(255,)
     assert caption.frame(.9, 'word').getpixel((5, 5)) == white
-    assert caption.frame(1., 'word').getpixel((5, 5)) == amber
+    assert caption.frame(1., 'word').getpixel((5, 5)) == white
+    partial = caption.frame(1.5, 'word')
+    assert partial.getpixel((5, 5)) == amber and partial.getpixel((12, 5)) == white
+    assert caption.frame(1.99, 'word').getpixel((12, 5)) == amber
     assert caption.frame(2., 'word').getpixel((25, 5)) == white
     middle = caption.frame(3., 'word')
     assert middle.getpixel((25, 5)) == amber and middle.getpixel((5, 30)) == white
     assert caption.frame(4., 'word').getpixel((5, 30)) == amber
     assert caption.frame(4.9, 'word').getpixel((25, 30)) == white
-    assert caption.frame(5., 'word').getpixel((25, 30)) == amber
+    assert caption.frame(5., 'word').getpixel((25, 30)) == white
+    assert caption.frame(6., 'word').getpixel((25, 30)) == amber
     # Seeking back must not reuse the cached fully highlighted frame.
     assert caption.frame(2., 'word').getpixel((25, 5)) == white
+    assert caption.frame(3., 'word').tobytes() == middle.tobytes()
+    assert caption.frame(1.5, 'word').tobytes() == partial.tobytes()
     assert caption.frame(3., 'static').getpixel((5, 5)) == white
     assert len(caption.cache) <= 3
 
