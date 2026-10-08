@@ -1807,7 +1807,8 @@ def test_published_lyrics_strip_only_leading_metadata_identity(title, artist, he
 @pytest.mark.parametrize('credit', ['音频助理', '音頻工程師', '录音助理', 'Audio Engineer', 'Assistant Engineer',
     '配唱制作人', '人聲錄音師', '童声', '合唱', '和音', '伴唱编配', '主唱指导',
     '編曲 Arrangement', '制作人 Producer', '和声编写 Backing Vocal Arrangement',
-    '配唱录音师 Recording Engineer (Vocals)', '母带后期处理工程师 Mastering Engineer', 'Music Production 音乐制作', '音乐制作 Music Production'])
+    '配唱录音师 Recording Engineer (Vocals)', '母带后期处理工程师 Mastering Engineer', 'Music Production 音乐制作', '音乐制作 Music Production',
+    '低音吉他', '器樂', 'Instrumental', '音乐制作助理', '录音工作室', '混音工作室', '母带后期制作人', '编曲协力'])
 def test_translated_production_footer_cannot_change_the_lyric_language(credit):
     from karaoke.lyric_lookup import published_candidate
     body = ['Stars above the quiet shore', 'I will sing once more']

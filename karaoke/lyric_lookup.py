@@ -258,11 +258,11 @@ def text_language(text):
 def published_lyric_lines(text, title, artists=()):
     """Keep published phrases intact; remove only explicit credit metadata."""
     converter = OpenCC('t2s')
-    role = (r'歌名|歌曲|词|曲|词曲|作词|作曲|编曲|演唱|专辑|发行日|音乐制作|制作人|制作助理|监制|'
-        r'弦乐(?:编写|编曲)?|(?:人声|配唱|伴唱|主唱|合唱|童声|合声|和声|和音)(?:编写|编曲|编配|制作|录音)?(?:人|师|指导)?|钢琴|吉他|贝斯|鼓|'
-        r'(?:第[一二三四\d]+)?(?:小提琴|中提琴|大提琴)|录音(?:师|助理|室)?|混音(?:师|室)?|母带(?:后期处理)?(?:工程师|录音室)?|音频(?:助理|工程师)|'
+    role = (r'歌名|歌曲|词|曲|词曲|作词|作曲|编曲(?:协力)?|演唱|专辑|发行日|音乐制作(?:人|助理)?|制作人|制作助理|监制|'
+        r'弦乐(?:编写|编曲)?|(?:人声|配唱|伴唱|主唱|合唱|童声|合声|和声|和音)(?:编写|编曲|编配|制作|录音)?(?:人|师|指导)?|钢琴|(?:低音)?吉他|贝斯|鼓|器乐|'
+        r'(?:第[一二三四\d]+)?(?:小提琴|中提琴|大提琴)|录音(?:师|助理|(?:工作)?室)?|混音(?:师|(?:工作)?室)?|母带(?:后期(?:处理|制作))?(?:人|工程师|录音室)?|音频(?:助理|工程师)|'
         r'title|artist|album|composer|lyricist|producer|lyrics|music(?: production)?|written by|produced by|'
-        r'guitar|bass|drums|piano|strings|recorded by|mixed by|mastered by|audio engineer|assistant engineer|'
+        r'guitar|bass|drums|piano|strings|instrumental|recorded by|mixed by|mastered by|audio engineer|assistant engineer|'
         r'arrangement|(?:backing |lead )?vocal(?: arrangement)?|(?:recording|mixing|mastering)(?: engineer| studio)?(?: \(vocals\))?|'
         r'production assistant|[OS]P|O[AC](?:\s*/\s*O[AC])?|publisher|copyright')
     # A translated role is still metadata: "编曲 Arrangement: ...".
