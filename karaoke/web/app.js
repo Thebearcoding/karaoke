@@ -11,7 +11,7 @@ try { savedPlayback = JSON.parse(sessionStorage.getItem('karaokePlayback')); } c
 const playback = new LocalPlayback(savedPlayback);
 let roomState = {entries:[], revision:0}, viewRevision = 0, lastPlaybackSave = 0;
 const stages = {download:'下载音频', download_video:'下载视频', verify_video:'校验视频', decode_audio:'提取音频', decode_native:'准备音频母版', separate_music:'分离伴奏', separate_lead:'分离主唱', package_two_stems:'整理音轨', package_three_stems:'整理音轨', resample_vocals:'整理人声', transcribe:'识别歌词', prepare_lyrics:'整理歌词', align_words:'对齐歌词', align_phonemes:'对齐起唱时间', align_repeats:'检查重复段落', align_context:'校准字幕', validate_timing:'核对起唱时间', render:'生成字幕画面', mux_video:'合成字幕 MV'};
-let state = {entries:[], current_id:null, playing:false, position:0, started_at:null, mix:'karaoke', levels:{instrumental:1,backing_vocals:1,lead_vocals:0}, revision:0};
+let state = {entries:[], current_id:null, playing:false, position:0, started_at:null, levels:{instrumental:1,backing_vocals:1,lead_vocals:0}, revision:0};
 let library = [], filter = 'ready', view = 'library', clockOffset = 0, readySent = null, loading = false, loadError = '', seeking = false;
 let toastTimer, librarySignature = '', queueSignature = '', historySignature = '', discoverySignature = '';
 let queueTab = 'upcoming';
@@ -31,15 +31,11 @@ function renderRange(input) {
 }
 
 function renderMixer() {
-  const levels = state.levels;
-  player.setLevels(levels);
-  document.querySelectorAll('[data-level]').forEach(input => {
-    input.value = levels[input.dataset.level];
-    renderRange(input);
-    const percentage = `${Math.round(Number(input.value)*100)}%`;
-    $(`value-${input.dataset.level}`).textContent = percentage;
-    input.setAttribute('aria-valuetext', percentage);
-  });
+  player.setLevels(state.levels);
+  const enabled = state.levels.lead_vocals > 0;
+  $('lead-state').textContent = enabled ? '开' : '关';
+  $('lead-toggle').setAttribute('aria-pressed', String(enabled));
+  $('lead-toggle').setAttribute('aria-label', enabled ? '关闭主唱' : '开启主唱');
 }
 
 function renderStorage() {
@@ -78,7 +74,7 @@ async function request(path, body) {
 
 async function command(action, extra = {}) {
   try {
-    if (['play','pause','seek','next','select','mix','levels','pitch','ready','buffering'].includes(action) ||
+    if (['play','pause','seek','next','select','lead','pitch','ready','buffering'].includes(action) ||
         (action === 'remove' && extra.entry_id === state.current_id)) {
       if (extra.revision !== undefined && extra.revision !== state.revision) return null;
       const {finished} = playback.command(action === 'remove' ? 'next' : action, extra, state.entries);
@@ -97,7 +93,7 @@ async function command(action, extra = {}) {
   } catch (error) { toast(error.message); return null; }
 }
 
-function switchView(next) {
+function switchView(next, {scroll = true} = {}) {
   view = next;
   const mobile = matchMedia('(max-width:1100px)').matches;
   $('library-view').hidden = next !== 'library';
@@ -109,6 +105,7 @@ function switchView(next) {
     button.classList.toggle('selected', button.dataset.view === view);
     button.setAttribute('aria-current', button.dataset.view === view ? 'page' : 'false');
   });
+  if (scroll) window.scrollTo(0, 0);
   navigation.save();
 }
 
@@ -128,7 +125,7 @@ function restoreView(saved) {
   document.querySelectorAll('[data-filter]').forEach(button => button.classList.toggle('selected', button.dataset.filter === filter));
   renderLibrary();
   videoSearch.restore(saved.search);
-  switchView(saved.view || 'library');
+  switchView(saved.view || 'library', {scroll:false});
   requestAnimationFrame(() => window.scrollTo(0, saved.scroll || 0));
 }
 
@@ -448,6 +445,7 @@ async function openQueuedSong(id) {
 }
 
 function previewVideo(song) {
+  if (current() && queuePosition(song, [current()])) { switchView('player'); return; }
   previewSong = song;
   $('preview-title').textContent = song.title;
   $('preview-source').href = song.url;
@@ -548,8 +546,8 @@ function renderQueue() {
     const active = entry.id === state.current_id;
     const status = entry.status === 'running' ? '' : `<span class="entry-status ${entry.status === 'queued' ? 'preparing' : ''}">${escape(statusText(entry))}</span>`;
     return `<article class="queue-entry ${active ? 'current' : ''}" data-entry="${escape(entry.id)}"><span class="entry-number">${active && state.playing ? '♫' : String(i+1).padStart(2,'0')}</span>
-      ${entry.poster ? `<img class="entry-art" src="${escape(entry.poster)}" alt="">` : `<span class="entry-art">♪</span>`}
-      <div class="entry-info"><h3 class="entry-title">${escape(entry.title)}</h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || 'YouTube 视频')}</p>${entry.status === 'failed' ? '' : preparationElapsedHTML(entry) || status}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : entry.status === 'failed' ? `<p class="entry-error">${escape(statusText(entry))} <button data-action="retry">重试</button></p>` : ''}${entry.status === 'completed' ? `<button class="queue-sing" data-action="sing" aria-label="${active && state.playing ? '回到播放' : '开始唱'}：${escape(entry.title)}">${icon('play')}${active && state.playing ? '回到播放' : '开始唱'}</button>` : ''}</div>
+      <button class="entry-cover" data-action="preview" aria-label="${active ? '查看播放' : '预览'}：${escape(entry.title)}">${entry.poster ? `<img class="entry-art" src="${escape(entry.poster)}" alt="">` : `<span class="entry-art">♪</span>`}</button>
+      <div class="entry-info"><h3 class="entry-title"><button data-action="preview">${escape(entry.title)}</button></h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || 'YouTube 视频')}</p>${entry.status === 'failed' ? '' : preparationElapsedHTML(entry) || status}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : entry.status === 'failed' ? `<p class="entry-error">${escape(statusText(entry))} <button data-action="retry">重试</button></p>` : ''}${entry.status === 'completed' ? `<button class="queue-sing" data-action="sing" aria-label="${active && state.playing ? '回到播放' : '开始唱'}：${escape(entry.title)}">${icon('play')}${active && state.playing ? '回到播放' : '开始唱'}</button>` : ''}</div>
       <details class="entry-menu"><summary aria-label="操作：${escape(entry.title)}">${icon('more')}</summary><div class="entry-tools">${!active ? `<button data-action="up" aria-label="上移：${escape(entry.title)}" ${i === 0 ? 'disabled' : ''}>${icon('up')}上移</button><button data-action="down" aria-label="下移：${escape(entry.title)}" ${i === state.entries.length-1 ? 'disabled' : ''}>${icon('down')}下移</button>` : ''}<button data-action="remove" aria-label="移除：${escape(entry.title)}">${icon('trash')}移除</button></div></details></article>`;
   }).join('');
 }
@@ -599,10 +597,6 @@ function updateTransport() {
   $('pitch-value').setAttribute('aria-label', `当前${pitch ? `${pitch > 0 ? '升' : '降'} ${Math.abs(pitch)} 个半音` : '原调'}`);
   $('pitch-down').disabled = pitch <= -6;
   $('pitch-up').disabled = pitch >= 6;
-  document.querySelectorAll('[data-mix]').forEach(button => {
-    button.classList.toggle('selected', button.dataset.mix === state.mix);
-    button.setAttribute('aria-pressed', String(button.dataset.mix === state.mix));
-  });
   renderMixer();
   updateCover();
 }
@@ -738,6 +732,14 @@ async function togglePlay() {
 }
 
 document.querySelectorAll('[data-view]').forEach(button => button.onclick = () => switchView(button.dataset.view));
+document.querySelector('.brand').onclick = event => {
+  event.preventDefault();
+  navigation.push();
+  $('song-input').value = ''; $('title-input').value = '';
+  filter = 'ready'; videoSource = 'songs'; searchOrder = 'relevance'; catalogueSelection = null;
+  clearVideoSearch(); renderLibrary(); switchView('library');
+  $('song-input').focus({preventScroll:true});
+};
 document.querySelectorAll('[data-filter]').forEach(button => button.onclick = () => {
   filter = button.dataset.filter;
   document.querySelectorAll('[data-filter]').forEach(b => b.classList.toggle('selected', b === button));
@@ -836,14 +838,13 @@ $('queue-list').onclick = async event => {
   const id = button.closest('[data-entry]').dataset.entry;
   const action = button.dataset.action;
   if (action === 'sing') return openQueuedSong(id);
-  if (action === 'select' && !(await activate())) return;
+  if (action === 'preview') return previewVideo(state.entries.find(entry => entry.id === id));
   if (action === 'up' || action === 'down') {
     const order = state.entries.map(e => e.id), index = order.indexOf(id), target = index + (action === 'up' ? -1 : 1);
     [order[index],order[target]] = [order[target],order[index]];
     await command('reorder', {order, revision:roomState.revision});
   } else {
     await command(action, {entry_id:id});
-    if (action === 'select') switchView('player');
   }
 };
 for (const button of document.querySelectorAll('[data-queue-tab]')) {
@@ -866,12 +867,12 @@ $('history-list').onclick = async event => {
   finally { button.disabled = false; }
 };
 $('play-toggle').onclick = togglePlay;
-for (const [id, step] of [['pitch-down', -1], ['pitch-up', 1], ['pitch-reset', null]]) {
+for (const [id, step] of [['pitch-down', -1], ['pitch-up', 1]]) {
   $(id).onclick = () => {
     pitchRequest = pitchRequest.then(async () => {
       if (!(await activate())) return;
       if (player.pitchError) { toast(player.pitchError.message); return; }
-      const pitch = step === null ? 0 : Math.max(-6, Math.min(6, (state.pitch_semitones || 0) + step));
+      const pitch = Math.max(-6, Math.min(6, (state.pitch_semitones || 0) + step));
       await command('pitch', {pitch_semitones:pitch});
     });
   };
@@ -887,8 +888,7 @@ async function nextSong() {
 document.querySelectorAll('[data-next]').forEach(button => button.onclick = nextSong);
 $('now-song').onclick = () => switchView('player');
 $('transport-restart').onclick = () => command('seek', {position:0});
-document.querySelectorAll('[data-mix]').forEach(button => button.onclick = () => command('mix', {mix:button.dataset.mix}));
-document.querySelectorAll('[data-level]').forEach(input => input.oninput = () => command('levels', {levels:{[input.dataset.level]:Number(input.value)}}));
+$('lead-toggle').onclick = () => command('lead', {enabled:state.levels.lead_vocals === 0});
 $('storage-form').onsubmit = async event => {
   event.preventDefault();
   $('storage-save').disabled = true;
@@ -922,17 +922,11 @@ async function fullscreen() {
 }
 $('fullscreen').onclick = fullscreen;
 $('exit-fullscreen').onclick = fullscreen;
-// Move the same controls so fullscreen keeps their handlers and state.
-const seekRow = $('seek').closest('.seek-row');
-const seekHome = seekRow.parentElement;
-const transportTools = $('transport-tools'), toolsHome = transportTools.parentElement;
-const stemMixer = $('stem-mixer'), mixerHome = stemMixer.parentElement;
+// One control panel, including one timeline, in both normal and fullscreen views.
+const transport = document.querySelector('.transport'), transportHome = transport.parentElement;
 document.addEventListener('fullscreenchange', () => {
   const fullscreen = document.fullscreenElement === $('player-stage');
-  const target = fullscreen ? $('fullscreen-progress') : seekHome;
-  target.append(seekRow);
-  (fullscreen ? $('screen-tools') : toolsHome).prepend(transportTools);
-  (fullscreen ? $('player-stage') : mixerHome).append(stemMixer);
+  (fullscreen ? $('player-stage') : transportHome).append(transport);
 });
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') document.querySelectorAll('.entry-menu[open]').forEach(menu => { menu.open = false; menu.querySelector('summary').focus(); });
@@ -942,7 +936,7 @@ document.addEventListener('keydown', event => {
   if (event.key.toLowerCase() === 'n') nextSong();
   if (event.key.toLowerCase() === 'f') fullscreen();
 });
-window.addEventListener('resize', () => switchView(view));
+window.addEventListener('resize', () => switchView(view, {scroll:false}));
 for (const [selector, variable] of [['.topbar', '--header-height'], ['.transport', '--transport-height']]) {
   new ResizeObserver(([entry]) => document.documentElement.style.setProperty(variable, `${entry.target.getBoundingClientRect().height}px`)).observe(document.querySelector(selector));
 }

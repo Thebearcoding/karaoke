@@ -4,11 +4,6 @@ export function isStaleRoomSnapshot(incoming, current) {
     (incoming.revision === current.revision && incoming.server_time < current.server_time);
 }
 
-const presets = {
-  instrumental:{instrumental:1, backing_vocals:0, lead_vocals:0},
-  karaoke:{instrumental:1, backing_vocals:1, lead_vocals:0},
-  original:{instrumental:1, backing_vocals:1, lead_vocals:1},
-};
 const bounded = (value, min, max, fallback) => Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
 
 // Only the playlist and preparation results belong to the room. Transport is
@@ -17,16 +12,10 @@ export class LocalPlayback {
   constructor(saved = {}) {
     this.entry = saved?.entry?.id && saved.entry.job_id ? saved.entry : null;
     this.state = {playing:false, position:bounded(saved?.position, 0, Infinity, 0), started_at:null,
-      levels:{...presets.karaoke}, pitch_semitones:Math.round(bounded(saved?.pitch_semitones, -6, 6, 0))};
-    for (const key in this.state.levels) this.state.levels[key] = bounded(saved?.levels?.[key], 0, 1, this.state.levels[key]);
-    this.updateMix();
+      levels:{instrumental:1, backing_vocals:1, lead_vocals:Number(bounded(saved?.levels?.lead_vocals, 0, 1, 0) > 0)},
+      pitch_semitones:Math.round(bounded(saved?.pitch_semitones, -6, 6, 0))};
     this.playedAt = saved?.played_at || null;
     this.finished = new Set(saved?.finished_ids || []);
-  }
-
-  updateMix() {
-    this.state.mix = Object.keys(presets).find(name => Object.keys(presets[name]).every(
-      key => presets[name][key] === this.state.levels[key])) || 'custom';
   }
 
   reconcile(room) {
@@ -58,7 +47,7 @@ export class LocalPlayback {
 
   command(action, extra, entries) {
     const state = this.state;
-    if (extra.entry_id && !['select','mix','levels','pitch'].includes(action) && extra.entry_id !== this.entry?.id) return {};
+    if (extra.entry_id && !['select','lead','pitch'].includes(action) && extra.entry_id !== this.entry?.id) return {};
     this.markPlayed();
     let finished;
     if (action === 'next' || action === 'select') {
@@ -67,10 +56,8 @@ export class LocalPlayback {
       if (this.entry && (action === 'next' || this.playedAt)) finished = {entry_id:this.entry.id, playback_started_at:this.playedAt};
       if (finished) this.finished.add(finished.entry_id);
       this.select(target || null, true);
-    } else if (action === 'mix') {
-      state.levels = {...presets[extra.mix]}; this.updateMix();
-    } else if (action === 'levels') {
-      Object.assign(state.levels, extra.levels); this.updateMix();
+    } else if (action === 'lead') {
+      state.levels.lead_vocals = Number(Boolean(extra.enabled));
     } else if (action === 'pitch') {
       state.pitch_semitones = extra.pitch_semitones;
     } else if (this.entry) {

@@ -60,7 +60,7 @@ test('two devices play, pause, seek and mix independently across shared queue up
     }
     const desktopSources=[...desktop.sources];
     assert.equal(desktopSources.length,3); assert.equal(mobile.sources.length,3);
-    command(phone,'seek',{position:9}); command(phone,'ready'); command(phone,'levels',{levels:{lead_vocals:.4}});
+    command(phone,'seek',{position:9}); command(phone,'ready'); command(phone,'lead',{enabled:true});
     await mobile.apply(snapshot(phone),0);
     command(phone,'pause'); await mobile.apply(snapshot(phone),0);
     // Even a legacy client changing server transport is only a queue update here.
@@ -68,7 +68,7 @@ test('two devices play, pause, seek and mix independently across shared queue up
     await desktop.apply(snapshot(computer),0);
     assert.equal(computer.state.playing,true); assert.equal(computer.state.position,0);
     assert.equal(computer.state.levels.lead_vocals,0);
-    assert.equal(phone.state.position,9); assert.equal(phone.state.levels.lead_vocals,.4);
+    assert.equal(phone.state.position,9); assert.equal(phone.state.levels.lead_vocals,1);
     assert.ok(desktopSources.every(s=>!s.stopped)); assert.deepEqual(desktop.sources,desktopSources);
     assert.equal(mobile.sources.length,0);
     command(phone,'select',{entry_id:'two'});
@@ -108,16 +108,33 @@ test('browser refresh restores only its own song, position and mix, paused until
   const room={entries:[{...song,status:'completed'},{...song,id:'two',status:'completed'}]};
   const computer=new LocalPlayback(); computer.reconcile(room);
   computer.command('select',{entry_id:'two'},room.entries); computer.command('ready',{},room.entries);
-  computer.command('mix',{mix:'original'},room.entries); computer.command('pitch',{pitch_semitones:2},room.entries);
+  computer.command('lead',{enabled:true},room.entries); computer.command('pitch',{pitch_semitones:2},room.entries);
   now+=7;
   const restored=new LocalPlayback(JSON.parse(JSON.stringify(computer.save())));
   restored.reconcile({...room,playing:true,position:99,current_id:'one'});
   assert.equal(restored.entry.id,'two'); assert.equal(restored.position(),7);
-  assert.equal(restored.state.mix,'original'); assert.equal(restored.state.pitch_semitones,2);
+  assert.deepEqual(restored.state.levels,{instrumental:1,backing_vocals:1,lead_vocals:1}); assert.equal(restored.state.pitch_semitones,2);
   assert.equal(restored.state.playing,false); assert.equal(restored.state.started_at,null);
   assert.equal(restored.command('next',{entry_id:'two'},room.entries).finished.playback_started_at,100);
   const other=new LocalPlayback(); other.reconcile(room);
-  assert.equal(other.entry.id,'one'); assert.equal(other.position(),0); assert.equal(other.state.mix,'karaoke');
+  assert.equal(other.entry.id,'one'); assert.equal(other.position(),0); assert.equal(other.state.levels.lead_vocals,0);
+});
+
+test('lead toggle restores old mixes with backing enabled and never restarts the audio', async () => {
+  const entries=[{...song,status:'completed'}];
+  const local=new LocalPlayback({levels:{instrumental:0,backing_vocals:.2,lead_vocals:.4}}), p=setup();
+  local.reconcile({entries}); await p.unlock(); await p.load(local.entry);
+  local.command('play',{},entries); local.command('ready',{},entries);
+  await p.apply(local.reconcile({entries}),0);
+  const sources=[...p.sources], position=p.video.currentTime;
+  assert.deepEqual(p.gains.map(g=>g.gain.value),[1,1,1]);
+  for (const enabled of [false,true,false]) {
+    local.command('lead',{enabled},entries); await p.apply(local.reconcile({entries}),0);
+    assert.deepEqual(p.gains.map(g=>g.gain.value),[1,1,Number(enabled)]);
+    assert.deepEqual(p.sources,sources); assert.equal(p.video.currentTime,position);
+    assert.deepEqual(new LocalPlayback(local.save()).state.levels,local.state.levels);
+  }
+  p.clear();
 });
 
 test('local readiness, count-in and stale buffering never start or rewind the wrong clock', t => {
