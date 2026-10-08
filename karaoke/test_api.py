@@ -1805,7 +1805,9 @@ def test_published_lyrics_strip_only_leading_metadata_identity(title, artist, he
 
 
 @pytest.mark.parametrize('credit', ['音频助理', '音頻工程師', '录音助理', 'Audio Engineer', 'Assistant Engineer',
-    '配唱制作人', '人聲錄音師', '童声', '合唱', '和音', '伴唱编配', '主唱指导'])
+    '配唱制作人', '人聲錄音師', '童声', '合唱', '和音', '伴唱编配', '主唱指导',
+    '編曲 Arrangement', '制作人 Producer', '和声编写 Backing Vocal Arrangement',
+    '配唱录音师 Recording Engineer (Vocals)', '母带后期处理工程师 Mastering Engineer'])
 def test_translated_production_footer_cannot_change_the_lyric_language(credit):
     from karaoke.lyric_lookup import published_candidate
     body = ['Stars above the quiet shore', 'I will sing once more']
@@ -1814,6 +1816,13 @@ def test_translated_production_footer_cannot_change_the_lyric_language(credit):
     lines, report = published_candidate([row], dict(title='Evening', artist='Singer'), '')
     assert lines == body and report['language'] == 'English'
     assert report['excluded_credit_lines'] == [3, 4]
+
+
+def test_bilingual_credits_do_not_consume_lyric_prose_or_change_the_body():
+    from karaoke.lyric_lookup import published_lyric_lines
+    body = ['Music keeps us moving: through the night', '鼓 beat tonight: 我们继续唱']
+    text = '\n'.join(['编曲 Arrangement：A Person', *body, '制作人 Producer：Someone'])
+    assert published_lyric_lines(text, 'Evening') == (body, [1, 4])
 
 
 @pytest.mark.parametrize('placeholder', ['[00:00.00]纯音乐，请欣赏', '純音樂，請您欣賞',
@@ -2457,6 +2466,30 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
         for t,s in zip(lines,starts)]))
     assert recover_with_local_asr(good,lines,np.zeros(12*16000),'English',
         lambda *a:pytest.fail('A complete alignment ran ASR'),align) is good
+
+
+def test_missing_recognition_uses_original_audio_before_spending_alignment_retries():
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines, starts = ['alpha', 'bravo', 'charlie'], [1.,4.,8.]
+    segments = [dict(text=t,start=s,end=s+.8,words=[dict(word=t,start=s,end=s+.8)])
+                for t,s in zip(lines,starts)]
+    segments[1]['words'][0]['end'] = 4.
+    block = dict(range=[0,3],context=[0,3],source_range=[0.,12.],result=dict(segments=segments))
+    calls=[]
+    def original(begin,end):
+        calls.append((begin,end))
+        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+.8-begin)
+                                         for t,s in zip(lines,starts)])])
+    def align(begin,end,text,**options):
+        assert options['detect_language']
+        return dict(segments=[dict(text=t,words=[dict(word=t,start=s-begin,end=s+.8-begin)])
+                              for t,s in zip(lines,starts)])
+    result = recover_with_local_asr(block,lines,np.zeros(12*16000),'English',
+        lambda *args:dict(segments=[]),align,recognize_original=original)
+    assert len(calls)==1
+    assert result['result']['segments'][1]['words']==[dict(word='bravo',start=4.,end=4.8)]
+    assert result['asr_localizations'][0]['recognition_source']=='original'
+    assert result['asr_localizations'][1]['recognition']==dict(segments=[])
 
 
 @pytest.mark.parametrize('support', ['agree', 'disagree', 'unavailable', 'original', 'original_wrong', 'original_outside'])
@@ -4187,11 +4220,15 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
         assert calls == ([] if mode=='credits_only' else [primary,alternative] if mode=='all_fail' else [primary])
 
 
-def test_observed_missing_refrain_selects_complete_published_source(tmp_path, monkeypatch):
+@pytest.mark.parametrize('complete_source', [True, False])
+def test_observed_missing_refrain_selects_complete_published_source(tmp_path, monkeypatch, complete_source):
     refrain = ['glowing red horizon', 'bright blue ocean']
     short, complete = ['opening',*refrain,'closing'], ['opening',*refrain,*refrain,'closing']
     packet = dict(candidate_texts=[short,complete], crosscheck=dict(selected_source=0,
         eligible_sources=[0,1], sources=[dict(provider=p,language='English') for p in ('short','complete')]))
+    if not complete_source:
+        packet = dict(candidate_texts=[short], crosscheck=dict(selected_source=0,
+            eligible_sources=[0], sources=[dict(provider='short',language='English')]))
     lyrics = dict(title='Song',artist='Singer',language='English',lines=short,
         provenance=dict(kind='online_lyric_text',route='lyrics_first',lyric_lookup=packet))
     pipeline = Pipeline(dict(url=URL),tmp_path)
@@ -4218,6 +4255,15 @@ def test_observed_missing_refrain_selects_complete_published_source(tmp_path, mo
     rejected=json.loads((tmp_path/'quality.json').read_text())['lyric_source_fallback']['rejected']
     saved=json.loads((tmp_path/rejected[0]['diagnostics']/'localization-validation.json').read_text())
     assert saved[0]['missing_repetitions'][0]['source_range']==[1,3]
+    if not complete_source:
+        assert selected['provenance']['repetitions'][0]['source_lines']==refrain
+        assert json.loads((tmp_path/'quality.json').read_text())['restored_repetitions']==1
+        # Keeping the copied words is insufficient: they must be aligned to
+        # the separately heard repetition, not reused at the first occurrence.
+        wrong=json.loads((tmp_path/'cues.json').read_text())
+        wrong[3].update(start=3.,end=3.8)
+        with pytest.raises(StageFailure,match='重复唱段'):
+            pipeline.validate_localization(selected,15.,wrong)
 
 
 @pytest.mark.parametrize('observed', ['repeat', 'unrelated', 'spelling_noise'])
@@ -6101,13 +6147,17 @@ def test_repetition_recovery_rejects_unsupported_evidence(invalid, monkeypatch):
 
 
 @pytest.mark.parametrize('split_line', [False, True])
-def test_repeated_passage_detection_ignores_layout_and_distant_outro(split_line):
+@pytest.mark.parametrize('padding', ['distant', 'continuous'])
+def test_repeated_passage_detection_ignores_layout_and_unrelated_padding(split_line, padding):
     from karaoke.song_sources import missing_repetitions
     refrain = ['Golden lanterns in the window', 'Every sparrow flies back home']
     lines = ['Opening', *(refrain if split_line else [' '.join(refrain)])]
     cues = [dict(text=text,start=1.+i,end=1.8+i,status='candidate') for i,text in enumerate(lines)]
     words = [dict(word=text,start=10.+i,end=10.8+i) for i,text in enumerate(refrain)]
-    words.append(dict(word='Thank you for watching this presentation', start=28.,end=29.))
+    if padding == 'continuous':
+        words.insert(0, dict(word='The presenter is discussing something unrelated', start=9.,end=9.8))
+    words.append(dict(word='Thank you for watching this presentation',
+                      start=28. if padding == 'distant' else 12., end=29. if padding == 'distant' else 13.))
     found = missing_repetitions(lines,cues,words,'English',30.)
     assert len(found)==1 and found[0]['source_range']==[1,len(lines)]
     assert found[0]['boundary_anchors'][0]['start']==10.

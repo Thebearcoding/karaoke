@@ -23,6 +23,9 @@ from karaoke.tools.soak import ProbeSession, record_failure, run_probe, save, st
 def soft_failures(result, prepared):
     quality = result.get('quality', {})
     events = []
+    if quality.get('restored_repetitions'):
+        events.append(dict(module='lyrics', code='lyric_repetitions_restored',
+                           passages=quality['restored_repetitions']))
     fallback = quality.get('playback_fallback')
     if fallback and fallback['subtitle_mode'] != 'unavailable':
         events.append(dict(module='alignment',

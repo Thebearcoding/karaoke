@@ -37,9 +37,20 @@ def _match_words(lines, words, units):
         # asking edit distance to match the incomplete material between them.
         # A repeated phrase is only unambiguous when every occurrence was heard.
         positions, offset = {}, 0
-        for key in keys:
+        for line, key in zip(lines, keys):
             if key:
                 positions.setdefault(tuple(key), []).append(offset)
+            # Parentheses commonly contain a simultaneous second voice. A
+            # recognizer may hear one complete clause without hearing both.
+            # Keep the full text, but allow independently observed clauses to
+            # bound the ordinary edit-distance match around them.
+            if re.search(r'[（(][^()（）]+[)）]', line):
+                for part in re.finditer(r'[^()（）]+', line):
+                    begin = len(units(line[:part.start()]))
+                    end = len(units(line[:part.end()]))
+                    clause = tuple(key[begin:end])
+                    if clause and clause != tuple(key):
+                        positions.setdefault(clause, []).append(offset+begin)
             offset += len(key)
         candidates = []
         for key, starts in positions.items():
@@ -54,6 +65,11 @@ def _match_words(lines, words, units):
             if len(hits) == len(starts):
                 candidates.extend((start, start+len(key), hit, hit+len(key))
                                   for start, hit in zip(starts, hits))
+        # A fully heard line already includes its clauses. Remove only nested
+        # copies of that same correspondence before checking real conflicts.
+        candidates = [a for a in candidates if not any(a != b and
+            b[0] <= a[0] and a[1] <= b[1] and a[0]-b[0] == a[2]-b[2] and
+            a[1]-b[0] == a[3]-b[2] for b in candidates)]
         # Conflicting exact matches can come from dialogue or a changed verse
         # order. Neither is an independent boundary for the other.
         boundaries = [a for a in sorted(candidates) if all(a == b or
@@ -112,6 +128,13 @@ def _match_words(lines, words, units):
                      'source': 'asr_rough_anchor'})
         if any(a == position and b == position+len(key) for a, b, _, _ in boundaries):
             cues[-1]['match_basis'] = 'complete_phrase'
+        else:
+            clauses = [(c,d) for a,b,c,d in boundaries
+                       if position <= a < b <= position+len(key) and b-a >= len(key)/2]
+            if clauses:
+                cues[-1].update(match_basis='complete_clause', observed_range=[
+                    min(words[owners[c]]['start'] for c,d in clauses),
+                    max(words[owners[d-1]]['end'] for c,d in clauses)])
         position += len(key)
     return cues
 
@@ -158,7 +181,7 @@ def anchors_from_words(lines, words, language, allow_missing=False):
 def observed_context(lines, words, language, first, stop):
     """Include complete phrases heard outside a stale predicted lyric slice."""
     anchors = anchors_from_words(lines, words, language, allow_missing=True)
-    heard = [i for i,a in enumerate(anchors) if a.get('match_basis') == 'complete_phrase'
+    heard = [i for i,a in enumerate(anchors) if a.get('match_basis') in ('complete_phrase', 'complete_clause')
              and a['status'] == 'candidate']
     return min([first,*heard]), max([stop,*(i+1 for i in heard)])
 
@@ -173,7 +196,7 @@ def timeline_support(cues, words, language):
     anchors = anchors_from_words([c['text'] for c in cues], words, language, allow_missing=True)
     checked, conflicts = [], []
     for i, (cue, anchor) in enumerate(zip(cues, anchors), 1):
-        if anchor.get('match_basis') != 'complete_phrase' or anchor['status'] != 'candidate':
+        if anchor.get('match_basis') not in ('complete_phrase', 'complete_clause') or anchor['status'] != 'candidate':
             continue
         checked.append(i)
         units = cue.get('units') or []
@@ -181,9 +204,10 @@ def timeline_support(cues, words, language):
         end = max((u.get('acoustic_end') or u['end'] for u in units), default=cue['end'])
         # Rough recognition can truncate a held tail or stretch a first word.
         # A two-second separation still establishes a different passage.
-        if end+2 < anchor['start'] or begin-2 > anchor['end']:
+        observed_begin, observed_end = anchor.get('observed_range', [anchor['start'], anchor['end']])
+        if end+2 < observed_begin or begin-2 > observed_end:
             conflicts.append(dict(line=i, caption_range=[begin, end],
-                                  observed_range=[anchor['start'], anchor['end']]))
+                                  observed_range=[observed_begin, observed_end]))
     return dict(checked_lines=checked, conflicts=conflicts)
 
 

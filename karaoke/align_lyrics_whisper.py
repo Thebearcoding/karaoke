@@ -354,6 +354,32 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             left, right = first+cf, first+cs
             report['context'] = [left, right]
         anchors = anchors_from_words(lines[left:right], words, language, allow_missing=True)
+        if recognize_original is not None and budget > 0 and any(
+                a['status'] != 'candidate' and cues[left+i]['status'] == 'candidate'
+                for i,a in enumerate(anchors)):
+            # A separated voice can erase another singer or a language switch.
+            # Compare the original recording before spending alignment retries
+            # around plausible but unverified times. Truly untimed lines still
+            # use the cheaper bounded recovery below. Keep both observations.
+            budget -= 1
+            try:
+                alternate = recognize_original(begin, end)
+                alternate_words = recognized_words(begin, alternate, end)
+                if not global_recovery:
+                    cf, cs = observed_context(lines[first:stop], alternate_words, language, left-first, right-first)
+                    left, right = first+cf, first+cs
+                    report['context'] = [left,right]
+                    anchors = anchors_from_words(lines[left:right], words, language, allow_missing=True)
+                alternate_anchors = anchors_from_words(lines[left:right], alternate_words, language, allow_missing=True)
+                support = lambda rows: sum(a['matched_fraction']*len(a['text']) for a in rows)
+                other = alternate
+                if support(alternate_anchors) > support(anchors):
+                    other, response, words, anchors = response, alternate, alternate_words, alternate_anchors
+                    report.update(recognition=response, recognition_source='original')
+                reports.append(dict(context=[left,right], source_range=[begin,end], recognition=other,
+                    reason='alternate_recognition_observation', accepted_lines=[], attempts=[]))
+            except ValueError as error:
+                report['original_recognition_error'] = str(error)
         if global_recovery:
             report['recognition_anchors'] = anchors
             anchors = recovery_anchors(anchors)
@@ -369,7 +395,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         # elsewhere in that same crop. Partial/ambiguous text is not evidence
         # against it, and recognition never supplies the replacement timing.
         mislocalized = {i+left for i, a in enumerate(anchors)
-            if a.get('match_basis') == 'complete_phrase' and a['status'] == 'candidate'
+            if a.get('match_basis') in ('complete_phrase', 'complete_clause') and a['status'] == 'candidate'
             and cues[i+left]['status'] == 'candidate' and (
                 cues[i+left]['end']+2 < a['start'] or cues[i+left]['start']-2 > a['end'])}
         if global_recovery:
@@ -438,7 +464,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             budget -= cost
             try:
                 candidate = align_candidate(align, ab, ae, '\n'.join(lines[cf+left:cs+left]), gap_padding=None,
-                                  dynamic_heads=True, max_word_dur=None, word_dur_factor=None)
+                                  dynamic_heads=True, max_word_dur=None, word_dur_factor=None, detect_language=True)
             except ValueError as error:
                 attempt['error'] = str(error)
                 candidate = None
@@ -450,7 +476,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 budget -= cost
                 try:
                     alternate = align_candidate(align_original, ab, ae, '\n'.join(lines[cf+left:cs+left]),
-                        gap_padding=None, dynamic_heads=True, max_word_dur=None, word_dur_factor=None)
+                        gap_padding=None, dynamic_heads=True, max_word_dur=None, word_dur_factor=None, detect_language=True)
                     accepted = valid_recovery(alternate, lines[cf+left:cs+left], ae-ab)
                     attempt['original_mix_alignment'] = dict(result=alternate, accepted=accepted)
                     if accepted:
@@ -1080,6 +1106,8 @@ def main():
     heads = model._buffers.pop('alignment_heads')
     model.to(args.device)
     model.register_buffer('alignment_heads', heads, persistent=False)
+    recognition_model = None
+    recognition_config = None
     loading = time.perf_counter()-loading_start
     print(json.dumps({'model_loaded_seconds': loading, 'model': args.model}), flush=True)
     for job in jobs:
@@ -1173,10 +1201,20 @@ def main():
                 return align_audio(begin+start, begin+stop, text, **options)
 
             def recognize_audio(start, stop, *, original_mix=False):
+                nonlocal recognition_model, recognition_config
                 from stage_cache import StageCache
+                import local_asr
+                fallback = None
+                if original_mix and local_asr.offline():
+                    if recognition_config is None:
+                        recognition_config = local_asr.configuration()
+                        recognition_config['model_sha256'] = {name:sha(Path(recognition_config['model'])/name)
+                            for name in recognition_config['model_files']}
+                    fallback = recognition_config
                 config = dict(start=start, stop=stop, language=None, model=args.model,
                               model_sha256=model_hash, device=args.device,
                               temperature=0, condition_on_previous_text=False,
+                              fallback_recognizer=fallback,
                               implementation=inspect.getsource(recognize_audio), original_mix=original_mix,
                               windowing=inspect.getsource(recognize_in_windows),
                               audio_reader=inspect.getsource(audio_clip),
@@ -1185,11 +1223,19 @@ def main():
                 path = output.parent/'asr-requests'/(key+'.json')
                 path.parent.mkdir(exist_ok=True)
                 with StageCache(output.parent).stage(key, inputs=[job['original_audio'] if original_mix else job['audio']], outputs=[path], config=config,
-                        code=[Path(inspect.getfile(StageCache)), Path(inspect.getfile(detect_whisper_language))]) as reused:
+                        code=[Path(inspect.getfile(StageCache)), Path(inspect.getfile(local_asr))]) as reused:
                     if not reused:
                         report_progress(detail='定位未对齐的唱段')
                         clip = audio_clip(start, stop, original_mix)
+                        if fallback and recognition_model is None:
+                            from faster_whisper import WhisperModel
+                            recognition_model = WhisperModel(fallback['model'],
+                                device='cuda' if args.device == 'cuda' else 'cpu',
+                                compute_type=fallback['compute_type'], cpu_threads=4, local_files_only=True)
                         def transcribe_window(left, right):
+                            if fallback:
+                                return local_asr.transcribe(recognition_model,
+                                    clip[round(left*16000):round(right*16000)], 'auto', fallback['batch_size'])
                             return model.transcribe(clip[round(left*16000):round(right*16000)],
                                 language=None, temperature=0, condition_on_previous_text=False,
                                 word_timestamps=True, regroup=False, verbose=None,

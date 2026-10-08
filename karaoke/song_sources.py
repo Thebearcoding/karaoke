@@ -170,7 +170,28 @@ def missing_repetitions(reference, cues, words, language, duration):
             if pieces[-1] and word['start']-pieces[-1][-1]['end'] > 2:
                 pieces.append([])
             pieces[-1].append(word)
-        for part, gap in enumerate([gap, *pieces] if len(pieces)>1 else [gap]):
+        passages = [gap, *pieces] if len(pieces)>1 else [gap]
+        # An omitted verse may share a continuous ASR segment with ad-libs or
+        # dialogue. Match the observed phrase span, not that unrelated padding.
+        anchors = anchors_from_words(reference, gap, language, allow_missing=True)
+        candidates = []
+        for first, left_anchor in enumerate(anchors):
+            if left_anchor['status'] != 'candidate' or left_anchor['matched_fraction'] < .8:
+                continue
+            for stop in range(first+1, len(anchors)+1):
+                right_anchor = anchors[stop-1]
+                if right_anchor['status'] != 'candidate' or right_anchor['matched_fraction'] < .8:
+                    continue
+                lo, hi = left_anchor['start'], right_anchor['end']
+                clip = [w for w in gap if lo-.001 <= w['start'] and w['end'] <= hi+.001]
+                observed = [u for w in clip for u in text_units(w['word'], language)]
+                if len(observed) >= 24 and ratio(sum(keys[first:stop], []), observed) >= 90:
+                    candidates.append((lo, hi, clip))
+        for lo, hi, clip in candidates:
+            if not any(a <= lo and hi <= b and (a < lo or hi < b) for a,b,_ in candidates):
+                if clip not in passages:
+                    passages.append(clip)
+        for part, gap in enumerate(passages):
             observed = [u for w in gap for u in text_units(w['word'], language)]
             if len(observed) < 24:
                 continue
@@ -202,8 +223,10 @@ def missing_repetitions(reference, cues, words, language, duration):
                 elif text != identity:
                     best['ambiguous'] = True
             if best:
+                lo, hi = best['boundary_anchors'][0]['start'], best['boundary_anchors'][-1]['end']
                 if not any(prior['insertion_index']==best['insertion_index'] and
-                           prior['boundary_anchors']==best['boundary_anchors'] for prior in found):
+                           prior['boundary_anchors'][0]['start'] <= lo and
+                           hi <= prior['boundary_anchors'][-1]['end'] for prior in found):
                     found.append(best)
                 if part == 0:
                     break  # The complete passage already covers its pieces.

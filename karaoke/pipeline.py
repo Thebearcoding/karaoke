@@ -931,14 +931,14 @@ class Pipeline:
             lyrics_provenance=lyrics['provenance'], onset_accuracy=None, separation_purity=None,
             english_context_scope=english_context_scope,
             independent_asr_coverage=None if direct else True,
-            restored_repetitions=0 if direct else len(repeats['expansions']),
+            restored_repetitions=len(lyrics['provenance'].get('repetitions', [])) if direct else len(repeats['expansions']),
             fallback_units=sum(u.get('timing_source') == 'prior_word_fallback' for u in units),
             **alignment_recovery_summary(raw),
             line_order_fallback_lines=order_fallbacks,
             countdown_events=countdown_events(cues)))
 
     def align_candidates(self, lyrics, metadata, duration):
-        from .lyric_consensus import alternative_lyric_candidates, observed_source_alternative
+        from .lyric_consensus import alternative_lyric_candidates, observed_source_alternative, observed_repetition_candidate
         from .lyric_lookup import published_lyric_lines
         from .subtitles import normalized
         packet = lyrics.get('provenance', {}).get('lyric_lookup', {}) if not self.strict_audio else {}
@@ -980,11 +980,25 @@ class Pipeline:
                         raise
                     error = caught
                     candidate = self.playback_fallback(metadata, duration, caught)
-                self.validate_localization(candidate, duration)
                 raw_path = self.output/'alignment/raw.json'
-                if raw_path.is_file() and index+1 < len(candidates):
-                    observations = [o for block in json.loads(raw_path.read_text())
-                                    for o in block.get('asr_localizations', [])]
+                observations = [o for block in json.loads(raw_path.read_text())
+                                for o in block.get('asr_localizations', [])] if raw_path.is_file() else []
+                localization_error = None
+                try:
+                    self.validate_localization(candidate, duration)
+                except StageFailure as failure:
+                    localization_error = failure
+                if not self.strict_audio:
+                    repeated = observed_repetition_candidate(candidate,
+                        json.loads((self.output/'cues.json').read_text()), observations, duration)
+                    key = normalized(''.join(repeated['lines'])).casefold() if repeated else None
+                    if key and key not in seen:
+                        seen.add(key)
+                        candidates.insert(index+1,repeated)
+                        raise StageFailure('subtitles', '音频中发现重复唱段；正在重新对齐来源中的完整原文')
+                if localization_error is not None:
+                    raise localization_error
+                if index+1 < len(candidates):
                     preferred = observed_source_alternative(candidate, candidates[index+1:], observations)
                     if preferred:
                         position = index+1+preferred['alternative']
@@ -1010,10 +1024,12 @@ class Pipeline:
                 attempts.append(dict(source=candidate['provenance'].get('lyric_lookup'),
                     error=str(failure), diagnostics=str(folder.relative_to(self.output))))
                 continue
-            if attempts:
+            if attempts or candidate.get('provenance', {}).get('repetitions'):
                 quality = json.loads((self.output/'quality.json').read_text())
-                quality['lyric_source_fallback'] = dict(rejected=attempts,
-                    selected=candidate['provenance']['lyric_lookup'])
+                if attempts:
+                    quality['lyric_source_fallback'] = dict(rejected=attempts,
+                        selected=candidate['provenance']['lyric_lookup'])
+                quality['restored_repetitions'] = len(candidate['provenance'].get('repetitions', []))
                 write_json(self.output/'quality.json', quality)
             return candidate, error
 
@@ -1163,6 +1179,25 @@ class Pipeline:
                         lyrics['lines'], timed, words, lyrics['language'], duration)
                     observations.append(dict(context=[first, stop], source_range=[begin, end], **evidence))
         write_json(self.output/'localization-validation.json', observations)
+        repeats = []
+        if cues is not None:
+            for repeat in lyrics.get('provenance', {}).get('repetitions', []):
+                if 'output_range' not in repeat or 'source_lines' not in repeat:
+                    continue
+                first, stop = repeat['output_range']
+                if lyrics['lines'][first:stop] != repeat['source_lines']:
+                    raise StageFailure('subtitles', '重复唱段的来源文字不一致；诊断已保留')
+                for index, anchor in zip((first,stop-1),repeat['boundary_anchors']):
+                    cue = cues[index]
+                    conflict = cue['end']+2 < anchor['start'] or cue['start']-2 > anchor['end']
+                    repeats.append(dict(line=index+1, caption_range=[cue['start'],cue['end']],
+                                        observed_range=[anchor['start'],anchor['end']], conflict=conflict))
+        if repeats:
+            repeat_path = self.output/'lyric-repeat-validation.json'
+            earlier = json.loads(repeat_path.read_text()) if repeat_path.is_file() else {}
+            write_json(repeat_path, dict(earlier, restored=repeats))
+        if any(r['conflict'] for r in repeats):
+            raise StageFailure('subtitles', '恢复的重复唱段仍未落在已观察的音频范围；诊断已保留')
         if any(o['conflicts'] or o['missing_repetitions'] for o in observations):
             raise StageFailure('subtitles', '字幕与已定位的唱段不一致或遗漏重复唱段；音频位置证据已保留')
         return observations

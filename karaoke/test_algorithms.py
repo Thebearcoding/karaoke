@@ -1828,6 +1828,24 @@ class SubtitleIntegrity(unittest.TestCase):
         self.assertEqual((cues[1]['start'], cues[1]['end']), (20., 24.))
         self.assertEqual(cues[1]['match_basis'], 'complete_phrase')
 
+    def test_a_heard_clause_can_locate_a_line_with_an_unheard_second_voice(self):
+        from anchors_from_asr import timeline_support
+        lines = ['Silver rivers guide us home (quiet echo)', 'Golden mountains greet the dawn (quiet echo)']
+        words = [dict(word='Silver rivers guide us home',start=20.,end=24.),
+                 dict(word='Golden mountains greet the dawn',start=25.,end=29.)]
+        anchors = anchors_from_words(lines,words,'English')
+        self.assertEqual([a['text'] for a in anchors],lines)
+        self.assertEqual([a['match_basis'] for a in anchors],['complete_clause','complete_clause'])
+        cues = [dict(text=t,start=s,end=s+4) for t,s in zip(lines,[2.,25.])]
+        self.assertEqual(timeline_support(cues,words,'English')['conflicts'],
+            [dict(line=1,caption_range=[2.,6.],observed_range=[20.,24.])])
+        full = [dict(w,word=t) for w,t in zip(words,lines)]
+        self.assertEqual([a['match_basis'] for a in anchors_from_words(lines,full,'English')],
+                         ['complete_phrase','complete_phrase'])
+        repeated = [lines[0],lines[0]]
+        self.assertEqual(timeline_support([dict(text=t,start=2.+i*5,end=6.+i*5)
+            for i,t in enumerate(repeated)],words[:1],'English')['checked_lines'],[])
+
     def test_phrase_location_check_uses_audio_text_not_loudness_or_duration(self):
         from anchors_from_asr import timeline_support
         words = [dict(word='blue river', start=20., end=24.)]
