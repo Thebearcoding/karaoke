@@ -1264,6 +1264,15 @@ class Pipeline:
                 except (AttributeError, KeyError, TypeError, ValueError):
                     continue
                 options[-1].append((name, dict(cue, units=units)))
+            located = next((c for name in ('word-cues.json', 'alignment/raw.json', 'alignment/cues.json', 'anchors.json')
+                            for n,c in options[-1] if n==name), None)
+            if located is not None:
+                # A failed refinement may remain ordered while drifting into
+                # the following gap. Prefer the located phrase, retaining the
+                # other candidate only if it is needed for a complete path.
+                low, high = located['units'][0]['start'], located['units'][-1]['end']
+                options[-1].sort(key=lambda pair: pair[1]['units'][-1]['end'] <= low or
+                                 pair[1]['units'][0]['start'] >= high)
         def follows(previous, current):
             try:
                 presentation_cues([previous, current], duration, lead=0, tail=0, bridge_gap=0)

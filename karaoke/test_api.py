@@ -4472,6 +4472,21 @@ def test_playback_fallback_backtracks_refinements_that_block_later_lyrics(tmp_pa
             'word-cues.json','word-cues.json','ordered-cues.json']
 
 
+@pytest.mark.parametrize('shift', [.1, 2.])
+def test_failed_refinement_cannot_take_priority_in_an_unrelated_gap(tmp_path, shift):
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    (tmp_path/'lyrics.json').write_text(json.dumps(dict(language='English',lines=['first','last'],provenance={})))
+    def cue(text,start):
+        return dict(text=text,start=start,end=start+.5,status='candidate',
+                    units=[dict(text=text,first=0,stop=len(text),start=start,end=start+.5)])
+    coarse=[cue('first',1.),cue('last',5.)];refined=[cue('first',1.+shift),cue('last',5.)]
+    for name,values in [('word-cues.json',coarse),('ordered-cues.json',refined)]:
+        path=tmp_path/name;path.write_text(json.dumps(values));pipeline.alignment_outputs.add(path)
+    pipeline.playback_fallback({},8.,StageFailure('align_phonemes','fixture'))
+    actual=json.loads((tmp_path/'cues.json').read_text())
+    assert actual == (refined if shift<.5 else coarse)
+
+
 @pytest.mark.parametrize('fresh', [True, False])
 @pytest.mark.parametrize('missing_words', [True, False])
 def test_playback_fallback_retains_raw_aligned_lines_when_whole_block_text_check_fails(tmp_path, fresh, missing_words):
