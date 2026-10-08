@@ -373,12 +373,12 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             and cues[i+left]['status'] == 'candidate' and (
                 cues[i+left]['end']+2 < a['start'] or cues[i+left]['start']-2 > a['end'])}
         if global_recovery:
-            # Recognition supplies a rough interval, not an independent onset.
-            # A stretched first token can include an earlier refrain; only a
-            # disjoint interval contradicts an otherwise usable aligned line.
+            # Global recognition has the same coarse timing uncertainty as a
+            # local request. A small gap between its word boundary and an
+            # aligned phrase cannot invalidate that phrase or crop it away.
             mislocalized.update(i+left for i, a in enumerate(anchors) if a['status'] == 'candidate'
                 and cues[i+left]['status'] == 'candidate' and (
-                    cues[i+left]['end'] < a['start'] or cues[i+left]['start'] > a['end']))
+                    cues[i+left]['end']+2 < a['start'] or cues[i+left]['start']-2 > a['end']))
             for i, anchor in enumerate(anchors):
                 if anchor['status'] == 'candidate' or cues[i+left]['status'] != 'candidate':
                     continue
@@ -1178,6 +1178,7 @@ def main():
                               model_sha256=model_hash, device=args.device,
                               temperature=0, condition_on_previous_text=False,
                               implementation=inspect.getsource(recognize_audio), original_mix=original_mix,
+                              windowing=inspect.getsource(recognize_in_windows),
                               audio_reader=inspect.getsource(audio_clip),
                               packages={name: version(name) for name in ('stable-ts', 'openai-whisper')})
                 key = 'alignment_localization_'+hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:16]
@@ -1188,12 +1189,21 @@ def main():
                     if not reused:
                         report_progress(detail='定位未对齐的唱段')
                         clip = audio_clip(start, stop, original_mix)
-                        detected, probes = detect_whisper_language(model, clip) if stop-start > 30 else (None, [])
-                        recognized = model.transcribe(clip,
-                            language=detected, temperature=0, condition_on_previous_text=False,
-                            word_timestamps=True, regroup=False, verbose=None,
-                            fp16=args.device == 'cuda')
-                        response = dict(recognized.to_dict(), language_detection=probes)
+                        def transcribe_window(left, right):
+                            return model.transcribe(clip[round(left*16000):round(right*16000)],
+                                language=None, temperature=0, condition_on_previous_text=False,
+                                word_timestamps=True, regroup=False, verbose=None,
+                                fp16=args.device == 'cuda').to_dict()
+                        # A whole-recording language choice can translate or
+                        # erase a later language. Reuse the overlapping-window
+                        # recovery path, detecting language in each crop.
+                        seconds = len(clip)/16000
+                        if seconds > 30:
+                            words, windows = recognize_in_windows(transcribe_window, 0., seconds,
+                                                                 int(np.ceil(seconds/20)))
+                            response = dict(segments=[dict(words=words)], multilingual_windows=windows)
+                        else:
+                            response = transcribe_window(0., seconds)
                         path.write_text(json.dumps(response, ensure_ascii=False, default=json_number)+'\n')
                 return dict(json.loads(path.read_text()), localization_cache=dict(file=path.name, reused=reused))
 

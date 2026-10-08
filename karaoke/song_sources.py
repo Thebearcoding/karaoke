@@ -162,38 +162,51 @@ def missing_repetitions(reference, cues, words, language, duration):
         # Anchors are rounded to milliseconds; do not reuse a boundary word
         # merely because its original floating-point end is a few us later.
         gap = [w for w in timed if w['end'] > begin+.001 and w['start'] < end-.001]
-        observed = [u for w in gap for u in text_units(w['word'], language)]
-        if len(observed) < 24:
-            continue
-        scores = []
-        for first in range(len(keys)):
-            text = []
-            for stop in range(first+1, len(keys)+1):
-                text.extend(keys[stop-1])
-                if len(text) > len(observed)*1.5:
-                    break
-                if stop-first < 2 or len(text) < len(observed)*2/3:
-                    continue
-                score = ratio(text, observed)/100
-                if score >= .9:
-                    scores.append((score, first, stop))
-        best, identity = None, None
-        for score, first, stop in sorted(scores, key=lambda x: -x[0]):
-            if best and score < best['similarity']-1e-9:
-                break
-            anchors = anchors_from_words(reference[first:stop], gap, language, allow_missing=True)
-            if any(a['status'] != 'candidate' or a['matched_fraction'] < .8
-                   for a in (anchors[0], anchors[-1])):
+        # A distant outro or dialogue must not dilute an earlier repeat.
+        # Check contiguous observations as well as the full gap; lyric line
+        # breaks do not determine how much evidence a sung passage contains.
+        pieces = [[]]
+        for word in gap:
+            if pieces[-1] and word['start']-pieces[-1][-1]['end'] > 2:
+                pieces.append([])
+            pieces[-1].append(word)
+        for part, gap in enumerate([gap, *pieces] if len(pieces)>1 else [gap]):
+            observed = [u for w in gap for u in text_units(w['word'], language)]
+            if len(observed) < 24:
                 continue
-            text = ''.join(normalized(s).lower() for s in reference[first:stop])
-            if best is None:
-                identity = text
-                best = dict(insertion_index=after, source_range=[first, stop], gap=[begin, end],
-                            similarity=score, boundary_anchors=[anchors[0], anchors[-1]], ambiguous=False)
-            elif text != identity:
-                best['ambiguous'] = True
-        if best:
-            found.append(best)
+            scores = []
+            for first in range(len(keys)):
+                text = []
+                for stop in range(first+1, len(keys)+1):
+                    text.extend(keys[stop-1])
+                    if len(text) > len(observed)*1.5:
+                        break
+                    if len(text) < len(observed)*2/3:
+                        continue
+                    score = ratio(text, observed)/100
+                    if score >= .9:
+                        scores.append((score, first, stop))
+            best, identity = None, None
+            for score, first, stop in sorted(scores, key=lambda x: -x[0]):
+                if best and score < best['similarity']-1e-9:
+                    break
+                anchors = anchors_from_words(reference[first:stop], gap, language, allow_missing=True)
+                if any(a['status'] != 'candidate' or a['matched_fraction'] < .8
+                       for a in (anchors[0], anchors[-1])):
+                    continue
+                text = ''.join(normalized(s).lower() for s in reference[first:stop])
+                if best is None:
+                    identity = text
+                    best = dict(insertion_index=after, source_range=[first, stop], gap=[begin, end],
+                                similarity=score, boundary_anchors=[anchors[0], anchors[-1]], ambiguous=False)
+                elif text != identity:
+                    best['ambiguous'] = True
+            if best:
+                if not any(prior['insertion_index']==best['insertion_index'] and
+                           prior['boundary_anchors']==best['boundary_anchors'] for prior in found):
+                    found.append(best)
+                if part == 0:
+                    break  # The complete passage already covers its pieces.
     return found
 
 
@@ -211,11 +224,12 @@ def restore_repetitions(reference, anchors, words, language, duration, *, allow_
             report.update(status='failed', unresolved=found,
                           reason='Recognized lyric repetition needs an unambiguous automatic source')
             return lines, anchors, report
-        additions = {f['insertion_index']: f for f in found}
+        additions = {}
+        for item in sorted(found, key=lambda f:f['boundary_anchors'][0]['start']):
+            additions.setdefault(item['insertion_index'], []).append(item)
         expanded, kept, inserted = [], [], []
         for i in range(len(lines)+1):
-            if i in additions:
-                f = additions[i]
+            for f in additions.get(i, []):
                 first, stop = f['source_range']
                 start = len(expanded)
                 expanded.extend(reference[first:stop])

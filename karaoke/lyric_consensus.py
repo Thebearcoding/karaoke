@@ -165,6 +165,36 @@ def alternative_lyric_candidates(lyrics, packet):
             lyrics['provenance'], lyric_lookup=report, text_transform=report.get('text_transform', 'whitespace_only')))
 
 
+def observed_source_alternative(lyrics, alternatives, observations):
+    """Use existing recognition to request a better-supported published text.
+
+    This selects another alignment attempt, not accepted lyrics or timestamps.
+    A substantial gain is required so spelling noise cannot flip the source.
+    """
+    from .anchors_from_asr import text_units
+    from .align_lyrics_whisper import recognized_words
+    from rapidfuzz.distance import Levenshtein
+
+    language = lyrics['language']
+    for observation in sorted(observations, key=lambda o:o['source_range'][1]-o['source_range'][0], reverse=True):
+        if not observation.get('recognition'):
+            continue
+        begin, end = observation['source_range']
+        words = recognized_words(begin, observation['recognition'], end)
+        heard = [u for word in words for u in text_units(word['word'], language)]
+        def support(candidate):
+            expected = text_units(''.join(candidate['lines']), language)
+            return sum(block.src_end-block.src_start for block in Levenshtein.opcodes(expected, heard)
+                       if block.tag == 'equal')
+        baseline = support(lyrics)
+        for index, candidate in enumerate(alternatives):
+            matched = support(candidate)
+            if matched-baseline >= max(24, len(heard)*.05):
+                return dict(alternative=index, source_range=[begin,end], recognized_units=len(heard),
+                            current_matched_units=baseline, alternative_matched_units=matched)
+    return None
+
+
 def fetch_lyric_consensus(song, metadata, duration, cache, description=None, preserve_title=False, *, prefetched=None):
     """Resolve source identity before name searches; unavailable sources never vote."""
     def lrclib():

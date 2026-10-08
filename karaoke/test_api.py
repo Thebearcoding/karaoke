@@ -2704,7 +2704,7 @@ def test_local_recognition_repairs_a_contradicted_neighbour_too(outside_old_cont
     assert report['accepted_lines'] == list(range(2,len(lines)))
 
 
-@pytest.mark.parametrize('evidence', ['relocated', 'same_time', 'unrecognized', 'short_gap'])
+@pytest.mark.parametrize('evidence', ['relocated', 'same_time', 'near_boundary', 'unrecognized', 'short_gap'])
 def test_sentence_inside_nonspeech_only_requests_independent_localization(evidence):
     from copy import deepcopy
     from karaoke.align_lyrics_whisper import recover_with_local_asr
@@ -2718,7 +2718,8 @@ def test_sentence_inside_nonspeech_only_requests_independent_localization(eviden
     def recognize(begin,end):
         windows.append((begin,end))
         return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+1.2-begin)
-            for t,s in zip(lines,starts) if evidence!='unrecognized' or t!='bravo'])])
+            for t,s in zip(lines,[1.,2.5,15.] if evidence=='near_boundary' else starts)
+            if evidence!='unrecognized' or t!='bravo'])])
     def align(begin,end,text,**kwargs):
         attempts.append(text)
         return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+1.2-begin)])
@@ -2731,6 +2732,7 @@ def test_sentence_inside_nonspeech_only_requests_independent_localization(eviden
     if evidence!='short_gap':
         assert result['asr_localizations'][0]['activity_screened_lines'] == [2]
         assert result['asr_localizations'][0]['accepted_lines'] == ([2] if evidence=='relocated' else [])
+        assert result['asr_localizations'][0]['contradicted_lines'] == ([2] if evidence=='relocated' else [])
 
 
 def test_local_recognition_broadens_once_when_old_neighbours_miss_the_verse():
@@ -2751,6 +2753,21 @@ def test_local_recognition_broadens_once_when_old_neighbours_miss_the_verse():
     assert len(windows)==2 and windows[0][1]<10 and windows[1]==(0.,60.)
     assert result['asr_localizations'][-1]['accepted_lines']==[1,2,3]
     assert [s['words'][0]['start'] for s in result['result']['segments']]==starts
+
+
+def test_recognition_windows_keep_language_switches_and_boundary_words():
+    from karaoke.align_lyrics_whisper import recognize_in_windows
+    calls=[]
+    tokens=[('morning',1.,2.),('bonjour',19.,21.),('soir',30.,31.),('night',41.,42.)]
+    def recognize(begin,end):
+        calls.append((begin,end))
+        return dict(language='fr' if begin>0 else 'en',segments=[dict(words=[
+            dict(word=word,start=start-begin,end=stop-begin)
+            for word,start,stop in tokens if begin<=start<stop<=end])])
+    words,reports=recognize_in_windows(recognize,0.,60.,3)
+    assert words==[dict(word=word,start=start,end=end) for word,start,end in tokens]
+    assert calls==[(0.,25.),(15.,45.),(35.,60.)]
+    assert [r['recognition']['language'] for r in reports]==['en','fr','fr']
 
 
 @pytest.mark.parametrize('omitted_repeat', [1, 3])
@@ -4201,6 +4218,26 @@ def test_observed_missing_refrain_selects_complete_published_source(tmp_path, mo
     rejected=json.loads((tmp_path/'quality.json').read_text())['lyric_source_fallback']['rejected']
     saved=json.loads((tmp_path/rejected[0]['diagnostics']/'localization-validation.json').read_text())
     assert saved[0]['missing_repetitions'][0]['source_range']==[1,3]
+
+
+@pytest.mark.parametrize('observed', ['repeat', 'unrelated', 'spelling_noise'])
+def test_published_source_retry_requires_substantial_observed_content(observed):
+    from karaoke.lyric_consensus import observed_source_alternative
+    first, refrain, last = 'We leave beside the morning river', 'The golden lanterns guide us home', 'Until the quiet summer ends'
+    lyrics = dict(lines=[first,refrain,last], language='English')
+    alternative = dict(lyrics, lines=[first,refrain,refrain,last])
+    performed = alternative['lines'] if observed=='repeat' else lyrics['lines']
+    if observed=='unrelated':
+        performed = [first,refrain,'Remember to bring the umbrellas tomorrow',last]
+    if observed=='spelling_noise':
+        alternative = dict(lyrics,lines=[first,refrain.replace('lanterns','lantern'),last])
+    observations = [dict(source_range=[0.,20.],recognition=dict(segments=[dict(words=[
+        dict(word=text,start=1.+i*3,end=2.+i*3) for i,text in enumerate(performed)])]))]
+    result = observed_source_alternative(lyrics,[alternative],observations)
+    assert bool(result) == (observed=='repeat')
+    if result:
+        assert result['alternative_matched_units']-result['current_matched_units'] >= 24
+    assert observed_source_alternative(lyrics,[alternative],[]) is None
 
 
 @pytest.mark.parametrize('overlap', [.02, .1, .16, .32, .75])
@@ -6061,6 +6098,20 @@ def test_repetition_recovery_rejects_unsupported_evidence(invalid, monkeypatch):
     assert result == lines and not report['expansions']
     if invalid in ('moves_existing', 'outside_gap'):
         assert report['status'] == 'failed'
+
+
+@pytest.mark.parametrize('split_line', [False, True])
+def test_repeated_passage_detection_ignores_layout_and_distant_outro(split_line):
+    from karaoke.song_sources import missing_repetitions
+    refrain = ['Golden lanterns in the window', 'Every sparrow flies back home']
+    lines = ['Opening', *(refrain if split_line else [' '.join(refrain)])]
+    cues = [dict(text=text,start=1.+i,end=1.8+i,status='candidate') for i,text in enumerate(lines)]
+    words = [dict(word=text,start=10.+i,end=10.8+i) for i,text in enumerate(refrain)]
+    words.append(dict(word='Thank you for watching this presentation', start=28.,end=29.))
+    found = missing_repetitions(lines,cues,words,'English',30.)
+    assert len(found)==1 and found[0]['source_range']==[1,len(lines)]
+    assert found[0]['boundary_anchors'][0]['start']==10.
+    assert found[0]['boundary_anchors'][-1]['end']==11.8
 
 
 @pytest.mark.parametrize('same_text', [True, False])

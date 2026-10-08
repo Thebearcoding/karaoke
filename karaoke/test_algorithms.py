@@ -435,6 +435,55 @@ class SubtitleIntegrity(unittest.TestCase):
         self.assertEqual(result[0]['units'][1]['timing_source'],'linear_fallback')
         validate_timeline(result,[text],5.,report['constraints'],'Chinese')
 
+    def test_timing_reuses_measured_evidence_instead_of_assigning_a_constraint_bound(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_views
+        protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
+        old=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
+             for i,(c,t) in enumerate(zip('甲乙',[1.,4.]))]
+        measured=[dict(u) for u in old];measured[0].update(start=3.,end=3.2)
+        cue=dict(text='甲乙',start=1.,end=4.2,units=old)
+        proof=dict(line=1,text='甲乙',first=0,stop=1,onset=3.,start_min=2.6,start_max=3.4)
+        def unavailable(*args,**kwargs):
+            raise ValueError('Current observation unavailable')
+        for mode in ('measured','wrong_text','silent'):
+            with self.subTest(mode=mode):
+                row=dict(line=1,observation='vocals_ctc',witnesses=[deepcopy(measured),deepcopy(measured)],
+                         predictions=[deepcopy(measured) for _ in range(3)])
+                if mode=='wrong_text':row['witnesses'][0][0]['text']='丙'
+                wave=np.ones(5*44100)*(.0 if mode=='silent' else .1)
+                result,report=reconcile_views([cue],[('vocals_ctc',wave,unavailable,unavailable)],
+                    protocol,'Chinese',[proof],previous=[row])
+                self.assertEqual(result[0]['units'][0]['start'],3. if mode=='measured' else 1.)
+                self.assertEqual(bool(report['unresolved']),mode!='measured')
+                self.assertEqual(cue['units'][0]['start'],1.)
+
+    def test_timing_composition_keeps_all_measured_onsets_and_rejects_unsupported_interiors(self):
+        from copy import deepcopy
+        from timing_validation import compose_timing_bounds, validate_timeline
+        protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
+        text='甲乙丙丁戊己'
+        units=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
+               for i,(c,t) in enumerate(zip(text,[1.,1.5,4.1,4.3,4.5,5.5]))]
+        cue=dict(text=text,start=1.,end=5.7,units=units)
+        heard=[dict(u,start=t,end=t+.2) for u,t in zip(units,[1.,2.,2.5,3.,4.,5.])]
+        proofs=[dict(line=1,text=text,first=i,stop=i+1,onset=t,start_min=t-.4,start_max=t+.4)
+                for i,t in [(3,3.),(4,4.)]]
+        for mode in ('complete','outside','wrong_text','disagreed_onset','silent'):
+            with self.subTest(mode=mode):
+                row=dict(witnesses=[deepcopy(heard),deepcopy(heard)])
+                if mode=='outside':row['witnesses'][0][1]['start']=.2
+                if mode=='wrong_text':row['witnesses'][0][0]['text']='錯'
+                if mode=='disagreed_onset':row['witnesses'][0][3]['start']=3.3
+                wave=np.ones(6*44100)*(.0 if mode=='silent' else .1)
+                result=compose_timing_bounds([cue],0,row,[heard[0],heard[-1]],proofs,wave,protocol,'Chinese')
+                if mode=='complete':
+                    self.assertEqual([(u['text'],u['start']) for u in result['units']],
+                                     [('甲乙丙',1.),('丁',3.),('戊',4.),('己',5.)])
+                    validate_timeline([result],[text],6.,proofs,'Chinese')
+                else:
+                    self.assertIsNone(result)
+
     def test_alternate_acoustic_views_only_revisit_unsettled_lines(self):
         from copy import deepcopy
         from timing_validation import reconcile_views, validate_timeline
@@ -2402,8 +2451,8 @@ class AlignmentIntegrity(unittest.TestCase):
             self.assertEqual([c['text'] for c in cues], lines)
             np.testing.assert_allclose([c['start'] for c in cues], starts, atol=.001)
 
-            # A long localization must not inherit an intro's language. The
-            # existing local-ASR policy votes across interior audio windows.
+            # A long localization must not force one majority language on
+            # later verses. Each overlapping crop detects its own language.
             starts[:] = [31., 65., 100.]
             recognized = False
             sf.write(root/'audio.wav', np.arange(120*16000)/16000, 16000, subtype='FLOAT')
@@ -2415,7 +2464,9 @@ class AlignmentIntegrity(unittest.TestCase):
                     'align_lyrics_whisper.sha', return_value='test-model-hash'), patch('sys.argv',
                     ['align', '--jobs', str(root/'jobs.json'), '--device', 'cpu']):
                 main()
-            self.assertEqual(model.transcribe.call_args.kwargs['language'], 'de')
+            self.assertGreater(model.transcribe.call_count, 1)
+            self.assertTrue(all(call.kwargs['language'] is None and len(call.args[0])<=30*16000
+                                for call in model.transcribe.call_args_list))
             cues = json.loads((root/'alignment/cues.json').read_text())
             np.testing.assert_allclose([c['start'] for c in cues], starts, atol=.001)
             self.assertEqual([c['text'] for c in cues], lines)

@@ -938,7 +938,7 @@ class Pipeline:
             countdown_events=countdown_events(cues)))
 
     def align_candidates(self, lyrics, metadata, duration):
-        from .lyric_consensus import alternative_lyric_candidates
+        from .lyric_consensus import alternative_lyric_candidates, observed_source_alternative
         from .lyric_lookup import published_lyric_lines
         from .subtitles import normalized
         packet = lyrics.get('provenance', {}).get('lyric_lookup', {}) if not self.strict_audio else {}
@@ -981,6 +981,16 @@ class Pipeline:
                     error = caught
                     candidate = self.playback_fallback(metadata, duration, caught)
                 self.validate_localization(candidate, duration)
+                raw_path = self.output/'alignment/raw.json'
+                if raw_path.is_file() and index+1 < len(candidates):
+                    observations = [o for block in json.loads(raw_path.read_text())
+                                    for o in block.get('asr_localizations', [])]
+                    preferred = observed_source_alternative(candidate, candidates[index+1:], observations)
+                    if preferred:
+                        position = index+1+preferred['alternative']
+                        candidates[index+1], candidates[position] = candidates[position], candidates[index+1]
+                        write_json(self.output/'lyric-source-support.json', preferred)
+                        raise StageFailure('subtitles', '已有音频识别支持更完整的歌词来源；正在核验备用正文')
             except StageFailure as failure:
                 if (self.strict_audio or failure.stage != 'subtitles' or index+1 == len(candidates) or
                         not (self.checkpoints.directory/'align_words.json').is_file()):
@@ -990,7 +1000,8 @@ class Pipeline:
                 folder = self.output/'lyric-source-attempts'/str(time.time_ns())
                 folder.mkdir(parents=True)
                 for name in ('lyrics.json', 'alignment/raw.json', 'alignment/run.json',
-                             'playback-warning.json', 'cues.json', 'localization-validation.json'):
+                             'playback-warning.json', 'cues.json', 'localization-validation.json',
+                             'lyric-source-support.json'):
                     source = self.output/name
                     if source.is_file():
                         target = folder/name
