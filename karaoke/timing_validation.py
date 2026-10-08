@@ -44,7 +44,10 @@ def localized_constraints(cues, report, blocks):
         replacement = None
         if timing_violations(cues, [proof]):
             for observed in observations:
-                if proof['line'] not in set(observed.get('accepted_lines', [])) & set(observed.get('contradicted_lines', [])):
+                # A stretched old phrase can overlap the right passage while
+                # one of its word proofs points elsewhere. Compare the proof
+                # itself with the newly located phrase, not the old envelope.
+                if proof['line'] not in observed.get('accepted_lines', []):
                     continue
                 index = proof['line']-1-observed['context'][0]
                 anchors = observed.get('anchors', [])

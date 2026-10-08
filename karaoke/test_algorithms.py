@@ -372,7 +372,7 @@ class SubtitleIntegrity(unittest.TestCase):
                for i,(c,t) in enumerate(zip('甲乙',[10.,10.5]))]
         cues=[dict(text='甲乙',start=10.,end=10.7,units=units)]
         proof=dict(line=1,text='甲乙',first=0,stop=1,onset=1.,start_min=.6,start_max=1.4)
-        for mode in ('complete','no_new_proof','no_relocation','unaccepted','wrong_text','nearby'):
+        for mode in ('complete','overlapping_old_phrase','no_new_proof','unaccepted','wrong_text','nearby'):
             with self.subTest(mode=mode):
                 predictions=[] if mode=='no_new_proof' else [deepcopy(units) for _ in range(3)]
                 result,report=reconcile_timing(cues,np.ones(12*44100)*.1,lambda *a,**k:[units,units],
@@ -381,11 +381,11 @@ class SubtitleIntegrity(unittest.TestCase):
                             start=1. if mode=='nearby' else 10.,end=10.7)
                 observed=dict(context=[0,1],source_range=[0.,12.],anchors=[anchor],
                     accepted_lines=[] if mode=='unaccepted' else [1],
-                    contradicted_lines=[] if mode=='no_relocation' else [1])
+                    contradicted_lines=[] if mode=='overlapping_old_phrase' else [1])
                 active,retired=localized_constraints(result,report,[dict(asr_localizations=[observed])])
                 self.assertEqual(proof['onset'],1.)
-                self.assertEqual(bool(retired),mode=='complete')
-                self.assertEqual(bool(timing_violations(result,active)),mode!='complete')
+                self.assertEqual(bool(retired),mode in ('complete','overlapping_old_phrase'))
+                self.assertEqual(bool(timing_violations(result,active)),mode not in ('complete','overlapping_old_phrase'))
                 if retired:
                     self.assertEqual(retired[0]['proof'],proof)
                     self.assertEqual(retired[0]['replacement']['onset'],10.)
