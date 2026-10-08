@@ -1151,8 +1151,29 @@ class Pipeline:
             validate_timeline(checked, lyrics['lines'], duration, report['constraints'], lyrics['language'])
         except ValueError as error:
             raise StageFailure('validate_timing', '字幕时间校验失败；局部修复诊断已保留') from error
+        # Text completeness is one direction of coverage. When recovery has
+        # already heard a lyric elsewhere, the final/fallback captions must
+        # cover that passage too. Reuse evidence; do not launch another ASR.
+        observations = []
+        raw_path = self.output/'alignment/raw.json'
+        if raw_path.is_file():
+            for block in json.loads(raw_path.read_text()):
+                for localization in block.get('asr_localizations', []):
+                    if not localization.get('recognition'):
+                        continue
+                    from .anchors_from_asr import timeline_support
+                    from .align_lyrics_whisper import recognized_words
+                    first, stop = localization['context']
+                    begin, end = localization['source_range']
+                    evidence = timeline_support(checked[first:stop],
+                        recognized_words(begin, localization['recognition'], end), lyrics['language'])
+                    observations.append(dict(context=[first, stop], source_range=[begin, end], **evidence))
+        write_json(self.output/'localization-validation.json', observations)
+        if any(observation['conflicts'] for observation in observations):
+            raise StageFailure('validate_timing', '字幕与已定位的唱段不一致；音频位置证据已保留')
         quality = json.loads((self.output/'quality.json').read_text())
         quality.update(lines=len(checked), units=sum(len(c['units']) for c in checked),
+            localization_validation=observations,
             timing_review=dict(reviewed_lines=len({r['line'] for r in report['lines']}),
                 review_attempts=len(report['lines']),
                 onset_constraints=report['constraints'], unresolved=report['unresolved'],

@@ -30,8 +30,35 @@ def _match_words(lines, words, units):
         value = units(word['word'])
         observed.extend(value)
         owners.extend([i]*len(value))
-    correspondence = {}
+    correspondence, boundaries = {}, []
     if expected and observed:
+        # An omitted verse must not consume words belonging to a later,
+        # completely observed phrase. Establish those phrase boundaries before
+        # asking edit distance to match the incomplete material between them.
+        # A repeated phrase is only unambiguous when every occurrence was heard.
+        positions, offset = {}, 0
+        for key in keys:
+            if key:
+                positions.setdefault(tuple(key), []).append(offset)
+            offset += len(key)
+        candidates = []
+        for key, starts in positions.items():
+            # A short refrain can also occur inside a longer lyric line.
+            # Those occurrences count too, even with different line breaks.
+            occurrences = [i for i in range(len(expected)-len(key)+1)
+                           if tuple(expected[i:i+len(key)]) == key]
+            if occurrences != starts:
+                continue
+            hits = [i for i in range(len(observed)-len(key)+1)
+                    if tuple(observed[i:i+len(key)]) == key]
+            if len(hits) == len(starts):
+                candidates.extend((start, start+len(key), hit, hit+len(key))
+                                  for start, hit in zip(starts, hits))
+        # Conflicting exact matches can come from dialogue or a changed verse
+        # order. Neither is an independent boundary for the other.
+        boundaries = [a for a in sorted(candidates) if all(a == b or
+                      (a[1] <= b[0] and a[3] <= b[2]) or
+                      (b[1] <= a[0] and b[3] <= a[2]) for b in candidates)]
         alphabet = {unit: i for i, unit in enumerate(dict.fromkeys(expected+observed))}
         # Minimize ordinary edit distance first, then internal gap runs.
         # Otherwise scattered letters in a spoken intro can tie a contiguous
@@ -40,12 +67,17 @@ def _match_words(lines, words, units):
         aligner = PairwiseAligner(mode='global', match_score=0, mismatch_score=-base,
                                   open_gap_score=-base-1, extend_gap_score=-base)
         aligner.open_end_gap_score = -base  # Intro/outro gaps do not fragment lyrics.
-        alignment = aligner.align(array('i', (alphabet[u] for u in expected)),
-                                  array('i', (alphabet[u] for u in observed)))[0]
-        for (first, stop), (begin, end) in zip(*alignment.aligned):
-            for i, j in zip(range(first, stop), range(begin, end)):
-                if expected[i] == observed[j]:
-                    correspondence[i] = j
+        first = begin = 0
+        for stop, following, end, next_observed in [*boundaries, (len(expected), len(expected), len(observed), len(observed))]:
+            if stop > first and end > begin:
+                alignment = aligner.align(array('i', (alphabet[u] for u in expected[first:stop])),
+                                          array('i', (alphabet[u] for u in observed[begin:end])))[0]
+                for (a, b), (c, d) in zip(*alignment.aligned):
+                    for i, j in zip(range(a+first, b+first), range(c+begin, d+begin)):
+                        if expected[i] == observed[j]:
+                            correspondence[i] = j
+            correspondence.update(zip(range(stop, following), range(end, next_observed)))
+            first, begin = following, next_observed
     position = 0
     cues = []
     for line, key in zip(lines, keys):
@@ -78,6 +110,8 @@ def _match_words(lines, words, units):
                      'matched_fraction': coverage, 'matched_density': density,
                      'status': 'candidate' if end > start else 'unresolved_timing',
                      'source': 'asr_rough_anchor'})
+        if any(a == position and b == position+len(key) for a, b, _, _ in boundaries):
+            cues[-1]['match_basis'] = 'complete_phrase'
         position += len(key)
     return cues
 
@@ -119,6 +153,30 @@ def anchors_from_words(lines, words, language, allow_missing=False):
             if cue['status'] == 'unresolved_timing':
                 raise ValueError(f'Collapsed ASR interval for lyric line {i}')
     return cues
+
+
+def timeline_support(cues, words, language):
+    """Check coarse phrase location against already observed audio text.
+
+    This is not an onset-accuracy measurement. Silence and held syllables do
+    not fail a duration heuristic; only independently located lyrics can
+    contradict a caption, and ambiguous/missing recognition stays unknown.
+    """
+    anchors = anchors_from_words([c['text'] for c in cues], words, language, allow_missing=True)
+    checked, conflicts = [], []
+    for i, (cue, anchor) in enumerate(zip(cues, anchors), 1):
+        if anchor.get('match_basis') != 'complete_phrase' or anchor['status'] != 'candidate':
+            continue
+        checked.append(i)
+        units = cue.get('units') or []
+        begin = min((u['start'] for u in units), default=cue['start'])
+        end = max((u.get('acoustic_end') or u['end'] for u in units), default=cue['end'])
+        # Rough recognition can truncate a held tail or stretch a first word.
+        # A two-second separation still establishes a different passage.
+        if end+2 < anchor['start'] or begin-2 > anchor['end']:
+            conflicts.append(dict(line=i, caption_range=[begin, end],
+                                  observed_range=[anchor['start'], anchor['end']]))
+    return dict(checked_lines=checked, conflicts=conflicts)
 
 
 def main():

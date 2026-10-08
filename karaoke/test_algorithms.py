@@ -1744,6 +1744,31 @@ class SubtitleIntegrity(unittest.TestCase):
         self.assertEqual(cue['matched_density'],1.)
         self.assertEqual((cue['start'],cue['end']),(1.,30.))
 
+    def test_missing_phrase_cannot_consume_a_later_observed_phrase(self):
+        words = [dict(word='blue river', start=20., end=24.),
+                 dict(word='the weather today is cloudy and windy', start=26., end=35.)]
+        cues = anchors_from_words(['red sky', 'blue river'], words, 'English', allow_missing=True)
+        self.assertEqual(cues[0]['status'], 'unresolved_text')
+        self.assertEqual((cues[1]['start'], cues[1]['end']), (20., 24.))
+        self.assertEqual(cues[1]['match_basis'], 'complete_phrase')
+
+    def test_phrase_location_check_uses_audio_text_not_loudness_or_duration(self):
+        from anchors_from_asr import timeline_support
+        words = [dict(word='blue river', start=20., end=24.)]
+        cue = dict(text='blue river', start=30., end=34.)
+        self.assertEqual(timeline_support([cue], words, 'English')['conflicts'],
+                         [dict(line=1, caption_range=[30.,34.], observed_range=[20.,24.])])
+        # The same long note is fine; missing/different speech proves nothing.
+        cue.update(start=20., end=60.)
+        self.assertEqual(timeline_support([cue], words, 'English')['conflicts'], [])
+        self.assertEqual(timeline_support([cue], [], 'English')['checked_lines'], [])
+        self.assertEqual(timeline_support([dict(cue, text='red sky')], words, 'English')['checked_lines'], [])
+        # One recognized refrain cannot identify which of two copies it is.
+        self.assertEqual(timeline_support([cue, dict(cue,start=70.,end=74.)], words, 'English')['checked_lines'], [])
+        # A repeated prefix inside a longer line is still another occurrence.
+        longer = dict(cue, text='blue river runs', start=70., end=74.)
+        self.assertEqual(timeline_support([cue, longer], words, 'English')['checked_lines'], [])
+
     def test_split_video_cards_match_one_lyric_line(self):
         self.assertEqual(caption_similarity('星光落在心里面', '星光落在'), 1.)
         self.assertEqual(caption_similarity('星光落在心里面', '心里面'), 1.)

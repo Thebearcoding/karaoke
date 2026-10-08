@@ -4253,6 +4253,35 @@ def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success
         assert lead.result.call_count == int(need_lead)
 
 
+@pytest.mark.parametrize('displaced', [False, True])
+def test_publication_checks_observed_lyrics_even_after_playback_fallback(tmp_path, monkeypatch, displaced):
+    pipeline = Pipeline(dict(url=URL), tmp_path, device='cpu')
+    lyrics = dict(lines=['blue river'], language='English')
+    start = 30. if displaced else 20.
+    cue = dict(text='blue river', start=start, end=start+4., units=[
+        dict(text='blue', first=0, stop=4, start=start, end=start+2., timing_source='linear_fallback', acoustic_end=None),
+        dict(text='river', first=5, stop=10, start=start+2., end=start+4., timing_source='linear_fallback')])
+    (tmp_path/'cues.json').write_text(json.dumps([cue]))
+    (tmp_path/'quality.json').write_text('{}')
+    raw = tmp_path/'alignment/raw.json'; raw.parent.mkdir()
+    raw.write_text(json.dumps([dict(asr_localizations=[dict(context=[0,1], source_range=[10.,40.],
+        recognition=dict(segments=[dict(words=[dict(word='blue river', start=10., end=14.)])]))])]))
+    def run(*args):
+        output = tmp_path/'timing-checked'; output.mkdir()
+        (output/'cues.json').write_text(json.dumps([cue]))
+        (output/'report.json').write_text(json.dumps(dict(lines=[], unresolved=[], constraints=[])))
+    monkeypatch.setattr(pipeline, 'run', run)
+    if displaced:
+        with pytest.raises(StageFailure, match='字幕与已定位的唱段不一致'):
+            pipeline.validate_alignment(lyrics, 40.)
+    else:
+        pipeline.validate_alignment(lyrics, 40.)
+    evidence = json.loads((tmp_path/'localization-validation.json').read_text())
+    assert evidence[0]['checked_lines'] == [1]
+    assert bool(evidence[0]['conflicts']) is displaced
+    assert json.loads((tmp_path/'cues.json').read_text()) == [cue]
+
+
 @pytest.mark.parametrize('extra_frames', [0, 4])
 def test_timing_review_accepts_one_sample_of_resampling_but_rejects_different_lengths(tmp_path, monkeypatch, extra_frames):
     import soundfile as sf
