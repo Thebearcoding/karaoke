@@ -117,7 +117,7 @@
       <div class="transport-center"><div class="transport-buttons"><button class="next-button" id="transport-restart" aria-label="重唱" title="重唱"><svg class="icon"><use href="#i-restart"/></svg>重唱</button><button class="play-button" id="play-toggle" aria-label="播放"><svg class="icon"><use id="play-icon" href="#i-play"/></svg></button><button class="next-button" id="next-song" data-next title="下一首 · N">下一首 <svg class="icon"><use href="#i-next"/></svg></button></div><div class="seek-row"><time id="current-time">0:00</time><input id="seek" type="range" min="0" max="1" step="0.1" value="0" aria-label="播放进度"><time id="duration">0:00</time></div></div>
       <div class="transport-sound">
         <div class="transport-tools" id="transport-tools">
-          <button id="lead-toggle" class="lead-toggle" aria-label="开启主唱" aria-pressed="false">主唱 <span id="lead-state">关</span></button>
+          <div class="lead-control" role="group" aria-label="主唱音量"><span class="lead-label">主唱</span><button id="lead-down" aria-label="主唱减小 5%" title="主唱减小 5%">−</button><output id="lead-value" aria-live="polite">0%</output><button id="lead-up" aria-label="主唱增大 5%" title="主唱增大 5%">＋</button></div>
           <div class="pitch-control" role="group" aria-label="升降调"><button id="pitch-down" aria-label="降半音" title="降半音">♭</button><output id="pitch-value" aria-live="polite">原调</output><button id="pitch-up" aria-label="升半音" title="升半音">♯</button></div>
         </div>
       </div>

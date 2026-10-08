@@ -60,7 +60,7 @@ test('two devices play, pause, seek and mix independently across shared queue up
     }
     const desktopSources=[...desktop.sources];
     assert.equal(desktopSources.length,3); assert.equal(mobile.sources.length,3);
-    command(phone,'seek',{position:9}); command(phone,'ready'); command(phone,'lead',{enabled:true});
+    command(phone,'seek',{position:9}); command(phone,'ready'); command(phone,'lead',{level:1});
     await mobile.apply(snapshot(phone),0);
     command(phone,'pause'); await mobile.apply(snapshot(phone),0);
     // Even a legacy client changing server transport is only a queue update here.
@@ -108,7 +108,7 @@ test('browser refresh restores only its own song, position and mix, paused until
   const room={entries:[{...song,status:'completed'},{...song,id:'two',status:'completed'}]};
   const computer=new LocalPlayback(); computer.reconcile(room);
   computer.command('select',{entry_id:'two'},room.entries); computer.command('ready',{},room.entries);
-  computer.command('lead',{enabled:true},room.entries); computer.command('pitch',{pitch_semitones:2},room.entries);
+  computer.command('lead',{level:1},room.entries); computer.command('pitch',{pitch_semitones:2},room.entries);
   now+=7;
   const restored=new LocalPlayback(JSON.parse(JSON.stringify(computer.save())));
   restored.reconcile({...room,playing:true,position:99,current_id:'one'});
@@ -120,20 +120,27 @@ test('browser refresh restores only its own song, position and mix, paused until
   assert.equal(other.entry.id,'one'); assert.equal(other.position(),0); assert.equal(other.state.levels.lead_vocals,0);
 });
 
-test('lead toggle restores old mixes with backing enabled and never restarts the audio', async () => {
+test('lead percentage preserves the mix and playback through adjustment, refresh and song changes', async () => {
   const entries=[{...song,status:'completed'}];
   const local=new LocalPlayback({levels:{instrumental:0,backing_vocals:.2,lead_vocals:.4}}), p=setup();
   local.reconcile({entries}); await p.unlock(); await p.load(local.entry);
   local.command('play',{},entries); local.command('ready',{},entries);
   await p.apply(local.reconcile({entries}),0);
   const sources=[...p.sources], position=p.video.currentTime;
-  assert.deepEqual(p.gains.map(g=>g.gain.value),[1,1,1]);
-  for (const enabled of [false,true,false]) {
-    local.command('lead',{enabled},entries); await p.apply(local.reconcile({entries}),0);
-    assert.deepEqual(p.gains.map(g=>g.gain.value),[1,1,Number(enabled)]);
+  assert.deepEqual(p.gains.map(g=>g.gain.value),[1,1,.4]);
+  for (const level of [0,.25,.73,1]) {
+    local.command('lead',{level},entries); await p.apply(local.reconcile({entries}),0);
+    assert.deepEqual(p.gains.map(g=>g.gain.value),[1,1,level]);
     assert.deepEqual(p.sources,sources); assert.equal(p.video.currentTime,position);
     assert.deepEqual(new LocalPlayback(local.save()).state.levels,local.state.levels);
   }
+  for (const [level, expected] of [[-.1,0],[2,1],[.35,.35],[NaN,.35],[undefined,.35]]) {
+    local.command('lead',{level},entries);
+    assert.equal(local.state.levels.lead_vocals,expected);
+  }
+  local.command('select',{entry_id:'two'},[...entries,{...song,id:'two',status:'completed'}]);
+  assert.deepEqual(local.state.levels,{instrumental:1,backing_vocals:1,lead_vocals:.35});
+  assert.equal(new LocalPlayback(local.save()).state.levels.lead_vocals,.35);
   p.clear();
 });
 

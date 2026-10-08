@@ -32,10 +32,10 @@ function renderRange(input) {
 
 function renderMixer() {
   player.setLevels(state.levels);
-  const enabled = state.levels.lead_vocals > 0;
-  $('lead-state').textContent = enabled ? '开' : '关';
-  $('lead-toggle').setAttribute('aria-pressed', String(enabled));
-  $('lead-toggle').setAttribute('aria-label', enabled ? '关闭主唱' : '开启主唱');
+  const level = state.levels.lead_vocals;
+  $('lead-value').textContent = `${Math.round(level * 100)}%`;
+  $('lead-down').disabled = level <= 0;
+  $('lead-up').disabled = level >= 1;
 }
 
 function renderStorage() {
@@ -888,7 +888,9 @@ async function nextSong() {
 document.querySelectorAll('[data-next]').forEach(button => button.onclick = nextSong);
 $('now-song').onclick = () => switchView('player');
 $('transport-restart').onclick = () => command('seek', {position:0});
-$('lead-toggle').onclick = () => command('lead', {enabled:state.levels.lead_vocals === 0});
+for (const [id, step] of [['lead-down', -5], ['lead-up', 5]]) {
+  $(id).onclick = () => command('lead', {level:(Math.round(state.levels.lead_vocals * 100) + step) / 100});
+}
 $('storage-form').onsubmit = async event => {
   event.preventDefault();
   $('storage-save').disabled = true;

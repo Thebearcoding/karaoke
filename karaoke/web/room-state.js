@@ -12,7 +12,7 @@ export class LocalPlayback {
   constructor(saved = {}) {
     this.entry = saved?.entry?.id && saved.entry.job_id ? saved.entry : null;
     this.state = {playing:false, position:bounded(saved?.position, 0, Infinity, 0), started_at:null,
-      levels:{instrumental:1, backing_vocals:1, lead_vocals:Number(bounded(saved?.levels?.lead_vocals, 0, 1, 0) > 0)},
+      levels:{instrumental:1, backing_vocals:1, lead_vocals:bounded(saved?.levels?.lead_vocals, 0, 1, 0)},
       pitch_semitones:Math.round(bounded(saved?.pitch_semitones, -6, 6, 0))};
     this.playedAt = saved?.played_at || null;
     this.finished = new Set(saved?.finished_ids || []);
@@ -57,7 +57,7 @@ export class LocalPlayback {
       if (finished) this.finished.add(finished.entry_id);
       this.select(target || null, true);
     } else if (action === 'lead') {
-      state.levels.lead_vocals = Number(Boolean(extra.enabled));
+      state.levels.lead_vocals = bounded(extra.level, 0, 1, state.levels.lead_vocals);
     } else if (action === 'pitch') {
       state.pitch_semitones = extra.pitch_semitones;
     } else if (this.entry) {
