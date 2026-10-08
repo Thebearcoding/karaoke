@@ -4357,6 +4357,20 @@ def test_auxiliary_intro_and_long_preview_cannot_abort_valid_lyric_video(tmp_pat
     assert json.loads((tmp_path/'cues.json').read_text()) == cues
 
 
+@pytest.mark.parametrize('radius', [1, 3, 6])
+def test_caption_outline_preserves_antialiasing_and_canvas_edges(radius):
+    from PIL import Image, ImageDraw, ImageFilter
+    from karaoke.subtitle_style import outline_mask
+    for region in (None, (17, 13, 47, 26), (0, 0, 7, 9), (56, 31, 63, 39)):
+        mask = Image.new('L', (64, 40))
+        if region:
+            draw = ImageDraw.Draw(mask)
+            draw.rectangle(region, fill=173)
+            draw.point(region[:2], fill=255)
+        assert outline_mask(mask, radius).tobytes() == mask.filter(
+            ImageFilter.MaxFilter(2*radius+1)).tobytes()
+
+
 def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatch):
     from PIL import Image
     import karaoke.render_lyric_progress as renderer

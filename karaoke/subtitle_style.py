@@ -98,6 +98,18 @@ def balanced_lines(text, font, tracking, maximum):
     return list(min(candidates)[1:]) if candidates else lines
 
 
+def outline_mask(mask, radius):
+    """Dilate only the occupied region, including the filter's full halo."""
+    outline = Image.new('L', mask.size)
+    bounds = mask.getbbox()
+    if bounds is not None:
+        left, top, right, bottom = bounds
+        bounds = (max(0, left-radius), max(0, top-radius),
+                  min(mask.width, right+radius), min(mask.height, bottom+radius))
+        outline.paste(mask.crop(bounds).filter(ImageFilter.MaxFilter(2*radius+1)), bounds)
+    return outline
+
+
 def caption_image(text, width=1280, height=None, font_file=None,
                   style=DEFAULT_STYLE, tone='light', language='auto', layout_out=None,
                   style_overrides=None):
@@ -153,7 +165,7 @@ def caption_image(text, width=1280, height=None, font_file=None,
     edge_radius = max(1, round(spec.get('outline_width', .5)*font_scale))
     for alpha in [mask.filter(ImageFilter.GaussianBlur(spec.get('shadow_blur', 2.4)*font_scale))
                        .point(lambda a: round(a*spec.get('shadow_alpha', .6))),
-                  mask.filter(ImageFilter.MaxFilter(2*edge_radius+1))
+                  outline_mask(mask, edge_radius)
                        .point(lambda a: round(a*spec.get('outline_alpha', .34)))]:
         shadow = Image.new('RGBA', image.size, shadow_rgb+(0,))
         shadow.putalpha(alpha)
