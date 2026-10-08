@@ -25,14 +25,20 @@ API 的依赖文件只安装服务依赖。新检出请按[安装说明](../SETU
 | 接口 | 用途 |
 |---|---|
 | `GET /v1/library` | 列出已知歌曲，实际文件完整时才标记为已准备 |
-| `GET /v1/room` | 当前歌曲、播放位置、待唱 `entries` 和倒序演唱记录 `history` |
+| `GET /v1/room` | 待唱 `entries`、倒序演唱记录 `history`、准备状态和兼容旧客户端的播放字段 |
 | `POST /v1/room/entries` | 传入 `{ "url": "..." }` 点新歌，或 `{ "job_id": "..." }` 复用已准备歌曲 |
-| `POST /v1/room/commands` | `play`、`pause`、`seek`、`next`、`select`、`remove`、`reorder`、`mix`、`ready`、`retry` |
+| `POST /v1/room/commands` | 网页共享操作：`finish`、`remove`、`reorder`、`retry`；另保留旧客户端播放命令 |
 | `GET /v1/room/events` | 推送 `event: room`；空闲时只发连接保活注释 |
 | `GET /v1/storage` | 缓存使用量、上限、受保护与可回收容量、准备空间是否足够 |
 | `POST /v1/storage` | `{ "limit_gib": 10 }` 修改并持久化上限；`null` 取消应用配额，仍保护实际磁盘余量，返回新的房间快照 |
 
-`pause`、`seek`、`next`、`ready` 必须带 `entry_id`，防止旧播放器事件影响新歌曲。`reorder` 传入完整的 `order` ID 数组，可带 `revision` 拒绝过期操作；当前歌曲保持首位。`mix` 接受 `instrumental`（纯伴奏）、`karaoke`（伴奏＋伴唱）、`original`（三轨一起播放）。
+兼容旧客户端的 `pause`、`seek`、`next`、`ready` 必须带 `entry_id`，防止旧播放器事件影响新歌曲。`reorder` 传入完整的 `order` ID 数组，可带 `revision` 拒绝过期操作；调序不改变设备正在播放的歌。`mix` 接受 `instrumental`（纯伴奏）、`karaoke`（伴奏＋伴唱）、`original`（三轨一起播放）。
+
+网页不使用服务端的 `current_id`、`playing`、`position`、`started_at`、`mix`、`levels`、`pitch_semitones` 控制播放。这些旧 API 字段仅为兼容保留；网页的播放命令、媒体就绪握手和缓冲处理全部在设备本地进行。刷新从 sessionStorage 恢复本机选曲、位置和混音，并等待用户点击，不跟随其他设备起播。
+
+网页切歌或唱完时发送 `{"action":"finish","entry_id":"…","playback_started_at":…}`。实际起播时间为 Unix 秒；尚未开始则传 `null`，移除条目但不新增演唱历史。同一队列条目的重复完成是幂等操作，不能误删下一首。其他浏览器继续保留自己正在播放的条目。
+
+`GET /v1/room/events?job_id=…` 在 SSE 存续期间保护本机当前歌曲的缓存，并在快照的 `playback_entry` 中推送该任务的最新元数据；即使该歌曲不再位于共享待唱列表，也保持可播放。关闭连接释放保护，连接和状态推送不刷新 LRU 访问时间。
 
 `history` 与房间一起持久化并通过 SSE 推送，最新唱过的排在前面。每次演唱保存独立的条目 ID、任务 ID、来源 URL、歌名、歌手、语言、时长、封面和 Unix 秒时间 `played_at` / `finished_at`。开始播放后切歌、结束或移除当前歌曲才归档；加载、开场倒计时或准备中直接跳过不归档。`select` 会将已经唱过的当前歌曲归档，尚未开唱的旧当前歌曲仍保留在待唱队列。历史不参与预处理排序、队列容量或缓存保护；再点仍通过标准 `POST /v1/room/entries`，创建新的队列条目并复用可用任务。
 
@@ -44,11 +50,11 @@ API 的依赖文件只安装服务依赖。新检出请按[安装说明](../SETU
 
 `levels` 独立调整三个声部，支持部分更新，例如 `{ "action": "levels", "levels": { "backing_vocals": 0.35, "lead_vocals": 0.2 } }`。键为 `instrumental`、`backing_vocals`、`lead_vocals`，值为 0–1 的有限数。房间快照中的 `levels` 包含全部三个值，手动设置不对应预设时 `mix` 为 `custom`。切歌、暂停、定位不改变音量；选择 `mix` 预设则重置三个值。`storage` 随房间 SSE 快照推送，前端不轮询。
 
-`pitch` 实时设置三轨共同的升降调，例如 `{ "action": "pitch", "pitch_semitones": -2 }`。接受 -6 至 +6 的整数半音数，0 为原调；快照中的 `pitch_semitones` 持久保存，遥控页同步。此命令不改变播放位置、播放速度、音量、预处理结果或缓存音轨。
+`pitch` 实时设置三轨共同的升降调，例如 `{ "action": "pitch", "pitch_semitones": -2 }`。接受 -6 至 +6 的整数半音数，0 为原调；兼容字段 `pitch_semitones` 持久保存；当前网页在本机保存，不同步到其他设备。此命令不改变播放位置、播放速度、音量、预处理结果或缓存音轨。
 
 预处理队列按歌单中尚未开始的歌曲重新排序，不中断当前处理。播放抵达未准备好的歌曲时等待；媒体加载完成后由播放页发送 `ready`，从设定位置起播，不把预处理／加载耗时算入歌曲时间。首个起音不足四秒的成品通过 `opening_countdown` 提供准备提示。零点起播时 `ready` 可返回未来的 `started_at`，播放器必须等到该时间再启动三轨和视频，并在等待期间显示倒计时；中途续播不加此等待。移除点歌项解除缓存保护；已提交的预处理仍会完成，成品可按 LRU 回收。
 
-浏览器用同一个 Web Audio 时钟播放三条按需分段的 FLAC 音轨，MV 静音跟随。普通页面负责播放；`/?remote=1` 只点歌和控制，不发声。完整说明见 [APP.md](APP.md)。
+浏览器用同一个 Web Audio 时钟播放三条按需分段的 FLAC 音轨，MV 静音跟随。每个设备独立负责自己的声音与画面，旧的 `/?remote=1` 也正常播放。完整说明见 [APP.md](APP.md)。
 
 ### 分段播放
 

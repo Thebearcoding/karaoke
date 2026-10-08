@@ -66,7 +66,7 @@ export class Player {
           this.lastVideoAdvance = this.context.currentTime;
           const run = this.videoRun;
           this.video.play().catch(error => {
-            if (this.videoRun === run) this.failVideo(error, position);
+            if (this.videoRun === run) this.failPlayback(error, position);
           });
         }
         if (position >= this.entry.duration - 0.025) {
@@ -121,7 +121,7 @@ export class Player {
     this.onBuffering?.(position, startedAt);
   }
 
-  failVideo(error, position) {
+  failPlayback(error, position) {
     this.unlocked = false;
     this.waitForMedia(position);
     this.onError?.(error);
@@ -163,6 +163,7 @@ export class Player {
       // direct seek/resume callers before scheduling any audio.
       await this.prepareVideo(pending.position, pending.abort.signal);
       if (this.pendingStart !== pending) return;
+      if (this.context.state !== 'running') throw new Error('声音尚未启动，请点播放重试');
       this.pendingStart = null;
       this.videoRun = pending;
       this.videoPending = true;
@@ -175,13 +176,19 @@ export class Player {
       this.pitchChain?.start(this.audibleWhen);
     } catch (error) {
       if (this.pendingStart !== pending) return;
-      this.failVideo(error, pending.position);
+      this.failPlayback(error, pending.position);
     }
   }
 
   ensureContext() {
     if (this.context) return;
     this.context = new (window.AudioContext || window.webkitAudioContext)();
+    this.context.onstatechange = () => {
+      if (this.context.state !== 'running' && this.anchor !== null) {
+        const position = Math.max(0, Math.min(this.scheduledUntil, this.outputTime() - this.anchor));
+        this.failPlayback(new Error('声音已中断，请点播放继续'), position);
+      }
+    };
     this.master = this.context.createGain();
     this.master.gain.value = this.volume;
     this.master.connect(this.context.destination);
@@ -194,10 +201,14 @@ export class Player {
   }
 
   async unlock() {
+    // iOS otherwise treats Web Audio as ambient audio, which the ringer switch mutes.
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch { /* Optional API. */ }
     this.ensureContext();
+    this.unlocked = false;
     await this.context.resume();
     await this.preparePitch();
     this.unlocked = this.context.state === 'running';
+    if (!this.unlocked) throw new Error('声音尚未启动，请点播放重试');
   }
 
   preparePitch() {

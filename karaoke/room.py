@@ -34,7 +34,7 @@ class StemLevels(BaseModel):
 
 class RoomCommand(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    action: Literal['play', 'pause', 'seek', 'next', 'select', 'remove', 'reorder', 'mix', 'levels', 'pitch', 'ready', 'buffering', 'retry']
+    action: Literal['play', 'pause', 'seek', 'next', 'select', 'remove', 'finish', 'reorder', 'mix', 'levels', 'pitch', 'ready', 'buffering', 'retry']
     entry_id: str | None = None
     position: float = Field(default=0, ge=0, allow_inf_nan=False)
     order: list[str] | None = None
@@ -176,6 +176,28 @@ class Room:
                 'preparation_jobs': list(self.worker.processes),
                 'storage': self.store.cache.snapshot(), 'library': self.library()}
 
+    async def events(self, job_id=None):
+        # A second device may finish/remove the shared queue entry while this
+        # browser is still singing. Keep its media until the connection closes.
+        leased = job_id if job_id and self.store.read(job_id) else None
+        if leased:
+            self.store.cache.acquire(leased, record_access=False)
+
+        def snapshot():
+            data = self.snapshot()
+            if leased:
+                data['playback_entry'] = self.describe(dict(id=leased, job_id=leased))
+            return data
+
+        stream = self.updates.events(snapshot)
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            await stream.aclose()
+            if leased:
+                self.store.cache.release(leased)
+
     @staticmethod
     def featured():
         path = Path(__file__).with_name('web')/'catalog.json'
@@ -272,6 +294,8 @@ class Room:
         current = next((e for e in state['entries'] if e['id'] == state['current_id']), None)
         entry = next((e for e in state['entries'] if e['id'] == command.entry_id), None)
         action = command.action
+        if action == 'finish' and entry is None:
+            return self.snapshot()  # Another browser already finished this entry.
         if action in ('pause', 'seek', 'ready', 'buffering', 'next') and command.entry_id != state['current_id']:
             raise HTTPException(409, '已经切换到另一首歌')
         if action in ('select', 'remove', 'retry') and entry is None:
@@ -318,9 +342,11 @@ class Room:
                 state['entries'].insert(0, entry)
             state.update(current_id=entry['id'] if entry else None, position=0,
                          started_at=None, playing=bool(entry))
-        elif action == 'remove':
-            if entry == current:
-                self.remember_song(state, current)
+        elif action in ('remove', 'finish'):
+            if action == 'finish' and command.playback_started_at is not None:
+                entry['played_at'] = min(time.time(), command.playback_started_at)
+            if entry == current or action == 'finish':
+                self.remember_song(state, entry)
             state['entries'].remove(entry)
             if entry == current:
                 following = state['entries'][0] if state['entries'] else None
@@ -330,8 +356,6 @@ class Room:
             ids = [e['id'] for e in state['entries']]
             if not command.order or len(command.order) != len(ids) or set(command.order) != set(ids):
                 raise HTTPException(422, '排序必须包含歌单中的每一首歌，且不能重复')
-            if current and command.order[0] != current['id']:
-                raise HTTPException(409, '正在播放的歌曲保持在首位；请使用切歌')
             by_id = {e['id']: e for e in state['entries']}
             state['entries'] = [by_id[i] for i in command.order]
         elif action == 'mix':
@@ -362,6 +386,6 @@ class Room:
             if selected:
                 self.store.touch(selected['job_id'])
         self.save(state)
-        if action in ('next', 'remove', 'select', 'retry'):
+        if action in ('next', 'remove', 'finish', 'select', 'retry'):
             self.store.cache.enforce()
         return self.snapshot()

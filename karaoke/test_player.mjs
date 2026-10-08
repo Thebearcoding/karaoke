@@ -1,7 +1,7 @@
 import test, {beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import {Player} from './web/player.js';
-import {isStaleRoomSnapshot} from './web/room-state.js';
+import {isStaleRoomSnapshot, LocalPlayback} from './web/room-state.js';
 
 test('late HTTP replies cannot undo a newer room command or same-revision progress update', () => {
   const current = {revision:4,server_time:100,entries:[{status:'completed'}]};
@@ -48,6 +48,93 @@ const clockOffset = () => 100-Date.now()/1000;
 // The wall clock and simulated AudioContext advance only when the test asks.
 beforeEach(t => t.mock.method(Date, 'now', () => 100_000));
 
+test('two devices play, pause, seek and mix independently across shared queue updates', async () => {
+  const room={revision:1,entries:[{...song,status:'completed'},{...song,id:'two',status:'queued'}]};
+  const computer=new LocalPlayback(), phone=new LocalPlayback(), desktop=setup(), mobile=setup();
+  const snapshot=device=>device.reconcile(room);
+  const command=(device,action,extra={})=>device.command(action,extra,room.entries);
+  try {
+    for (const [device,p] of [[computer,desktop],[phone,mobile]]) {
+      snapshot(device); await p.unlock(); await p.load(device.entry);
+      command(device,'play'); command(device,'ready'); await p.apply(snapshot(device),0);
+    }
+    const desktopSources=[...desktop.sources];
+    assert.equal(desktopSources.length,3); assert.equal(mobile.sources.length,3);
+    command(phone,'seek',{position:9}); command(phone,'ready'); command(phone,'levels',{levels:{lead_vocals:.4}});
+    await mobile.apply(snapshot(phone),0);
+    command(phone,'pause'); await mobile.apply(snapshot(phone),0);
+    // Even a legacy client changing server transport is only a queue update here.
+    Object.assign(room,{revision:2,current_id:'two',playing:false,position:19,levels:{lead_vocals:0}});
+    await desktop.apply(snapshot(computer),0);
+    assert.equal(computer.state.playing,true); assert.equal(computer.state.position,0);
+    assert.equal(computer.state.levels.lead_vocals,0);
+    assert.equal(phone.state.position,9); assert.equal(phone.state.levels.lead_vocals,.4);
+    assert.ok(desktopSources.every(s=>!s.stopped)); assert.deepEqual(desktop.sources,desktopSources);
+    assert.equal(mobile.sources.length,0);
+    command(phone,'select',{entry_id:'two'});
+    assert.equal(phone.entry.id,'two'); assert.equal(phone.state.started_at,null);
+    assert.equal(computer.entry.id,'one');
+    room.entries[1].status='completed'; snapshot(phone); command(phone,'ready');
+    assert.notEqual(phone.state.started_at,null);
+  } finally { desktop.clear(); mobile.clear(); }
+});
+
+test('finishing on one device does not interrupt the other or resurrect a removed queue item', t => {
+  let now=100; t.mock.method(Date,'now',()=>now*1000);
+  const room={entries:[{...song,status:'completed'},{...song,id:'two',status:'completed'}]};
+  const computer=new LocalPlayback(), phone=new LocalPlayback();
+  for (const device of [computer,phone]) {
+    device.reconcile(room); device.command('play',{},room.entries); device.command('ready',{},room.entries);
+  }
+  now+=5;
+  const {finished}=phone.command('next',{entry_id:'one'},room.entries);
+  assert.deepEqual(finished,{entry_id:'one',playback_started_at:100});
+  room.entries.shift();
+  computer.reconcile(room); phone.reconcile(room);
+  assert.equal(computer.entry.id,'one'); assert.equal(computer.position(),5);
+  assert.equal(computer.state.playing,true); assert.equal(phone.entry.id,'two');
+  const unchanged=phone.save();
+  phone.command('next',{entry_id:'one'},room.entries);
+  assert.deepEqual(phone.save(),unchanged);
+  phone.command('next',{entry_id:'two'},room.entries);
+  phone.reconcile(room); // HTTP finish acknowledgement has not arrived yet.
+  assert.equal(phone.entry,null);
+  room.entries.push({...song,id:'three'}); phone.reconcile(room);
+  assert.equal(phone.entry.id,'three'); assert.equal(phone.state.playing,false);
+});
+
+test('browser refresh restores only its own song, position and mix, paused until a gesture', t => {
+  let now=100; t.mock.method(Date,'now',()=>now*1000);
+  const room={entries:[{...song,status:'completed'},{...song,id:'two',status:'completed'}]};
+  const computer=new LocalPlayback(); computer.reconcile(room);
+  computer.command('select',{entry_id:'two'},room.entries); computer.command('ready',{},room.entries);
+  computer.command('mix',{mix:'original'},room.entries); computer.command('pitch',{pitch_semitones:2},room.entries);
+  now+=7;
+  const restored=new LocalPlayback(JSON.parse(JSON.stringify(computer.save())));
+  restored.reconcile({...room,playing:true,position:99,current_id:'one'});
+  assert.equal(restored.entry.id,'two'); assert.equal(restored.position(),7);
+  assert.equal(restored.state.mix,'original'); assert.equal(restored.state.pitch_semitones,2);
+  assert.equal(restored.state.playing,false); assert.equal(restored.state.started_at,null);
+  assert.equal(restored.command('next',{entry_id:'two'},room.entries).finished.playback_started_at,100);
+  const other=new LocalPlayback(); other.reconcile(room);
+  assert.equal(other.entry.id,'one'); assert.equal(other.position(),0); assert.equal(other.state.mix,'karaoke');
+});
+
+test('local readiness, count-in and stale buffering never start or rewind the wrong clock', t => {
+  let now=100; t.mock.method(Date,'now',()=>now*1000);
+  const room={entries:[{...song,status:'completed',opening_countdown:{start:-3}}]};
+  const p=new LocalPlayback(); p.reconcile(room); p.command('play',{},room.entries);
+  now+=2; assert.equal(p.position(),0); assert.equal(p.state.started_at,null);
+  p.command('ready',{},room.entries); assert.equal(p.state.started_at,105);
+  now=104; assert.equal(p.position(),0);
+  now=109; assert.equal(p.position(),4);
+  p.command('buffering',{entry_id:'one',position:3.5,playback_started_at:105},room.entries);
+  now=112; assert.equal(p.position(),3.5); assert.equal(p.state.started_at,null);
+  p.command('ready',{},room.entries); assert.equal(p.state.started_at,112);
+  p.command('buffering',{entry_id:'one',position:1,playback_started_at:105},room.entries);
+  assert.equal(p.state.started_at,112); assert.equal(p.position(),3.5);
+});
+
 test('a paused video loads its first frame before playback is requested', async () => {
   const p=setup(); p.video.preload='metadata';
   p.video.load=function () {
@@ -87,6 +174,36 @@ test('media loading does not wait for an audio processor that needs a user gestu
     await unlocking; await p.apply(state,clockOffset());
     assert.equal(p.sources.length,3);
   } finally { activateProcessor({input:{},setPitch(){},stop(){},start(){}}); await pending; p.clear(); }
+});
+
+test('music playback selects the media audio session and requires a running audio context', async () => {
+  const session={type:'auto'}, p=setup();
+  Object.defineProperty(navigator,'audioSession',{configurable:true,value:session});
+  try {
+    p.ensureContext(); p.context.state='suspended';
+    p.context.resume=async()=>{if (session.type==='playback') p.context.state='running';};
+    await p.unlock(); await p.load(song); await p.apply(state,clockOffset());
+    assert.equal(p.sources.length,3);
+    p.stop(); p.context.state='interrupted'; p.context.resume=async()=>{};
+    await assert.rejects(p.unlock(),/声音尚未启动/);
+    assert.equal(p.unlocked,false);
+    await p.apply(state,clockOffset()); assert.equal(p.sources.length,0);
+  } finally { delete navigator.audioSession; p.clear(); }
+});
+
+test('an audio interruption pauses the video and local clock until sound is re-enabled', async () => {
+  const p=setup(), waiting=[], errors=[];
+  p.onBuffering=(...args)=>waiting.push(args); p.onError=error=>errors.push(error.message);
+  try {
+    await p.unlock(); await p.load(song); await p.apply(state,clockOffset());
+    p.context.currentTime=p.anchor+4;
+    const sources=[...p.sources];
+    p.context.state='interrupted'; p.context.onstatechange();
+    assert.equal(p.anchor,null); assert.equal(p.video.paused,true); assert.equal(p.unlocked,false);
+    assert.ok(sources.every(s=>s.stopped)); assert.deepEqual(waiting,[[4,100]]);
+    assert.match(errors[0],/声音已中断/);
+    p.context.onstatechange(); assert.equal(waiting.length,1);
+  } finally { p.clear(); }
 });
 
 test('decoded audio cannot start the clock before the video is ready', async () => {

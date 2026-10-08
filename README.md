@@ -8,8 +8,8 @@
 - 自动下载视频，分离背景音乐、伴唱、主唱，生成带字幕的 MV。
 - 中文、日文和英文歌词对齐；当前句＋下一句，琥珀色逐字／词点亮，硬切换句，片头歌曲信息和四秒开唱提示。
 - 暂停、定位、重唱、下一首、全屏、音量；三轨实时升降调，切换纯伴奏、保留伴唱和原唱。
-- 伴奏、伴唱、主唱独立音量，支持全屏调整和遥控同步；默认 10 GiB 歌曲缓存上限与 LRU 自动回收。
-- SQLite 持久化，SSE 推送进度；同一局域网可以用手机遥控点歌。
+- 伴奏、伴唱、主唱独立音量，支持全屏调整；各设备独立播放；默认 10 GiB 歌曲缓存上限与 LRU 自动回收。
+- SQLite 持久化，SSE 推送进度；同一局域网可以用手机点歌和播放。
 
 这是本地单房间 MVP。音频使用原曲和分离音轨，不生成替代音乐。当前有神经网络分离和对齐，普通点歌优先获取已发表歌词，模型负责歌曲信息与声学对齐；无可靠文本时保留音轨，不用识别草稿充当歌词。独立音频验收仍保留 ASR 覆盖率检查。尚未接入 Codex。切字精度仍在迭代，行为测试通过不代表音质或切字准确率已经达标。失败样本可先运行音频／字幕回归，通过后再补视频，见 [API](karaoke/API.md#先验证音频)。
 
@@ -31,7 +31,7 @@ python3.12 -m venv .venv
 
 - [开发指令](AGENTS.md)：给 Codex 和后续开发者的项目约束。
 - [安装与模型准备](SETUP.md)：环境、固定版本的上游源码、权重位置、验证命令。
-- [网页使用说明](karaoke/APP.md)：点歌、播放、混音模式和遥控。
+- [网页使用说明](karaoke/APP.md)：点歌、播放、混音模式和多设备播放。
 - [API](karaoke/API.md)：请求、任务状态、成品下载和环境变量。
 - [界面设计](karaoke/docs/design/app.md) · [字幕设计](karaoke/docs/design/subtitles.md)。
 - [切字验收](karaoke/docs/word-onset-metrics.md) · [主唱／伴唱验收](karaoke/docs/lead-backing-metrics.md) · [整体验收](karaoke/ACCEPTANCE.md)。
@@ -41,7 +41,7 @@ python3.12 -m venv .venv
 
 ```text
 karaoke/
-  api.py, room.py, job_schema.py    HTTP、任务队列、共享播放状态
+  api.py, room.py, job_schema.py    HTTP、任务队列、共享歌单和准备状态
   pipeline.py, song_sources.py     下载、分离、歌词、对齐、导出
   web/                            原生 HTML / CSS / JavaScript 播放器
   exact_stems.py, three_stems.py   可重组的双轨、三轨母版

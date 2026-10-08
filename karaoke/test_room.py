@@ -160,8 +160,9 @@ def test_playlist_duplicate_song_order_and_stale_end_event(tmp_path):
         assert playing['started_at'] is not None
         response = client.post('/v1/room/commands', json={'action':'reorder','order':[ids[0],ids[2],ids[1]],'revision':playing['revision']})
         assert response.status_code == 200
-        invalid = client.post('/v1/room/commands', json={'action':'reorder','order':[ids[1],ids[0],ids[2]]})
-        assert invalid.status_code == 409
+        moved = client.post('/v1/room/commands', json={'action':'reorder','order':[ids[2],ids[0],ids[1]]})
+        assert moved.status_code == 200
+        assert moved.json()['current_id'] == ids[0]
         following = client.post('/v1/room/commands', json={'action':'next','entry_id':ids[0]}).json()
         assert following['current_id'] == ids[2]
         stale = client.post('/v1/room/commands', json={'action':'next','entry_id':ids[0]})
@@ -211,6 +212,57 @@ def test_two_clients_share_queue_without_lost_adds_or_accidental_duplicates(tmp_
             assert repeat.status_code == 201
             assert len(repeat.json()['entries']) == 4
             assert repeat.json()['entries'][-1]['id'] != initial['entries'][0]['id']
+    asyncio.run(check())
+
+
+def test_device_finish_is_idempotent_and_does_not_move_another_legacy_transport(tmp_path):
+    app = create_app(tmp_path, version='test')
+    room = app.state.room
+    job = ready_job(app.state.store)
+    first = room.add(AddSong(job_id=job['id']))['entries'][0]
+    second = room.add(AddSong(job_id=job['id']))['entries'][1]
+    room.command(RoomCommand(action='play'))
+    playing = room.command(RoomCommand(action='ready', entry_id=first['id']))
+    with TestClient(app) as client:
+        body = dict(action='finish', entry_id=second['id'], playback_started_at=time.time()-5)
+        done = client.post('/v1/room/commands', json=body).json()
+        assert [e['id'] for e in done['entries']] == [first['id']]
+        assert [e['id'] for e in done['history']] == [second['id']]
+        assert {k:done[k] for k in ('current_id','playing','position','started_at')} == {
+            k:playing[k] for k in ('current_id','playing','position','started_at')}
+        repeated = client.post('/v1/room/commands', json=body).json()
+        assert repeated['revision'] == done['revision'] and repeated['history'] == done['history']
+
+
+def test_device_stream_protects_media_after_shared_queue_removal_until_disconnect(tmp_path):
+    app = create_app(tmp_path, version='test')
+    room, store = app.state.room, app.state.store
+    job = ready_job(store)
+    entry = room.add(AddSong(job_id=job['id']))['entries'][0]
+    store.update(job['id'], last_accessed_at='2000-01-01T00:00:00Z')
+
+    async def check():
+        one, two = room.events(job['id']), room.events(job['id'])
+        try:
+            event = json.loads((await anext(one)).split('data: ', 1)[1])
+            assert event['playback_entry']['job_id'] == job['id']
+            await anext(two)
+            room.command(RoomCommand(action='finish', entry_id=entry['id'], playback_started_at=time.time()-5))
+            assert not room.read()['entries']
+            assert store.cache.leases[job['id']] == 2
+            store.cache.limit = 1
+            store.cache.enforce()
+            assert store.read(job['id'])['status'] == 'completed'
+            assert store.read(job['id'])['last_accessed_at'] == '2000-01-01T00:00:00Z'
+            await one.aclose()
+            assert store.cache.leases[job['id']] == 1
+            assert '"playback_entry"' in await anext(two)
+        finally:
+            await one.aclose()
+            await two.aclose()
+        assert not store.cache.leases and not room.updates.subscribers
+        store.cache.enforce()
+        assert store.read(job['id'])['status'] != 'completed'
     asyncio.run(check())
 
 
