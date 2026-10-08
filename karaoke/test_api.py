@@ -2795,18 +2795,23 @@ def test_ambiguous_global_match_cannot_displace_aligned_neighbouring_phrases(mis
     assert result['asr_localizations'][0]['contradicted_lines'] == []
 
 
-@pytest.mark.parametrize('stale_neighbour', [False, True])
-def test_global_recovery_revisits_neighbours_newly_contradicted_by_repaired_phrases(stale_neighbour):
+@pytest.mark.parametrize('scenario', ['stable', 'stale_neighbour', 'cascading_conflicts'])
+def test_global_recovery_revisits_neighbours_newly_contradicted_by_repaired_phrases(scenario):
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines = ['Opening verse', 'Drink water', 'Fall asleep then dream', 'Drink water', 'Asleep and dream']
     actual = [0., 5., 12., 18., 24.]
-    old = [0., 3., 6., 9., 10.] if stale_neighbour else [0., 3., 6., 18., 24.]
+    old = [0., 3., 6., 9., 10.] if scenario!='stable' else [0., 3., 6., 18., 24.]
+    heard = [*lines[:4], 'Asleep dream']
+    if scenario == 'cascading_conflicts':
+        lines = ['Opening verse', 'Middle melody', 'Quiet morning light', 'Gentle evening star', 'Asleep and dream']
+        heard = [*lines[:2], 'morning light', 'evening star', 'Asleep dream']
+        actual, old = [0.,10.,14.,18.,24.], [0.,3.,4.,5.,12.]
     segments = [dict(words=[dict(word=t, start=s, end=s+(0 if i==1 else 1))])
                 for i,(t,s) in enumerate(zip(lines, old))]
     block = dict(range=[0,5], context=[0,5], source_range=[0.,30.], result=dict(segments=segments))
     def recognize(begin, end):
         # This partial match cannot itself invalidate a timed neighbour.
-        return dict(segments=[dict(words=[dict(word='Asleep dream' if i==4 else t,
+        return dict(segments=[dict(words=[dict(word=heard[i],
             start=s-begin, end=s+1-begin) for i,(t,s) in enumerate(zip(lines, actual))
             if begin <= s < s+1 <= end])])
     def align(begin, end, text, **options):
@@ -2820,7 +2825,7 @@ def test_global_recovery_revisits_neighbours_newly_contradicted_by_repaired_phra
     result = recover_with_local_asr(block, lines, np.zeros(30*16000), 'English',
                                     recognize, align, force_global=True)
     assert [s['words'][0]['start'] for s in result['result']['segments']] == actual
-    if stale_neighbour:
+    if scenario != 'stable':
         assert result['asr_localizations'][0]['unresolved_segments']
     else:
         assert result['result']['segments'][3:] == segments[3:]
@@ -3244,7 +3249,7 @@ def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(part
             segments[1]['words'][0]['start'] = starts['charlie']-.5-begin
         return dict(segments=segments)
     result = recover_with_local_asr(block,lines,np.zeros(int(duration*16000)),'English',recognize,align)
-    assert calls == [(0.,duration)]
+    assert calls == [(0.,duration)]*(2 if asr_gap=='boundary_unresolved' else 1)
     last = 6 if asr_gap=='boundary_unresolved' else 7 if asr_gap=='boundary_overlap' else 9
     assert result['asr_localizations'][0]['accepted_lines'] == list(range(1,last))
     assert [s['words'][0]['start'] for s in result['result']['segments'] if s['words']] == [v for i,v in enumerate(starts.values()) if asr_gap!='boundary_unresolved' or i!=5]

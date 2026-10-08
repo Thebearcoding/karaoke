@@ -274,7 +274,7 @@ def acoustic_segments(lines, units, begin, end):
 
 def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                           force_global=False, max_alignment_attempts=24, recovery_contexts=None, localize=None,
-                          align_original=None, recognize_original=None):
+                          align_original=None, recognize_original=None, _revisited_conflicts=()):
     """Use recognition only to locate failed lyrics, never as replacement text."""
     from anchors_from_asr import anchors_from_words, observed_context, combine_anchor_views
     from lyric_progress import partial_alignment_cues
@@ -331,7 +331,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
     contexts = [] if recovery_contexts is None else recovery_contexts
     needs_relocation = False
     newly_conflicting = set()
-    localized_lines = set()
+    revisited = set(_revisited_conflicts)
     for left, right, begin, end in windows[:8]:
         report = dict(context=[left, right], source_range=[begin, end], global_localization=global_recovery,
                       accepted_lines=[], attempts=[], activity_screened_lines=sorted(i+1 for i in quiet))
@@ -421,6 +421,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                     mislocalized.add(i+left)
         targets.update(mislocalized)
         bad.update(mislocalized)
+        revisited.update(targets)
         report['contradicted_lines'] = sorted(i+1 for i in mislocalized)
         proposed, replaced = deepcopy(result), []
         try:
@@ -590,7 +591,6 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 continue
             part = dict(range=[start+left, stop_line+left], context=[cf+left, cs+left],
                         source_range=[ab, ae], result=candidate)
-            localized_lines.update(range(cf+left, cs+left))
             fresh = partial_alignment_cues(lines, [dict(part, range=part['context'])], duration, language)
             supported = set()
             for i in range(cf+left, cs+left):
@@ -677,7 +677,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                         conflicts.update({i, j}-set(replaced) or {i, j})
                 if not conflicts:
                     break
-                newly_conflicting.update(conflicts-bad-localized_lines)
+                newly_conflicting.update(conflicts-bad-revisited)
                 for i in conflicts:
                     segment = proposed['result']['segments'][i-first]
                     rejected[i+1] = deepcopy(segment)
@@ -697,12 +697,20 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         # that never contained them. Broaden once, sharing the remaining budget.
         # A repaired phrase can also expose a new conflict with an old neighbour.
         # Revisit that changed context rather than ending with discarded lyrics.
-        # Previously failed regions alone never trigger another global pass.
-        result = recover_with_local_asr(result, lines, audio, language, recognize, align,
+        # Seeing a neighbour as context is not the same as selecting its repair.
+        # Each newly invalidated line can trigger this only once, sharing the budget.
+        followup = recover_with_local_asr(result, lines, audio, language, recognize, align,
                                        force_global=True, max_alignment_attempts=budget, recovery_contexts=contexts,
                                        localize=localize, align_original=align_original,
-                                       recognize_original=recognize_original)
-        reports.extend(result.get('asr_localizations', []))
+                                       recognize_original=recognize_original,
+                                       _revisited_conflicts=revisited | bad | newly_conflicting)
+        reports.extend(followup.get('asr_localizations', []))
+        usable = lambda value: sum(c['status'] == 'candidate' for c in
+            partial_alignment_cues(lines, [value], duration, language))
+        if not global_recovery or usable(followup) > usable(result):
+            result = followup
+        else:
+            reports.append(dict(reason='followup_did_not_improve_coverage', accepted_lines=[]))
     result['asr_localizations'] = reports
     result['recovery_contexts'] = contexts
     return result
