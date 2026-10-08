@@ -99,7 +99,9 @@ export class Player {
       this.lastVideoTime = video.currentTime;
       this.lastVideoAdvance = this.context.currentTime;
     }
-    if (video.paused || video.readyState < 3 || this.context.currentTime - this.lastVideoAdvance > 1) {
+    // readyState can briefly drop while frames still advance. Freeze only for
+    // an actual pause/stall, not a momentary change in the decoder's buffer.
+    if (video.paused || this.context.currentTime - this.lastVideoAdvance > 1) {
       this.waitForMedia(position);
       return;
     }

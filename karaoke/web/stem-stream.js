@@ -1,6 +1,7 @@
-// Two short windows, all three stems together. Frame indices, not fetch timing,
+// Bounded lookahead, all three stems together. Frame indices, not fetch timing,
 // determine where each window belongs on the shared AudioContext timeline.
 const stems = ['instrumental', 'backing_vocals', 'lead_vocals'];
+const lookaheadSeconds = 24;
 
 export class StemStream {
   constructor(context, url, signal, changed) {
@@ -40,6 +41,7 @@ export class StemStream {
     })).then(audio => {
       if (controller.signal.aborted) throw new Error('音轨加载超时，请重试');
       item.audio = audio;
+      this.prefetch();
       this.changed();
       return audio;
     }).catch(error => {
@@ -57,14 +59,26 @@ export class StemStream {
 
   around(position) {
     const index = this.index(position);
+    this.first = index;
+    this.last = this.index(position + lookaheadSeconds);
     for (const [key, item] of this.windows) {
-      if (key < index || key > index + 1) {
+      if (key < index || key > this.last) {
         item.controller.abort();
         this.windows.delete(key);
       }
     }
     this.request(index);
-    if (index + 1 < this.count) this.request(index + 1);
+    this.prefetch();
+  }
+
+  prefetch() {
+    // Load the current window first, then fill the reserve in order. Keep one
+    // group of three requests in flight so distant audio cannot starve startup.
+    for (let index = this.first; index <= this.last; index++) {
+      const item = this.windows.get(index);
+      if (!item) { this.request(index); return; }
+      if (!item.audio) return;
+    }
   }
 
   async prepare(position) {

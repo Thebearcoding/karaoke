@@ -477,6 +477,22 @@ test('video, progress and song end follow device output rather than the ahead-of
   }
 });
 
+test('a brief video readyState drop does not interrupt already scheduled audio', async () => {
+  const p=setup(), waiting=[];
+  p.onBuffering=(...args)=>waiting.push(args);
+  try {
+    await p.unlock(); await p.load(song); await p.apply(state,clockOffset());
+    p.context.currentTime=p.audibleWhen; frame();
+    const sources=[...p.sources];
+    p.video.readyState=2;
+    for (let i=0;i<15;i++) { p.context.currentTime+=.02; frame(); }
+    p.video.readyState=4; p.context.currentTime+=.02; frame();
+    assert.deepEqual(waiting,[]);
+    assert.notEqual(p.anchor,null);
+    assert.ok(sources.every(source=>!source.stopped));
+  } finally { p.clear(); }
+});
+
 test('a stalled video freezes the shared clock instead of chasing it with seeks', async () => {
   const p=setup(), waiting=[];
   p.onBuffering=(...args)=>waiting.push(args);
@@ -530,14 +546,60 @@ function streamingFetch(intercept = () => null) {
   };
 }
 
-test('long songs retain two windows and schedule adjacent stems on exact common boundaries', async () => {
+test('audio lookahead survives a ten-second delayed segment without pausing', async () => {
+  let elapsed=0;
+  const pending=[], waiting=[];
+  globalThis.fetch=streamingFetch(url=>url.endsWith('/lead_vocals/2') ? new Promise(resolve=>{
+    pending.push({due:elapsed+10,resolve:()=>resolve({ok:true,arrayBuffer:async()=>url})});
+  }) : null);
+  const p=setup(); p.onBuffering=(...args)=>waiting.push(args);
+  try {
+    await p.unlock(); await p.load({...song,duration:80}); await settled();
+    await p.apply({...state,position:0},clockOffset());
+    const anchor=p.anchor;
+    for (elapsed=0;elapsed<32;elapsed+=.25) {
+      for (const item of pending.splice(0)) {
+        if (item.due<=elapsed) item.resolve(); else pending.push(item);
+      }
+      await settled();
+      p.context.currentTime=anchor+elapsed;
+      for (const source of [...p.sources]) if (source.started[0]+source.length<=p.context.currentTime) source.onended();
+      frame(); await settled();
+      if (p.anchor===null) break;
+    }
+    assert.deepEqual(waiting,[]);
+    assert.notEqual(p.anchor,null);
+  } finally { for (const item of pending) item.resolve(); p.clear(); globalThis.fetch=fetchAudio; }
+});
+
+test('prefetch prioritizes the current window and bounds concurrent network requests', async () => {
+  const pending=[];
+  globalThis.fetch=streamingFetch(url=>/\/(instrumental|backing_vocals|lead_vocals)\/\d+$/.test(url) ?
+    new Promise(resolve=>pending.push({url,resolve:()=>resolve({ok:true,arrayBuffer:async()=>url})})) : null);
+  const p=setup();
+  try {
+    const loading=p.load({...song,duration:80}); await settled();
+    assert.equal(pending.length,3);
+    assert.ok(pending.every(item=>item.url.endsWith('/0')));
+    for (const item of pending.splice(0)) item.resolve();
+    await loading;
+    assert.equal(pending.length,3);
+    assert.ok(pending.every(item=>item.url.endsWith('/1')));
+    for (const item of pending.splice(0)) item.resolve();
+    await settled();
+    assert.equal(pending.length,3);
+    assert.ok(pending.every(item=>item.url.endsWith('/2')));
+  } finally { p.clear(); for (const item of pending) item.resolve(); globalThis.fetch=fetchAudio; }
+});
+
+test('long songs retain bounded lookahead and schedule adjacent stems on exact common boundaries', async () => {
   globalThis.fetch=streamingFetch();
   const p=setup();
   try {
     await p.unlock(); await p.load({...song,duration:80}); await settled();
     await p.apply({...state,position:0},clockOffset());
-    assert.equal(p.sources.length,6);
-    const first=p.sources.slice(0,3), next=p.sources.slice(3);
+    assert.equal(p.sources.length,12);
+    const first=p.sources.slice(0,3), next=p.sources.slice(3,6);
     assert.ok(first.every(s=>s.length===8 && s.started[1]===0));
     assert.ok(next.every(s=>Math.abs(s.started[0]-first[0].started[0]-8)<1e-9));
     assert.ok(next.every(s=>Math.abs(s.started[1]-256/48000)<1e-9));
@@ -549,8 +611,8 @@ test('long songs retain two windows and schedule adjacent stems on exact common 
       }
       frame(); await settled();
       assert.notEqual(p.anchor,null);
-      assert.ok(p.stream.windows.size<=2);
-      assert.ok(p.sources.length<=6);
+      assert.ok(p.stream.windows.size<=4);
+      assert.ok(p.sources.length<=12);
       assert.ok([...p.stream.windows.keys()].every(i=>i>=Math.floor(position/8)));
     }
   } finally { p.clear(); globalThis.fetch=fetchAudio; }
@@ -574,7 +636,7 @@ test('one delayed stem freezes all audio at the last common boundary and a seek 
     const resumed=p.sources.slice(0,3);
     assert.ok(resumed.every(s=>Math.abs(s.started[1]-(4+256/48000))<1e-8));
     release(); await settled();
-    assert.deepEqual([...p.stream.windows.keys()],[7,8]);
+    assert.deepEqual([...p.stream.windows.keys()],[7,8,9]);
     assert.ok(p.sources.every(s=>!s.buffer.tag.endsWith('/1')));
   } finally { release?.(); p.clear(); globalThis.fetch=fetchAudio; }
 });
