@@ -386,18 +386,20 @@ def test_soak_adds_all_cases_to_room_and_only_removes_finished_owned_entries(tmp
         assert remaining == {user['id'], attempts[0]['entry_id'], attempts[2]['entry_id']}
 
 
-def test_room_can_force_full_revalidation_without_reusing_a_completed_job(tmp_path):
+@pytest.mark.parametrize('by_id', [False, True])
+def test_room_can_force_full_revalidation_without_reusing_a_completed_job(tmp_path, by_id):
     app = create_app(tmp_path, worker_command=fake_worker, version='test')
     old = ready_job(app.state.store)
     with TestClient(app) as client:
-        entry = client.post('/v1/room/entries', json={'url':URL,'force':True}).json()['entries'][0]
+        request = {'job_id':old['id']} if by_id else {'url':URL}
+        entry = client.post('/v1/room/entries', json={**request,'force':True}).json()['entries'][0]
         assert entry['job_id'] != old['id']
         assert finished(client, entry['job_id'])['status'] == 'completed'
 
 
 @pytest.mark.parametrize('by_id', [False, True])
 @pytest.mark.parametrize('already_queued', [False, True])
-def test_pointing_to_old_completed_song_refreshes_it_once(tmp_path, by_id, already_queued):
+def test_replaying_completed_song_keeps_media_while_new_request_refreshes(tmp_path, by_id, already_queued):
     app = create_app(tmp_path, worker_command=fake_worker, version='new')
     old = ready_job(app.state.store)
     if already_queued:
@@ -412,7 +414,10 @@ def test_pointing_to_old_completed_song_refreshes_it_once(tmp_path, by_id, alrea
         assert len(first['entries']) == 1
         entry = first['entries'][0]
         job = app.state.store.read(entry['job_id'])
-        assert job['status']=='queued' and job['pipeline_version']=='new'
+        assert job['status']==('completed' if by_id else 'queued')
+        assert job['pipeline_version']==(old['pipeline_version'] if by_id else 'new')
+        if by_id:
+            assert app.state.worker.queue.empty()
         assert client.post('/v1/room/entries',json=request).json()['entries']==first['entries']
         assert len(app.state.store.list(-1)) == 1
         if already_queued:
@@ -430,7 +435,7 @@ def test_refresh_does_not_replace_current_or_leased_media(tmp_path):
     first = app.state.room.add(AddSong(job_id=old['id'],if_absent=True))
     assert len(first['entries'])==1 and first['playing']
     second = app.state.room.add(AddSong(job_id=old['id']))
-    assert second['entries'][0]['job_id']==old['id'] and second['entries'][1]['job_id']!=old['id']
+    assert second['entries'][0]['job_id']==second['entries'][1]['job_id']==old['id']
     assert app.state.store.read(old['id'])['status']=='completed'
     assert second['current_id']=='current' and second['playing']
     leased = ready_job(app.state.store,url='https://www.youtube.com/watch?v=2Vv-BfVoq4g')

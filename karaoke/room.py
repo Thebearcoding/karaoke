@@ -234,6 +234,7 @@ class Room:
     def add(self, request):
         if bool(request.url) == bool(request.job_id):
             raise HTTPException(422, '请提供视频链接或已准备好的歌曲')
+        replay = bool(request.job_id) and not request.force
         state = self.read()
         existing = None
         if request.if_absent:
@@ -248,7 +249,7 @@ class Room:
             for entry in state['entries']:
                 job = self.store.read(entry['job_id'])
                 if job and job['input']['url'] == url:
-                    if job['status'] != 'completed' or job.get('pipeline_version') == self.version or entry['id'] == state['current_id']:
+                    if replay or job['status'] != 'completed' or job.get('pipeline_version') == self.version or entry['id'] == state['current_id']:
                         return self.snapshot()
                     existing = entry
                     request = request.model_copy(update={'url': None, 'job_id': job['id']})
@@ -257,9 +258,10 @@ class Room:
             raise HTTPException(409, '歌单最多保留 100 首，请先移除一些歌曲')
         if request.job_id:
             job = self.store.read(request.job_id)
-            if job and (job['status'] in ('evicted', 'video_evicted') or job.get('restore_video') or
-                        (job['status'] == 'completed' and job.get('pipeline_version') != self.version)):
-                job, cached = self.store.create(JobRequest(**{**job['input'], 'force': False}), self.version)
+            if job and (request.force or job['status'] in ('evicted', 'video_evicted') or job.get('restore_video') or
+                        (not replay and job['status'] == 'completed' and job.get('pipeline_version') != self.version)):
+                version = job['pipeline_version'] if replay and job.get('restore_video') else self.version
+                job, cached = self.store.create(JobRequest(**{**job['input'], 'force': request.force}), version)
                 if not cached:
                     self.worker.queue.put_nowait(job['id'])
             elif not job or job['status'] not in ('completed', 'queued', 'running'):

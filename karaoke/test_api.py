@@ -6916,18 +6916,24 @@ def test_completed_version_refresh_keeps_valid_stage_checkpoints(tmp_path):
     store = Store(tmp_path)
     old = cache_fixture(store, '1', restorable=True)
     folder = tmp_path/old['id']
-    source, separated, aligned, code = [folder/name for name in ('input', 'separated', 'aligned', 'align.py')]
+    source, separated, aligned, code = [folder/name for name in
+        ('download/source.mkv', 'music-separation/vocals.wav', 'aligned', 'align.py')]
+    source.parent.mkdir()
+    separated.parent.mkdir()
     source.write_bytes(b'audio')
+    (folder/'source.json').write_text(json.dumps(dict(url=URL,sha256=hashlib.sha256(b'audio').hexdigest())))
+    (folder/'download/source.info.json').write_text('{}')
     code.write_text('version = 1')
     cache = StageCache(folder)
-    with cache.stage('separate', inputs=[source], outputs=[separated]):
+    with cache.stage('separate_music', inputs=[source], outputs=[separated]):
         separated.write_bytes(b'computed stem')
     with cache.stage('align', inputs=[separated], outputs=[aligned], code=[code]):
         aligned.write_bytes(b'old timings')
+    store.cache.compact(old)
     refreshed, hit = store.create(JobRequest(**{**old['input'],'force':False}), 'new')
     assert not hit and refreshed['id']==old['id'] and refreshed['status']=='queued'
     code.write_text('version = 2')
-    with StageCache(folder).stage('separate', inputs=[source], outputs=[separated]) as hit:
+    with StageCache(folder).stage('separate_music', inputs=[source], outputs=[separated]) as hit:
         assert hit and separated.read_bytes()==b'computed stem'
     with StageCache(folder).stage('align', inputs=[separated], outputs=[aligned], code=[code]) as hit:
         assert not hit and not aligned.exists()
@@ -6935,10 +6941,11 @@ def test_completed_version_refresh_keeps_valid_stage_checkpoints(tmp_path):
 
 
 @pytest.mark.parametrize('queued', [False, True])
-def test_outdated_video_restore_revalidates_stages_before_completion(tmp_path, queued):
+def test_cached_video_restore_preserves_audio_version_across_upgrade(tmp_path, queued):
     def check_refresh(folder):
         job = app.state.store.read(folder.name)
-        assert not job['restore_video'] and job['pipeline_version'] == 'new'
+        assert job['restore_video'] and job['pipeline_version'] == old['pipeline_version']
+        assert job['presentation_pipeline_version'] == 'new'
         return fake_worker(folder)
     app = create_app(tmp_path, worker_command=check_refresh, version='new')
     store = app.state.store
@@ -6950,7 +6957,8 @@ def test_outdated_video_restore_revalidates_stages_before_completion(tmp_path, q
             response = client.post('/v1/room/entries', json={'job_id':old['id']})
             assert response.status_code == 201
         fresh = finished(client, old['id'])
-        assert fresh['status'] == 'completed' and fresh['pipeline_version'] == 'new'
+        assert fresh['status'] == 'completed' and fresh['pipeline_version'] == old['pipeline_version']
+        assert fresh['presentation_pipeline_version'] == 'new'
         assert not fresh['restore_video']
 
 

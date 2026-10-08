@@ -427,11 +427,10 @@ class Worker:
         process = self.processes[job_id] = None
         folder = self.store.root/job_id
         room_managed = self.in_room(job_id)
-        # A queued video-only restore can survive a service upgrade. Its old
-        # audio/subtitles must enter the normal checkpoint validation path too.
-        version = {'pipeline_version': self.version} if self.version else {}
-        if job.get('restore_video') and self.version and job.get('pipeline_version') != self.version:
-            version['restore_video'] = False
+        # Restoring a cached recording only rebuilds its presentation. Keep the
+        # actual audio/subtitle version; a new preparation updates it separately.
+        version_key = 'presentation_pipeline_version' if job.get('restore_video') else 'pipeline_version'
+        version = {version_key: self.version} if self.version else {}
         retry = {'download_retry': {**job['download_retry'], 'next_retry_at': None}} if job.get('download_retry') else {}
         job = self.store.update(job_id, status='running', error=None, started_at=now(), **version, **retry)
         try:

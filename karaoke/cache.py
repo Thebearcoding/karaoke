@@ -133,6 +133,13 @@ class SongCache:
                 'song-metadata.json', 'checkpoints/extract_song_metadata.json',
                 'lyrics.json', 'timing-constraints.json', 'timing-checked/report.json'}
         keep.update(p.relative_to(folder).as_posix() for p in (folder/'lyric-source-attempts').rglob('*.json'))
+        # A later subtitle fix can decode the small source again, but should not
+        # repeat either expensive separator. These checkpoints still share LRU.
+        if job['status'] in ('completed', 'video_evicted'):
+            keep.update({'source.json', 'download/source.mkv', 'download/source.info.json'})
+            keep.update(p for p in retained_files(folder)
+                        if p.startswith(('music-separation/', 'lead-separation/')) or
+                        p in ('checkpoints/separate_music.json', 'checkpoints/separate_lead.json'))
         if (job['status'] in ('failed', 'audio_ready', 'source_ready') or
                 (job['status'] == 'queued' and job.get('download_retry')) or
                 (job.get('result') or {}).get('validation_scope') == 'playback_audio_preview'):
