@@ -35,23 +35,18 @@
     <nav class="navigation" aria-label="主要导航">
       <button data-view="library" class="selected">点歌台</button>
       <button data-view="player">正在播放 <span id="playing-dot" hidden></span></button>
-      <button data-view="queue" class="mobile-only">已点 <span id="nav-count">0</span></button>
+      <button data-view="queue" class="mobile-only">待唱 <span id="nav-count">0</span></button>
     </nav>
     <div class="connection"><span id="connection-dot"></span><span id="connection-text">连接中</span></div>
   </header>
 
   <main class="workspace">
     <section class="main-panel" id="library-view" aria-label="点歌台">
-      <section id="home-discovery" class="home-discovery" aria-label="从演唱记录选歌" hidden>
-        <div class="section-heading"><h2>最近唱过</h2><button id="show-history" class="text-button">全部已唱 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
-        <div id="recent-songs" class="recent-songs"></div>
-        <div id="frequent-artists" class="frequent-artists"></div>
-      </section>
       <section id="video-results" class="video-results" aria-label="选歌结果" hidden>
         <div class="section-heading search-heading"><div><h2 id="search-heading">搜索结果</h2><div id="search-status" class="search-status" role="status"></div></div><button class="text-button" id="clear-search">返回曲库</button></div>
         <div class="search-controls">
-          <div class="filters video-sources" role="group" aria-label="搜索类型"><button data-video-source="songs" class="selected">全部</button><button data-video-source="artists">歌手</button><button data-video-source="youtube">YouTube 视频</button><button data-video-source="local">本地</button></div>
-          <label id="search-order-label">排序 <select id="search-order" aria-label="搜索结果排序"><option value="relevance">默认</option><option value="popular">播放量</option><option value="ready">已准备优先</option><option value="title">歌名</option></select></label>
+          <div class="search-modes"><div class="filters video-sources" role="group" aria-label="搜索内容"><button data-video-source="songs" class="selected">综合</button><button data-video-source="artists">歌手</button></div><div class="search-sources" role="group" aria-label="其他搜索来源"><button data-video-source="youtube">YouTube 视频</button><button data-video-source="local">本地曲库</button></div></div>
+          <label id="search-order-label"><select id="search-order" aria-label="搜索结果排序"><option value="relevance">默认排序</option><option value="popular">按播放量</option><option value="ready">可直接唱优先</option><option value="title">按歌名</option></select></label>
         </div>
         <div id="artist-summary" class="artist-summary" hidden></div>
         <p id="search-order-note" class="search-order-note"></p>
@@ -63,12 +58,17 @@
       </section>
       <section id="local-library">
       <div class="section-heading"><h1 id="library-heading">曲库</h1><span id="library-count"></span></div>
-      <div class="filters" role="group" aria-label="筛选歌曲"><button data-filter="all" class="selected">全部</button><button data-filter="ready">已准备</button><button data-filter="Chinese">华语</button><button data-filter="English">英语</button><button data-filter="Japanese">日语</button><button data-filter="Korean">韩语</button><button data-filter="other">小语种</button></div>
+      <div class="filters library-filters" role="group" aria-label="筛选歌曲"><button data-filter="ready" class="selected">可直接唱 <span>0</span></button><button data-filter="all">全部 <span>0</span></button><button data-filter="restore">待补视频 <span>0</span></button><button data-filter="Chinese">华语</button><button data-filter="English">英语</button><button data-filter="Japanese">日语</button><button data-filter="Korean">韩语</button><button data-filter="other">小语种</button></div>
       <div class="search-list home-list" id="library-list" role="table" aria-label="本地歌曲列表">
         <div class="music-columns" role="row"><span class="music-rank" role="columnheader">#</span><span class="music-song" role="columnheader">歌曲</span><span class="music-credits" role="columnheader">歌手</span><span class="music-album" role="columnheader">专辑</span><span class="music-plays" role="columnheader">播放量</span><span class="music-duration" role="columnheader">时长</span><span class="music-actions" role="columnheader">点歌</span><span class="music-alternative" role="columnheader">找 MV</span></div>
         <div class="music-list" id="song-grid" role="rowgroup"></div>
       </div>
       <div class="search-empty" id="search-empty" hidden><h3>还没有歌曲</h3><p>搜一首喜欢的歌，开始唱。</p></div>
+      </section>
+      <section id="home-discovery" class="home-discovery" aria-label="从演唱记录选歌" hidden>
+        <div class="section-heading"><h2>最近唱过</h2><button id="show-history" class="text-button">全部已唱 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
+        <div id="recent-songs" class="recent-songs"></div>
+        <div id="frequent-artists" class="frequent-artists"></div>
       </section>
     </section>
 
@@ -78,7 +78,7 @@
       <div class="screen" id="screen">
         <video id="video" playsinline muted preload="auto" aria-label="卡拉 OK 字幕 MV"></video>
         <svg id="opening-countdown" class="opening-countdown" aria-label="准备开唱" hidden></svg>
-        <div class="screen-cover" id="screen-cover"><div class="record-art"><div class="record-label"><span class="brand-mark"><i></i><i></i><i></i><i></i></span></div></div><p id="screen-status">请先点歌</p><div id="screen-preparation"></div><button class="primary" id="screen-start" hidden>开始唱 <svg class="icon"><use href="#i-play"/></svg></button></div>
+        <div class="screen-cover" id="screen-cover"><p id="screen-status">请先点歌</p><div id="screen-preparation"></div><button class="primary" id="screen-start" hidden>开始唱 <svg class="icon"><use href="#i-play"/></svg></button></div>
         <div class="screen-tools" id="screen-tools"></div>
         <button class="screen-next next-button" data-next title="下一首 · N">下一首 <svg class="icon"><use href="#i-next"/></svg></button>
         <button class="screen-exit icon-button" id="exit-fullscreen" aria-label="退出全屏"><svg class="icon"><use href="#i-full"/></svg></button>

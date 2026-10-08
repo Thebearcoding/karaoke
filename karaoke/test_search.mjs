@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createVideoSearch, createViewHistory, previewURL, searchLibrary, filterSongs, visibleResults, playCount, orderResults, queueKey, queuePosition, historySuggestions} from './web/search.js';
+import {createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, filterSongs, visibleResults, playCount, orderResults, queueKey, queuePosition, historySuggestions} from './web/search.js';
 
 function setup() {
   const requests = [], snapshots = [];
@@ -9,6 +9,17 @@ function setup() {
   return {search, requests, snapshots};
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
+
+test('ready library contains only playable songs; recovered audio remains discoverable separately', () => {
+  const songs = ['completed','video_evicted','audio_ready','source_ready','running','queued','failed'].map((status,index) =>
+    ({id:index,title:`Song ${index}`,status,language:index % 2 ? 'Japanese' : 'Chinese'}));
+  assert.deepEqual(librarySongs(songs).map(song => song.id), [0]);
+  assert.deepEqual(librarySongs(songs, 'restore').map(song => song.id), [1]);
+  assert.equal(librarySongs(songs, 'all').length, songs.length);
+  assert.deepEqual(librarySongs(songs, 'Japanese').map(song => song.id), [1,3,5]);
+  assert.deepEqual(librarySongs(songs, 'ready', 'Song 1'), []);
+  assert.deepEqual(librarySongs(songs, 'all', 'Song 1').map(song => song.id), [1]);
+});
 
 test('queued feedback follows source identity and room order, including unprepared songs', () => {
   const song = {url:'https://www.youtube.com/watch?v=abcdefghijk', title:'Original title', job_id:'job'};

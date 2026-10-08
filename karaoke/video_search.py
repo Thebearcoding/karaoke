@@ -177,7 +177,7 @@ def music_results(entries, kind):
         duration = item.get('duration_seconds')
         if not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration < 0:
             duration = 0
-        results.append(dict(common, kind='song', url='https://www.youtube.com/watch?v='+video_id,
+        results.append(dict(common, kind='episode' if result_type == 'episode' else 'song', url='https://www.youtube.com/watch?v='+video_id,
             duration=duration,
             album=(item.get('album') or {}).get('name'), views=item.get('views'),
             version={'MUSIC_VIDEO_TYPE_ATV': '专辑音频', 'MUSIC_VIDEO_TYPE_OMV': 'MV'}.get(item.get('videoType'),
@@ -269,6 +269,7 @@ def music_entries(kind, query, continuation=None):
         # Parse all native sections in order, without checking titles or localized headings.
         visit(music.response)
     elif kind == 'artist' and re.fullmatch(r'UC[\w-]{22}', query):
+        known = (continuation or {}).get('metadata_by_video', {})
         if continuation:
             music._send_request('browse', dict(continuation=continuation['token']))
             contents = music.response['onResponseReceivedActions'][0]['appendContinuationItemsAction']['continuationItems']
@@ -279,6 +280,9 @@ def music_entries(kind, query, continuation=None):
                             if (artist.get(name) or {}).get('browseId') or
                             (artist.get(name) or {}).get('results')), 'releases')
             shelf = artist.get(section) or {}
+            known = {row['videoId']: {field: row[field] for field in
+                     ('views', 'artists', 'thumbnails', 'duration_seconds', 'album', 'videoType') if row.get(field) is not None}
+                     for row in shelf.get('results', []) if row.get('videoId')}
             playlist_id = shelf.get('browseId')
             metadata = dict(title=artist['name'], browse_id=query, thumbnail=music_thumbnail(artist),
                 url='https://music.youtube.com/channel/'+query, monthly_listeners=artist.get('monthlyListeners'),
@@ -293,7 +297,13 @@ def music_entries(kind, query, continuation=None):
                 entries = [dict(row, resultType='album', artists=[dict(name=artist['name'], id=query)])
                            for name in ('albums', 'singles') for row in (artist.get(name) or {}).get('results', [])]
         token = get_continuation_token(contents) if contents else None
-        next_page = dict(token=token) if token else None
+        # Browsing the full playlist must not erase richer artist-shelf metadata.
+        # Join by recording identity; similarly titled versions stay independent.
+        for row in entries:
+            for field, value in known.get(row.get('videoId'), {}).items():
+                if row.get(field) in (None, '', []):
+                    row[field] = value
+        next_page = dict(token=token, metadata_by_video=known) if token else None
     elif kind == 'album' and re.fullmatch(r'MPRE[\w-]+', query):
         album = music.get_album(query)
         metadata = dict(title=album['title'], browse_id=query, thumbnail=music_thumbnail(album),

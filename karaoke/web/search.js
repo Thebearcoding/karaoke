@@ -183,6 +183,19 @@ export function searchLibrary(library, query) {
     .map(song => ({...song, provider:'local', thumbnail:song.poster, uploader:song.artist}));
 }
 
+export function librarySongs(library, filter = 'ready', query = '') {
+  return filterSongs(library, query).filter(song => filter === 'all' ||
+    (filter === 'ready' ? song.status === 'completed' :
+     filter === 'restore' ? song.status === 'video_evicted' :
+     filter === 'other' ? song.language && !['Chinese','English','Japanese','Korean'].includes(song.language) :
+     song.language === filter));
+}
+
+export function songAvailability(song) {
+  return {completed:'可直接唱', video_evicted:'待补视频', running:'准备中', failed:'准备失败',
+    queued:song?.next_retry_at ? '等待重试' : '等待准备'}[song?.status] || '需准备';
+}
+
 // Match the source, not its title: translated titles and URL aliases share a queue entry.
 export function queueKey(song) {
   try {

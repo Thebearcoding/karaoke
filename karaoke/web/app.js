@@ -1,6 +1,6 @@
 import { Player } from './player.js';
 import { isStaleRoomSnapshot, LocalPlayback } from './room-state.js';
-import { createVideoSearch, createViewHistory, previewURL, searchLibrary, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
+import { createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, songAvailability, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
 
 const $ = id => document.getElementById(id);
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -12,7 +12,7 @@ const playback = new LocalPlayback(savedPlayback);
 let roomState = {entries:[], revision:0}, viewRevision = 0, lastPlaybackSave = 0;
 const stages = {download:'下载音频', download_video:'下载视频', verify_video:'校验视频', decode_audio:'提取音频', decode_native:'准备音频母版', separate_music:'分离伴奏', separate_lead:'分离主唱', package_two_stems:'整理音轨', package_three_stems:'整理音轨', resample_vocals:'整理人声', transcribe:'识别歌词', prepare_lyrics:'整理歌词', align_words:'对齐歌词', align_phonemes:'对齐起唱时间', align_repeats:'检查重复段落', align_context:'校准字幕', validate_timing:'核对起唱时间', render:'生成字幕画面', mux_video:'合成字幕 MV'};
 let state = {entries:[], current_id:null, playing:false, position:0, started_at:null, mix:'karaoke', levels:{instrumental:1,backing_vocals:1,lead_vocals:0}, revision:0};
-let library = [], filter = 'all', view = 'library', clockOffset = 0, readySent = null, loading = false, loadError = '', seeking = false;
+let library = [], filter = 'ready', view = 'library', clockOffset = 0, readySent = null, loading = false, loadError = '', seeking = false;
 let toastTimer, librarySignature = '', queueSignature = '', historySignature = '', discoverySignature = '';
 let queueTab = 'upcoming';
 let pitchRequest = Promise.resolve();
@@ -56,11 +56,17 @@ function renderStorage() {
   if (document.activeElement !== $('storage-limit')) $('storage-limit').value = limited ? storage.limit_bytes/1024**3 : '';
 }
 
-function toast(message) {
+function toast(message, entry) {
   $('toast').textContent = message;
+  if (entry) {
+    const button = document.createElement('button');
+    button.textContent = entry.status === 'completed' ? '开始唱 →' : '查看进度 →';
+    button.onclick = () => openQueuedSong(entry.id);
+    $('toast').append(button);
+  }
   $('toast').hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => $('toast').hidden = true, 3800);
+  toastTimer = setTimeout(() => $('toast').hidden = true, entry ? 6500 : 3800);
 }
 
 async function request(path, body) {
@@ -93,11 +99,12 @@ async function command(action, extra = {}) {
 
 function switchView(next) {
   view = next;
-  const mobile = matchMedia('(max-width:900px)').matches;
+  const mobile = matchMedia('(max-width:1100px)').matches;
   $('library-view').hidden = next !== 'library';
   $('player-view').hidden = next !== 'player';
   $('queue-panel').classList.toggle('mobile-open', next === 'queue');
   if (next === 'queue' && !mobile) { view = 'library'; $('library-view').hidden = false; }
+  document.body.dataset.view = view;
   document.querySelectorAll('[data-view]').forEach(button => {
     button.classList.toggle('selected', button.dataset.view === view);
     button.setAttribute('aria-current', button.dataset.view === view ? 'page' : 'false');
@@ -110,7 +117,7 @@ function restoreView(saved) {
   clearVideoSearch();
   $('song-input').value = saved.query || '';
   $('title-input').value = saved.title || '';
-  filter = saved.filter || 'all';
+  filter = saved.filter || 'ready';
   videoSource = saved.videoSource || 'songs';
   searchOrder = saved.searchOrder || 'relevance';
   queueTab = saved.queueTab === 'history' ? 'history' : 'upcoming';
@@ -131,15 +138,16 @@ function renderLibrary() {
   $('title-row').hidden = !isURL;
   $('submit-song').innerHTML = `${isURL ? '点歌' : '搜索'} ${icon('arrow')}`;
   const search = isURL ? '' : query.toLocaleLowerCase();
-  const songs = library.filter(song => (!search || search.split(/\s+/).every(word => `${song.title} ${song.artist}`.toLocaleLowerCase().includes(word))) &&
-    (search || filter === 'all' || (filter === 'ready' ? ['completed', 'video_evicted'].includes(song.status) :
-      filter === 'other' ? song.language && !['Chinese', 'English', 'Japanese', 'Korean'].includes(song.language) : song.language === filter)));
+  const songs = librarySongs(library, search ? 'all' : filter, search);
   const preparedView = filter === 'ready' && !search;
-  const missingVideo = songs.filter(song => song.status === 'video_evicted').length;
-  $('library-count').textContent = preparedView && missingVideo
-    ? `${songs.length-missingVideo} 首可播放 · ${missingVideo} 首待补视频`
-    : `${songs.length} 首${preparedView ? '已准备' : '歌曲'}`;
-  $('library-heading').textContent = search ? '曲库里的歌' : '曲库';
+  $('library-count').textContent = `${songs.length} 首`;
+  $('library-heading').textContent = search ? '曲库里的歌' : preparedView ? '现在就能唱' : filter === 'restore' ? '音轨已就绪，等待补视频' : '曲库';
+  document.querySelectorAll('[data-filter]').forEach(button => {
+    button.classList.toggle('selected', button.dataset.filter === filter);
+    button.setAttribute('aria-pressed', String(button.dataset.filter === filter));
+    const count = button.querySelector('span');
+    if (count) count.textContent = librarySongs(library, button.dataset.filter).length;
+  });
   $('local-library').hidden = Boolean(searchQuery || (search && !songs.length));
   document.querySelector('#local-library .filters').hidden = Boolean(search);
   const signature = JSON.stringify([songs.map(({stage_progress, active_stages, ...song}) => song), filter, query]);
@@ -150,6 +158,7 @@ function renderLibrary() {
     updatePreparationSlots($('song-grid'), songs);
   }
   $('search-empty').hidden = songs.length > 0;
+  $('search-empty').querySelector('h3').textContent = preparedView ? '还没有可以直接唱的歌' : '这里还没有歌曲';
   $('library-list').hidden = !songs.length;
   renderDiscovery();
   updateAddButtons();
@@ -159,15 +168,18 @@ function renderDiscovery() {
   const suggestions = historySuggestions(state.history || []);
   const recent = suggestions.recent.slice(0,4), artists = suggestions.artists.slice(0,6);
   $('home-discovery').hidden = !recent.length || Boolean($('song-input').value.trim() || searchQuery);
-  const posters = new Map(library.map(song => [queueKey(song), song.poster]));
-  const signature = JSON.stringify([recent, artists, recent.map(song => posters.get(queueKey(song)))]);
+  const cached = new Map(library.map(song => [queueKey(song), song]));
+  const signature = JSON.stringify([recent, artists, recent.map(song => {
+    const item = cached.get(queueKey(song)); return [item?.poster, item?.status];
+  })]);
   if (signature === discoverySignature) return;
   discoverySignature = signature;
   $('recent-songs').innerHTML = recent.map(song => {
-    const poster = posters.get(queueKey(song));
-    return `<button class="recent-song" data-recent-song="${escape(song.id)}" aria-label="再点：${escape(song.title)}">
-      ${poster ? `<img src="${escape(poster)}" alt="" loading="lazy">` : `<span class="recent-initial">${escape(song.title.slice(0,1))}</span>`}
-      <span class="recent-info"><strong>${escape(song.title)}</strong><span>${escape(song.artist)}</span></span>${icon('plus')}</button>`;
+    const local = cached.get(queueKey(song));
+    return `<div class="recent-song"><button class="recent-preview" data-preview-history="${escape(song.id)}" aria-label="预览：${escape(song.title)}">
+      ${local?.poster ? `<img src="${escape(local.poster)}" alt="" loading="lazy">` : `<span class="recent-initial">${escape(song.title.slice(0,1))}</span>`}
+      <span class="recent-info"><strong>${escape(song.title)}</strong><span>${escape(song.artist)}</span><span class="${local?.status === 'completed' ? 'is-ready' : ''}">${songAvailability(local)}</span></span></button>
+      <button class="music-add" data-recent-song="${escape(song.id)}" aria-label="再点：${escape(song.title)}">${icon('plus')}<span>再点</span></button></div>`;
   }).join('');
   $('frequent-artists').hidden = !artists.length;
   $('frequent-artists').innerHTML = `<h2>常唱歌手</h2><div>${artists.map(artist => `<button data-search-artist="${escape(artist.name)}" aria-label="找歌手：${escape(artist.name)}">${escape(artist.name)}<span>唱过 ${artist.count} 次</span></button>`).join('')}</div>`;
@@ -192,22 +204,26 @@ function renderVideoResults(providers, mode = videoSource) {
   if (searchOrder === 'popular' && !popularityAvailable) searchOrder = 'relevance';
   $('search-order').value = searchOrder;
   $('search-order').querySelector('[value="popular"]').disabled = !popularityAvailable;
-  $('search-order').querySelector('[value="relevance"]').textContent = album ? '专辑顺序' : '默认';
+  $('search-order').querySelector('[value="relevance"]').textContent = album ? '专辑顺序' : '默认排序';
   $('search-order-label').hidden = artists || info.loading || !info.results.length;
-  $('search-heading').textContent = album ? '专辑曲目' : catalogue ? catalogueHeading : artists ? '找一位歌手' : '搜索结果';
+  $('video-results').classList.toggle('is-catalogue', catalogue);
+  $('search-heading').textContent = catalogue ? metadata.title || (album ? '专辑曲目' : catalogueHeading) : artists ? '找一位歌手' : '搜索结果';
   $('search-order-note').textContent = artists ? '选一位歌手，看看有哪些歌想唱' :
     searchOrder === 'popular' ? '已加载结果按播放量排序 · YouTube 提供' : searchOrder === 'ready' ? '已加载结果中，已准备歌曲排在前面' :
     searchOrder === 'title' ? '已加载结果按歌名排序' : album ? 'YouTube Music 专辑曲目顺序' :
     videoSource === 'local' ? '本地曲库 · 现场版靠后' : videoSource === 'songs' ? '歌曲优先 · 现场版靠后' : 'YouTube 原顺序 · 现场版靠后';
+  $('search-order-note').hidden = searchOrder !== 'popular';
+  $('search-order').title = $('search-order-note').textContent;
   $('search-status').innerHTML = `<span class="${info.error ? 'search-error' : ''}">${info.loading ? '正在查找…' : info.error ? escape(info.error) : info.results.length ? `${videoSource === 'local' ? '' : '已加载 '}${info.results.length} ${artists ? '位歌手' : videoSource === 'youtube' || metadata.catalogue_section === 'videos' ? '个视频' : videoSource === 'songs' || metadata.catalogue_section === 'releases' ? '项' : '首'}${catalogue && info.metadata?.complete === false ? ' · 歌手页精选' : ''}` : catalogue ? '这个页面暂未提供可点播作品' : '没有找到，试试另一个关键词或搜索类型'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`;
   $('artist-summary').hidden = !catalogue;
   const otherArtists = !album && (providers.artists?.results.length > 1 || providers.artists?.nextCursor);
-  if (catalogue) $('artist-summary').innerHTML = `${metadata.thumbnail ? `<img src="${escape(metadata.thumbnail)}" alt="" referrerpolicy="no-referrer">` : ''}<div><p>${album ? '专辑' : '歌手'}</p><h3>${escape(metadata.title)}</h3>${metadata.monthly_listeners ? `<p>${escape(metadata.monthly_listeners)} · YouTube Music</p>` : ''}${otherArtists ? '<button class="text-button" data-other-artists>其他歌手 →</button>' : ''}</div>`;
+  if (catalogue) $('artist-summary').innerHTML = `${metadata.thumbnail ? `<img src="${escape(metadata.thumbnail)}" alt="" referrerpolicy="no-referrer">` : ''}<div><p>${escape(metadata.monthly_listeners || metadata.artist || (album ? '专辑曲目' : catalogueHeading))} · YouTube Music</p>${otherArtists ? '<button class="text-button" data-other-artists>其他歌手 →</button>' : ''}</div>`;
   renderSearchMore(info);
   searchSongs = orderResults(info.results.map(song => ({...song,
     status:library.find(item => item.url === song.url)?.status || song.status})), album && searchOrder === 'relevance' ? 'album' : searchOrder);
   const videos = videoSource === 'youtube', local = videoSource === 'local';
   $('search-list').className = artists ? '' : `search-list${videos ? ' video-list' : local ? ' local-list' : ''}`;
+  $('search-list').classList.toggle('has-albums', !videos && !local && searchSongs.some(song => song.album));
   $('search-list').setAttribute('role', artists ? 'group' : 'table');
   $('search-list').setAttribute('aria-label', artists ? '歌手列表' : videos ? '视频列表' : '歌曲列表');
   $('music-columns').hidden = artists || !searchSongs.length;
@@ -239,15 +255,15 @@ function songRow(song, index, {artists = false, videos = false, local = false, i
     `<${tag} class="music-add" ${open}>${song.kind === 'album' ? '查看专辑' : catalogueAction ? '查看歌曲' : '打开'} ${icon('arrow')}</${tag}>`;
   const credits = song.artists?.length ? song.artists.map(a => a.id ? `<button data-artist-id="${escape(a.id)}" data-artist-name="${escape(a.name)}">${escape(a.name)}</button>` : escape(a.name)).join(' · ') : local && song.uploader ? `<button data-search-artist="${escape(song.uploader)}">${escape(song.uploader)}</button>` : escape(song.uploader || '—');
   const kind = song.kind === 'album' ? '专辑' : song.kind === 'artist' ? '歌手' : song.version || '';
-  const status = inLibrary ? song.status === 'completed' ? '已准备' : song.status === 'video_evicted' ? '待补视频' : song.status === 'queued' ? queuedStatus(song) : song.status === 'failed' ? '准备失败' : song.status === 'running' ? '' : '需准备' : '';
-  const availability = inLibrary ? `<span class="library-status ${song.status === 'completed' ? 'is-ready' : song.status === 'failed' ? 'is-failed' : ''}">${status}</span>` : '<span class="music-availability"></span>';
+  const status = inLibrary && song.status !== 'running' ? songAvailability(song) : '';
+  const availability = inLibrary ? `<span class="library-status ${song.status === 'completed' ? 'is-ready' : song.status === 'failed' ? 'is-failed' : ''}">${status}</span>` : playable ? '<span class="music-availability"></span>' : '';
   return `<article class="music-row" ${inLibrary ? `data-card="${escape(song.id)}"` : `data-result="${index}"`} role="row"><span class="music-rank" role="cell">${String(index+1).padStart(2,'0')}</span>
     <div class="music-song" role="cell"><${tag} class="music-cover" ${open} aria-label="${playable ? '预览' : '打开'}：${escape(song.title)}">${thumbnail}<span>${icon(playable ? 'play' : 'arrow')}</span></${tag}>
-      <div class="music-title"><h3 title="${escape(song.title)}">${escape(song.title)}</h3><div class="music-meta">${kind ? `<span${song.kind === 'album' ? ' class="music-kind"' : ''}>${escape(kind)}</span>` : ''}${availability}</div>${inLibrary && song.status === 'running' ? `<div class="preparation-slot">${preparationHTML(song)}</div>` : ''}</div></div>
+      <div class="music-title"><h3><${tag} ${open} title="${escape(song.title)}">${escape(song.title)}</${tag}></h3><div class="music-meta">${kind ? `<span${song.kind === 'album' ? ' class="music-kind"' : ''}>${escape(kind)}</span>` : ''}${availability}</div>${inLibrary && song.status === 'running' ? `<div class="preparation-slot">${preparationHTML(song)}</div>` : ''}</div></div>
     <div class="music-credits" role="cell" title="${escape(song.artists?.map(a => a.name).join(' · ') || song.uploader || '')}">${inLibrary ? `<div class="song-info-row">${credits}${preparationElapsedHTML(song)}</div>` : credits}</div>
     <div class="music-album" role="cell" title="${escape(song.album || '')}">${escape(song.album || '—')}</div>
-    <div class="music-plays" role="cell">${playCount(song.views) !== null ? `${formatPlays(song.views)}<small>播放</small>` : '—'}</div>
-    <div class="music-duration" role="cell">${song.duration ? time(song.duration) : '—'}</div>
+    <div class="music-facts"><div class="music-plays${playCount(song.views) === null ? ' is-empty' : ''}" role="cell">${playCount(song.views) !== null ? `${formatPlays(song.views)}<small>播放</small>` : '—'}</div>
+    <div class="music-duration${!song.duration ? ' is-empty' : ''}" role="cell">${song.duration ? time(song.duration) : '—'}</div></div>
     <div class="music-actions" role="cell">${action}</div>
     <div class="music-alternative" role="cell">${(local || song.provider === 'youtube_music') && playable ? `<button class="find-mv" ${inLibrary ? `data-find-mv-song="${escape(song.id)}"` : `data-find-mv="${index}"`} aria-label="找 MV：${escape(song.title)}">找 MV</button>` : videos ? `<a class="find-mv" href="${escape(song.url)}" target="_blank" rel="noopener noreferrer">YouTube ↗</a>` : ''}</div></article>`;
 }
@@ -338,17 +354,19 @@ function updateAddButtons() {
     if (!song) return;
     if (form && !/^https?:\/\//i.test(song.url)) { button.disabled = false; button.classList.remove('is-queued'); button.removeAttribute('aria-label'); return; }
     const position = queuePosition(song, state.entries), adding = addingVideos.has(queueKey(song));
-    const label = position ? `已加入 · 第${position}首` : adding ? '点歌中…' : song.available === false ? '暂不可用' : '点歌';
-    button.disabled = Boolean(position || adding || song.available === false);
+    const entry = state.entries[position-1];
+    const label = position ? entry.status === 'completed' ? '开始唱' : '查看进度' : adding ? '点歌中…' : song.available === false ? '暂不可用' : '点歌';
+    button.disabled = Boolean(adding || song.available === false);
     button.classList.toggle('is-queued', position > 0);
+    button.classList.toggle('can-sing', entry?.status === 'completed');
     button.setAttribute('aria-label', `${label}：${song.title || song.url}`);
-    (button.querySelector('span') || button).textContent = label;
-    button.querySelector('svg')?.toggleAttribute('hidden', position > 0 || adding);
+    const markup = `${position ? '' : icon('plus')}<span>${label}${position ? `<small>已点 · 第${position}首</small>` : ''}</span>`;
+    if (button.innerHTML !== markup) button.innerHTML = markup;
   });
   document.querySelectorAll('.music-availability').forEach(label => {
     const song = searchSongs[label.closest('[data-result]').dataset.result];
     const cached = library.find(item => item.url === song.url);
-    label.textContent = cached?.status === 'completed' ? '已准备' : cached?.status === 'running' ? '准备中' : cached?.status === 'queued' ? queuedStatus(cached) : cached?.status === 'video_evicted' ? '待补视频' : '';
+    label.textContent = cached ? songAvailability(cached) : '';
     label.classList.toggle('is-ready', cached?.status === 'completed');
   });
 }
@@ -390,7 +408,9 @@ function editSearch() {
 }
 
 async function addVideo(song, {title, repeat = false} = {}) {
-  if (!song || addingVideos.has(queueKey(song)) || (!repeat && queuePosition(song, state.entries)) || song.available === false) return;
+  if (!song || addingVideos.has(queueKey(song)) || song.available === false) return;
+  const queued = !repeat && state.entries[queuePosition(song, state.entries)-1];
+  if (queued) return openQueuedSong(queued.id);
   const key = queueKey(song);
   addingVideos.add(key); updateAddButtons();
   $('preview-error').hidden = true;
@@ -403,12 +423,28 @@ async function addVideo(song, {title, repeat = false} = {}) {
     if ($('video-preview').open) $('video-preview').close();
     const added = updated.entries.find(entry => !previous.has(entry.id) && queueKey(entry) === key);
     const position = added ? updated.entries.findIndex(entry => entry.id === added.id)+1 : queuePosition(song, updated.entries);
-    toast(`已加入${position ? ` · 第${position}首` : ''}`);
+    toast(`已点${position ? ` · 第${position}首` : ''}`, updated.entries[position-1]);
   } catch (error) {
     toast(error.message);
     $('preview-error').textContent = error.message;
     $('preview-error').hidden = false;
   } finally { addingVideos.delete(key); updateAddButtons(); }
+}
+
+async function openQueuedSong(id) {
+  const entry = state.entries.find(song => song.id === id);
+  if (!entry) return;
+  $('toast').hidden = true;
+  if ($('video-preview').open) $('video-preview').close();
+  if (entry.status !== 'completed') {
+    queueTab = 'upcoming'; renderQueue(); switchView('queue');
+    document.querySelector(`[data-entry="${CSS.escape(id)}"]`)?.scrollIntoView({block:'nearest'});
+    return;
+  }
+  if (!(await activate())) return;
+  if (state.current_id !== id) await command('select', {entry_id:id});
+  else if (!state.playing) await command('play');
+  switchView('player');
 }
 
 function previewVideo(song) {
@@ -445,7 +481,7 @@ function queuedStatus(entry) {
 
 function statusText(entry) {
   if (entry.status === 'failed') return entry.error?.message || '准备失败，请重试';
-  if (entry.status === 'completed') return entry.id === state.current_id ? (state.playing ? '正在播放' : '已暂停') : '已准备';
+  if (entry.status === 'completed') return entry.id === state.current_id ? (state.playing ? '正在播放' : '已暂停') : '可直接唱';
   if (entry.status === 'queued') return queuedStatus(entry);
   return (entry.active_stages || []).map(s => stages[s] || '正在准备').join(' · ') || '开始准备';
 }
@@ -513,8 +549,8 @@ function renderQueue() {
     const status = entry.status === 'running' ? '' : `<span class="entry-status ${entry.status === 'queued' ? 'preparing' : ''}">${escape(statusText(entry))}</span>`;
     return `<article class="queue-entry ${active ? 'current' : ''}" data-entry="${escape(entry.id)}"><span class="entry-number">${active && state.playing ? '♫' : String(i+1).padStart(2,'0')}</span>
       ${entry.poster ? `<img class="entry-art" src="${escape(entry.poster)}" alt="">` : `<span class="entry-art">♪</span>`}
-      <div class="entry-info"><h3 class="entry-title">${escape(entry.title)}</h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || 'YouTube 视频')}</p>${entry.status === 'failed' ? '' : preparationElapsedHTML(entry) || status}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : entry.status === 'failed' ? `<p class="entry-error">${escape(statusText(entry))} <button data-action="retry">重试</button></p>` : ''}</div>
-      <details class="entry-menu"><summary aria-label="操作：${escape(entry.title)}">${icon('more')}</summary><div class="entry-tools">${!active ? `<button data-action="select">${icon('play')}现在唱</button><button data-action="up" aria-label="上移：${escape(entry.title)}" ${i === 0 ? 'disabled' : ''}>${icon('up')}上移</button><button data-action="down" aria-label="下移：${escape(entry.title)}" ${i === state.entries.length-1 ? 'disabled' : ''}>${icon('down')}下移</button>` : ''}<button data-action="remove" aria-label="移除：${escape(entry.title)}">${icon('trash')}移除</button></div></details></article>`;
+      <div class="entry-info"><h3 class="entry-title">${escape(entry.title)}</h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || 'YouTube 视频')}</p>${entry.status === 'failed' ? '' : preparationElapsedHTML(entry) || status}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : entry.status === 'failed' ? `<p class="entry-error">${escape(statusText(entry))} <button data-action="retry">重试</button></p>` : ''}${entry.status === 'completed' ? `<button class="queue-sing" data-action="sing" aria-label="${active && state.playing ? '回到播放' : '开始唱'}：${escape(entry.title)}">${icon('play')}${active && state.playing ? '回到播放' : '开始唱'}</button>` : ''}</div>
+      <details class="entry-menu"><summary aria-label="操作：${escape(entry.title)}">${icon('more')}</summary><div class="entry-tools">${!active ? `<button data-action="up" aria-label="上移：${escape(entry.title)}" ${i === 0 ? 'disabled' : ''}>${icon('up')}上移</button><button data-action="down" aria-label="下移：${escape(entry.title)}" ${i === state.entries.length-1 ? 'disabled' : ''}>${icon('down')}下移</button>` : ''}<button data-action="remove" aria-label="移除：${escape(entry.title)}">${icon('trash')}移除</button></div></details></article>`;
   }).join('');
 }
 
@@ -769,6 +805,12 @@ $('song-grid').onclick = async event => {
 $('library-view').addEventListener('click', async event => {
   const artist = event.target.closest('[data-search-artist]');
   if (artist) { changeSearchMode('artists', artist.dataset.searchArtist); return; }
+  const historyPreview = event.target.closest('[data-preview-history]');
+  if (historyPreview) {
+    const song = state.history.find(item => item.id === historyPreview.dataset.previewHistory);
+    if (song) previewVideo({...song, provider:'local'});
+    return;
+  }
   const repeat = event.target.closest('[data-recent-song]');
   if (repeat && !repeat.disabled) {
     repeat.disabled = true;
@@ -793,6 +835,7 @@ $('queue-list').onclick = async event => {
   if (!button || button.disabled) return;
   const id = button.closest('[data-entry]').dataset.entry;
   const action = button.dataset.action;
+  if (action === 'sing') return openQueuedSong(id);
   if (action === 'select' && !(await activate())) return;
   if (action === 'up' || action === 'down') {
     const order = state.entries.map(e => e.id), index = order.indexOf(id), target = index + (action === 'up' ? -1 : 1);

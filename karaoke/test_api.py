@@ -7594,7 +7594,7 @@ def test_music_catalogue_keeps_provider_order_versions_and_distinct_artist_ids(m
     assert catalogue['complete'] and catalogue['catalogue_section'] == catalogue_section
     assert catalogue['order'] == ('youtube_music_top_songs' if catalogue_section == 'songs' else 'youtube_music_videos')
     assert catalogue['results'] == songs
-    assert catalogue['continuation'] == dict(token='playlist-next')
+    assert catalogue['continuation']['token'] == 'playlist-next'
 
 
 @pytest.mark.parametrize('section', ['songs', 'videos', 'releases', 'empty'])
@@ -7709,6 +7709,31 @@ def test_music_album_browse_keeps_every_track_and_its_order(monkeypatch):
     assert [s['title'] for s in page['results']] == [s['title'] for s in tracks]
     assert all(s['album'] == 'An album' and s['uploader'] == 'Singer' for s in page['results'])
     assert page['continuation'] is None
+
+
+def test_artist_playlist_preserves_richer_shelf_metadata_by_video_id(monkeypatch):
+    from ytmusicapi import YTMusic
+    from karaoke.video_search import music_entries
+    shelf = [dict(videoId='abcdefghijk', title='Same title', views='1136万次观看'),
+             dict(videoId='00000000000', title='Same title', views='8万次观看')]
+    monkeypatch.setattr(YTMusic, 'get_artist', lambda *a: dict(name='Singer', videos=dict(browseId='VLlist', results=shelf)))
+    monkeypatch.setattr(YTMusic, 'get_playlist', lambda *a, **kw: dict(tracks=[
+        dict(videoId='00000000000', title='Renamed', views=0, duration_seconds=180),
+        dict(videoId='abcdefghijk', title='Same title', views='', duration_seconds=240),
+        dict(videoId='11111111111', title='Same title')]))
+    page = music_entries('artist', 'UC'+'a'*22)
+    assert [s['views'] for s in page['results']] == [0, '1136万次观看', None]
+    assert [s['duration'] for s in page['results']] == [180, 240, 0]
+    assert [s['title'] for s in page['results']] == ['Renamed', 'Same title', 'Same title']
+
+
+def test_music_episodes_remain_visible_without_becoming_songs():
+    from karaoke.video_search import music_results
+    rows = [dict(title='Conversation', videoId='abcdefghijk', resultType='episode'),
+            dict(title='Song', videoId='00000000000', resultType='song')]
+    results = music_results(rows, 'songs')
+    assert [s['kind'] for s in results] == ['episode', 'song']
+    assert results[0]['url'] == 'https://www.youtube.com/watch?v=abcdefghijk'
 
 
 def test_search_api_failure_is_distinct_from_empty_and_creates_no_jobs(tmp_path, monkeypatch):
