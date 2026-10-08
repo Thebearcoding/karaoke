@@ -1863,6 +1863,33 @@ class SubtitleIntegrity(unittest.TestCase):
         longer = dict(cue, text='blue river runs', start=70., end=74.)
         self.assertEqual(timeline_support([cue, longer], words, 'English')['checked_lines'], [])
 
+    def test_inline_echo_does_not_assign_a_standalone_refrain_occurrence(self):
+        from anchors_from_asr import timeline_support
+        lines = ['blue river', 'red mountain (blue river)']
+        words = [dict(word='blue river',start=20.,end=22.),
+                 dict(word='blue river',start=40.,end=42.)]
+        cues = [dict(text=lines[0],start=1.,end=3.),dict(text=lines[1],start=38.,end=42.)]
+        # The two heard copies could belong to an inline echo or to the lead.
+        # Their count alone cannot prove the first displayed line is misplaced.
+        self.assertEqual(timeline_support(cues,words,'English')['checked_lines'], [])
+
+    def test_recording_views_combine_without_crossing_observed_phrase_order(self):
+        from anchors_from_asr import combine_anchor_views
+        texts = ['opening known phrase', 'a different foreign language verse', 'closing refrain', 'unheard text']
+        def anchor(i,start,score=1.):
+            return dict(text=texts[i],status='candidate' if start is not None else 'unresolved_text',
+                        start=start,end=start+1 if start is not None else None,
+                        matched_fraction=score if start is not None else 0.,matched_density=1.)
+        primary = [anchor(0,1.),anchor(1,None),anchor(2,10.),anchor(3,None)]
+        alternate = [anchor(0,None),anchor(1,20.),anchor(2,30.,.8),anchor(3,None)]
+        combined = combine_anchor_views([primary,alternate])
+        self.assertEqual([a['start'] for a in combined],[1.,20.,30.,None])
+        self.assertEqual([a.get('recognition_view') for a in combined],[0,1,1,None])
+        self.assertEqual([a['text'] for a in combined],texts)
+        self.assertEqual(primary[2]['start'],10.)
+        with self.assertRaisesRegex(ValueError,'same lyric text'):
+            combine_anchor_views([primary,alternate[:-1]])
+
     def test_split_video_cards_match_one_lyric_line(self):
         self.assertEqual(caption_similarity('星光落在心里面', '星光落在'), 1.)
         self.assertEqual(caption_similarity('星光落在心里面', '心里面'), 1.)

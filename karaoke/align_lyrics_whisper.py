@@ -276,7 +276,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                           force_global=False, max_alignment_attempts=24, recovery_contexts=None, localize=None,
                           align_original=None, recognize_original=None):
     """Use recognition only to locate failed lyrics, never as replacement text."""
-    from anchors_from_asr import anchors_from_words, observed_context
+    from anchors_from_asr import anchors_from_words, observed_context, combine_anchor_views
     from lyric_progress import partial_alignment_cues
     duration = len(audio)/16000
     cues = partial_alignment_cues(lines, [block], duration, language)
@@ -372,11 +372,14 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                     report['context'] = [left,right]
                     anchors = anchors_from_words(lines[left:right], words, language, allow_missing=True)
                 alternate_anchors = anchors_from_words(lines[left:right], alternate_words, language, allow_missing=True)
+                combined = combine_anchor_views([anchors, alternate_anchors])
                 support = lambda rows: sum(a['matched_fraction']*len(a['text']) for a in rows)
                 other = alternate
                 if support(alternate_anchors) > support(anchors):
                     other, response, words, anchors = response, alternate, alternate_words, alternate_anchors
                     report.update(recognition=response, recognition_source='original')
+                anchors = combined
+                report['anchor_view_sources'] = ['vocals', 'original']
                 reports.append(dict(context=[left,right], source_range=[begin,end], recognition=other,
                     reason='alternate_recognition_observation', accepted_lines=[], attempts=[]))
             except ValueError as error:

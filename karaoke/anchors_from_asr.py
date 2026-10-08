@@ -36,7 +36,7 @@ def _match_words(lines, words, units):
         # completely observed phrase. Establish those phrase boundaries before
         # asking edit distance to match the incomplete material between them.
         # A repeated phrase is only unambiguous when every occurrence was heard.
-        positions, offset = {}, 0
+        positions, clause_positions, offset = {}, {}, 0
         for line, key in zip(lines, keys):
             if key:
                 positions.setdefault(tuple(key), []).append(offset)
@@ -50,10 +50,12 @@ def _match_words(lines, words, units):
                     end = len(units(line[:part.end()]))
                     clause = tuple(key[begin:end])
                     if clause and clause != tuple(key):
-                        positions.setdefault(clause, []).append(offset+begin)
+                        clause_positions.setdefault(clause, []).append(offset+begin)
             offset += len(key)
         candidates = []
-        for key, starts in positions.items():
+        # A refrain occurring both as a whole line and inside another voice's
+        # parentheses cannot acquire an occurrence number from clause matching.
+        for key, starts in [*positions.items(), *clause_positions.items()]:
             # A short refrain can also occur inside a longer lyric line.
             # Those occurrences count too, even with different line breaks.
             occurrences = [i for i in range(len(expected)-len(key)+1)
@@ -184,6 +186,35 @@ def observed_context(lines, words, language, first, stop):
     heard = [i for i,a in enumerate(anchors) if a.get('match_basis') in ('complete_phrase', 'complete_clause')
              and a['status'] == 'candidate']
     return min([first,*heard]), max([stop,*(i+1 for i in heard)])
+
+
+def combine_anchor_views(views):
+    """Keep the strongest ordered phrase evidence across recording views."""
+    if not views:
+        return []
+    texts = [a['text'] for a in views[0]]
+    if any([a['text'] for a in view] != texts for view in views[1:]):
+        raise ValueError('Recognition views must describe the same lyric text')
+    nodes = []
+    for index, alternatives in enumerate(zip(*views)):
+        for view, anchor in enumerate(alternatives):
+            if anchor['status'] != 'candidate':
+                continue
+            previous = max((n for n in nodes if n['line'] < index and
+                n['anchor']['start'] < anchor['start'] and n['anchor']['end'] <= anchor['end']),
+                key=lambda n:n['score'], default=None)
+            score = len(normalized(anchor['text']))*anchor['matched_fraction']*anchor['matched_density']
+            nodes.append(dict(line=index, view=view, anchor=anchor,
+                score=score+(previous['score'] if previous else 0), previous=previous))
+    selected = {}
+    node = max(nodes, key=lambda n:n['score'], default=None)
+    while node is not None:
+        selected[node['line']] = dict(node['anchor'], recognition_view=node['view'])
+        node = node['previous']
+    # A conflict stays unresolved. This chooses existing observations; it never
+    # shifts their times or treats a missing observation as missing lyrics.
+    return [selected.get(i, dict(anchor, status='unresolved_text', start=None, end=None))
+            for i,anchor in enumerate(views[0])]
 
 
 def timeline_support(cues, words, language):
