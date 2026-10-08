@@ -677,7 +677,12 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                         conflicts.update({i, j}-set(replaced) or {i, j})
                 if not conflicts:
                     break
-                newly_conflicting.update(conflicts-bad-revisited)
+                discovered = conflicts-bad-revisited
+                newly_conflicting.update(discovered)
+                # Moving a phrase can reveal a previously invisible task.
+                # Reserve a primary and alternate attempt for each new target;
+                # a failed old target cannot replenish its own budget.
+                budget += 2*len(discovered)
                 for i in conflicts:
                     segment = proposed['result']['segments'][i-first]
                     rejected[i+1] = deepcopy(segment)
@@ -698,7 +703,8 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         # A repaired phrase can also expose a new conflict with an old neighbour.
         # Revisit that changed context rather than ending with discarded lyrics.
         # Seeing a neighbour as context is not the same as selecting its repair.
-        # Each newly invalidated line can trigger this only once, sharing the budget.
+        # Each newly invalidated line can trigger this only once. Its reserved
+        # work cannot be consumed by the earlier, already completed targets.
         followup = recover_with_local_asr(result, lines, audio, language, recognize, align,
                                        force_global=True, max_alignment_attempts=budget, recovery_contexts=contexts,
                                        localize=localize, align_original=align_original,

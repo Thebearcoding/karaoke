@@ -2795,14 +2795,14 @@ def test_ambiguous_global_match_cannot_displace_aligned_neighbouring_phrases(mis
     assert result['asr_localizations'][0]['contradicted_lines'] == []
 
 
-@pytest.mark.parametrize('scenario', ['stable', 'stale_neighbour', 'cascading_conflicts'])
+@pytest.mark.parametrize('scenario', ['stable', 'stale_neighbour', 'cascading_conflicts', 'late_discovery'])
 def test_global_recovery_revisits_neighbours_newly_contradicted_by_repaired_phrases(scenario):
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines = ['Opening verse', 'Drink water', 'Fall asleep then dream', 'Drink water', 'Asleep and dream']
     actual = [0., 5., 12., 18., 24.]
     old = [0., 3., 6., 9., 10.] if scenario!='stable' else [0., 3., 6., 18., 24.]
     heard = [*lines[:4], 'Asleep dream']
-    if scenario == 'cascading_conflicts':
+    if scenario in ('cascading_conflicts', 'late_discovery'):
         lines = ['Opening verse', 'Middle melody', 'Quiet morning light', 'Gentle evening star', 'Asleep and dream']
         heard = [*lines[:2], 'morning light', 'evening star', 'Asleep dream']
         actual, old = [0.,10.,14.,18.,24.], [0.,3.,4.,5.,12.]
@@ -2823,7 +2823,8 @@ def test_global_recovery_revisits_neighbours_newly_contradicted_by_repaired_phra
         return dict(segments=[dict(words=[dict(word=lines[i], start=actual[i]-begin,
             end=actual[i]+1-begin)]) for i in range(first, first+len(selected))])
     result = recover_with_local_asr(block, lines, np.zeros(30*16000), 'English',
-                                    recognize, align, force_global=True)
+                                    recognize, align, force_global=True,
+                                    max_alignment_attempts=1 if scenario=='late_discovery' else 24)
     assert [s['words'][0]['start'] for s in result['result']['segments']] == actual
     if scenario != 'stable':
         assert result['asr_localizations'][0]['unresolved_segments']
