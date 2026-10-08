@@ -22,7 +22,6 @@
     <symbol id="i-up" viewBox="0 0 24 24"><path d="m6 14 6-6 6 6"/></symbol>
     <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 10 6 6 6-6"/></symbol>
     <symbol id="i-restart" viewBox="0 0 24 24"><path d="M4 10a8 8 0 1 1 0 5M4 4v6h6"/></symbol>
-    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
   </svg>
 
   <header class="topbar">
@@ -71,7 +70,7 @@
     </section>
 
     <section class="main-panel player-panel" id="player-view" hidden aria-label="播放器">
-      <div class="section-heading player-heading"><div><h1 id="player-title">未播放</h1><div class="song-info-row"><p><span id="player-artist"></span> <span class="quality-note" id="quality-note" hidden>歌词待校对</span></p><span id="player-elapsed"></span></div></div><button class="icon-button" id="fullscreen" aria-label="全屏播放" title="全屏 · F"><svg class="icon"><use href="#i-full"/></svg></button></div>
+      <div class="section-heading player-heading"><div><h1 id="player-title">未播放</h1><div class="song-info-row"><p id="player-artist"></p><span id="player-elapsed"></span></div></div><button class="icon-button" id="fullscreen" aria-label="全屏播放" title="全屏 · F"><svg class="icon"><use href="#i-full"/></svg></button></div>
       <div class="player-stage" id="player-stage">
       <div class="screen" id="screen">
         <video id="video" playsinline muted preload="auto" aria-label="卡拉 OK 字幕 MV"></video>

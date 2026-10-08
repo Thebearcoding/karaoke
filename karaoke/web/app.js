@@ -538,8 +538,8 @@ function renderQueue() {
     const status = entry.status === 'running' || !statusText(entry) ? '' : `<span class="entry-status ${entry.status === 'queued' ? 'preparing' : ''}">${escape(statusText(entry))}</span>`;
     return `<article class="queue-entry ${active ? 'current' : ''}" data-entry="${escape(entry.id)}"><span class="entry-number">${active && state.playing ? '♫' : String(i+1).padStart(2,'0')}</span>
       <button class="entry-cover" data-action="preview" aria-label="${active ? '查看播放' : '预览'}：${escape(entry.title)}">${entry.poster ? `<img class="entry-art" src="${escape(entry.poster)}" alt="">` : `<span class="entry-art">♪</span>`}</button>
-      <div class="entry-info"><h3 class="entry-title"><button data-action="preview">${escape(entry.title)}</button></h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || 'YouTube 视频')}</p>${entry.status === 'failed' ? '' : preparationElapsedHTML(entry) || status}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : entry.status === 'failed' ? `<p class="entry-error">${escape(statusText(entry))} <button data-action="retry">重试</button></p>` : ''}${entry.status === 'completed' ? `<button class="queue-sing" data-action="sing" aria-label="${active && state.playing ? '回到播放' : '开始唱'}：${escape(entry.title)}">${icon('play')}${active && state.playing ? '回到播放' : '开始唱'}</button>` : ''}</div>
-      <details class="entry-menu"><summary aria-label="操作：${escape(entry.title)}">${icon('more')}</summary><div class="entry-tools">${!active ? `<button data-action="up" aria-label="上移：${escape(entry.title)}" ${i === 0 ? 'disabled' : ''}>${icon('up')}上移</button><button data-action="down" aria-label="下移：${escape(entry.title)}" ${i === state.entries.length-1 ? 'disabled' : ''}>${icon('down')}下移</button>` : ''}<button data-action="remove" aria-label="移除：${escape(entry.title)}">${icon('trash')}移除</button></div></details></article>`;
+      <div class="entry-info"><h3 class="entry-title"><button data-action="preview">${escape(entry.title)}</button></h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || 'YouTube 视频')}</p>${entry.status === 'failed' ? '' : preparationElapsedHTML(entry) || status}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : entry.status === 'failed' ? `<p class="entry-error">${escape(statusText(entry))} <button data-action="retry">重试</button></p>` : ''}</div>
+      <div class="entry-tools">${entry.status === 'completed' ? `<button class="queue-sing" data-action="sing" aria-label="${active && state.playing ? '回到播放' : '开始唱'}：${escape(entry.title)}">${icon('play')}${active && state.playing ? '回到播放' : '开始唱'}</button>` : ''}<button data-action="up" aria-label="上移：${escape(entry.title)}" ${i === 0 ? 'disabled' : ''}>${icon('up')}上移</button><button data-action="down" aria-label="下移：${escape(entry.title)}" ${i === state.entries.length-1 ? 'disabled' : ''}>${icon('down')}下移</button><button data-action="remove" aria-label="移除：${escape(entry.title)}">${icon('trash')}移除</button></div></article>`;
   }).join('');
 }
 
@@ -581,8 +581,6 @@ function updateTransport() {
   $('seek').max = song?.duration || 1;
   $('duration').textContent = time(song?.duration);
   $('playing-dot').hidden = !state.playing;
-  $('quality-note').hidden = !song?.lyrics_need_review && !song?.lyrics_unavailable;
-  $('quality-note').textContent = song?.lyrics_unavailable ? '歌词暂缺' : '歌词待校对';
   const pitch = state.pitch_semitones || 0;
   $('pitch-value').textContent = pitch ? `${pitch > 0 ? '+' : '−'}${Math.abs(pitch)}` : '原调';
   $('pitch-value').setAttribute('aria-label', `当前${pitch ? `${pitch > 0 ? '升' : '降'} ${Math.abs(pitch)} 个半音` : '原调'}`);
@@ -820,9 +818,6 @@ $('library-view').addEventListener('click', async event => {
 $('show-history').onclick = () => {
   queueTab = 'history'; renderQueue(); switchView('queue'); $('history-tab').focus();
 };
-document.addEventListener('click', event => {
-  document.querySelectorAll('.entry-menu[open]').forEach(menu => { if (!menu.contains(event.target)) menu.open = false; });
-});
 $('queue-list').onclick = async event => {
   const button = event.target.closest('[data-action]');
   if (!button || button.disabled) return;
@@ -908,7 +903,6 @@ document.addEventListener('fullscreenchange', () => {
   (fullscreen ? $('player-stage') : transportHome).append(transport);
 });
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape') document.querySelectorAll('.entry-menu[open]').forEach(menu => { menu.open = false; menu.querySelector('summary').focus(); });
   if ($('video-preview').open) return;
   if (['INPUT','TEXTAREA','BUTTON','SELECT','SUMMARY'].includes(event.target.tagName) || event.ctrlKey || event.metaKey || event.altKey) return;
   if (event.code === 'Space') { event.preventDefault(); togglePlay(); }
