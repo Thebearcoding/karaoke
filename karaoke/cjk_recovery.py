@@ -132,8 +132,15 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *,
             # Grapheme CTC spikes identify the word inside its acoustic event;
             # they are not estimates of the first audible phoneme. Compare
             # events, never the display hold until the following word.
-            event_end = float(np.median([u['emission_end'] for u in primary]))
-            supported = all(u['start'] <= event_end+.1 and u['end'] >= start-.1 for u in secondary)
+            primary_ends = [u.get('first_event_end',u['emission_end']) for u in primary]
+            secondary_ends = [u.get('first_event_end',u['end']) for u in secondary]
+            if any(not isinstance(end,(int,float)) or not np.isfinite(end)
+                   or not u['start'] < end <= u['end']
+                   for u,end in zip([*primary,*secondary],[*primary_ends,*secondary_ends])):
+                return None, 'invalid CTC onset event'
+            event_end = float(np.median(primary_ends))
+            supported = all(u['start'] <= event_end+.1 and end >= start-.1
+                            for u,end in zip(secondary,secondary_ends))
         else:
             supported = all(abs(u['start']-start) <= .1 for u in secondary)
         if (not supported or abs(secondary[0]['start']-secondary[1]['start']) > .1):

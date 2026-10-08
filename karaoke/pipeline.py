@@ -988,6 +988,13 @@ class Pipeline:
                     self.validate_localization(candidate, duration)
                 except StageFailure as failure:
                     localization_error = failure
+                if index+1 < len(candidates):
+                    preferred = observed_source_alternative(candidate, candidates[index+1:], observations)
+                    if preferred:
+                        position = index+1+preferred['alternative']
+                        candidates[index+1], candidates[position] = candidates[position], candidates[index+1]
+                        write_json(self.output/'lyric-source-support.json', preferred)
+                        raise StageFailure('subtitles', '已有音频识别支持更完整的歌词来源；正在核验备用正文')
                 if not self.strict_audio:
                     repeated = observed_repetition_candidate(candidate,
                         json.loads((self.output/'cues.json').read_text()), observations, duration)
@@ -998,13 +1005,6 @@ class Pipeline:
                         raise StageFailure('subtitles', '音频中发现重复唱段；正在重新对齐来源中的完整原文')
                 if localization_error is not None:
                     raise localization_error
-                if index+1 < len(candidates):
-                    preferred = observed_source_alternative(candidate, candidates[index+1:], observations)
-                    if preferred:
-                        position = index+1+preferred['alternative']
-                        candidates[index+1], candidates[position] = candidates[position], candidates[index+1]
-                        write_json(self.output/'lyric-source-support.json', preferred)
-                        raise StageFailure('subtitles', '已有音频识别支持更完整的歌词来源；正在核验备用正文')
             except StageFailure as failure:
                 if (self.strict_audio or failure.stage != 'subtitles' or index+1 == len(candidates) or
                         not (self.checkpoints.directory/'align_words.json').is_file()):

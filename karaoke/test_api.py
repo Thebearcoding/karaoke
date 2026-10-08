@@ -4312,6 +4312,8 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
 def test_observed_missing_refrain_selects_complete_published_source(tmp_path, monkeypatch, complete_source, compression_ratio):
     refrain = ['glowing red horizon', 'bright blue ocean']
     short, complete = ['opening',*refrain,'closing'], ['opening',*refrain,*refrain,'closing']
+    if complete_source:
+        complete.insert(-1, 'silver stars appear behind the evening clouds')
     packet = dict(candidate_texts=[short,complete], crosscheck=dict(selected_source=0,
         eligible_sources=[0,1], sources=[dict(provider=p,language='English') for p in ('short','complete')]))
     if not complete_source:
@@ -4322,11 +4324,12 @@ def test_observed_missing_refrain_selects_complete_published_source(tmp_path, mo
     pipeline = Pipeline(dict(url=URL),tmp_path)
     (tmp_path/'lyrics.json').write_text(json.dumps(lyrics))
     raw = tmp_path/'alignment/raw.json';raw.parent.mkdir()
-    heard = [1.,3.,5.,8.,10.,12.]
+    heard = [1.,3.,5.,8.,10.,*([11.] if complete_source else []),12.]
     calls=[]
     def align(candidate,duration):
         calls.append(candidate['lines'])
-        starts = [1.,3.,5.,12.] if candidate['lines']==short else heard
+        starts = ([1.,3.,5.,12.] if candidate['lines']==short else heard
+                  if candidate['lines']==complete else [1.,3.,5.,8.,10.,12.])
         cues = [dict(text=t,start=s,end=s+.8,status='candidate') for t,s in zip(candidate['lines'],starts)]
         (tmp_path/'cues.json').write_text(json.dumps(cues))
         (tmp_path/'quality.json').write_text('{}')

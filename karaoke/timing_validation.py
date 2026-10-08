@@ -577,7 +577,9 @@ def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, proto
                 return None
             def joined(v):
                 return [dict(v[0],first=group['first'],stop=group['stop'],text=group['text'],
-                             end=v[-1]['end'],emission_end=v[-1].get('emission_end'),acoustic_end=None)]
+                             end=v[-1]['end'],emission_end=v[-1].get('emission_end'),acoustic_end=None,
+                             first_event_end=v[0].get('emission_end')
+                                 if v[0].get('timing_evidence')=='ctc_event' else v[0]['end'])]
             primary, selected = [joined(v) for v in primary], [joined(v) for v in selected]
         found, _ = corroborated_group(group, primary, selected,
             wave, bounds, protocol, spans=[(u['first'],u['stop']) for u in selected[0]])

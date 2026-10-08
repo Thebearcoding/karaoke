@@ -716,13 +716,17 @@ class SubtitleIntegrity(unittest.TestCase):
             dict(first=1,stop=2,text='乙',start=2.02,end=2.5),
             dict(first=2,stop=3,text='丙',start=3.,end=3.5)])
         measured=[dict(u,start=t,end=e) for u,t,e in zip(cue['units'],[2.,2.02,3.],[2.02,2.5,3.5])]
-        for mode in ('valid','silent_onset','disagreement','missing_text','protected_interior','strict'):
+        for mode in ('valid','silent_onset','disagreement','missing_text','protected_interior','strict','later_label_in_group'):
             with self.subTest(mode=mode):
                 views=[deepcopy(measured),deepcopy(measured)]
                 predictions=[[dict(u,timing_evidence='ctc_event',emission_end=u['start']+.01)
                               for u in measured] for _ in range(3)]
                 if mode=='disagreement':predictions[0][0]['start']=1.8
                 if mode=='missing_text':predictions[0].pop(1)
+                if mode=='later_label_in_group':
+                    for view in views:
+                        for u,(start,end) in zip(view,[(2.3,2.4),(2.45,2.6),(3.,3.05)]):
+                            u.update(start=start,end=end,timing_evidence='ctc_label_event')
                 wave=np.ones(44100*4)*.1
                 if mode=='silent_onset':wave[2*44100:round(2.035*44100)]=0.
                 constraints=([dict(line=1,text=cue['text'],first=1,stop=2,onset=2.02,
