@@ -4483,6 +4483,15 @@ def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatc
     assert caption.frame(3., 'static').getpixel((5, 5)) == white
     assert len(caption.cache) <= 3
 
+    # A later onset must not finish a still-sounding earlier unit. Nor may a
+    # completed later unit freeze that earlier sweep in the frame cache.
+    overlapping = renderer.Caption(dict(cue, units=[dict(cue['units'][0], end=5.), *cue['units'][1:]]),
+                                   'cinema_focus', 'Chinese')
+    assert overlapping.frame(2., 'word').getpixel((12, 5)) == white
+    assert overlapping.frame(4., 'word').getpixel((12, 5)) == white
+    assert overlapping.frame(4.9, 'word').getpixel((12, 5)) == amber
+    assert overlapping.frame(4., 'word').getpixel((12, 5)) == white
+
 
 @pytest.mark.parametrize('spaced', [False, True])
 def test_long_lyric_pages_preserve_all_text_and_only_switch_at_measured_onsets(spaced):

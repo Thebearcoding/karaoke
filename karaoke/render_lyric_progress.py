@@ -93,8 +93,8 @@ class Caption:
             if instant >= hold_end:
                 return self.base
         key = (mode, index)
-        sweeping = mode == 'word'
-        cacheable = not sweeping or instant >= unit['end']
+        sweeping = [u for u in self.cue['units'][:index+1] if instant < u['end']] if mode == 'word' else []
+        cacheable = not sweeping
         if cacheable and key in self.cache:
             return self.cache[key]
         result = self.base.copy()
@@ -102,17 +102,17 @@ class Caption:
         if mode == 'word':
             area = Image.new('L', result.size)
             draw = ImageDraw.Draw(area)
-            if sweeping:
-                selected = [c for c in chars if unit['first'] <= c['index'] < unit['stop']]
-                duration = unit['end']-unit['start']
-                fraction = min(1., max(0., (instant-unit['start'])/duration)) if duration > 0 else 1.
+            right_edges = {}
+            for active in sweeping:
+                selected = [c for c in chars if active['first'] <= c['index'] < active['stop']]
+                fraction = (instant-active['start'])/(active['end']-active['start'])
                 remaining = sum(c['right']-c['left']+4 for c in selected) * fraction
-            for char in chars:
-                right = char['right']+2
-                if sweeping and unit['first'] <= char['index'] < unit['stop']:
+                for char in selected:
                     width = char['right']-char['left']+4
-                    right = char['left']-2+min(width, remaining)
+                    right_edges[char['index']] = char['left']-2+min(width, remaining)
                     remaining = max(0., remaining-width)
+            for char in chars:
+                right = right_edges.get(char['index'], char['right']+2)
                 if char['index'] < unit['stop'] and right > char['left']-2:
                     draw.rectangle((char['left']-2, char['top']-2, right, char['baseline']+8), fill=255)
             tint = Image.new('RGBA', result.size, self.color+(0,))
