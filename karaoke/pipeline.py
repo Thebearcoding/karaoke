@@ -259,9 +259,9 @@ class Pipeline:
             from .timing_validation import acoustic_model_files
             if '--lead' in command:
                 inputs = [*inputs, command[command.index('--lead')+1]]
-            constraints = self.output/'timing-constraints.json'
-            if constraints.is_file():
-                inputs = [*inputs, 'timing-constraints.json']
+            for evidence in ('timing-constraints.json', 'alignment/raw.json'):
+                if (self.output/evidence).is_file():
+                    inputs = [*inputs, evidence]
             weights = acoustic_model_files(ROOT)
             config['weights'] = [(str(p), p.stat().st_size, p.stat().st_mtime_ns)
                                  for p in weights if p.is_file()]
@@ -1248,9 +1248,10 @@ class Pipeline:
                 candidates.insert(before_coarse, raw)
             except (OSError, ValueError, KeyError, TypeError):
                 pass
+        options = []
         for line, text in enumerate(lyrics['lines']):
+            options.append([])
             if line+1 in recovery.get('unresolved_localization_lines', []):
-                omitted.append(line+1)
                 continue
             for name, candidate in candidates:
                 cue = candidate[line]
@@ -1260,18 +1261,41 @@ class Pipeline:
                             not 0 <= cue['start'] < cue['end'] <= duration+.001):
                         continue
                     units = playback_units(cue, lyrics['language'])
-                    if cues:
-                        presentation_cues([cues[-1], cue], duration, lead=0, tail=0, bridge_gap=0)
-                        if cues[-1]['units'][-1]['start'] >= units[0]['start']:
-                            continue
                 except (AttributeError, KeyError, TypeError, ValueError):
                     continue
-                cues.append(dict(cue, units=units))
-                sources.append(dict(line=line+1, source=name))
-                estimated.extend(dict(line=line+1, **u) for u in units if u.get('timing_source') == 'linear_fallback')
-                break
+                options[-1].append((name, dict(cue, units=units)))
+        def follows(previous, current):
+            try:
+                presentation_cues([previous, current], duration, lead=0, tail=0, bridge_gap=0)
+                return previous['units'][-1]['start'] < current['units'][0]['start']
+            except ValueError:
+                return False
+        # A locally preferred refinement must not consume the next sentence.
+        # Find a complete ordered path through existing candidates first;
+        # priority stays unchanged and no timestamps are manufactured.
+        paths = [{} for _ in options]
+        for line in range(len(options)-1, -1, -1):
+            for index, (_, cue) in enumerate(options[line]):
+                if line == len(options)-1:
+                    paths[line][index] = None
+                else:
+                    following = next((j for j in paths[line+1] if follows(cue, options[line+1][j][1])), None)
+                    if following is not None:
+                        paths[line][index] = following
+        choice = next(iter(paths[0]), None) if paths else None
+        for line, candidates in enumerate(options):
+            if choice is not None:
+                selected = candidates[choice]
+                choice = paths[line][choice]
             else:
+                selected = next((pair for pair in candidates if not cues or follows(cues[-1], pair[1])), None)
+            if selected is None:
                 omitted.append(line+1)
+                continue
+            name, cue = selected
+            cues.append(cue)
+            sources.append(dict(line=line+1, source=name))
+            estimated.extend(dict(line=line+1, **u) for u in cue['units'] if u.get('timing_source') == 'linear_fallback')
         # Reuse normal display-boundary handling. Acoustic word onsets stay
         # untouched; a small overlapping tail must not delete a whole phrase.
         display, boundaries = presentation_cues(cues, duration, lead=0, tail=0, bridge_gap=0)

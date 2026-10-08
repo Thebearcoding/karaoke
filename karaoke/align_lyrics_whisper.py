@@ -292,11 +292,23 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 presentation_cues(cues[i-1:i+1], duration, lead=0, tail=0, bridge_gap=0)
             except ValueError:
                 bad.update((i-1, i))  # Complete words can still occupy the wrong repeated passage.
-    if not bad:
+    # Attention can place a perfectly complete sentence inside an instrumental
+    # gap. Reuse the aligner's own activity map to request localization; silence
+    # alone neither invalidates lyrics nor supplies replacement timestamps.
+    quiet = set()
+    gaps = [(g['start']+block['source_range'][0], g['end']+block['source_range'][0])
+            for g in (block['result'].get('nonspeech_sections') or []) if g['end']-g['start'] >= 1.]
+    for i in range(*block['range']):
+        cue = cues[i]
+        if cue['status'] == 'candidate' and cue['end']-cue['start'] >= 1.:
+            overlap = sum(max(0., min(end, cue['end'])-max(begin, cue['start'])) for begin,end in gaps)
+            if overlap >= .8*(cue['end']-cue['start']):
+                quiet.add(i)
+    if not bad and not quiet:
         return block
     # Widespread collapse makes the old neighbouring times unsafe as anchors.
     # Otherwise recognize just the failed run plus its two neighbouring lines.
-    windows, remaining = [], sorted(bad)
+    windows, remaining = [], sorted(bad | quiet)
     while remaining:
         left = remaining.pop(0)
         right = left+1
@@ -308,7 +320,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         begin = max(0., cues[left]['start']-.6) if cues[left]['status'] == 'candidate' else 0.
         end = min(duration, cues[right-1]['end']+.6) if cues[right-1]['status'] == 'candidate' else duration
         windows.append((left, right, begin, end))
-    global_recovery = force_global or len(bad) >= max(4, (stop-first+4)//5) or any(e-b > 45 for _, _, b, e in windows)
+    global_recovery = force_global or bool(quiet) or len(bad) >= max(4, (stop-first+4)//5) or any(e-b > 45 for _, _, b, e in windows)
     untimed = {i for i in bad if cues[i]['status'] == 'unresolved_timing'}
     if global_recovery:
         windows = [(first, stop, block['source_range'][0], block['source_range'][1])]
@@ -319,7 +331,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
     needs_relocation = False
     for left, right, begin, end in windows[:8]:
         report = dict(context=[left, right], source_range=[begin, end], global_localization=global_recovery,
-                      accepted_lines=[], attempts=[])
+                      accepted_lines=[], attempts=[], activity_screened_lines=sorted(i+1 for i in quiet))
         reports.append(report)
         if needs_relocation and not untimed.intersection(range(left, right)):
             report['reason'] = 'deferred_until_missing_lines_are_located'

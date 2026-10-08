@@ -648,6 +648,18 @@ def test_timing_review_cache_tracks_its_additional_audio_view(tmp_path, monkeypa
     lead.write_bytes(b'lead version 3')
     pipeline.run('validate_timing', command)
     assert len(calls)==3
+    localization = folder/'alignment/raw.json'
+    localization.parent.mkdir(exist_ok=True)
+    localization.write_text('[]')
+    pipeline.run('validate_timing', command)
+    pipeline.run('validate_timing', command)
+    assert len(calls)==4
+    localization.write_text('[{"asr_localizations": []}]')
+    pipeline.run('validate_timing', command)
+    assert len(calls)==5
+    localization.unlink()
+    pipeline.run('validate_timing', command)
+    assert len(calls)==6
 
 
 def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
@@ -2692,6 +2704,35 @@ def test_local_recognition_repairs_a_contradicted_neighbour_too(outside_old_cont
     assert report['accepted_lines'] == list(range(2,len(lines)))
 
 
+@pytest.mark.parametrize('evidence', ['relocated', 'same_time', 'unrecognized', 'short_gap'])
+def test_sentence_inside_nonspeech_only_requests_independent_localization(evidence):
+    from copy import deepcopy
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines, old = ['alpha', 'bravo', 'charlie'], [1.,4.,15.]
+    starts = [1.,10.,15.] if evidence=='relocated' else old
+    segments = [dict(words=[dict(word=t,start=s,end=s+1.2)]) for t,s in zip(lines,old)]
+    block = dict(range=[0,3],context=[0,3],source_range=[0.,20.],result=dict(segments=segments,
+        nonspeech_sections=[dict(start=4.,end=4.2 if evidence=='short_gap' else 5.2)]))
+    original = deepcopy(block)
+    windows, attempts = [], []
+    def recognize(begin,end):
+        windows.append((begin,end))
+        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+1.2-begin)
+            for t,s in zip(lines,starts) if evidence!='unrecognized' or t!='bravo'])])
+    def align(begin,end,text,**kwargs):
+        attempts.append(text)
+        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+1.2-begin)])
+            for t,s in zip(lines,starts) if t in text.splitlines()])
+    result = recover_with_local_asr(block,lines,np.zeros(20*16000),'English',recognize,align)
+    assert block == original
+    assert windows == ([] if evidence=='short_gap' else [(0.,20.)])
+    assert [s['words'][0]['start'] for s in result['result']['segments']] == starts
+    assert bool(attempts) == (evidence=='relocated')
+    if evidence!='short_gap':
+        assert result['asr_localizations'][0]['activity_screened_lines'] == [2]
+        assert result['asr_localizations'][0]['accepted_lines'] == ([2] if evidence=='relocated' else [])
+
+
 def test_local_recognition_broadens_once_when_old_neighbours_miss_the_verse():
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines, starts = ['alpha', 'bravo', 'charlie'], [30., 40., 50.]
@@ -4402,6 +4443,33 @@ def test_playback_fallback_recovers_each_phrase_from_available_stages(tmp_path):
     assert warning['omitted_lines'] == []
     assert [x['source'] for x in warning['phrase_timing_sources']] == [
         'word-cues.json', 'alignment/cues.json', 'word-cues.json']
+
+
+@pytest.mark.parametrize('missing_last', [False, True])
+def test_playback_fallback_backtracks_refinements_that_block_later_lyrics(tmp_path, missing_last):
+    from copy import deepcopy
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    lines = ['甲乙', '丙丁', '戊己']
+    (tmp_path/'lyrics.json').write_text(json.dumps(dict(language='Chinese',lines=lines,provenance={})))
+    def cue(text, a, b):
+        return dict(text=text,start=a,end=b+.2,status='candidate',units=[
+            dict(text=c,first=i,stop=i+1,start=t,end=t+.2) for i,(c,t) in enumerate(zip(text,[a,b]))])
+    coarse = [cue(t,s,s+.4) for t,s in zip(lines,[1.,3.,5.])]
+    refined = [cue(lines[0],4.2,4.6),cue(lines[1],4.4,5.1),deepcopy(coarse[2])]
+    if missing_last:
+        coarse[2]['status'] = refined[2]['status'] = 'unresolved_timing'
+    for name,values in [('word-cues.json',coarse),('ordered-cues.json',refined)]:
+        path=tmp_path/name;path.write_text(json.dumps(values));pipeline.alignment_outputs.add(path)
+    if missing_last:
+        with pytest.raises(StageFailure,match='未能定位'):
+            pipeline.playback_fallback({},8,StageFailure('align_phonemes','fixture'))
+    else:
+        pipeline.playback_fallback({},8,StageFailure('align_phonemes','fixture'))
+        assert json.loads((tmp_path/'cues.json').read_text()) == coarse
+        warning=json.loads((tmp_path/'playback-warning.json').read_text())
+        assert warning['omitted_lines'] == []
+        assert [p['source'] for p in warning['phrase_timing_sources']] == [
+            'word-cues.json','word-cues.json','ordered-cues.json']
 
 
 @pytest.mark.parametrize('fresh', [True, False])

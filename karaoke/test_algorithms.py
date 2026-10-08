@@ -364,6 +364,33 @@ class SubtitleIntegrity(unittest.TestCase):
                     self.assertEqual([u['start'] for u in result[0]['units']],[u['start'] for u in old])
                     self.assertFalse(report['constraints'])
 
+    def test_relocalized_phrase_needs_fresh_acoustic_proof_to_supersede_a_bad_crop(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, localized_constraints, timing_violations
+        protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
+        units=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
+               for i,(c,t) in enumerate(zip('甲乙',[10.,10.5]))]
+        cues=[dict(text='甲乙',start=10.,end=10.7,units=units)]
+        proof=dict(line=1,text='甲乙',first=0,stop=1,onset=1.,start_min=.6,start_max=1.4)
+        for mode in ('complete','no_new_proof','no_relocation','unaccepted','wrong_text','nearby'):
+            with self.subTest(mode=mode):
+                predictions=[] if mode=='no_new_proof' else [deepcopy(units) for _ in range(3)]
+                result,report=reconcile_timing(cues,np.ones(12*44100)*.1,lambda *a,**k:[units,units],
+                    lambda *a:predictions,protocol,'Chinese',[proof],_retry_context=False)
+                anchor=dict(text='错字' if mode=='wrong_text' else '甲乙',status='candidate',
+                            start=1. if mode=='nearby' else 10.,end=10.7)
+                observed=dict(context=[0,1],source_range=[0.,12.],anchors=[anchor],
+                    accepted_lines=[] if mode=='unaccepted' else [1],
+                    contradicted_lines=[] if mode=='no_relocation' else [1])
+                active,retired=localized_constraints(result,report,[dict(asr_localizations=[observed])])
+                self.assertEqual(proof['onset'],1.)
+                self.assertEqual(bool(retired),mode=='complete')
+                self.assertEqual(bool(timing_violations(result,active)),mode!='complete')
+                if retired:
+                    self.assertEqual(retired[0]['proof'],proof)
+                    self.assertEqual(retired[0]['replacement']['onset'],10.)
+                    self.assertEqual(active,[retired[0]['replacement']])
+
     def test_isolated_matching_syllable_does_not_establish_a_conflicting_phrase(self):
         from copy import deepcopy
         from timing_validation import reconcile_views

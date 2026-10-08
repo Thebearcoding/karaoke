@@ -29,6 +29,48 @@ def timing_violations(cues, constraints):
     return errors
 
 
+def localized_constraints(cues, report, blocks):
+    """Retire a wrong-phrase proof only after relocation and new acoustic proof.
+
+    A phonetic aligner assumes its supplied words occur in the crop. A later
+    independently recognized phrase can disprove that premise. Keep both
+    proofs and the localization evidence instead of making a bad crop eternal.
+    """
+    active, superseded = [], []
+    proposals = [p for row in report['lines'] for p in row.get('proposed_constraints', [])
+                 if not timing_violations(cues, [p])]
+    observations = [o for block in blocks for o in block.get('asr_localizations', [])]
+    for proof in report['constraints']:
+        replacement = None
+        if timing_violations(cues, [proof]):
+            for observed in observations:
+                if proof['line'] not in set(observed.get('accepted_lines', [])) & set(observed.get('contradicted_lines', [])):
+                    continue
+                index = proof['line']-1-observed['context'][0]
+                anchors = observed.get('anchors', [])
+                if not 0 <= index < len(anchors):
+                    continue
+                anchor = anchors[index]
+                if anchor['status']!='candidate' or anchor['text']!=proof['text']:
+                    continue
+                if anchor['start']-2 <= proof['onset'] <= anchor['end']+2:
+                    continue
+                revised = next((p for p in proposals if all(p[k]==proof[k] for k in ('line','text','first','stop'))
+                    and anchor['start']-2 <= p['onset'] <= anchor['end']+2), None)
+                if revised is not None:
+                    replacement = dict(proof=proof, replacement=revised, anchor=anchor,
+                        source_range=observed['source_range'], reason='independently_relocalized_phrase')
+                    break
+        if replacement is None:
+            if proof not in active:
+                active.append(proof)
+        else:
+            superseded.append(replacement)
+            if replacement['replacement'] not in active:
+                active.append(replacement['replacement'])
+    return active, superseded
+
+
 def screened_units(cue, wave, protocol, *, floor=None):
     """Cheap hints select acoustic work; no hint invalidates a timestamp."""
     units = cue['units']
@@ -149,9 +191,12 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                         max(abs(begin-cue['aligned_start']),abs(end-cue['aligned_end'])) > protocol['maximum_change_seconds']):
                     context_hints[index] = [begin,end]
                     report['context_hint'] = [begin,end]
+            challenged = {v['proof']['first'] for v in timing_violations(result, ledger)
+                          if v['proof']['line']==index+1}
             suspects = [a for a,b in zip(*views) if a['first'] in old
                         and abs(a['start']-b['start']) <= .1
-                        and abs(old[a['first']]['start']-a['start']) > protocol['maximum_change_seconds']]
+                        and (a['first'] in challenged or
+                             abs(old[a['first']]['start']-a['start']) > protocol['maximum_change_seconds'])]
             if not suspects:
                 report['status'] = 'no_corroborated_displacement'
                 continue
@@ -686,10 +731,15 @@ def main():
                 yield 'lead_phonemes', lead, lead_review.observe, lead_review.predict(lead,decoder='phonemes')
     repaired,report=reconcile_views(cues,observations(),protocol,lyrics['language'],constraints,
                                    playback=args.playback_fallback)
+    localization=out.parent/'alignment/raw.json'
+    active,superseded=localized_constraints(repaired,report,read(localization) if localization.is_file() else [])
+    superseded=(ledger.get('superseded',[]) if ledger.get('source')==source else [])+superseded
+    report.update(constraints=active,unresolved=timing_violations(repaired,active),superseded_constraints=superseded)
+    report['pending_review_lines']=[i+1 for i in sorted(pending_review_lines(repaired,report,protocol))]
     if args.lead is not None:
         report['lead_sha256']=sha(args.lead)
     report.update(seconds=time.perf_counter()-started,source=source,input_sha256=sha(args.input))
-    write(ledger_file,dict(source=source,constraints=report['constraints']))
+    write(ledger_file,dict(source=source,constraints=report['constraints'],superseded=superseded))
     write(out/'cues.json',repaired);write(out/'report.json',report)
     validate_timeline(repaired,lyrics['lines'],duration,
                       () if args.defer_constraints else report['constraints'],lyrics['language'])
