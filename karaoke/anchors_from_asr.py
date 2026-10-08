@@ -67,16 +67,33 @@ def _match_words(lines, words, units):
             if len(hits) == len(starts):
                 candidates.extend((start, start+len(key), hit, hit+len(key))
                                   for start, hit in zip(starts, hits))
-        # A fully heard line already includes its clauses. Remove only nested
-        # copies of that same correspondence before checking real conflicts.
-        candidates = [a for a in candidates if not any(a != b and
-            b[0] <= a[0] and a[1] <= b[1] and a[0]-b[0] == a[2]-b[2] and
-            a[1]-b[0] == a[3]-b[2] for b in candidates)]
-        # Conflicting exact matches can come from dialogue or a changed verse
-        # order. Neither is an independent boundary for the other.
-        boundaries = [a for a in sorted(candidates) if all(a == b or
-                      (a[1] <= b[0] and a[3] <= b[2]) or
-                      (b[1] <= a[0] and b[3] <= a[2]) for b in candidates)]
+        for refinement in range(2):
+            # A fully heard line already includes its clauses. Remove only nested
+            # copies of that same correspondence before checking real conflicts.
+            candidates = [a for a in candidates if not any(a != b and
+                b[0] <= a[0] and a[1] <= b[1] and a[0]-b[0] == a[2]-b[2] and
+                a[1]-b[0] == a[3]-b[2] for b in candidates)]
+            # Conflicting exact matches can come from dialogue or a changed verse
+            # order. Neither is an independent boundary for the other.
+            boundaries = [a for a in sorted(candidates) if all(a == b or
+                          (a[1] <= b[0] and a[3] <= b[2]) or
+                          (b[1] <= a[0] and b[3] <= a[2]) for b in candidates)]
+            if refinement:
+                break
+            # A missing copy elsewhere need not erase an unambiguous refrain
+            # bracketed by two independently heard phrases. Count occurrences
+            # within both text intervals; song edges alone supply no evidence.
+            for left, right in zip(boundaries, boundaries[1:]):
+                first, stop, begin, end = left[1], right[0], left[3], right[2]
+                for key, starts in [*positions.items(), *clause_positions.items()]:
+                    within = [s for s in starts if first <= s and s+len(key) <= stop]
+                    if not within or within != [i for i in range(first, stop-len(key)+1)
+                                                if tuple(expected[i:i+len(key)]) == key]:
+                        continue
+                    hits = [i for i in range(begin, end-len(key)+1)
+                            if tuple(observed[i:i+len(key)]) == key]
+                    if len(hits) == len(within):
+                        candidates.extend((s, s+len(key), h, h+len(key)) for s,h in zip(within,hits))
         alphabet = {unit: i for i, unit in enumerate(dict.fromkeys(expected+observed))}
         # Minimize ordinary edit distance first, then internal gap runs.
         # Otherwise scattered letters in a spoken intro can tie a contiguous

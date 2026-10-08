@@ -1876,6 +1876,25 @@ class SubtitleIntegrity(unittest.TestCase):
         self.assertEqual(timeline_support([dict(text=t,start=2.+i*5,end=6.+i*5)
             for i,t in enumerate(repeated)],words[:1],'English')['checked_lines'],[])
 
+    def test_refrain_identity_can_be_resolved_between_independent_phrases(self):
+        from anchors_from_asr import timeline_support
+        lines = ['Opening', 'Sing again', 'Left marker', 'Sing again', 'Right marker', 'Ending']
+        for case in ('bounded', 'missing_left', 'missing_right', 'extra_refrain'):
+            with self.subTest(case=case):
+                observed = [('Opening',0.), ('Left marker',8.), ('Sing again',13.),
+                            ('Right marker',16.), ('Ending',20.)]
+                if case.startswith('missing_'):
+                    observed = [x for x in observed if x[0] not in
+                                (case[8:].title()+' marker', 'Opening' if case=='missing_left' else 'Ending')]
+                if case == 'extra_refrain':
+                    observed[3:3] = [('Sing again',14.), ('Sing again',15.)]
+                words = [dict(word=t,start=s,end=s+1) for t,s in observed]
+                cues = [dict(text=t,start=s,end=s+1) for t,s in zip(lines,[0.,3.,8.,9.,16.,20.])]
+                support = timeline_support(cues,words,'English')
+                self.assertEqual(4 in support['checked_lines'], case == 'bounded')
+                if case == 'bounded':
+                    self.assertIn(dict(line=4,caption_range=[9.,10.],observed_range=[13.,14.]),support['conflicts'])
+
     def test_phrase_location_check_uses_audio_text_not_loudness_or_duration(self):
         from anchors_from_asr import timeline_support
         words = [dict(word='blue river', start=20., end=24.)]
