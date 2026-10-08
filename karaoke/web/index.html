@@ -26,10 +26,6 @@
 
   <header class="topbar">
     <a class="brand" href="/" aria-label="余音首页"><span class="brand-mark"><i></i><i></i><i></i><i></i></span><strong>余音</strong></a>
-    <form id="add-form" class="search-form" role="search">
-      <div class="search-box"><svg class="icon"><use href="#i-search"/></svg><input id="song-input" type="text" autocomplete="off" maxlength="2048" enterkeyhint="search" aria-label="搜索歌名、歌手或粘贴视频链接" placeholder="搜索歌名或歌手"><button id="submit-song" type="submit">搜索 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
-      <label class="optional-title" id="title-row" hidden>歌名 <input id="title-input" maxlength="200" placeholder="可选"></label>
-    </form>
     <nav class="navigation" aria-label="主要导航">
       <button data-view="library" class="selected">点歌台</button>
       <button data-view="player">正在播放 <span id="playing-dot" hidden></span></button>
@@ -40,6 +36,10 @@
 
   <main class="workspace">
     <section class="main-panel" id="library-view" aria-label="点歌台">
+      <form id="add-form" class="search-form" role="search">
+        <div class="search-box"><svg class="icon"><use href="#i-search"/></svg><input id="song-input" type="text" autocomplete="off" maxlength="2048" enterkeyhint="search" aria-label="搜索歌名、歌手或粘贴视频链接" placeholder="搜索歌名或歌手"><button id="submit-song" type="submit">搜索 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
+        <label class="optional-title" id="title-row" hidden>歌名 <input id="title-input" maxlength="200" placeholder="可选"></label>
+      </form>
       <section id="video-results" class="video-results" aria-label="选歌结果" hidden>
         <div class="section-heading search-heading"><div><h2 id="search-heading">搜索结果</h2><div id="search-status" class="search-status" role="status"></div></div><button class="text-button" id="clear-search">返回曲库</button></div>
         <div class="search-controls">
