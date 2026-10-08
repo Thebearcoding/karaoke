@@ -836,12 +836,19 @@ def main():
     source=dict(original=sha(args.original),vocals=sha(args.audio),lyrics=lyrics['lines'])
     ledger_file=out.parent/'timing-constraints.json'
     ledger=read(ledger_file) if ledger_file.is_file() else {}
-    constraints=ledger.get('constraints',[]) if ledger.get('source')==source else []
     paths=[code_root/name for name in ('timing_validation.py','cjk_recovery.py','align_lyric_phonemes.py',
         'phoneme_progress.py','align_english_sofa.py','align_english_onsets.py','subtitles.py')]
     models=acoustic_model_files(ROOT)
     identity=dict(source=source,protocol=protocol,code={str(p):sha(p) for p in paths},
                   models={str(p):sha(p) for p in models if p.is_file()})
+    lead_sha256 = sha(args.lead) if args.lead is not None else None
+    same_evidence = (ledger.get('identity') == identity and
+                     (not ledger.get('lead_sha256') or ledger['lead_sha256'] == lead_sha256))
+    constraints = ledger.get('constraints', []) if same_evidence else []
+    if ledger and not same_evidence:
+        history = out.parent/'timing-history'
+        history.mkdir(exist_ok=True)
+        write(history/(sha(ledger_file)+'.json'), ledger)
     torch.set_num_threads(4);torch.set_grad_enabled(False)
     review=AcousticReview(args.original,args.device,out.parent/'timing-cache',identity,protocol)
     started=time.perf_counter()
@@ -862,18 +869,18 @@ def main():
             yield 'lead_ctc', lead, lead_review.observe, lead_review.predict(lead)
             if lyrics['language'] != 'English':
                 yield 'lead_phonemes', lead, lead_review.observe, lead_review.predict(lead,decoder='phonemes')
-    previous = ledger.get('observations', []) if ledger.get('identity') == identity else []
-    if args.lead is None or ledger.get('lead_sha256') != sha(args.lead):
+    previous = ledger.get('observations', []) if same_evidence else []
+    if args.lead is None or ledger.get('lead_sha256') != lead_sha256:
         previous = [row for row in previous if not row.get('observation', '').startswith('lead_')]
     repaired,report=reconcile_views(cues,observations(),protocol,lyrics['language'],constraints,
                                    playback=args.playback_fallback,previous=previous)
     localization=out.parent/'alignment/raw.json'
     active,superseded=localized_constraints(repaired,report,read(localization) if localization.is_file() else [])
-    superseded=(ledger.get('superseded',[]) if ledger.get('source')==source else [])+superseded
+    superseded=(ledger.get('superseded',[]) if same_evidence else [])+superseded
     report.update(constraints=active,unresolved=timing_violations(repaired,active),superseded_constraints=superseded)
     report['pending_review_lines']=[i+1 for i in sorted(pending_review_lines(repaired,report,protocol))]
     if args.lead is not None:
-        report['lead_sha256']=sha(args.lead)
+        report['lead_sha256']=lead_sha256
     report.update(seconds=time.perf_counter()-started,source=source,input_sha256=sha(args.input))
     measurements = list({json.dumps(row, sort_keys=True): row for row in [*previous, *report['lines']]
                          if row.get('proposed_constraints') and not row.get('reused_measurement')}.values())

@@ -1807,7 +1807,7 @@ def test_published_lyrics_strip_only_leading_metadata_identity(title, artist, he
 @pytest.mark.parametrize('credit', ['音频助理', '音頻工程師', '录音助理', 'Audio Engineer', 'Assistant Engineer',
     '配唱制作人', '人聲錄音師', '童声', '合唱', '和音', '伴唱编配', '主唱指导',
     '編曲 Arrangement', '制作人 Producer', '和声编写 Backing Vocal Arrangement',
-    '配唱录音师 Recording Engineer (Vocals)', '母带后期处理工程师 Mastering Engineer'])
+    '配唱录音师 Recording Engineer (Vocals)', '母带后期处理工程师 Mastering Engineer', 'Music Production 音乐制作', '音乐制作 Music Production'])
 def test_translated_production_footer_cannot_change_the_lyric_language(credit):
     from karaoke.lyric_lookup import published_candidate
     body = ['Stars above the quiet shore', 'I will sing once more']
@@ -4396,11 +4396,13 @@ def test_playback_fallback_keeps_overlapping_word_tails_without_moving_onsets(tm
     assert warning['omitted_lines'] == [] and len(warning['overlap_adjustments']) == 1
 
 
+@pytest.mark.parametrize('language,middle', [('English', 'I want to sing with you now'),
+    ('Japanese', 'ここでもう一度歌おう'), ('Korean', '여기서우리다시노래해')])
 @pytest.mark.parametrize('seconds', [.06, .8])
-def test_playback_fallback_rejects_collapsed_phrase_without_rejecting_fast_lyrics(tmp_path, seconds):
+def test_playback_fallback_rejects_collapsed_phrase_without_rejecting_fast_lyrics(tmp_path, seconds, language, middle):
     pipeline = Pipeline(dict(url=URL), tmp_path)
-    lines = ['First phrase', 'I want to sing with you now', 'Last phrase']
-    (tmp_path/'lyrics.json').write_text(json.dumps(dict(language='English',lines=lines,provenance={})))
+    lines = ['First phrase', middle, 'Last phrase']
+    (tmp_path/'lyrics.json').write_text(json.dumps(dict(language=language,lines=lines,provenance={})))
     cues = [dict(text=text,start=float(i*2),end=float(i*2)+(seconds if i==1 else 1.),status='candidate')
             for i,text in enumerate(lines)]
     (tmp_path/'alignment').mkdir()
@@ -4611,6 +4613,46 @@ def test_timing_review_accepts_one_sample_of_resampling_but_rejects_different_le
     else:
         module.main()
         assert json.loads((tmp_path/'checked/cues.json').read_text()) == [cue]
+
+
+@pytest.mark.parametrize('changed', [None, 'code', 'models', 'protocol', 'legacy', 'lead'])
+def test_timing_constraints_reuse_only_the_same_evidence_method(tmp_path, monkeypatch, changed):
+    import soundfile as sf
+    from karaoke import timing_validation as module
+    cue = dict(text='hello', start=.1, end=.3,
+               units=[dict(text='hello', first=0, stop=5, start=.1, end=.3)])
+    (tmp_path/'cues.json').write_text(json.dumps([cue]))
+    (tmp_path/'lyrics.json').write_text(json.dumps(dict(lines=['hello'], language='English')))
+    audio = tmp_path/'audio.wav'
+    sf.write(audio, np.ones((44100, 2))*.05, 44100, subtype='FLOAT')
+    proof = dict(line=1, text='hello', first=0, stop=5, onset=.1, start_min=.05, start_max=.15)
+    seen = []
+    def reconcile(cues, observations, protocol, language, constraints, **kwargs):
+        seen.append(constraints)
+        return cues, dict(lines=[], constraints=[proof], unresolved=[])
+    monkeypatch.setattr(module, 'AcousticReview', Mock())
+    monkeypatch.setattr(module, 'acoustic_model_files', lambda *args: [])
+    monkeypatch.setattr(module, 'reconcile_views', reconcile)
+    monkeypatch.setattr(sys, 'argv', ['timing_validation', '--input', str(tmp_path/'cues.json'),
+        '--lyrics', str(tmp_path/'lyrics.json'), '--audio', str(audio), '--original', str(audio),
+        '--output', str(tmp_path/'checked'), '--device', 'cpu'])
+    module.main()
+    path = tmp_path/'timing-constraints.json'
+    old = json.loads(path.read_text())
+    if changed == 'lead':
+        old['lead_sha256'] = 'different-audio'
+    elif changed == 'legacy':
+        old.pop('identity')
+    elif changed:
+        old['identity'][changed] = {'earlier_method': True}
+    path.write_text(json.dumps(old))
+    module.main()
+    assert seen == [[], [proof] if changed is None else []]
+    if changed:
+        archived = list((tmp_path/'timing-history').glob('*.json'))
+        assert len(archived) == 1 and json.loads(archived[0].read_text()) == old
+    else:
+        assert not (tmp_path/'timing-history').exists()
 
 
 def test_playback_fallback_recovers_each_phrase_from_available_stages(tmp_path):
