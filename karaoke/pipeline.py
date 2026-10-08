@@ -1013,6 +1013,7 @@ class Pipeline:
                 # then let the normal stage cache rebuild for the next text.
                 folder = self.output/'lyric-source-attempts'/str(time.time_ns())
                 folder.mkdir(parents=True)
+                write_json(folder/'failure.json', dict(stage=failure.stage, message=str(failure)))
                 for name in ('lyrics.json', 'alignment/raw.json', 'alignment/run.json',
                              'playback-warning.json', 'cues.json', 'localization-validation.json',
                              'lyric-source-support.json'):
@@ -1160,7 +1161,7 @@ class Pipeline:
         """Reuse observed text to check both misplaced and omitted passages."""
         from .anchors_from_asr import timeline_support, observed_context
         from .align_lyrics_whisper import recognized_words
-        observations = []
+        observations, word_views = [], []
         raw_path = self.output/'alignment/raw.json'
         if raw_path.is_file():
             if cues is None:
@@ -1173,11 +1174,24 @@ class Pipeline:
                     first, stop = localization['context']
                     begin, end = localization['source_range']
                     words = recognized_words(begin, localization['recognition'], end)
+                    word_views.append(words)
                     first, stop = observed_context(lyrics['lines'], words, lyrics['language'], first, stop)
                     evidence = timeline_support(cues[first:stop], words, lyrics['language'])
                     evidence['missing_repetitions'] = missing_repetitions(
                         lyrics['lines'], timed, words, lyrics['language'], duration)
                     observations.append(dict(context=[first, stop], source_range=[begin, end], **evidence))
+            if len(word_views) > 1:
+                joint = timeline_support(cues, word_views[0], lyrics['language'], other_word_views=word_views[1:])
+                for observation in observations:
+                    # Dialogue can repeat a lyric verbatim. A single view's
+                    # isolated occurrence cannot overturn another occurrence
+                    # supported by the ordered surrounding lyric sequence.
+                    conflicts = observation['conflicts']
+                    disputed = [c for c in conflicts if c['line']+observation['context'][0] in joint['supported_lines']]
+                    if disputed:
+                        observation['competing_view_conflicts'] = disputed
+                        observation['conflicts'] = [c for c in conflicts if c not in disputed]
+                observations[0]['joint_view_validation'] = joint
         write_json(self.output/'localization-validation.json', observations)
         repeats = []
         if cues is not None:

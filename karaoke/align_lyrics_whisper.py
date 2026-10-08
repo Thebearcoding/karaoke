@@ -702,9 +702,12 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
 
 
 def recognized_words(begin, response, end):
+    # Compression ratio measures repeated text, not whether singing occurred.
+    # Real refrains can exceed speech-ASR's repetition threshold. These words
+    # only locate supplied lyrics; acoustic alignment still supplies timings.
     words = [dict(w, start=w['start']+begin, end=w['end']+begin)
              for s in response.get('segments', [])
-             if s.get('no_speech_prob', 0) < .6 and s.get('compression_ratio', 0) < 2.4
+             if s.get('no_speech_prob', 0) < .6
              for w in s.get('words') or [] if np.isfinite([w['start'], w['end']]).all()
              and 0 <= w['start'] < w['end'] <= end-begin+.001]
     return words
@@ -1238,6 +1241,7 @@ def main():
                               fallback_recognizer=fallback,
                               implementation=inspect.getsource(recognize_audio), original_mix=original_mix,
                               windowing=inspect.getsource(recognize_in_windows),
+                              word_filter=inspect.getsource(recognized_words),
                               audio_reader=inspect.getsource(audio_clip),
                               packages={name: version(name) for name in ('stable-ts', 'openai-whisper')})
                 key = 'alignment_localization_'+hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:16]

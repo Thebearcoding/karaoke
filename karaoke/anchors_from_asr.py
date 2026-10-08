@@ -217,7 +217,7 @@ def combine_anchor_views(views):
             for i,anchor in enumerate(views[0])]
 
 
-def timeline_support(cues, words, language):
+def timeline_support(cues, words, language, *, other_word_views=()):
     """Check coarse phrase location against already observed audio text.
 
     This is not an onset-accuracy measurement. Silence and held syllables do
@@ -225,21 +225,28 @@ def timeline_support(cues, words, language):
     contradict a caption, and ambiguous/missing recognition stays unknown.
     """
     anchors = anchors_from_words([c['text'] for c in cues], words, language, allow_missing=True)
-    checked, conflicts = [], []
+    if other_word_views:
+        anchors = combine_anchor_views([anchors, *(anchors_from_words(
+            [c['text'] for c in cues], view, language, allow_missing=True) for view in other_word_views)])
+    checked, conflicts, supported = [], [], []
     for i, (cue, anchor) in enumerate(zip(cues, anchors), 1):
-        if anchor.get('match_basis') not in ('complete_phrase', 'complete_clause') or anchor['status'] != 'candidate':
+        if anchor['status'] != 'candidate':
             continue
-        checked.append(i)
         units = cue.get('units') or []
         begin = min((u['start'] for u in units), default=cue['start'])
         end = max((u.get('acoustic_end') or u['end'] for u in units), default=cue['end'])
         # Rough recognition can truncate a held tail or stretch a first word.
         # A two-second separation still establishes a different passage.
         observed_begin, observed_end = anchor.get('observed_range', [anchor['start'], anchor['end']])
+        if not (end+2 < observed_begin or begin-2 > observed_end):
+            supported.append(i)
+        if anchor.get('match_basis') not in ('complete_phrase', 'complete_clause'):
+            continue
+        checked.append(i)
         if end+2 < observed_begin or begin-2 > observed_end:
             conflicts.append(dict(line=i, caption_range=[begin, end],
                                   observed_range=[observed_begin, observed_end]))
-    return dict(checked_lines=checked, conflicts=conflicts)
+    return dict(checked_lines=checked, conflicts=conflicts, supported_lines=supported)
 
 
 def main():

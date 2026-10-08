@@ -4236,6 +4236,7 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
             saved=tmp_path/rejected[0]['diagnostics']
             assert json.loads((saved/'lyrics.json').read_text())['lines']==primary
             assert json.loads((saved/'playback-warning.json').read_text())['omitted_lines']==[2]
+            assert json.loads((saved/'failure.json').read_text())['stage']=='subtitles'
             assert json.loads((tmp_path/'lyrics.json').read_text())['lines']==alternative
     else:
         with pytest.raises(StageFailure):pipeline.align_candidates(lyrics, {}, 6.)
@@ -4243,7 +4244,8 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize('complete_source', [True, False])
-def test_observed_missing_refrain_selects_complete_published_source(tmp_path, monkeypatch, complete_source):
+@pytest.mark.parametrize('compression_ratio', [1., 3.2])
+def test_observed_missing_refrain_selects_complete_published_source(tmp_path, monkeypatch, complete_source, compression_ratio):
     refrain = ['glowing red horizon', 'bright blue ocean']
     short, complete = ['opening',*refrain,'closing'], ['opening',*refrain,*refrain,'closing']
     packet = dict(candidate_texts=[short,complete], crosscheck=dict(selected_source=0,
@@ -4266,7 +4268,7 @@ def test_observed_missing_refrain_selects_complete_published_source(tmp_path, mo
         (tmp_path/'quality.json').write_text('{}')
         (pipeline.checkpoints.directory/'align_words.json').write_text('{}')
         raw.write_text(json.dumps([dict(asr_localizations=[dict(context=[0,len(candidate['lines'])],
-            source_range=[0.,15.],recognition=dict(segments=[dict(words=[
+            source_range=[0.,15.],recognition=dict(segments=[dict(compression_ratio=compression_ratio, words=[
                 dict(word=t,start=s,end=s+.8) for t,s in zip(complete,heard)])]))])]))
     monkeypatch.setattr(pipeline,'align',align)
     selected,error=pipeline.align_candidates(lyrics,{},15.)
@@ -4289,7 +4291,8 @@ def test_observed_missing_refrain_selects_complete_published_source(tmp_path, mo
 
 
 @pytest.mark.parametrize('observed', ['repeat', 'unrelated', 'spelling_noise'])
-def test_published_source_retry_requires_substantial_observed_content(observed):
+@pytest.mark.parametrize('compression_ratio', [1., 3.2])
+def test_published_source_retry_requires_substantial_observed_content(observed, compression_ratio):
     from karaoke.lyric_consensus import observed_source_alternative
     first, refrain, last = 'We leave beside the morning river', 'The golden lanterns guide us home', 'Until the quiet summer ends'
     lyrics = dict(lines=[first,refrain,last], language='English')
@@ -4299,7 +4302,7 @@ def test_published_source_retry_requires_substantial_observed_content(observed):
         performed = [first,refrain,'Remember to bring the umbrellas tomorrow',last]
     if observed=='spelling_noise':
         alternative = dict(lyrics,lines=[first,refrain.replace('lanterns','lantern'),last])
-    observations = [dict(source_range=[0.,20.],recognition=dict(segments=[dict(words=[
+    observations = [dict(source_range=[0.,20.],recognition=dict(segments=[dict(compression_ratio=compression_ratio, words=[
         dict(word=text,start=1.+i*3,end=2.+i*3) for i,text in enumerate(performed)])]))]
     result = observed_source_alternative(lyrics,[alternative],observations)
     assert bool(result) == (observed=='repeat')
@@ -4492,6 +4495,28 @@ def test_publication_checks_observed_lyrics_even_after_playback_fallback(tmp_pat
     assert evidence[0]['checked_lines'] == [1]
     assert bool(evidence[0]['conflicts']) is displaced
     assert json.loads((tmp_path/'cues.json').read_text()) == [cue]
+
+
+@pytest.mark.parametrize('displaced', [False, True])
+def test_phrase_validation_reconciles_dialogue_with_ordered_recording_views(tmp_path, displaced):
+    lines = ['A long opening phrase about the morning', 'Can you hear me', 'Another long phrase about the evening']
+    lyrics = dict(lines=lines, language='English')
+    cues = [dict(text=t,start=s,end=s+2) for t,s in zip(lines,[40.,80. if displaced else 50.,60.])]
+    primary = [dict(word=lines[1],start=5.,end=7.), *[
+        dict(word=t,start=s,end=s+2.) for t,s in zip(lines,[40.,50.,60.])]]
+    alternate = [dict(word=lines[1],start=5.,end=7.),dict(word=lines[2],start=60.,end=62.)]
+    raw = tmp_path/'alignment/raw.json';raw.parent.mkdir()
+    raw.write_text(json.dumps([dict(asr_localizations=[dict(context=[0,3],source_range=[0.,90.],
+        recognition=dict(segments=[dict(words=words)])) for words in [primary,alternate]])]))
+    pipeline = Pipeline(dict(url=URL),tmp_path)
+    if displaced:
+        with pytest.raises(StageFailure,match='字幕与已定位的唱段不一致'):
+            pipeline.validate_localization(lyrics,90.,cues)
+    else:
+        evidence = pipeline.validate_localization(lyrics,90.,cues)
+        assert not any(e['conflicts'] for e in evidence)
+        assert evidence[1]['competing_view_conflicts'][0]['observed_range']==[5.,7.]
+        assert 2 in evidence[0]['joint_view_validation']['supported_lines']
 
 
 @pytest.mark.parametrize('extra_frames', [0, 4])
