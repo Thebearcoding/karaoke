@@ -2768,6 +2768,32 @@ def test_sentence_inside_nonspeech_only_requests_independent_localization(eviden
         assert result['asr_localizations'][0]['contradicted_lines'] == ([2] if evidence=='relocated' else [])
 
 
+@pytest.mark.parametrize('missing_middle', [False, True])
+def test_ambiguous_global_match_cannot_displace_aligned_neighbouring_phrases(missing_middle):
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines = ['All the kids sing', 'A broken phrase', 'Hum dee la', 'Hum dee la', 'Kids']
+    old = [0., 3., 10., 15., 22.]
+    segments = [dict(words=[dict(word=t, start=s, end=s+(0 if i==1 or missing_middle and i in (2,3) else 1))])
+                for i,(t,s) in enumerate(zip(lines,old))]
+    block = dict(range=[0,5],context=[0,5],source_range=[0.,25.],result=dict(segments=segments))
+    def recognize(begin,end):
+        return dict(segments=[dict(words=[dict(word=lines[i],start=s-begin,end=s+1-begin)
+                    for i,s in [(0,0.),(1,5.),(4,9.)] if begin <= s < s+1 <= end])])
+    def align(begin,end,text,**kwargs):
+        seen = 0
+        result = []
+        for line in text.splitlines():
+            start = 10.+5*seen if line=='Hum dee la' else {lines[0]:0.,lines[1]:5.,lines[4]:22. if end>=23 else 9.}[line]
+            seen += line=='Hum dee la'
+            result.append(dict(words=[dict(word=line,start=start-begin,end=start+1-begin)]))
+        return dict(segments=result)
+    result = recover_with_local_asr(block,lines,np.zeros(25*16000),'English',recognize,align,force_global=True)
+    assert [s['words'][0]['start'] for s in result['result']['segments']] == [0.,5.,10.,15.,22.]
+    if not missing_middle:
+        assert result['result']['segments'][2:] == segments[2:]
+    assert result['asr_localizations'][0]['contradicted_lines'] == []
+
+
 def test_local_recognition_broadens_once_when_old_neighbours_miss_the_verse():
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines, starts = ['alpha', 'bravo', 'charlie'], [30., 40., 50.]

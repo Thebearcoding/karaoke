@@ -403,17 +403,17 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             and cues[i+left]['status'] == 'candidate' and (
                 cues[i+left]['end']+2 < a['start'] or cues[i+left]['start']-2 > a['end'])}
         if global_recovery:
-            # Global recognition has the same coarse timing uncertainty as a
-            # local request. A small gap between its word boundary and an
-            # aligned phrase cannot invalidate that phrase or crop it away.
-            mislocalized.update(i+left for i, a in enumerate(anchors) if a['status'] == 'candidate'
-                and cues[i+left]['status'] == 'candidate' and (
-                    cues[i+left]['end']+2 < a['start'] or cues[i+left]['start']-2 > a['end']))
+            # Only independently matched phrases can contradict existing
+            # timing, directly or through their neighbours. An ambiguous
+            # short match may help find an untimed line, but cannot crop away
+            # already aligned singing on either side.
+            independent = lambda a: a['status'] == 'candidate' and a.get('match_basis') in (
+                'complete_phrase', 'complete_clause')
             for i, anchor in enumerate(anchors):
                 if anchor['status'] == 'candidate' or cues[i+left]['status'] != 'candidate':
                     continue
-                before = [a for a in anchors[:i] if a['status'] == 'candidate']
-                after = [a for a in anchors[i+1:] if a['status'] == 'candidate']
+                before = [a for a in anchors[:i] if independent(a)]
+                after = [a for a in anchors[i+1:] if independent(a)]
                 if before and after and (cues[i+left]['start'] < before[-1]['start']-2 or
                                          cues[i+left]['end'] > after[0]['end']+2):
                     mislocalized.add(i+left)
