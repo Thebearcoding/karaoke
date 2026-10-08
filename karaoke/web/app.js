@@ -574,12 +574,13 @@ function updateTransport() {
 
 function updateCover() {
   const song = current();
+  const startingVideo = Boolean(player.pendingStart || player.videoPreparation);
   if (player.anchor === null || player.entry?.id !== song?.id || remote)
     $('opening-countdown').setAttribute('hidden', '');
-  $('screen-cover').hidden = Boolean(song?.status === 'completed' && !loading && !loadError && !remote && player.unlocked && player.ready);
-  $('screen-status').textContent = remote ? '遥控模式' : loadError || (!song ? '请先点歌' : song.status !== 'completed' ? statusText(song) : loading ? '加载音轨…' : '');
+  $('screen-cover').hidden = Boolean(song?.status === 'completed' && !loading && !startingVideo && !loadError && !remote && player.unlocked && player.ready);
+  $('screen-status').textContent = remote ? '遥控模式' : loadError || (!song ? '请先点歌' : song.status !== 'completed' ? statusText(song) : startingVideo ? '加载画面…' : loading ? '加载音轨…' : '');
   $('screen-status').hidden = !$('screen-status').textContent || song?.status === 'running';
-  $('screen-start').hidden = remote || !song || song.status !== 'completed' || loading;
+  $('screen-start').hidden = remote || !song || song.status !== 'completed' || loading || startingVideo;
   $('screen-start').firstChild.textContent = loadError ? '重试加载 ' : '开始唱 ';
 }
 
@@ -618,6 +619,11 @@ player.onBuffering = (position, startedAt, entryId = player.entry?.id) => {
   command('buffering', {entry_id:entryId, position, playback_started_at:startedAt})
     .finally(() => { if (bufferingRequest === token) bufferingRequest = null; });
 };
+player.onError = error => {
+  loadError = error.message || '视频播放失败，请重试';
+  loading = false;
+  updateCover(); toast(loadError);
+};
 
 async function syncPlayback() {
   if (remote) return;
@@ -640,6 +646,12 @@ async function syncPlayback() {
     updateCover();
     await player.load(song, position);
     if (state.current_id !== song.id || state.revision !== revision || !player.matches(song)) return;
+    if (state.playing && !state.started_at && player.unlocked) {
+      const preparing = player.prepareVideo(position);
+      updateCover();
+      await preparing;
+      if (state.current_id !== song.id || state.revision !== revision) return;
+    }
     loading = false; loadError = '';
     if (state.playing && !state.started_at && player.unlocked && readySent !== song.id) {
       readySent = song.id;
@@ -650,6 +662,7 @@ async function syncPlayback() {
     updateTransport();
   } catch (error) {
     if (state.current_id !== song.id || state.revision !== revision) return;
+    player.unlocked = false;
     loading = false; loadError = error.message;
     updateCover(); toast(loadError);
   }
@@ -671,6 +684,7 @@ function acceptState(updated) {
 
 async function activate() {
   if (!remote) {
+    loadError = '';
     try { await player.unlock(); }
     catch { toast('浏览器还没有启用声音，请再点一次播放'); return false; }
   }
