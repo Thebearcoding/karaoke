@@ -393,9 +393,10 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                 localized=False
                 if not members:reason='incomplete local replacement'
                 else:
+                    original={u['first']:u for u in views[0]}
                     other={u['first']:u for u in views[1]}
-                    localized=all(abs(u['start']-other[u['first']]['start'])<=protocol['maximum_change_seconds'] for u in members)
-                    if any(abs(u['start']-other[u['first']]['start'])>.1 for u in members):
+                    localized=all(abs(original[u['first']]['start']-other[u['first']]['start'])<=protocol['maximum_change_seconds'] for u in members)
+                    if any(abs(original[u['first']]['start']-other[u['first']]['start'])>.1 for u in members):
                         reason='original and vocal localization disagree'
                     limit=units[hi]['start'] if hi<len(units) else bounds[1]
                     for member_index,(unit,following) in enumerate(zip(members,[*members[1:],dict(start=limit)])):

@@ -87,7 +87,8 @@ class AcousticWitness:
                 raise ValueError('Independent aligner omitted characters')
             step = len(audio)/16000/emissions.shape[1]
             result.append([dict(first=a, stop=b, text=cue['text'][a:b],
-                                start=begin+times[0].start*step, end=begin+times[-1].end*step)
+                                start=begin+times[0].start*step, end=begin+times[-1].end*step,
+                                timing_evidence='ctc_label_event')
                            for (a, b), times in zip(spans, aligned)])
         return result
 
@@ -126,8 +127,16 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *,
         start, end = float(np.median(starts)), min(bounds[1], float(np.median([u['end'] for u in primary])))
         if max(starts)-min(starts) > protocol['maximum_spread_seconds']:
             return None, 'context disagreement'
-        if (any(abs(u['start']-start) > .1 for u in secondary)
-                or abs(secondary[0]['start']-secondary[1]['start']) > .1):
+        label_events = all(events) and all(u.get('timing_evidence')=='ctc_label_event' for u in secondary)
+        if label_events:
+            # Grapheme CTC spikes identify the word inside its acoustic event;
+            # they are not estimates of the first audible phoneme. Compare
+            # events, never the display hold until the following word.
+            event_end = float(np.median([u['emission_end'] for u in primary]))
+            supported = all(u['start'] <= event_end+.1 and u['end'] >= start-.1 for u in secondary)
+        else:
+            supported = all(abs(u['start']-start) <= .1 for u in secondary)
+        if (not supported or abs(secondary[0]['start']-secondary[1]['start']) > .1):
             return None, 'independent acoustic disagreement'
         if not bounds[0] <= start < end <= bounds[1] or (result and start-result[-1]['start'] < .015):
             return None, 'conflict with adjacent words'
@@ -141,6 +150,8 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *,
             return None, 'insufficient audible vocal support'
         result.append(dict(primary[0], start=round(start, 3), end=round(end, 3),
                            timing_source='cross_model_phonemes'))
+        if label_events:
+            result[-1]['independent_evidence'] = 'ctc_label_localization'
     for left, right in zip(result, result[1:]):
         left['end'] = min(left['end'], right['start'])
     return result, 'agreement across phonetic contexts, original and separated audio'

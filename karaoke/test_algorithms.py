@@ -324,7 +324,8 @@ class SubtitleIntegrity(unittest.TestCase):
                for i,(c,a,b) in enumerate(zip(text,[1.,1.2,1.4,4.5,5.],[1.2,1.4,2.,4.9,5.5]))]
         original = [dict(text=text,start=1.,end=5.5,aligned_start=1.,aligned_end=5.5,units=old)]
         for mode in ('valid','suffix_disagreement','one_view','text_mismatch','prefix_disagreement',
-                     'window_disagreement','silent','silent_neighbor','invalid','held_note','quiet_voice'):
+                     'window_disagreement','silent','silent_neighbor','invalid','held_note','quiet_voice',
+                     'label_peak','label_outside_event','label_in_display_hold','untyped_peak'):
             with self.subTest(mode=mode):
                 times = [1.,1.2,1.4,4.5,5.] if mode=='held_note' else [3.,3.2,3.6,4.5,5.]
                 measured = [dict(u,start=t,end=t+.15) for u,t in zip(old,times)]
@@ -338,6 +339,17 @@ class SubtitleIntegrity(unittest.TestCase):
                 if mode=='invalid': views[1][0]['start']=float('nan')
                 predictions = [[dict(u,timing_evidence='ctc_event',emission_end=u['start']+.04)
                                 for u in measured] for _ in range(3)]
+                if mode.startswith('label_') or mode=='untyped_peak':
+                    for view in views:
+                        for u in view:
+                            u.update(start=u['start']+(.5 if mode=='label_outside_event' else .3 if mode=='label_in_display_hold' else .18),end=u['end']+.4)
+                            if mode!='untyped_peak':u['timing_evidence']='ctc_label_event'
+                    if mode in ('label_peak','untyped_peak'):
+                        for view in predictions:
+                            for u in view:u['emission_end']=u['start']+.14
+                    if mode=='label_in_display_hold':
+                        for view in predictions:
+                            for u in view:u['end']=u['start']+.8
                 if mode=='window_disagreement':
                     for u in predictions[0]:u.update(start=u['start']+.12,end=u['end']+.12,emission_end=u['emission_end']+.12)
                 wave=np.full(44100*6,0. if mode=='silent' else 1e-6 if mode=='quiet_voice' else .1)
@@ -346,7 +358,7 @@ class SubtitleIntegrity(unittest.TestCase):
                 result,report=reconcile_timing(original,wave,lambda *a,**k:views,
                     lambda *a:predictions,protocol,'Japanese')
                 self.assertEqual(original[0]['units'],old)
-                if mode in ('valid','suffix_disagreement'):
+                if mode in ('valid','suffix_disagreement','label_peak'):
                     self.assertEqual([u['start'] for u in result[0]['units']],times)
                     self.assertEqual([u['start'] for u in result[0]['units'][3:]],[4.5,5.])
                     self.assertFalse(report['unresolved'])
