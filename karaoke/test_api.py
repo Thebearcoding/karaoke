@@ -2713,6 +2713,34 @@ def test_incomplete_refrain_recognition_cannot_overwrite_bounded_acoustic_alignm
     assert [report['anchors'][i]['status'] for i in (1,3)] == ['ambiguous_repeat']*2
 
 
+def test_broad_recognition_anchor_cannot_erase_earlier_aligned_lyrics():
+    from copy import deepcopy
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines = ['morning', 'echo', 'bright horizon', 'clear sky', 'missing phrase', 'finale']
+    starts = [1., 4., 14., 18., 22., 26.]
+    def segment(index, begin=0., rough=False):
+        words = [dict(word=word, start=starts[index]+j*.5-begin, end=starts[index]+j*.5+.4-begin)
+                 for j, word in enumerate(lines[index].split())]
+        if rough and index == 2:
+            # Recognition can attach the first syllable to a much earlier sound.
+            words[0]['start'] = 2.-begin
+        return dict(words=words)
+    segments = [segment(i) for i in range(len(lines))]
+    segments[4]['words'] = []
+    block = dict(range=[0,6], context=[0,6], source_range=[0.,30.], result=dict(segments=segments))
+    original = deepcopy(block)
+    def recognize(begin, end):
+        return dict(segments=[segment(i,begin,True) for i in range(2,6)])
+    def align(begin, end, text, **options):
+        return dict(segments=[segment(lines.index(line),begin,True) for line in text.splitlines()])
+    result = recover_with_local_asr(block,lines,np.zeros(30*16000),'English',recognize,align,
+                                   force_global=True)
+    assert block == original
+    assert result['result']['segments'][:4] == segments[:4]
+    assert result['result']['segments'][4]['words'] == segment(4)['words']
+    assert result['asr_localizations'][0]['contradicted_lines'] == []
+
+
 def test_ambiguous_refrains_need_independent_bounds_and_cannot_bootstrap_them():
     from copy import deepcopy
     from karaoke.align_lyrics_whisper import recovery_anchors

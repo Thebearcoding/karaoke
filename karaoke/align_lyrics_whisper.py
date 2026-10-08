@@ -347,11 +347,11 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         targets = bad.intersection(range(left, right))
         mislocalized = set()
         if global_recovery:
-            # A several-second contradiction from independently recognized
-            # words is evidence that a superficially valid old line also drifted.
+            # Recognition supplies a rough interval, not an independent onset.
+            # A stretched first token can include an earlier refrain; only a
+            # disjoint interval contradicts an otherwise usable aligned line.
             mislocalized.update(i+left for i, a in enumerate(anchors) if a['status'] == 'candidate'
                 and cues[i+left]['status'] == 'candidate' and (
-                    abs(cues[i+left]['start']-a['start']) > 4 or
                     cues[i+left]['end'] < a['start'] or cues[i+left]['start'] > a['end']))
             for i, anchor in enumerate(anchors):
                 if anchor['status'] == 'candidate' or cues[i+left]['status'] != 'candidate':
