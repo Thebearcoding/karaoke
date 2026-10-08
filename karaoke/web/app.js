@@ -1,6 +1,6 @@
 import { Player } from './player.js';
 import { isStaleRoomSnapshot, LocalPlayback } from './room-state.js';
-import { createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, songAvailability, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
+import { createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
 
 const $ = id => document.getElementById(id);
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -114,7 +114,7 @@ function restoreView(saved) {
   clearVideoSearch();
   $('song-input').value = saved.query || '';
   $('title-input').value = saved.title || '';
-  filter = saved.filter || 'ready';
+  filter = [...document.querySelectorAll('[data-filter]')].some(button => button.dataset.filter === saved.filter) ? saved.filter : 'ready';
   videoSource = saved.videoSource || 'songs';
   searchOrder = saved.searchOrder || 'relevance';
   queueTab = saved.queueTab === 'history' ? 'history' : 'upcoming';
@@ -138,7 +138,7 @@ function renderLibrary() {
   const songs = librarySongs(library, search ? 'all' : filter, search);
   const preparedView = filter === 'ready' && !search;
   $('library-count').textContent = `${songs.length} 首`;
-  $('library-heading').textContent = search ? '曲库里的歌' : preparedView ? '现在就能唱' : filter === 'restore' ? '音轨已就绪，等待补视频' : '曲库';
+  $('library-heading').textContent = search ? '曲库里的歌' : preparedView ? '现在就能唱' : '曲库';
   document.querySelectorAll('[data-filter]').forEach(button => {
     button.classList.toggle('selected', button.dataset.filter === filter);
     button.setAttribute('aria-pressed', String(button.dataset.filter === filter));
@@ -162,12 +162,11 @@ function renderLibrary() {
 }
 
 function renderDiscovery() {
-  const suggestions = historySuggestions(state.history || []);
-  const recent = suggestions.recent.slice(0,4), artists = suggestions.artists.slice(0,6);
+  const recent = historySuggestions(state.history || []).recent.slice(0,4);
   $('home-discovery').hidden = !recent.length || Boolean($('song-input').value.trim() || searchQuery);
   const cached = new Map(library.map(song => [queueKey(song), song]));
-  const signature = JSON.stringify([recent, artists, recent.map(song => {
-    const item = cached.get(queueKey(song)); return [item?.poster, item?.status];
+  const signature = JSON.stringify([recent, recent.map(song => {
+    return cached.get(queueKey(song))?.poster;
   })]);
   if (signature === discoverySignature) return;
   discoverySignature = signature;
@@ -175,11 +174,9 @@ function renderDiscovery() {
     const local = cached.get(queueKey(song));
     return `<div class="recent-song"><button class="recent-preview" data-preview-history="${escape(song.id)}" aria-label="预览：${escape(song.title)}">
       ${local?.poster ? `<img src="${escape(local.poster)}" alt="" loading="lazy">` : `<span class="recent-initial">${escape(song.title.slice(0,1))}</span>`}
-      <span class="recent-info"><strong>${escape(song.title)}</strong><span>${escape(song.artist)}</span><span class="${local?.status === 'completed' ? 'is-ready' : ''}">${songAvailability(local)}</span></span></button>
+      <span class="recent-info"><strong>${escape(song.title)}</strong><span>${escape(song.artist)}</span></span></button>
       <button class="music-add" data-recent-song="${escape(song.id)}" aria-label="再点：${escape(song.title)}">${icon('plus')}<span>再点</span></button></div>`;
   }).join('');
-  $('frequent-artists').hidden = !artists.length;
-  $('frequent-artists').innerHTML = `<h2>常唱歌手</h2><div>${artists.map(artist => `<button data-search-artist="${escape(artist.name)}" aria-label="找歌手：${escape(artist.name)}">${escape(artist.name)}<span>唱过 ${artist.count} 次</span></button>`).join('')}</div>`;
 }
 
 function renderVideoResults(providers, mode = videoSource) {
@@ -252,11 +249,11 @@ function songRow(song, index, {artists = false, videos = false, local = false, i
     `<${tag} class="music-add" ${open}>${song.kind === 'album' ? '查看专辑' : catalogueAction ? '查看歌曲' : '打开'} ${icon('arrow')}</${tag}>`;
   const credits = song.artists?.length ? song.artists.map(a => a.id ? `<button data-artist-id="${escape(a.id)}" data-artist-name="${escape(a.name)}">${escape(a.name)}</button>` : escape(a.name)).join(' · ') : local && song.uploader ? `<button data-search-artist="${escape(song.uploader)}">${escape(song.uploader)}</button>` : escape(song.uploader || '—');
   const kind = song.kind === 'album' ? '专辑' : song.kind === 'artist' ? '歌手' : song.version || '';
-  const status = inLibrary && song.status !== 'running' ? songAvailability(song) : '';
-  const availability = inLibrary ? `<span class="library-status ${song.status === 'completed' ? 'is-ready' : song.status === 'failed' ? 'is-failed' : ''}">${status}</span>` : playable ? '<span class="music-availability"></span>' : '';
+  const status = inLibrary && song.status === 'failed' ? '<span class="library-status is-failed">准备失败</span>' : '';
+  const meta = kind || status ? `<div class="music-meta">${kind ? `<span${song.kind === 'album' ? ' class="music-kind"' : ''}>${escape(kind)}</span>` : ''}${status}</div>` : '';
   return `<article class="music-row" ${inLibrary ? `data-card="${escape(song.id)}"` : `data-result="${index}"`} role="row"><span class="music-rank" role="cell">${String(index+1).padStart(2,'0')}</span>
     <div class="music-song" role="cell"><${tag} class="music-cover" ${open} aria-label="${playable ? '预览' : '打开'}：${escape(song.title)}">${thumbnail}<span>${icon(playable ? 'play' : 'arrow')}</span></${tag}>
-      <div class="music-title"><h3><${tag} ${open} title="${escape(song.title)}">${escape(song.title)}</${tag}></h3><div class="music-meta">${kind ? `<span${song.kind === 'album' ? ' class="music-kind"' : ''}>${escape(kind)}</span>` : ''}${availability}</div>${inLibrary && song.status === 'running' ? `<div class="preparation-slot">${preparationHTML(song)}</div>` : ''}</div></div>
+      <div class="music-title"><h3><${tag} ${open} title="${escape(song.title)}">${escape(song.title)}</${tag}></h3>${meta}${inLibrary && song.status === 'running' ? `<div class="preparation-slot">${preparationHTML(song)}</div>` : ''}</div></div>
     <div class="music-credits" role="cell" title="${escape(song.artists?.map(a => a.name).join(' · ') || song.uploader || '')}">${inLibrary ? `<div class="song-info-row">${credits}${preparationElapsedHTML(song)}</div>` : credits}</div>
     <div class="music-album" role="cell" title="${escape(song.album || '')}">${escape(song.album || '—')}</div>
     <div class="music-facts"><div class="music-plays${playCount(song.views) === null ? ' is-empty' : ''}" role="cell">${playCount(song.views) !== null ? `${formatPlays(song.views)}<small>播放</small>` : '—'}</div>
@@ -359,12 +356,6 @@ function updateAddButtons() {
     button.setAttribute('aria-label', `${label}：${song.title || song.url}`);
     const markup = `${position ? '' : icon('plus')}<span>${label}${position ? `<small>已点 · 第${position}首</small>` : ''}</span>`;
     if (button.innerHTML !== markup) button.innerHTML = markup;
-  });
-  document.querySelectorAll('.music-availability').forEach(label => {
-    const song = searchSongs[label.closest('[data-result]').dataset.result];
-    const cached = library.find(item => item.url === song.url);
-    label.textContent = cached ? songAvailability(cached) : '';
-    label.classList.toggle('is-ready', cached?.status === 'completed');
   });
 }
 
@@ -479,7 +470,7 @@ function queuedStatus(entry) {
 
 function statusText(entry) {
   if (entry.status === 'failed') return entry.error?.message || '准备失败，请重试';
-  if (entry.status === 'completed') return entry.id === state.current_id ? (state.playing ? '正在播放' : '已暂停') : '可直接唱';
+  if (entry.status === 'completed') return entry.id === state.current_id ? (state.playing ? '正在播放' : '已暂停') : '';
   if (entry.status === 'queued') return queuedStatus(entry);
   return (entry.active_stages || []).map(s => stages[s] || '正在准备').join(' · ') || '开始准备';
 }
@@ -544,7 +535,7 @@ function renderQueue() {
   queueSignature = signature;
   $('queue-list').innerHTML = state.entries.map((entry, i) => {
     const active = entry.id === state.current_id;
-    const status = entry.status === 'running' ? '' : `<span class="entry-status ${entry.status === 'queued' ? 'preparing' : ''}">${escape(statusText(entry))}</span>`;
+    const status = entry.status === 'running' || !statusText(entry) ? '' : `<span class="entry-status ${entry.status === 'queued' ? 'preparing' : ''}">${escape(statusText(entry))}</span>`;
     return `<article class="queue-entry ${active ? 'current' : ''}" data-entry="${escape(entry.id)}"><span class="entry-number">${active && state.playing ? '♫' : String(i+1).padStart(2,'0')}</span>
       <button class="entry-cover" data-action="preview" aria-label="${active ? '查看播放' : '预览'}：${escape(entry.title)}">${entry.poster ? `<img class="entry-art" src="${escape(entry.poster)}" alt="">` : `<span class="entry-art">♪</span>`}</button>
       <div class="entry-info"><h3 class="entry-title"><button data-action="preview">${escape(entry.title)}</button></h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || 'YouTube 视频')}</p>${entry.status === 'failed' ? '' : preparationElapsedHTML(entry) || status}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : entry.status === 'failed' ? `<p class="entry-error">${escape(statusText(entry))} <button data-action="retry">重试</button></p>` : ''}${entry.status === 'completed' ? `<button class="queue-sing" data-action="sing" aria-label="${active && state.playing ? '回到播放' : '开始唱'}：${escape(entry.title)}">${icon('play')}${active && state.playing ? '回到播放' : '开始唱'}</button>` : ''}</div>

@@ -163,18 +163,13 @@ export function filterSongs(songs, query) {
 }
 
 export function historySuggestions(history) {
-  const recent = new Map(), artists = new Map();
+  const recent = new Map();
   const ordered = [...history].sort((a,b) => b.finished_at-a.finished_at);
   for (const song of ordered) {
     const key = queueKey(song);
     if (key && !recent.has(key)) recent.set(key, song);
-    const name = (song.artist || '').trim();
-    if (!name) continue;
-    const artistKey = name.normalize('NFKC').toLocaleLowerCase();
-    if (!artists.has(artistKey)) artists.set(artistKey, {name, count:0, lastSung:song.finished_at});
-    artists.get(artistKey).count++;
   }
-  return {recent:[...recent.values()], artists:[...artists.values()].sort((a,b) => b.count-a.count || b.lastSung-a.lastSung)};
+  return {recent:[...recent.values()]};
 }
 
 export function searchLibrary(library, query) {
@@ -186,14 +181,8 @@ export function searchLibrary(library, query) {
 export function librarySongs(library, filter = 'ready', query = '') {
   return filterSongs(library, query).filter(song => filter === 'all' ||
     (filter === 'ready' ? song.status === 'completed' :
-     filter === 'restore' ? song.status === 'video_evicted' :
      filter === 'other' ? song.language && !['Chinese','English','Japanese','Korean'].includes(song.language) :
      song.language === filter));
-}
-
-export function songAvailability(song) {
-  return {completed:'可直接唱', video_evicted:'待补视频', running:'准备中', failed:'准备失败',
-    queued:song?.next_retry_at ? '等待重试' : '等待准备'}[song?.status] || '需准备';
 }
 
 // Match the source, not its title: translated titles and URL aliases share a queue entry.

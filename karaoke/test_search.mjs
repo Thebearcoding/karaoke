@@ -10,11 +10,10 @@ function setup() {
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-test('ready library contains only playable songs; recovered audio remains discoverable separately', () => {
+test('ready library contains only playable songs; unfinished songs remain in all songs and language filters', () => {
   const songs = ['completed','video_evicted','audio_ready','source_ready','running','queued','failed'].map((status,index) =>
     ({id:index,title:`Song ${index}`,status,language:index % 2 ? 'Japanese' : 'Chinese'}));
   assert.deepEqual(librarySongs(songs).map(song => song.id), [0]);
-  assert.deepEqual(librarySongs(songs, 'restore').map(song => song.id), [1]);
   assert.equal(librarySongs(songs, 'all').length, songs.length);
   assert.deepEqual(librarySongs(songs, 'Japanese').map(song => song.id), [1,3,5]);
   assert.deepEqual(librarySongs(songs, 'ready', 'Song 1'), []);
@@ -54,7 +53,7 @@ test('history search matches song and artist while preserving performance order 
   assert.equal(songs[0].id,'recent');
 });
 
-test('home suggestions use the latest performance of each source and count actual artist performances', () => {
+test('recent songs use the latest performance of each source', () => {
   const songs = [
     {id:'old',url:'https://youtu.be/abcdefghijk',title:'Old title',artist:'ＴＫ',finished_at:10},
     {id:'cover',url:'https://www.youtube.com/watch?v=12345678901',title:'Same title',artist:'Cover artist',finished_at:30},
@@ -65,13 +64,8 @@ test('home suggestions use the latest performance of each source and count actua
   const original = structuredClone(songs);
   const result = historySuggestions(songs);
   assert.deepEqual(result.recent.map(s => s.id), ['latest','other','cover','unknown']);
-  assert.deepEqual(result.artists, [
-    {name:'TK',count:2,lastSung:50},
-    {name:'Another artist',count:1,lastSung:40},
-    {name:'Cover artist',count:1,lastSung:30},
-  ]);
   assert.deepEqual(songs, original);
-  assert.deepEqual(historySuggestions([]), {recent:[],artists:[]});
+  assert.deepEqual(historySuggestions([]), {recent:[]});
 });
 
 test('search calls only YouTube and preserves every returned result in order', async () => {
