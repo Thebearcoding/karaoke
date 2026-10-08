@@ -1,6 +1,7 @@
 """Optional independent lyric text; provider timestamps never become onsets."""
 import hashlib
 import html
+from functools import lru_cache
 import json
 import math
 import os
@@ -139,6 +140,32 @@ def identity(value, *, title=False):
             if match:
                 aliases.append(match[1])
     return {''.join(c for c in name if c.isalnum()) for name in aliases} - {''}
+
+
+def artist_credit_matches(credit, artists):
+    """Match whole credited names, including reordered multi-artist credits."""
+    expected = identity(credit)
+    if not expected:
+        return False
+    if any(expected & identity(artist) for artist in artists):
+        return True
+    separators = r'\s*[&,/×+、;]\s*|\s+·\s+|\s+\b(?:feat\.?|featuring|ft\.?|with)\s+'
+    members = [identity(part) for artist in artists if isinstance(artist, str)
+               for part in re.split(separators, artist, flags=re.I) if part.strip()]
+    if len(members) < 2 or not all(members):
+        return False
+    expected |= identity(''.join(re.split(separators, credit, flags=re.I)))
+
+    @lru_cache(None)
+    def consume(text, remaining):
+        if not remaining:
+            return not text
+        return any(text.startswith(name) and consume(text[len(name):], remaining[:i]+remaining[i+1:])
+                   for i, member in enumerate(remaining) for name in members[member])
+
+    # Use provider-supplied name boundaries: splitting on spaces would break
+    # multi-word English names. Every member must account for the whole credit.
+    return any(consume(text, tuple(range(len(members)))) for text in expected)
 
 
 def live_performance(value):
@@ -337,7 +364,7 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
         album = row['album'].get('albumTitle', '')
         if not isinstance(album, str):
             continue
-        if not any(identity(song['artist']) & identity(a) for a in artists):
+        if not artist_credit_matches(song['artist'], artists):
             continue
         title_match = bool(identity(song['title'], title=True) & identity(title, title=True))
         if not title_match:
@@ -612,7 +639,7 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
         # A text search can return covers, live cuts and unrelated recordings.
         # Identity and duration must agree before using any audio-text score.
         if (not identity(song['title'], title=True) & identity(row.get('trackName'), title=True) or
-                not identity(song['artist']) & identity(row.get('artistName')) or row.get('instrumental') is not False):
+                not artist_credit_matches(song['artist'], [row.get('artistName')]) or row.get('instrumental') is not False):
             continue
         mismatch = (recording_mismatches(song, source_title, row.get('trackName'), row.get('albumName'))
                     if allow_recording_mismatch else ['live_performance'] if performance and performance not in

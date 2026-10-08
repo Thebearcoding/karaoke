@@ -1989,6 +1989,52 @@ def test_published_lyrics_match_joined_artist_scripts_without_matching_collabora
         assert published_candidate([dict(row, artists=[dict(artistName=name)])], song, '')[0] is None
 
 
+@pytest.mark.parametrize('credit,artists,accepted', [
+    (None, ['林林', '苏雨'], False),
+    ('林林 蘇雨', ['苏雨', '林林'], True),
+    ('蘇雨 & 林林', ['林林', '苏雨'], True),
+    ('蘇雨 feat. 林林', ['林林', '苏雨'], True),
+    ('林林 · 蘇雨', ['苏雨 / 林林'], True),
+    ('林林 蘇雨', ['林林'], False),
+    ('林林 蘇雨', ['苏雨', '林林歌迷站'], False),
+    ('林林 蘇雨', ['苏雨', '林林', '另一歌手'], False),
+    ('North River feat. Evening Star', ['Evening Star', 'North River'], True),
+    ('North River & Evening Star', ['North River'], False),
+    ('Anna & Ann', ['Ann', 'Anna'], True),
+])
+def test_published_lyrics_match_complete_collaboration_credits(credit, artists, accepted):
+    from karaoke.lyric_lookup import published_candidate, lyric_candidate
+    body = 'Stars above the quiet shore'
+    song = dict(title='Evening', artist=credit)
+    row = dict(trackId=123, trackTitle='Evening', artists=[dict(artistName=a) for a in artists],
+               album={}, lyrics=body)
+    assert bool(published_candidate([row], song, '')[0]) is accepted
+    flat = dict(id=123, trackName='Evening', artistName=' / '.join(artists),
+                albumName='', duration=30, instrumental=False, plainLyrics=body)
+    assert bool(lyric_candidate(dict(status='ok', results=[flat]), song, None, 30)[0]) is accepted
+
+
+def test_netease_reads_duet_lyrics_after_matching_reordered_credit(tmp_path, monkeypatch):
+    from karaoke import lyric_consensus as module
+    from karaoke.stage_cache import StageCache
+    calls = []
+    def read(url, **kwargs):
+        calls.append(url)
+        if 'cloudsearch' in url:
+            return dict(code=200, result=dict(songs=[
+                dict(id=1, name='晚風', ar=[dict(name='林林')], al=dict(name='春天')),
+                dict(id=2, name='晚風', ar=[dict(name='苏雨'), dict(name='林林')], al=dict(name='春天'))]))
+        assert 'id=2&' in url
+        return dict(lrc=dict(lyric='[00:01.00] 微風裡慢慢歌唱\n[00:05.00] 星光下靜靜傾聽'))
+    monkeypatch.setattr(module, 'read_document', read)
+    for _ in range(2):
+        lines, report = module.fetch_additional_lyrics('netease', dict(title='晚風', artist='林林 蘇雨'),
+                                                      {}, StageCache(tmp_path))
+        assert lines == ['微風裡慢慢歌唱', '星光下靜靜傾聽']
+        assert report['url'].endswith('id=2')
+    assert len(calls) == 2
+
+
 @pytest.mark.parametrize('first_hit', ['yes', 'wrong_identity', 'short', 'header'])
 def test_published_lyric_search_uses_a_bounded_title_query_only_after_no_match(tmp_path, monkeypatch, first_hit):
     from urllib.parse import parse_qs, urlparse
