@@ -1,6 +1,7 @@
 """Force-align lyrics to vocal audio without video or external subtitle times."""
 
 import argparse
+from contextlib import nullcontext
 from copy import deepcopy
 import hashlib
 from importlib.metadata import version
@@ -1106,7 +1107,6 @@ def main():
     heads = model._buffers.pop('alignment_heads')
     model.to(args.device)
     model.register_buffer('alignment_heads', heads, persistent=False)
-    recognition_model = None
     recognition_config = None
     loading = time.perf_counter()-loading_start
     print(json.dumps({'model_loaded_seconds': loading, 'model': args.model}), flush=True)
@@ -1201,7 +1201,7 @@ def main():
                 return align_audio(begin+start, begin+stop, text, **options)
 
             def recognize_audio(start, stop, *, original_mix=False):
-                nonlocal recognition_model, recognition_config
+                nonlocal recognition_config
                 from stage_cache import StageCache
                 import local_asr
                 fallback = None
@@ -1227,16 +1227,8 @@ def main():
                     if not reused:
                         report_progress(detail='定位未对齐的唱段')
                         clip = audio_clip(start, stop, original_mix)
-                        if fallback and recognition_model is None:
-                            from faster_whisper import WhisperModel
-                            recognition_model = WhisperModel(fallback['model'],
-                                device='cuda' if args.device == 'cuda' else 'cpu',
-                                compute_type=fallback['compute_type'], cpu_threads=4, local_files_only=True)
-                        def transcribe_window(left, right):
-                            if fallback:
-                                return local_asr.transcribe(recognition_model,
-                                    clip[round(left*16000):round(right*16000)], 'auto', fallback['batch_size'])
-                            return model.transcribe(clip[round(left*16000):round(right*16000)],
+                        def transcribe_chunk(samples):
+                            return model.transcribe(samples,
                                 language=None, temperature=0, condition_on_previous_text=False,
                                 word_timestamps=True, regroup=False, verbose=None,
                                 fp16=args.device == 'cuda').to_dict()
@@ -1244,12 +1236,17 @@ def main():
                         # erase a later language. Reuse the overlapping-window
                         # recovery path, detecting language in each crop.
                         seconds = len(clip)/16000
-                        if seconds > 30:
-                            words, windows = recognize_in_windows(transcribe_window, 0., seconds,
-                                                                 int(np.ceil(seconds/20)))
-                            response = dict(segments=[dict(words=words)], multilingual_windows=windows)
-                        else:
-                            response = transcribe_window(0., seconds)
+                        worker = (local_asr.isolated_recognizer(fallback,
+                            'cuda' if args.device == 'cuda' else 'cpu', path.parent)
+                            if fallback else nullcontext(transcribe_chunk))
+                        with worker as recognize:
+                            transcribe_window = lambda left, right: recognize(clip[round(left*16000):round(right*16000)])
+                            if seconds > 30:
+                                words, windows = recognize_in_windows(transcribe_window, 0., seconds,
+                                                                     int(np.ceil(seconds/20)))
+                                response = dict(segments=[dict(words=words)], multilingual_windows=windows)
+                            else:
+                                response = transcribe_window(0., seconds)
                         path.write_text(json.dumps(response, ensure_ascii=False, default=json_number)+'\n')
                 return dict(json.loads(path.read_text()), localization_cache=dict(file=path.name, reused=reused))
 

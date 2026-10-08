@@ -7179,6 +7179,51 @@ def test_local_whisper_batches_cover_the_recording_and_keep_word_times(monkeypat
         assert bool(detected) == (language == 'auto')
 
 
+@pytest.mark.parametrize('failure', [None, 'value', 'fatal'])
+def test_local_recognizer_isolates_libraries_reuses_model_and_cleans_up(tmp_path, monkeypatch, failure):
+    import os
+    import psutil
+    from karaoke.local_asr import isolated_recognizer
+    (tmp_path/'faster_whisper.py').write_text('''
+import os, sys
+from dataclasses import dataclass
+@dataclass
+class Segment:
+    text: str
+    words: list
+class WhisperModel:
+    def __init__(self, *args, **kwargs):
+        assert 'torch' not in sys.modules
+        self.calls = 0
+    def detect_language(self, **kwargs):
+        return 'en', 1., []
+class BatchedInferencePipeline:
+    def __init__(self, model): self.model = model
+    def transcribe(self, samples, **kwargs):
+        if samples[0] == -1: raise ValueError('unusable crop')
+        if samples[0] == -2: raise RuntimeError('model failed')
+        self.model.calls += 1
+        text = f'{os.getpid()}:{self.model.calls}:{len(samples)}:{samples.sum()}'
+        return iter([Segment(text, [])]), None
+''')
+    monkeypatch.setenv('PYTHONPATH', str(tmp_path)+os.pathsep+os.environ.get('PYTHONPATH', ''))
+    config = dict(model='test', compute_type='float32', batch_size=8)
+    with isolated_recognizer(config, 'cpu', tmp_path) as recognize:
+        first = recognize(np.ones(16000, dtype=np.float32))
+        pid, calls, size, total = first['text'].split(':')
+        pid = int(pid)
+        assert pid != os.getpid() and (calls,size,total) == ('1','16000','16000.0')
+        if failure:
+            with pytest.raises(ValueError if failure == 'value' else RuntimeError,
+                               match='unusable crop' if failure == 'value' else 'Local recognizer exited'):
+                recognize(np.full(16000, -1 if failure == 'value' else -2, dtype=np.float32))
+        if failure != 'fatal':
+            second = recognize(np.ones(8000, dtype=np.float32))
+            assert second['text'] == f'{pid}:2:8000:8000.0'
+    assert not psutil.pid_exists(pid)
+    assert not list(tmp_path.glob('recognizer-*'))
+
+
 @pytest.mark.parametrize('valid', [True, False])
 def test_offline_transcription_never_falls_back_to_an_api(tmp_path, monkeypatch, valid):
     import soundfile as sf
