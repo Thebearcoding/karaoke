@@ -4410,6 +4410,7 @@ def test_published_source_retry_requires_substantial_observed_content(observed, 
         alternative = dict(lyrics,lines=[first,refrain.replace('lanterns','lantern'),last])
     observations = [dict(source_range=[0.,20.],recognition=dict(segments=[dict(compression_ratio=compression_ratio, words=[
         dict(word=text,start=1.+i*3,end=2.+i*3) for i,text in enumerate(performed)])]))]
+    observations.insert(0, dict(reason='followup_did_not_improve_coverage', accepted_lines=[]))
     result = observed_source_alternative(lyrics,[alternative],observations)
     assert bool(result) == (observed=='repeat')
     if result:

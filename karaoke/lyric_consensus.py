@@ -176,9 +176,8 @@ def observed_source_alternative(lyrics, alternatives, observations):
     from rapidfuzz.distance import Levenshtein
 
     language = lyrics['language']
-    for observation in sorted(observations, key=lambda o:o['source_range'][1]-o['source_range'][0], reverse=True):
-        if not observation.get('recognition'):
-            continue
+    recognized = (o for o in observations if o.get('recognition'))
+    for observation in sorted(recognized, key=lambda o:o['source_range'][1]-o['source_range'][0], reverse=True):
         begin, end = observation['source_range']
         words = recognized_words(begin, observation['recognition'], end)
         heard = [u for word in words for u in text_units(word['word'], language)]
