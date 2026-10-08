@@ -26,12 +26,23 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .cache import CacheFull, GIB, SongCache, can_restore_video
-from .job_schema import JobRequest, download_backoff, retry_fields
+from .job_schema import JobRequest, download_backoff, retry_after_seconds, retry_fields as source_retry_fields
 from .room import AddSong, Room, RoomCommand, Updates, artifact_url
 from .video_search import SearchCursorExpired, VideoSearch
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+def retry_fields(error, diagnostic, number, *, failed_at):
+    """Recover interactive downloads promptly, retaining shared provider limits."""
+    policy = source_retry_fields(error, diagnostic, number, failed_at=failed_at)
+    if (error['code'] in ('download_failed', 'download_video_failed') and
+            policy['status'] == 'external' and not policy['provider_blocked']):
+        delay = min(1800, 5*4**min(10, max(0, number-1)))
+        policy['next_retry_at'] = failed_at+max(delay, error.get('retry_after_seconds') or 0,
+                                               retry_after_seconds(diagnostic) or 0)
+    return policy
 
 
 PLAYBACK_STEMS = ('instrumental', 'backing_vocals', 'lead_vocals')

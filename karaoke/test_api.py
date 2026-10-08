@@ -244,7 +244,7 @@ def test_download_retry_survives_restart_without_blocking_other_songs(tmp_path, 
         job = app.state.store.read(first['job_id'])
         retry = job['download_retry']
         assert job['status'] == 'queued' and retry['count'] == 1
-        assert 290 < retry['next_retry_at']-time.time() <= 300
+        assert retry['next_retry_at']-retry['history'][-1]['at'] == 5
         assert (tmp_path/job['id']/'separated.wav').read_bytes() == b'expensive output'
         assert len(client.get('/v1/room').json()['entries']) == 1
         assert client.get('/v1/room').json()['entries'][0]['next_retry_at'] == retry['next_retry_at']
@@ -255,7 +255,7 @@ def test_download_retry_survives_restart_without_blocking_other_songs(tmp_path, 
     restarted = create_app(tmp_path, worker_command=command, version='test')
     with TestClient(restarted) as client:
         assert restarted.state.store.read(job['id'])['download_retry'] == retry
-        # Advance the persisted timer to its deadline without waiting five minutes.
+        # Advance the persisted timer so restart recovery does not depend on wall time.
         restarted.state.store.update(job['id'], download_retry={**retry, 'next_retry_at':time.time()-.1})
         result = finished(client, job['id'])
         assert result['status'] == 'completed' and calls.count(job['id']) == 2
@@ -412,10 +412,21 @@ def test_video_retry_does_not_apply_one_resource_error_to_every_song(diagnostic,
 
 @pytest.mark.parametrize('code', ['download_failed', 'download_video_failed'])
 def test_download_retry_distinguishes_login_advice_and_respects_long_server_delays(code):
-    from karaoke.job_schema import retry_fields
+    from karaoke.api import retry_fields
     error = dict(code=code, message='视频站点拒绝下载（403）；请检查下载器与登录信息后重试')
-    policy = retry_fields(error, '', 1, failed_at=1000)
-    assert policy['status'] == 'external' and policy['next_retry_at'] == 1300
+    for number, delay in enumerate((5, 20, 80), 1):
+        policy = retry_fields(error, '', number, failed_at=1000)
+        assert policy['status'] == 'external' and policy['next_retry_at'] == 1000+delay
+        policy = retry_fields(error, 'HTTP Error 429: Too Many Requests', number, failed_at=1000)
+        assert policy['provider_blocked'] and policy['next_retry_at'] == 1000+60*2**(number-1)
+    policy = retry_fields(error, 'HTTP Error 403: Forbidden\nRetry-After: 120', 1, failed_at=1000)
+    assert not policy['provider_blocked'] and policy['next_retry_at'] == 1120
+    policy = retry_fields(error, 'HTTP Error 403: Forbidden\nSign in to confirm', 1, failed_at=1000)
+    assert policy['status'] == 'blocked' and policy['next_retry_at'] is None
+    for diagnostic in ('The read operation timed out', 'HTTP Error 503: Service Unavailable',
+                       'Failed to resolve www.youtube.com'):
+        policy = retry_fields(error, diagnostic, 1, failed_at=1000)
+        assert policy['status'] == 'external' and policy['next_retry_at'] == 1005
     policy = retry_fields(error, 'HTTP Error 429: Too Many Requests\nRetry-After: 3600', 1, failed_at=1000)
     assert policy['provider_blocked'] and policy['next_retry_at'] == 4600
     policy = retry_fields(error, 'HTTP Error 429: Too Many Requests\nRetry-After: 3600\nLogin required', 1, failed_at=1000)
