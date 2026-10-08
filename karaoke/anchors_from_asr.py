@@ -155,6 +155,14 @@ def anchors_from_words(lines, words, language, allow_missing=False):
     return cues
 
 
+def observed_context(lines, words, language, first, stop):
+    """Include complete phrases heard outside a stale predicted lyric slice."""
+    anchors = anchors_from_words(lines, words, language, allow_missing=True)
+    heard = [i for i,a in enumerate(anchors) if a.get('match_basis') == 'complete_phrase'
+             and a['status'] == 'candidate']
+    return min([first,*heard]), max([stop,*(i+1 for i in heard)])
+
+
 def timeline_support(cues, words, language):
     """Check coarse phrase location against already observed audio text.
 

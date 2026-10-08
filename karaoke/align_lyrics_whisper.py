@@ -275,7 +275,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                           force_global=False, max_alignment_attempts=24, recovery_contexts=None, localize=None,
                           align_original=None, recognize_original=None):
     """Use recognition only to locate failed lyrics, never as replacement text."""
-    from anchors_from_asr import anchors_from_words
+    from anchors_from_asr import anchors_from_words, observed_context
     from lyric_progress import partial_alignment_cues
     duration = len(audio)/16000
     cues = partial_alignment_cues(lines, [block], duration, language)
@@ -334,6 +334,13 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             continue
         report['recognition'] = response
         words = recognized_words(begin, response, end)
+        if not global_recovery:
+            # The old time window may actually contain earlier/later lyrics.
+            # Include those independently heard full phrases before deciding
+            # which neighbours can safely remain untouched.
+            cf, cs = observed_context(lines[first:stop], words, language, left-first, right-first)
+            left, right = first+cf, first+cs
+            report['context'] = [left, right]
         anchors = anchors_from_words(lines[left:right], words, language, allow_missing=True)
         if global_recovery:
             report['recognition_anchors'] = anchors
@@ -345,7 +352,14 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 needs_relocation = True
             continue
         targets = bad.intersection(range(left, right))
-        mislocalized = set()
+        # A local crop also observes its neighbouring phrases. A superficially
+        # valid neighbour is not read-only when the complete phrase was heard
+        # elsewhere in that same crop. Partial/ambiguous text is not evidence
+        # against it, and recognition never supplies the replacement timing.
+        mislocalized = {i+left for i, a in enumerate(anchors)
+            if a.get('match_basis') == 'complete_phrase' and a['status'] == 'candidate'
+            and cues[i+left]['status'] == 'candidate' and (
+                cues[i+left]['end']+2 < a['start'] or cues[i+left]['start']-2 > a['end'])}
         if global_recovery:
             # Recognition supplies a rough interval, not an independent onset.
             # A stretched first token can include an earlier refrain; only a
@@ -361,7 +375,8 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 if before and after and (cues[i+left]['start'] < before[-1]['start']-2 or
                                          cues[i+left]['end'] > after[0]['end']+2):
                     mislocalized.add(i+left)
-            targets.update(mislocalized)
+        targets.update(mislocalized)
+        bad.update(mislocalized)
         report['contradicted_lines'] = sorted(i+1 for i in mislocalized)
         proposed, replaced = deepcopy(result), []
         try:

@@ -638,7 +638,7 @@ def record_failure(attempt, job, folder):
                     'prepared-lyrics.json', 'playback-warning.json', 'lyrics-first-lookup.json',
                     'published-lyrics.json', 'lyric-lookup.json', 'song-metadata.json',
                     'audio-result.json', 'result.json', 'lyric-coverage-validation.json',
-                    'lyric-repeat-validation.json', 'highlight-validation.json',
+                    'lyric-repeat-validation.json', 'highlight-validation.json', 'localization-validation.json',
                     'timing-checked/*.json', 'timing-constraints.json', 'timing-input.json'):
         for path in folder.glob(pattern):
             try:

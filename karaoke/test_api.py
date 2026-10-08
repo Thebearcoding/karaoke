@@ -464,6 +464,7 @@ def test_soak_preserves_failed_stage_diagnostics_after_cache_eviction(tmp_path):
         'audio-result.json': dict(duration_seconds=4., artifacts={'subtitles': {'path': 'cues.json'}}),
         'result.json': dict(duration_seconds=4., artifacts={'mv': {'path': 'mv.mp4'}}),
         'lyric-coverage-validation.json': dict(status='incomplete', uncovered_passages=[dict(start=0., end=2.)]),
+        'localization-validation.json': [dict(context=[0,1],conflicts=[dict(line=1,observed_range=[10.,12.])])],
     }
     for name, value in final_validation.items():
         (folder/name).write_text(json.dumps(value))
@@ -2659,6 +2660,38 @@ def test_local_recognition_keeps_context_predictions_through_global_retry(locate
     assert result['recovery_contexts'][0]['context'] == [located-1,located+2]
 
 
+@pytest.mark.parametrize('outside_old_context', [False, True])
+def test_local_recognition_repairs_a_contradicted_neighbour_too(outside_old_context):
+    from copy import deepcopy
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines = ['intro', 'alpha', 'bravo', 'omega']
+    old = [1., 4., 12., 16.]
+    actual = [1., 10., 12., 16.]
+    if outside_old_context:
+        lines = ['intro', 'alpha', 'bravo', 'charlie', 'delta', 'omega']
+        old, actual = [1.,4.,6.,8.,16.,20.], [1.,10.,12.,14.,16.,20.]
+    segments = [dict(words=[dict(word=t, start=s, end=s+(.8 if i != len(lines)-2 else 0))])
+                for i,(t,s) in enumerate(zip(lines,old))]
+    block = dict(range=[0,len(lines)],context=[0,len(lines)],source_range=[0.,25.],result=dict(segments=segments))
+    original = deepcopy(block)
+    def recognize(begin,end):
+        assert 0 < begin < 10 < end < 25
+        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+.8-begin)
+            for t,s in zip(lines[1:],actual[1:])])])
+    def align(begin,end,text,**options):
+        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+.8-begin)])
+            for t,s in zip(lines,actual) if t in text.splitlines()])
+    result = recover_with_local_asr(block,lines,np.zeros(25*16000),'English',recognize,align)
+    assert block == original
+    assert result['result']['segments'][0] == segments[0]
+    assert result['result']['segments'][-1] == segments[-1]
+    assert result['result']['segments'][1]['words'][0]['start'] == 10.
+    report = result['asr_localizations'][0]
+    assert not report['global_localization']
+    assert report['contradicted_lines'] == ([2,3,4] if outside_old_context else [2])
+    assert report['accepted_lines'] == list(range(2,len(lines)))
+
+
 def test_local_recognition_broadens_once_when_old_neighbours_miss_the_verse():
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines, starts = ['alpha', 'bravo', 'charlie'], [30., 40., 50.]
@@ -4094,6 +4127,39 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
     else:
         with pytest.raises(StageFailure):pipeline.align_candidates(lyrics, {}, 6.)
         assert calls == ([] if mode=='credits_only' else [primary,alternative] if mode=='all_fail' else [primary])
+
+
+def test_observed_missing_refrain_selects_complete_published_source(tmp_path, monkeypatch):
+    refrain = ['glowing red horizon', 'bright blue ocean']
+    short, complete = ['opening',*refrain,'closing'], ['opening',*refrain,*refrain,'closing']
+    packet = dict(candidate_texts=[short,complete], crosscheck=dict(selected_source=0,
+        eligible_sources=[0,1], sources=[dict(provider=p,language='English') for p in ('short','complete')]))
+    lyrics = dict(title='Song',artist='Singer',language='English',lines=short,
+        provenance=dict(kind='online_lyric_text',route='lyrics_first',lyric_lookup=packet))
+    pipeline = Pipeline(dict(url=URL),tmp_path)
+    (tmp_path/'lyrics.json').write_text(json.dumps(lyrics))
+    raw = tmp_path/'alignment/raw.json';raw.parent.mkdir()
+    heard = [1.,3.,5.,8.,10.,12.]
+    calls=[]
+    def align(candidate,duration):
+        calls.append(candidate['lines'])
+        starts = [1.,3.,5.,12.] if candidate['lines']==short else heard
+        cues = [dict(text=t,start=s,end=s+.8,status='candidate') for t,s in zip(candidate['lines'],starts)]
+        (tmp_path/'cues.json').write_text(json.dumps(cues))
+        (tmp_path/'quality.json').write_text('{}')
+        (pipeline.checkpoints.directory/'align_words.json').write_text('{}')
+        raw.write_text(json.dumps([dict(asr_localizations=[dict(context=[0,len(candidate['lines'])],
+            source_range=[0.,15.],recognition=dict(segments=[dict(words=[
+                dict(word=t,start=s,end=s+.8) for t,s in zip(complete,heard)])]))])]))
+    monkeypatch.setattr(pipeline,'align',align)
+    selected,error=pipeline.align_candidates(lyrics,{},15.)
+    assert selected['lines']==complete and error is None
+    assert calls==[short,complete]
+    evidence=json.loads((tmp_path/'localization-validation.json').read_text())
+    assert all(not e['missing_repetitions'] and not e['conflicts'] for e in evidence)
+    rejected=json.loads((tmp_path/'quality.json').read_text())['lyric_source_fallback']['rejected']
+    saved=json.loads((tmp_path/rejected[0]['diagnostics']/'localization-validation.json').read_text())
+    assert saved[0]['missing_repetitions'][0]['source_range']==[1,3]
 
 
 @pytest.mark.parametrize('overlap', [.02, .1, .16, .32, .75])
@@ -8200,11 +8266,14 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
         assert len(calls) == (2 if targeted or mode == 'pause' else 3)
         if mode == 'parallel':
             assert health_disconnected
-        assert set(calls[1:]) == set(source_jobs[2:] if targeted else source_jobs[1:2] if mode == 'pause' else source_jobs[1:])
+        # Worker admission order does not determine thread start order.
+        called = {json.loads((data/job/'request.json').read_text())['url']:job for job in calls}
+        first_job = called[cases[0]['url']]
+        assert set(calls)-{first_job} == set(source_jobs[2:] if targeted else source_jobs[1:2] if mode == 'pause' else source_jobs[1:])
         assert maximum == ((2 if targeted else 3) if mode == 'unlimited' else 2 if mode in ('parallel', 'pause', 'skip_large') else 1)
         if mode == 'skip_large' and not targeted:
-            assert calls[1:] == [source_jobs[2], source_jobs[1]]
-        assert (calls[0] != source_jobs[0]) == has_full_mv
+            assert calls.index(source_jobs[2]) < calls.index(source_jobs[1])
+        assert (first_job != source_jobs[0]) == has_full_mv
         if has_full_mv:
             assert app.state.store.read(source_jobs[0])['status'] == 'completed'
         assert [e['id'] for e in api.get('/v1/room').json()['entries']] == [e['id'] for e in user_queue]

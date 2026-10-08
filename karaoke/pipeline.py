@@ -973,31 +973,32 @@ class Pipeline:
                 self.phase(song_info={k:candidate[k] for k in ('title', 'artist', 'language')})
             error = None
             try:
-                self.align(candidate, duration)
-            except (StageFailure, ValueError) as caught:
-                if self.strict_audio:
-                    raise
-                error = caught
                 try:
-                    candidate = self.playback_fallback(metadata, duration, caught)
-                except StageFailure as failure:
-                    if (failure.stage != 'subtitles' or index+1 == len(candidates) or
-                            not (self.checkpoints.directory/'align_words.json').is_file()):
+                    self.align(candidate, duration)
+                except (StageFailure, ValueError) as caught:
+                    if self.strict_audio:
                         raise
-                    # Preserve the rejected whole text and its actual alignment,
-                    # then let the normal stage cache rebuild for the next text.
-                    folder = self.output/'lyric-source-attempts'/str(time.time_ns())
-                    folder.mkdir(parents=True)
-                    for name in ('lyrics.json', 'alignment/raw.json', 'alignment/run.json',
-                                 'playback-warning.json', 'cues.json'):
-                        source = self.output/name
-                        if source.is_file():
-                            target = folder/name
-                            target.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy2(source, target)
-                    attempts.append(dict(source=candidate['provenance'].get('lyric_lookup'),
-                        error=str(failure), diagnostics=str(folder.relative_to(self.output))))
-                    continue
+                    error = caught
+                    candidate = self.playback_fallback(metadata, duration, caught)
+                self.validate_localization(candidate, duration)
+            except StageFailure as failure:
+                if (self.strict_audio or failure.stage != 'subtitles' or index+1 == len(candidates) or
+                        not (self.checkpoints.directory/'align_words.json').is_file()):
+                    raise
+                # Preserve the rejected whole text and its actual alignment,
+                # then let the normal stage cache rebuild for the next text.
+                folder = self.output/'lyric-source-attempts'/str(time.time_ns())
+                folder.mkdir(parents=True)
+                for name in ('lyrics.json', 'alignment/raw.json', 'alignment/run.json',
+                             'playback-warning.json', 'cues.json', 'localization-validation.json'):
+                    source = self.output/name
+                    if source.is_file():
+                        target = folder/name
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(source, target)
+                attempts.append(dict(source=candidate['provenance'].get('lyric_lookup'),
+                    error=str(failure), diagnostics=str(folder.relative_to(self.output))))
+                continue
             if attempts:
                 quality = json.loads((self.output/'quality.json').read_text())
                 quality['lyric_source_fallback'] = dict(rejected=attempts,
@@ -1128,6 +1129,33 @@ class Pipeline:
         file = self.output/path
         return dict(path=str(path), bytes=file.stat().st_size, sha256=file_hash(file))
 
+    def validate_localization(self, lyrics, duration, cues=None):
+        """Reuse observed text to check both misplaced and omitted passages."""
+        from .anchors_from_asr import timeline_support, observed_context
+        from .align_lyrics_whisper import recognized_words
+        observations = []
+        raw_path = self.output/'alignment/raw.json'
+        if raw_path.is_file():
+            if cues is None:
+                cues = json.loads((self.output/'cues.json').read_text())
+            timed = [dict(c, status='candidate') for c in cues]
+            for block in json.loads(raw_path.read_text()):
+                for localization in block.get('asr_localizations', []):
+                    if not localization.get('recognition'):
+                        continue
+                    first, stop = localization['context']
+                    begin, end = localization['source_range']
+                    words = recognized_words(begin, localization['recognition'], end)
+                    first, stop = observed_context(lyrics['lines'], words, lyrics['language'], first, stop)
+                    evidence = timeline_support(cues[first:stop], words, lyrics['language'])
+                    evidence['missing_repetitions'] = missing_repetitions(
+                        lyrics['lines'], timed, words, lyrics['language'], duration)
+                    observations.append(dict(context=[first, stop], source_range=[begin, end], **evidence))
+        write_json(self.output/'localization-validation.json', observations)
+        if any(o['conflicts'] or o['missing_repetitions'] for o in observations):
+            raise StageFailure('subtitles', '字幕与已定位的唱段不一致或遗漏重复唱段；音频位置证据已保留')
+        return observations
+
     def validate_alignment(self, lyrics, duration, lead=None):
         from .timing_validation import validate_timeline
         cues = json.loads((self.output/'cues.json').read_text())
@@ -1154,23 +1182,7 @@ class Pipeline:
         # Text completeness is one direction of coverage. When recovery has
         # already heard a lyric elsewhere, the final/fallback captions must
         # cover that passage too. Reuse evidence; do not launch another ASR.
-        observations = []
-        raw_path = self.output/'alignment/raw.json'
-        if raw_path.is_file():
-            for block in json.loads(raw_path.read_text()):
-                for localization in block.get('asr_localizations', []):
-                    if not localization.get('recognition'):
-                        continue
-                    from .anchors_from_asr import timeline_support
-                    from .align_lyrics_whisper import recognized_words
-                    first, stop = localization['context']
-                    begin, end = localization['source_range']
-                    evidence = timeline_support(checked[first:stop],
-                        recognized_words(begin, localization['recognition'], end), lyrics['language'])
-                    observations.append(dict(context=[first, stop], source_range=[begin, end], **evidence))
-        write_json(self.output/'localization-validation.json', observations)
-        if any(observation['conflicts'] for observation in observations):
-            raise StageFailure('validate_timing', '字幕与已定位的唱段不一致；音频位置证据已保留')
+        observations = self.validate_localization(lyrics, duration, checked)
         quality = json.loads((self.output/'quality.json').read_text())
         quality.update(lines=len(checked), units=sum(len(c['units']) for c in checked),
             localization_validation=observations,

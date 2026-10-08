@@ -2085,6 +2085,44 @@ class AlignmentIntegrity(unittest.TestCase):
                         self.assertFalse(context_scope_violations(cues, report['scope_blocks']))
                         self.assertAlmostEqual(cues[0]['start'], 10.17)
 
+    def test_english_phrase_cannot_drift_inside_a_valid_larger_context(self):
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from align_english_onsets import align_job
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sf.write(root/'audio.wav', np.zeros(15*16000), 16000)
+            lines = ['morning', 'river', 'evening']
+            (root/'lyrics.json').write_text(json.dumps(dict(language='English', lines=lines)))
+            (root/'anchors.json').write_text(json.dumps([
+                dict(text=t,start=s,end=s+1.,status='candidate') for t,s in zip(lines,[1.,5.,10.])]))
+            for mode in ('repair', 'unresolved', 'held_note'):
+                with self.subTest(mode=mode):
+                    def align(audio, words):
+                        if len(audio) == 15*16000:
+                            starts = [1.,4. if mode=='held_note' else 8.5,10.]
+                        else:
+                            starts = [.8,8.1 if mode=='unresolved' else 4.8,9.8]
+                        return [dict(text=t,start=s,end=(8. if mode=='held_note' and i==1 else s+.4), confidence=.8)
+                                for i,(t,s) in enumerate(zip(words,starts))],None,.02
+                    model = SimpleNamespace(method='singing', device='cpu', onset_ratio=.02,
+                                            model_identity={}, align=Mock(side_effect=align))
+                    out = root/mode
+                    report = align_job(model,dict(audio=str(root/'audio.wav'),lyrics=str(root/'lyrics.json'),
+                        anchors=str(root/'anchors.json'),output=str(out)),full_song=True)
+                    cues = json.loads((out/'cues.json').read_text())
+                    self.assertEqual(model.align.call_count,1 if mode=='held_note' else 2)
+                    self.assertEqual([cues[0]['start'],cues[2]['start']],[1.,10.])
+                    self.assertEqual(bool(report['failures']),mode=='unresolved')
+                    if mode=='repair':
+                        self.assertAlmostEqual(cues[1]['start'],5.2)
+                    elif mode=='unresolved':
+                        self.assertEqual(cues[1]['status'],'unresolved_timing')
+                    else:
+                        self.assertEqual((cues[1]['start'],cues[1]['end']),(4.,8.))
+
     def test_late_coarse_boundary_does_not_cut_off_a_sustained_syllable(self):
         import json
         from types import SimpleNamespace
@@ -2134,7 +2172,7 @@ class AlignmentIntegrity(unittest.TestCase):
                 for mode in ('repair', 'outside_scope', 'new_conflict'):
                     with self.subTest(mode=mode, scale=scale):
                         def align(audio, words):
-                            times = {6: [t*scale for t in (1., 4., 9., 18., 20., 23.)],
+                            times = {6: [t*scale for t in (1., 4., 9., 18., 13., 16.)],
                                      3: [.1, .5*scale+.6, 6*scale+.6],
                                      4: [.1, .4, 6*scale+.6, 9*scale+.6],
                                      5: [t*scale+.6 for t in (0, 3, 6, 9, 12)]}[len(words)]
@@ -2155,7 +2193,7 @@ class AlignmentIntegrity(unittest.TestCase):
                         self.assertFalse(report['boundary_retries'][0]['accepted'])
                         self.assertEqual(report['boundary_retries'][1]['accepted'], mode == 'repair')
                         self.assertEqual(report['scope_blocks'][3], (3, 4, 2, 5, 7*scale-.6, 14*scale+.6))
-                        expected = [1., 4., 7., 10., 20., 23.] if mode == 'repair' else [1., 4., 9., 7.5, 20., 23.]
+                        expected = [1., 4., 7., 10., 13., 16.] if mode == 'repair' else [1., 4., 9., 7.5, 13., 16.]
                         np.testing.assert_allclose([c['start'] for c in result], np.array(expected)*scale)
                         self.assertEqual(bool(report['failures']), mode != 'repair')
 
