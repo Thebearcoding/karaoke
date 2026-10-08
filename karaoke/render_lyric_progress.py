@@ -182,11 +182,7 @@ def main():
             intro_path = None
             intro = dict(status='omitted', error=type(error).__name__, reason=str(error),
                          visible_in_this_export=False)
-    # These overlays are a small serial graph. Spawning a filter worker per
-    # host core adds synchronization and competes with audio preparation.
-    # Keep decoder/encoder threading separate; pixels and encoding stay unchanged.
-    command = ['ffmpeg', '-v', 'error', '-nostdin', '-filter_complex_threads', '1',
-        '-ss', str(args.start), '-i', str(args.video),
+    command = ['ffmpeg', '-v', 'error', '-nostdin', '-ss', str(args.start), '-i', str(args.video),
         '-f', 'rawvideo', '-pixel_format', 'rgba', '-video_size', f'{width}x{height}',
         '-framerate', str(fps), '-i', 'pipe:0']
     if args.audio and not args.video_only:
