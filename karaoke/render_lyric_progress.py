@@ -12,6 +12,7 @@ from subtitle_style import (TOKENS, STYLES, CaptionOverflow, caption_height, cap
                             compact_caption_image, japanese_readings, song_intro_image, static_video_scrim)
 from subtitles import countdown_events, countdown_state, normalized, read_ahead_state
 from stage_progress import progress_items, report_progress
+from lyric_readings import load_readings, resolve_readings
 
 
 class Caption:
@@ -161,6 +162,7 @@ def main():
     parser.add_argument('--audio', type=Path)
     parser.add_argument('--video-only', action='store_true', help='Render the picture before final audio is ready')
     parser.add_argument('--cues', type=Path, required=True)
+    parser.add_argument('--readings', type=Path, help='Source-bound published Japanese readings')
     parser.add_argument('--song-info', type=Path,
                         help='JSON with title, optional artist and version for opening credits')
     parser.add_argument('--start', type=float, default=0.)
@@ -179,6 +181,10 @@ def main():
     if args.output.exists():
         raise FileExistsError(args.output)
     cues = json.loads(args.cues.read_text())
+    annotations, reading_source = load_readings(args.readings, cues) if args.readings else ([], None)
+    readings = [resolve_readings(cue['text'], annotations[i]['spans'] if i < len(annotations)
+                and annotations[i]['text'] == cue['text'] else ())
+                if args.language == 'Japanese' else ((), ()) for i, cue in enumerate(cues)]
     if any(c['end'] <= c['start'] for c in cues) or any(a['end'] > b['start']+1e-5 for a, b in zip(cues, cues[1:])):
         raise ValueError('Invalid display intervals')
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -271,7 +277,7 @@ def main():
                 picture = blank.copy() if preview_height else blank
                 if index is not None:
                     if previous != index:
-                        caption = Caption(cues[index], args.style, args.language)
+                        caption = Caption(cues[index], args.style, args.language, readings[index])
                         if caption.pages:
                             pagination[index+1] = [dict(text=p.cue['text'], start=p.starts[0]) for p in caption.pages]
                         if args.language == 'Japanese':
@@ -291,7 +297,7 @@ def main():
                     if preview_previous != preview:
                         preview_image = compact_caption_image(cues[preview]['text'], height=preview_height,
                             style=args.style, language=args.language,
-                            readings=japanese_readings(cues[preview]['text'])[0] if args.language == 'Japanese' else (),
+                            readings=readings[preview][0],
                             style_overrides={
                                 'size': 34, 'minimum_size': 26, 'single_line_floor': 34,
                                 'maximum_lines': 1, 'balanced_wrap': False, 'baseline_inset': 22})
@@ -315,7 +321,7 @@ def main():
         raise ValueError('Incorrect rendered duration')
     opening = None
     if countdown and countdown[0]['start'] < 0:
-        geometry = Caption(cues[0], args.style, args.language).countdown_geometry
+        geometry = Caption(cues[0], args.style, args.language, readings[0]).countdown_geometry
         opening = dict(countdown[0], **geometry, width=width, height=720)
         opening['y'] += 720-main_height-args.bottom_margin
     report = {'command': command, 'seconds': time.perf_counter()-started, 'start': args.start,
@@ -325,6 +331,7 @@ def main():
         'shown_lines': sorted(i+1 for i in shown),
         'display_pages': pagination,
         'furigana': readings_report,
+        'reading_source': reading_source,
         'background_readability': background,
         'decode_check': 'pending_final_mux' if args.video_only else 'passed', 'probe': probe,
         'motion': 'Fixed text positions; hard line cuts; linear left-to-right fill within each existing timing unit',

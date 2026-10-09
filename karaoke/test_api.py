@@ -5885,6 +5885,96 @@ def test_furigana_dictionary_failure_does_not_lose_valid_subtitles(monkeypatch):
         japanese_readings.cache_clear()
 
 
+def test_published_readings_preserve_occurrences_text_and_dictionary_fallback(tmp_path, monkeypatch):
+    import copy
+    from karaoke import lyric_readings as readings
+    from karaoke.stage_cache import StageCache
+    from karaoke.render_lyric_progress import Caption
+    html = '''<div class="comments">関係のない文字</div><div class="hiragana">
+        <span class="ruby"><span class="rb">故郷</span><span class="rt">ふるさと</span></span>へ<br>
+        <span class="ruby"><span class="rb">今日</span><span class="rt">きょう</span></span>も帰る<br>
+        <span class="ruby"><span class="rb">故郷</span><span class="rt">こきょう</span></span>から
+        </div><div class="romaji">ignore this</div>'''
+    lines = ['故郷へ 今日も帰る', '故郷から']
+    page = readings.ReadingPage(html)
+    rows, coverage = readings.match_readings(lines, page)
+    assert coverage == 1 and 'ふるさと' not in page.text and 'ignore' not in page.text
+    assert rows[0]['spans'][0] == dict(first=0, stop=2, text='故郷', reading='ふるさと')
+    assert rows[1]['spans'][0]['reading'] == 'こきょう'
+    assert readings.match_readings(['故郷の別の曲は全く違う歌詞です'], page)[0] is None
+    cue = dict(text=lines[0], start=0., end=5., units=[
+        dict(first=i, stop=i+1, start=i*.3, end=i*.3+.2) for i in range(len(lines[0]))])
+    before = copy.deepcopy(cue)
+    resolved = readings.resolve_readings(cue['text'], rows[0]['spans'])
+    caption = Caption(cue, 'cinema_focus', 'Japanese', resolved)
+    assert cue == before and caption.readings[0] == (0, 2, 'ふるさと')
+    assert any(cue['text'][a:b] == '帰' for a, b, _ in caption.readings)
+    assert readings.resolve_readings(lines[1], rows[1]['spans'])[0][0] == (0, 2, 'こきょう')
+    # Bad/stale annotations cannot change the text or discard the usable captions.
+    invalid = [dict(first=0, stop=2, text='違う', reading='よみ')]
+    assert readings.resolve_readings(cue['text'], invalid)[1]
+    calls = []
+    def fetch(url):
+        calls.append(url)
+        return '<a href="/lyric/example/">result</a>' if '/search?' in url else html
+    monkeypatch.setattr(readings, 'read_page', fetch)
+    cache = StageCache(tmp_path)
+    path = readings.prepare_readings(lines, URL, cache)
+    packet = json.loads(path.read_text())
+    assert packet['status'] == 'published' and packet['lines'] == rows and len(calls) == 2
+    readings.prepare_readings(lines, URL, cache)
+    assert len(calls) == 2
+    assert readings.load_readings(path, [dict(text=t) for t in lines])[0] == rows
+    assert readings.load_readings(path, [dict(text='新しい歌詞')])[0] == []
+
+
+def test_unavailable_published_readings_do_not_fail_valid_lyrics(tmp_path, monkeypatch):
+    from karaoke import lyric_readings as readings
+    from karaoke.stage_cache import StageCache
+    def unavailable(url):
+        raise RuntimeError('Source unavailable')
+    monkeypatch.setattr(readings, 'read_page', unavailable)
+    lines = ['今日の空']
+    path = readings.prepare_readings(lines, URL, StageCache(tmp_path))
+    packet = json.loads(path.read_text())
+    assert packet['status'] == 'unavailable' and packet['error']
+    assert readings.load_readings(path, [dict(text=t) for t in lines])[0] == []
+    assert readings.resolve_readings(lines[0])[0] == ((0, 2, 'きょう'), (3, 4, 'そら'))
+
+
+def test_changed_published_readings_invalidate_both_render_caches(tmp_path, monkeypatch):
+    from karaoke import lyric_readings as readings
+    from karaoke.pipeline import Pipeline
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    pipeline.video.parent.mkdir(exist_ok=True)
+    pipeline.video.write_bytes(b'unchanged source')
+    text = '故郷へ'
+    (tmp_path/'cues.json').write_text(json.dumps([dict(text=text, units=[])]))
+    path = tmp_path/'lyric-readings.json'
+    path.write_text('first reading')
+    monkeypatch.setattr(readings, 'prepare_readings', lambda *a: path)
+    result = dict(title='Example', artist='Artist', language='Japanese', duration_seconds=3.,
+                  artifacts={'subtitles': {'path': 'cues.json'}, 'mv': {'path': 'mv.mp4'}})
+    renders = []
+    def render(stage, command):
+        assert command[command.index('--readings')+1] == path
+        renders.append(path.read_text())
+        (tmp_path/'captioned-picture.mp4').write_bytes(path.read_bytes())
+        (tmp_path/'captioned-picture.render.json').write_text('{}')
+    def publish(result, picture=None):
+        import shutil
+        shutil.copyfile(pipeline.render_picture(result), tmp_path/'mv.mp4')
+    monkeypatch.setattr(pipeline, 'run', render)
+    monkeypatch.setattr(pipeline, 'render_uncached', publish)
+    pipeline.render_video(result)
+    pipeline.render_video(result)
+    assert renders == ['first reading']
+    path.write_text('corrected reading')
+    pipeline.render_video(result)
+    assert renders == ['first reading', 'corrected reading']
+    assert (tmp_path/'mv.mp4').read_text() == 'corrected reading'
+
+
 def test_furigana_pages_keep_full_sentence_readings_and_preview_can_shorten():
     from karaoke.render_lyric_progress import Caption
     from karaoke.subtitle_style import compact_caption_image

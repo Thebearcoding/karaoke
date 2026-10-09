@@ -1,0 +1,185 @@
+"""Published Japanese readings, bound to the lyric body rather than a word list."""
+from difflib import SequenceMatcher
+import hashlib
+from html.parser import HTMLParser
+import json
+import re
+import time
+import unicodedata
+from urllib.parse import urlencode
+
+
+def hiragana(text):
+    return ''.join(chr(ord(c)-0x60) if 'ァ' <= c <= 'ヶ' else c
+                   for c in unicodedata.normalize('NFKC', text))
+
+
+class ReadingPage(HTMLParser):
+    """Read UtaTen's ruby body; navigation, romanization and comments are excluded."""
+    def __init__(self, html):
+        super().__init__(convert_charrefs=True)
+        self.text, self.spans, self.links = '', [], []
+        self.depth, self.stack, self.ruby, self.in_reading = 0, [], None, False
+        self.feed(html)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        classes = attrs.get('class', '').split()
+        if tag == 'a' and re.fullmatch(r'/lyric/[A-Za-z0-9]+/', attrs.get('href', '')):
+            if attrs['href'] not in self.links:
+                self.links.append(attrs['href'])
+        if tag == 'div':
+            if self.depth:
+                self.depth += 1
+            elif 'hiragana' in classes and not self.text:
+                self.depth = 1
+        if not self.depth:
+            return
+        if tag == 'br':
+            self.text += '\n'
+        elif tag == 'span':
+            role = next((c for c in classes if c in ('ruby', 'rb', 'rt')), '')
+            self.stack.append(role)
+            if role == 'ruby':
+                self.ruby = dict(first=len(self.text), reading='')
+            elif role == 'rt':
+                self.in_reading = True
+
+    def handle_endtag(self, tag):
+        if not self.depth:
+            return
+        if tag == 'div':
+            self.depth -= 1
+        elif tag == 'span' and self.stack:
+            role = self.stack.pop()
+            if role == 'rt':
+                self.in_reading = False
+            elif role == 'ruby' and self.ruby is not None:
+                self.spans.append(dict(self.ruby, stop=len(self.text)))
+                self.ruby = None
+
+    def handle_data(self, text):
+        if self.depth:
+            if self.in_reading and self.ruby is not None:
+                self.ruby['reading'] += text
+            else:
+                self.text += text
+
+
+def text_positions(text):
+    """Match typography without losing the original character boundaries."""
+    normalized, positions = '', []
+    for i, character in enumerate(text):
+        for c in unicodedata.normalize('NFKC', character):
+            if c.isalnum():
+                normalized += c
+                positions.append(i)
+    return normalized, positions
+
+
+def match_readings(lines, page):
+    expected, positions = text_positions('\n'.join(lines))
+    published, source_positions = text_positions(page.text)
+    blocks = SequenceMatcher(None, published, expected, autojunk=False).get_matching_blocks()
+    matched = sum(b.size for b in blocks)
+    coverage = matched / max(1, len(expected), len(published))
+    # A shared short phrase cannot establish which song these readings belong to.
+    if not expected or coverage < .9:
+        return None, coverage
+    mapping = {b.a+i: b.b+i for b in blocks for i in range(b.size)}
+    by_source = {raw: i for i, raw in enumerate(source_positions)}
+    rows, owners = [], []
+    for line in lines:
+        rows.append(dict(text=line, spans=[]))
+        owners.extend((len(rows)-1, i) for i in range(len(line)+1))
+    for span in page.spans:
+        reading = hiragana(span['reading'].strip())
+        indexes = [by_source[i] for i in range(span['first'], span['stop']) if i in by_source]
+        target = [mapping.get(i) for i in indexes]
+        if (not target or None in target or target != list(range(target[0], target[0]+len(target)))
+                or not re.fullmatch('[ぁ-ゖー]+', reading)):
+            continue
+        line, first = owners[positions[target[0]]]
+        last_line, stop = owners[positions[target[-1]]]
+        if line == last_line:
+            rows[line]['spans'].append(dict(first=first, stop=stop+1,
+                text=lines[line][first:stop+1], reading=reading))
+    return rows, coverage
+
+
+def read_page(url):
+    import httpx
+    with httpx.stream('GET', url, timeout=8, headers={'User-Agent': 'Mozilla/5.0'}) as response:
+        response.raise_for_status()
+        body = bytearray()
+        for part in response.iter_bytes():
+            body.extend(part)
+            if len(body) > 2*1024*1024:
+                raise ValueError('Reading page exceeds 2 MiB')
+    return body.decode('utf-8')
+
+
+def prepare_readings(lines, source_url, cache):
+    """Optional, cached presentation evidence; unavailable readings never lose lyrics."""
+    from .lyric_lookup import cached_lyric_request, lyric_request_error
+    path = cache.root/'lyric-readings.json'
+    identity = dict(lines=lines, source_url=source_url)
+    try:
+        old = json.loads(path.read_text())
+        if old['identity'] == identity and (old.get('error', {}).get('retry_at') or float('inf')) > time.time():
+            return path
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    packet = dict(identity=identity, status='unavailable', lines=[], attempts=[])
+    try:
+        query = next((line.strip() for line in lines if re.search('[\u3400-\u9fff]', line)), '')
+        if query:
+            url = 'https://utaten.com/search?'+urlencode(dict(body=query))
+            fetch = lambda url: cached_lyric_request('utaten_readings', url, cache, lambda: read_page(url))
+            listing = ReadingPage(fetch(url))
+            for link in listing.links[:3]:
+                url = 'https://utaten.com'+link
+                html = fetch(url)
+                rows, coverage = match_readings(lines, ReadingPage(html))
+                packet['attempts'].append(dict(url=url, text_coverage=coverage))
+                if rows and any(row['spans'] for row in rows):
+                    packet.update(status='published', lines=rows, url=url,
+                                  page_sha256=hashlib.sha256(html.encode()).hexdigest())
+                    break
+    except Exception as error:
+        packet['error'] = lyric_request_error(error)
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(packet, ensure_ascii=False, indent=2)+'\n')
+    temporary.replace(path)
+    return path
+
+
+def resolve_readings(text, annotations=()):
+    from subtitle_style import japanese_readings
+    fallback, warnings = japanese_readings(text)
+    supplied = []
+    for item in annotations:
+        try:
+            first, stop, reading = item['first'], item['stop'], hiragana(item['reading'])
+            if (not isinstance(first, int) or not isinstance(stop, int) or not 0 <= first < stop <= len(text)
+                    or text[first:stop] != item['text'] or not re.fullmatch('[ぁ-ゖー]+', reading)
+                    or supplied and first < supplied[-1][1]):
+                raise ValueError('Reading does not match lyric span')
+            supplied.append((first, stop, reading))
+        except (KeyError, TypeError, ValueError):
+            warnings += ('Ignored a published reading that does not match this lyric span',)
+    return tuple(sorted([*supplied, *(s for s in fallback if not any(
+        s[0] < stop and first < s[1] for first, stop, _ in supplied))])), warnings
+
+
+def load_readings(path, cues):
+    """Refuse stale annotations without changing any lyric or timing data."""
+    try:
+        packet = json.loads(path.read_text())
+        if packet['identity']['lines'] == [cue['text'] for cue in cues] and isinstance(packet['lines'], list) and all(
+                isinstance(row, dict) and isinstance(row.get('text'), str) and isinstance(row.get('spans'), list)
+                for row in packet['lines']):
+            return packet['lines'], packet
+        return [], dict(status='stale_lyric_body')
+    except (OSError, ValueError, KeyError, TypeError):
+        return [], dict(status='unavailable')

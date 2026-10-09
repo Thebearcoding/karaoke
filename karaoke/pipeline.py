@@ -1478,19 +1478,28 @@ class Pipeline:
             raise StageFailure('subtitles', f'仍有 {len(omitted)} 行歌词未能定位；已保留音轨、可用字幕和局部修复诊断') from error
         return lyrics
 
+    def reading_inputs(self, result, subtitles):
+        if result['language'] != 'Japanese':
+            return []
+        from .lyric_readings import prepare_readings
+        return [prepare_readings([c['text'] for c in json.loads(subtitles.read_text())],
+                                 self.request['url'], self.checkpoints)]
+
     def render_picture(self, result):
         subtitles = self.output/result.get('artifacts', {}).get('subtitles', {}).get('path', 'cues.json')
+        readings = self.reading_inputs(result, subtitles)
         picture = self.output/'captioned-picture.mp4'
-        with self.checkpoints.stage('render_picture', inputs=[self.video, subtitles],
+        with self.checkpoints.stage('render_picture', inputs=[self.video, subtitles, *readings],
                 outputs=[picture, picture.with_suffix('.render.json')],
                 config={**{key: result[key] for key in ('title', 'artist', 'language', 'duration_seconds')},
                         'implementation': inspect.getsource(type(self).render_picture)},
                 code=[ROOT/p for p in ('render_lyric_progress.py', 'render_subtitles.py', 'subtitles.py', 'lyric_progress.py',
-                                      'subtitle_style.py', 'subtitle-styles.json')]) as reused:
+                                      'subtitle_style.py', 'subtitle-styles.json', 'lyric_readings.py')]) as reused:
             if not reused:
                 write_json(self.output/'song-info.json', dict(title=result['title'], artist=result['artist']))
                 self.run('render', [sys.executable, ROOT/'render_lyric_progress.py', '--video', self.video,
                     '--video-only', '--cues', subtitles, '--song-info', self.output/'song-info.json',
+                    *(['--readings', readings[0]] if readings else []),
                     '--language', {'English': 'Latin'}.get(result['language'], result['language']) or 'auto',
                     '--duration', result['duration_seconds'], '--bottom-margin', '96', '--next-line',
                     '--countdown', '--output', picture])
@@ -1498,14 +1507,15 @@ class Pipeline:
 
     def render_video(self, result, picture=None):
         paths = {name: self.output/a['path'] for name, a in result['artifacts'].items()}
+        readings = self.reading_inputs(result, paths['subtitles'])
         result['video_only'] = True
         with self.checkpoints.stage('render',
-                inputs=[self.video, paths['subtitles']],
+                inputs=[self.video, paths['subtitles'], *readings],
                 outputs=[paths['mv']],
                 config={**{key: result[key] for key in ('title', 'artist', 'language', 'duration_seconds')},
                     'implementation': inspect.getsource(type(self).render_uncached)},
                 code=[ROOT/p for p in ('render_lyric_progress.py', 'render_subtitles.py', 'subtitles.py', 'lyric_progress.py',
-                                      'subtitle_style.py', 'subtitle-styles.json')]) as reused:
+                                      'subtitle_style.py', 'subtitle-styles.json', 'lyric_readings.py')]) as reused:
             if not reused:
                 self.render_uncached(result, picture)
 

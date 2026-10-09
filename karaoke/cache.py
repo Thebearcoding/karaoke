@@ -140,7 +140,7 @@ class SongCache:
         """Keep published outputs and bounded diagnostics; discard working audio."""
         folder = self.folder(job['id'])
         keep = {'request.json', 'result.json', 'error.json', 'worker.log', 'lyric-crosscheck.json',
-                'captioned-picture.render.json',
+                'captioned-picture.render.json', 'lyric-readings.json',
                 'song-metadata.json', 'checkpoints/extract_song_metadata.json',
                 'lyrics.json', 'timing-constraints.json', 'timing-checked/report.json', 'timing-recovery.json',
                 'quality.json', 'alignment/raw.json', 'lyric-coverage-validation.json',
