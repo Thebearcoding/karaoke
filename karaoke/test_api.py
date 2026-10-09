@@ -9696,7 +9696,16 @@ def test_download_transport_preserves_bytes_on_range_and_whole_file_servers(tmp_
         thread.join()
 
 
-def test_repeated_stage_timings_include_failed_and_successful_work(tmp_path):
+def test_repeated_stage_timings_include_failed_and_successful_work(tmp_path, monkeypatch):
+    clock = SimpleNamespace(now=0.)
+    durations = iter((.25, .75))
+    popen = subprocess.Popen
+    def launch(*args, **kwargs):
+        clock.now += next(durations)
+        return popen(*args, **kwargs)
+    # Exercise real exit statuses without timing filesystem or scheduler delays.
+    monkeypatch.setattr(time, 'perf_counter', lambda: clock.now)
+    monkeypatch.setattr(subprocess, 'Popen', launch)
     pipeline = Pipeline(dict(url=URL), tmp_path)
     with pytest.raises(StageFailure):
         pipeline.run('render', [sys.executable, '-c', 'raise SystemExit(1)'])
@@ -9705,6 +9714,6 @@ def test_repeated_stage_timings_include_failed_and_successful_work(tmp_path):
     timeline = pipeline.timeline['render']
     attempts = timeline['previous_attempts']+[timeline]
     assert [a['status'] for a in attempts] == ['failed','completed']
-    assert pipeline.timings['render'] > first
-    assert pipeline.timings['render'] == pytest.approx(
-        sum(a['finished']-a['started'] for a in attempts), abs=.02)
+    assert first == .25
+    assert pipeline.timings['render'] == 1.
+    assert sum(a['finished']-a['started'] for a in attempts) == 1.
