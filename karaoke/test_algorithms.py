@@ -1034,6 +1034,42 @@ class SubtitleIntegrity(unittest.TestCase):
                 else:
                     self.assertIsNone(result)
 
+    def test_playback_preserves_proposed_onsets_around_a_colliding_coarse_word(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        text = '甲乙丙丁戊己'
+        units = [dict(first=i, stop=i+1, text=c, start=t, end=t+.2, timing_source='prior_word_fallback')
+                 for i,(c,t) in enumerate(zip(text, [1.,1.5,1.8,2.2,2.4,5.]))]
+        cue = dict(text=text, start=1., end=5.2, units=units)
+        measured = [dict(u, start=t, end=t+.2, timing_evidence='phonetic_span')
+                    for u,t in zip(units, [3.,3.3,3.6,4.3,4.5,5.])]
+        measured[3]['end'] = 4.32  # Too short to supply its own measured onset.
+        heard = [dict(u, timing_evidence='ctc_label_event') for u in measured]
+        heard[3].update(start=4.51, end=4.55)
+        heard[4].update(start=4.6, end=4.7)
+        for mode in ('playback', 'strict', 'disagree_first', 'silent_first', 'outside_interior', 'existing_constraint'):
+            with self.subTest(mode=mode):
+                views = [deepcopy(heard), deepcopy(heard)]
+                if mode == 'disagree_first': views[1][0].update(start=3.4, end=3.5)
+                if mode == 'outside_interior': views[1][3].update(start=4.9, end=4.95)
+                wave = np.full(6*44100, .1)
+                if mode == 'silent_first': wave[3*44100:round(3.25*44100)] = 0.
+                constraints = ([dict(line=1,text=text,first=0,stop=1,onset=1.,start_min=.6,start_max=1.4)]
+                               if mode == 'existing_constraint' else [])
+                result, report = reconcile_timing([cue], wave, lambda *a, **k: views,
+                    lambda *a: [deepcopy(measured) for _ in range(3)], protocol, 'Chinese',
+                    constraints, playback=mode!='strict', _retry_context=False)
+                if mode == 'playback':
+                    self.assertEqual([(u['text'],u['start']) for u in result[0]['units']],
+                                     [('甲',3.),('乙',3.3),('丙丁',3.6),('戊',4.5),('己',5.)])
+                    self.assertFalse(report['unresolved'])
+                    self.assertTrue({0,1,2,4}.issubset({p['first'] for p in report['constraints']}))
+                    validate_timeline(result, [text], 6., report['constraints'], 'Chinese')
+                else:
+                    self.assertEqual(result[0]['units'][0]['start'], 1.)
+                self.assertEqual(cue['units'], units)
+
     def test_alternate_acoustic_views_only_revisit_unsettled_lines(self):
         from copy import deepcopy
         from timing_validation import reconcile_views, validate_timeline
@@ -1443,7 +1479,8 @@ class SubtitleIntegrity(unittest.TestCase):
                     self.assertFalse(report['unresolved'])
                     self.assertEqual([(u['text'],u['start']) for u in result[0]['units']],
                                      [('甲',1.),('乙',2.),('丙丁',2.7),('戊',3.5),('己',4.2)])
-                    self.assertEqual([r['first'] for r in report['lines'][0]['repairs'] if r.get('accepted')],[2,1])
+                    self.assertTrue({(1,2.),(2,2.7)}.issubset(
+                        {(p['first'],p['onset']) for p in report['constraints']}))
                     validate_timeline(result,[text],5.,report['constraints'],'Chinese')
                 else:
                     self.assertTrue(report['unresolved'])

@@ -237,12 +237,13 @@ def reconcile_views(cues, observations, protocol, language, constraints=(), *, p
 
 
 def compose_timing_bounds(cues, index, row, measured, constraints, wave, protocol, language, *, floor=None):
-    """Compose local playback groups from durable, independently measured onsets.
+    """Compose local playback groups from independently measured onsets.
 
     A previous observation can locate one word and a later observation its
     neighbour. Requiring both to succeed in the same model call discards that
     evidence. Interior word times stay unspecified; the two acoustic bounds
-    and every established onset remain explicit.
+    and every established onset remain explicit. Proposed onsets may be tested
+    here but become durable only after the complete candidate is accepted.
     """
     cue = cues[index]
     proofs = [p for p in constraints if p['line']==index+1]
@@ -661,6 +662,19 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                 proof = dict(line=index+1,text=result[index]['text'],first=first)
                 candidate, repair = grouped_timing_fallback(result[index], row, proof, ledger,
                     wave, bounds, protocol, language, floor=floor)
+                promoted = []
+                if candidate is None:
+                    proposal = next((p for p in row.get('proposed_constraints', []) if p['first']==first), None)
+                    if proposal is not None:
+                        # A coarse interior can collide with a measured word
+                        # while its surrounding onsets are independently sound.
+                        candidate = compose_timing_bounds(result, index, row, row.get('corroborated_units', []),
+                            [*ledger, proposal], wave, protocol, language, floor=floor)
+                    if candidate is not None:
+                        promoted = [p for p in row['proposed_constraints'] if any(
+                            (u['first'],u['start'])==(p['first'],p['onset']) for u in candidate['units'])]
+                        repair = dict(first=first, accepted=True, mode='composed_acoustic_bounds',
+                                      reason='local sweep between independently measured onsets')
                 if candidate is None:
                     continue
                 anchor = next((u for u in candidate['units'] if u['first']==first), None)
@@ -669,7 +683,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                 proof.update(stop=anchor['stop'],onset=anchor['start'],
                              start_min=max(0.,anchor['start']-protocol['maximum_change_seconds']),
                              start_max=anchor['start']+protocol['maximum_change_seconds'])
-                ledger.append(proof)
+                ledger.extend(p for p in [proof, *promoted] if p not in ledger)
                 result[index] = candidate
                 row['repairs'].append(repair)
         # A repaired neighbour can make an earlier rejected local edit fit.
