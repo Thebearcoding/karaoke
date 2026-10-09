@@ -1437,7 +1437,10 @@ class Pipeline:
         mixing = '[1:a]aformat=sample_fmts=fltp[audio];'
         if result['mv_audio'] == 'instrumental_backing':
             audio_inputs += ['-i', paths['backing_vocals']]
-            mixing = ('[1:a]aformat=sample_fmts=fltp[i];[2:a]aformat=sample_fmts=fltp[b];'
+            # FLAC decoders can emit uneven frames; feed amix equal sample
+            # blocks without padding or changing any samples at the tail.
+            frame = 'aformat=sample_fmts=fltp,asetnsamples=n=1024:p=0,asetpts=N/SR/TB'
+            mixing = (f'[1:a]{frame}[i];[2:a]{frame}[b];'
                       '[i][b]amix=inputs=2:normalize=0[audio];')
         rendered = self.output/'rendered-mv.mp4'
         rendered.unlink(missing_ok=True)
