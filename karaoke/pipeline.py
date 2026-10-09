@@ -958,7 +958,7 @@ class Pipeline:
             line_order_fallback_lines=order_fallbacks,
             countdown_events=countdown_events(cues)))
 
-    def align_candidates(self, lyrics, metadata, duration):
+    def align_candidates(self, lyrics, metadata, duration, lead=None):
         from .lyric_consensus import alternative_lyric_candidates, observed_source_alternative, observed_repetition_candidate
         from .lyric_lookup import published_lyric_lines
         from .subtitles import normalized
@@ -992,7 +992,7 @@ class Pipeline:
                 self.alignment_outputs.clear()
                 write_json(self.output/'lyrics.json', candidate)
                 self.phase(song_info={k:candidate[k] for k in ('title', 'artist', 'language')})
-            error = None
+            error, observations, preferred = None, [], None
             try:
                 try:
                     self.align(candidate, duration)
@@ -1004,11 +1004,6 @@ class Pipeline:
                 raw_path = self.output/'alignment/raw.json'
                 observations = [o for block in json.loads(raw_path.read_text())
                                 for o in block.get('asr_localizations', [])] if raw_path.is_file() else []
-                localization_error = None
-                try:
-                    self.validate_localization(candidate, duration)
-                except StageFailure as failure:
-                    localization_error = failure
                 if index+1 < len(candidates):
                     preferred = observed_source_alternative(candidate, candidates[index+1:], observations)
                     if preferred:
@@ -1016,17 +1011,19 @@ class Pipeline:
                         candidates[index+1], candidates[position] = candidates[position], candidates[index+1]
                         write_json(self.output/'lyric-source-support.json', preferred)
                         raise StageFailure('subtitles', '已有音频识别支持更完整的歌词来源；正在核验备用正文')
-                if not self.strict_audio:
+                # The final timing review can expose a gap previously hidden
+                # by a held caption. Keep it in the same bounded source-repair
+                # loop; every replacement must pass this review again. Its
+                # localization gate runs after the acoustic repair, not before.
+                self.validate_alignment(candidate, duration, lead)
+            except StageFailure as failure:
+                if not self.strict_audio and failure.stage == 'subtitles' and observations and not preferred:
                     repeated = observed_repetition_candidate(candidate,
                         json.loads((self.output/'cues.json').read_text()), observations, duration)
                     key = normalized(''.join(repeated['lines'])).casefold() if repeated else None
                     if key and key not in seen:
                         seen.add(key)
                         candidates.insert(index+1,repeated)
-                        raise StageFailure('subtitles', '音频中发现重复唱段；正在重新对齐来源中的完整原文')
-                if localization_error is not None:
-                    raise localization_error
-            except StageFailure as failure:
                 if (self.strict_audio or failure.stage != 'subtitles' or index+1 == len(candidates) or
                         not (self.checkpoints.directory/'align_words.json').is_file()):
                     raise
@@ -1037,7 +1034,8 @@ class Pipeline:
                 write_json(folder/'failure.json', dict(stage=failure.stage, message=str(failure)))
                 for name in ('lyrics.json', 'alignment/raw.json', 'alignment/run.json',
                              'playback-warning.json', 'cues.json', 'localization-validation.json',
-                             'lyric-source-support.json'):
+                             'lyric-source-support.json', 'timing-input.json',
+                             'timing-checked/cues.json', 'timing-checked/report.json', 'timing-constraints.json'):
                     source = self.output/name
                     if source.is_file():
                         target = folder/name
@@ -1139,12 +1137,10 @@ class Pipeline:
                 text_error = error
                 lyrics = None
             if text_error is None:
-                lyrics, text_error = self.align_candidates(lyrics, metadata, duration)
+                lyrics, text_error = self.align_candidates(lyrics, metadata, duration, packaging)
             else:
                 lyrics = self.playback_fallback(metadata, duration, text_error)
-            # This gate is intentionally outside the fallback catch: a fallback
-            # must not resurrect a timestamp contradicted by acoustic evidence.
-            self.validate_alignment(lyrics, duration, packaging)
+                self.validate_alignment(lyrics, duration, packaging)
             render_info = dict(title=lyrics['title'], artist=lyrics['artist'], language=lyrics['language'],
                                duration_seconds=duration)
             def prepare_picture():
@@ -1291,6 +1287,10 @@ class Pipeline:
             validate_timeline(checked, lyrics['lines'], duration, report['constraints'], lyrics['language'])
         except ValueError as error:
             raise StageFailure('validate_timing', '字幕时间校验失败；局部修复诊断已保留') from error
+        # Save the reviewed candidate before the coverage gate so a missing
+        # repetition is repaired from these bounds, not the superseded ones.
+        # Publication still requires this gate and the full output validation.
+        write_json(self.output/'cues.json', checked)
         # Text completeness is one direction of coverage. When recovery has
         # already heard a lyric elsewhere, the final/fallback captions must
         # cover that passage too. Reuse evidence; do not launch another ASR.
@@ -1312,7 +1312,6 @@ class Pipeline:
             onset_accuracy=None)
         quality['fallback_units'] = sum(u.get('timing_source') == 'prior_word_fallback'
                                        for c in checked for u in c['units'])
-        write_json(self.output/'cues.json', checked)
         write_json(self.output/'quality.json', quality)
 
     def playback_fallback(self, metadata, duration, error, *, constraints=()):

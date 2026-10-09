@@ -4614,6 +4614,7 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
         (tmp_path/'cues.json').write_text(json.dumps(cues))
         if failing:raise ValueError('Unresolved alignment')
     monkeypatch.setattr(pipeline, 'align', align)
+    monkeypatch.setattr(pipeline, 'validate_alignment', lambda *args: None)
     if mode in ('success', 'other_recording', 'soft', 'missing_language', 'null_language', 'cached_credits', 'primary_credits'):
         selected, error = pipeline.align_candidates(lyrics, {}, 6.)
         assert selected['lines'] == (primary if mode=='soft' else alternative)
@@ -4637,7 +4638,8 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
 
 @pytest.mark.parametrize('complete_source', [True, False])
 @pytest.mark.parametrize('compression_ratio', [1., 3.2])
-def test_observed_missing_refrain_selects_complete_published_source(tmp_path, monkeypatch, complete_source, compression_ratio):
+@pytest.mark.parametrize('late_review', [False, True])
+def test_observed_missing_refrain_selects_complete_published_source(tmp_path, monkeypatch, complete_source, compression_ratio, late_review):
     refrain = ['glowing red horizon', 'bright blue ocean']
     short, complete = ['opening',*refrain,'closing'], ['opening',*refrain,*refrain,'closing']
     if complete_source:
@@ -4659,6 +4661,8 @@ def test_observed_missing_refrain_selects_complete_published_source(tmp_path, mo
         starts = ([1.,3.,5.,12.] if candidate['lines']==short else heard
                   if candidate['lines']==complete else [1.,3.,5.,8.,10.,12.])
         cues = [dict(text=t,start=s,end=s+.8,status='candidate') for t,s in zip(candidate['lines'],starts)]
+        if late_review and candidate['lines']==short:
+            cues[2]['end']=11.6  # A held caption initially hides the missing repeat.
         (tmp_path/'cues.json').write_text(json.dumps(cues))
         (tmp_path/'quality.json').write_text('{}')
         (pipeline.checkpoints.directory/'align_words.json').write_text('{}')
@@ -4666,14 +4670,30 @@ def test_observed_missing_refrain_selects_complete_published_source(tmp_path, mo
             source_range=[0.,15.],recognition=dict(segments=[dict(compression_ratio=compression_ratio, words=[
                 dict(word=t,start=s,end=s+.8) for t,s in zip(complete,heard)])]))])]))
     monkeypatch.setattr(pipeline,'align',align)
+    reviewed=[]
+    def validate(candidate,duration,lead):
+        reviewed.append(candidate['lines'])
+        cues=json.loads((tmp_path/'cues.json').read_text())
+        if candidate['lines']==short:
+            cues[2]['end']=5.8
+            (tmp_path/'cues.json').write_text(json.dumps(cues))
+        pipeline.validate_localization(candidate,duration,cues)
+    monkeypatch.setattr(pipeline,'validate_alignment',validate)
     selected,error=pipeline.align_candidates(lyrics,{},15.)
     assert selected['lines']==complete and error is None
     assert calls==[short,complete]
+    assert reviewed[-1]==complete
+    if late_review and not complete_source:
+        assert reviewed==[short,complete]
     evidence=json.loads((tmp_path/'localization-validation.json').read_text())
     assert all(not e['missing_repetitions'] and not e['conflicts'] for e in evidence)
     rejected=json.loads((tmp_path/'quality.json').read_text())['lyric_source_fallback']['rejected']
-    saved=json.loads((tmp_path/rejected[0]['diagnostics']/'localization-validation.json').read_text())
-    assert saved[0]['missing_repetitions'][0]['source_range']==[1,3]
+    saved=tmp_path/rejected[0]['diagnostics']
+    if complete_source:
+        support=json.loads((saved/'lyric-source-support.json').read_text())
+        assert support['alternative_matched_units'] > support['current_matched_units']
+    else:
+        assert json.loads((saved/'localization-validation.json').read_text())[0]['missing_repetitions'][0]['source_range']==[1,3]
     if not complete_source:
         assert selected['provenance']['repetitions'][0]['source_lines']==refrain
         assert json.loads((tmp_path/'quality.json').read_text())['restored_repetitions']==1
@@ -4683,6 +4703,40 @@ def test_observed_missing_refrain_selects_complete_published_source(tmp_path, mo
         wrong[3].update(start=3.,end=3.8)
         with pytest.raises(StageFailure,match='重复唱段'):
             pipeline.validate_localization(selected,15.,wrong)
+
+
+@pytest.mark.parametrize('repair', [False, True])
+def test_candidate_localization_checks_the_acoustically_reviewed_timeline(tmp_path, monkeypatch, repair):
+    lines=['Morning light shines through the trees', 'Silver lanterns show the winding path']
+    lyrics=dict(title='Song',artist='Singer',language='English',lines=lines,provenance={})
+    pipeline=Pipeline(dict(url=URL),tmp_path)
+    (tmp_path/'lyrics.json').write_text(json.dumps(lyrics))
+    def cues(starts):
+        return [dict(text=t,start=s,end=s+1.,units=[dict(text=t,first=0,stop=len(t),start=s,end=s+1.)])
+                for t,s in zip(lines,starts)]
+    coarse,correct=cues([1.,12.]),cues([1.,6.])
+    def align(*args):
+        (tmp_path/'cues.json').write_text(json.dumps(coarse))
+        (tmp_path/'quality.json').write_text('{}')
+        raw=tmp_path/'alignment/raw.json';raw.parent.mkdir()
+        raw.write_text(json.dumps([dict(asr_localizations=[dict(context=[0,2],source_range=[0.,15.],
+            recognition=dict(segments=[dict(words=[dict(word=c['text'],start=c['start'],end=c['end'])
+                                                  for c in correct])]))])]))
+    calls=[]
+    def run(stage,command):
+        calls.append(stage)
+        output=tmp_path/'timing-checked';output.mkdir()
+        (output/'cues.json').write_text(json.dumps(correct if repair else coarse))
+        (output/'report.json').write_text(json.dumps(dict(lines=[],unresolved=[],constraints=[])))
+    monkeypatch.setattr(pipeline,'align',align)
+    monkeypatch.setattr(pipeline,'run',run)
+    if repair:
+        pipeline.align_candidates(lyrics,{},15.)
+        assert json.loads((tmp_path/'cues.json').read_text())==correct
+    else:
+        with pytest.raises(StageFailure,match='字幕与已定位'):
+            pipeline.align_candidates(lyrics,{},15.)
+    assert calls==['validate_timing']
 
 
 @pytest.mark.parametrize('gap_kind', ['missing', 'covered', 'unrelated'])
