@@ -20,12 +20,12 @@ def can_restore_video(folder, result):
     """Only discard an MV when its expensive inputs and source identity survive."""
     try:
         artifacts = result['artifacts']
-        required = {'mv', 'subtitles', *playback_stems(artifacts)}
+        required = {'subtitles', *playback_stems(artifacts)}
         if not required <= artifacts.keys() or not result['reconstruction']['source_pcm_sha256']:
             return False
         if not result['language'] or not 0 < result['shared_preview_gain'] <= 1 or result['duration_seconds'] <= 0:
             return False
-        video = (folder/artifacts['mv']['path']).resolve()
+        video = (folder/artifacts.get('mv', {'path':'mv.mp4'})['path']).resolve()
         if not video.is_relative_to(folder):
             return False
         for name, artifact in artifacts.items():
@@ -139,26 +139,32 @@ class SongCache:
     def compact(self, job, *, source_only=False):
         """Keep published outputs and bounded diagnostics; discard working audio."""
         folder = self.folder(job['id'])
-        keep = {'request.json', 'result.json', 'error.json', 'worker.log', 'lyric-crosscheck.json',
+        audio = job.get('audio_result')
+        audio_complete = job['status'] == 'audio_ready' and can_restore_video(folder, audio)
+        result = audio if audio_complete else job.get('result') or {}
+        keep = {'request.json', 'result.json', 'audio-result.json', 'error.json', 'worker.log', 'lyric-crosscheck.json',
                 'captioned-picture.render.json', 'lyric-readings.json',
                 'song-metadata.json', 'checkpoints/extract_song_metadata.json',
                 'lyrics.json', 'timing-constraints.json', 'timing-checked/report.json', 'timing-recovery.json',
                 'timing-context-recovery.json',
                 'quality.json', 'alignment/raw.json', 'lyric-coverage-validation.json',
                 'highlight-validation.json', 'storage-migration.json'}
-        keep.update(p.relative_to(folder).as_posix() for p in (folder/'lyric-source-attempts').rglob('*.json'))
+        keep.update(p.relative_to(folder).as_posix() for p in (folder/'lyric-source-attempts').rglob('*.json')
+                    if p.name in ('lyrics.json', 'error.json', 'quality.json', 'playback-warning.json',
+                                  'lyric-crosscheck.json', 'localization-validation.json', 'lyric-repeat-validation.json'))
         # Published playback depends only on final artifacts. Keep the compact
         # source for explicit reprocessing, not every intermediate calculation.
-        if job['status'] in ('completed', 'video_evicted'):
+        if job['status'] in ('completed', 'video_evicted') or audio_complete:
             keep.update({'source.json', 'download/source.mkv', 'download/source.info.json'})
-        if (job['status'] in ('failed', 'cancelled', 'audio_ready', 'source_ready') or
+        if (job['status'] in ('failed', 'cancelled', 'source_ready') or
+                (job['status'] == 'audio_ready' and not audio_complete) or
                 (job['status'] == 'queued' and job.get('download_retry')) or
                 (job.get('result') or {}).get('validation_scope') == 'playback_audio_preview'):
             keep.update(retained_files(folder))
             keep.update(p.relative_to(folder).as_posix() for p in folder.rglob('*.json'))
             if (folder/'source.json').is_file():
                 keep.update({'source.json', 'download/source.mkv', 'download/source.info.json', 'poster.jpg'})
-        keep.update(a['path'] for name, a in (job.get('result') or {}).get('artifacts', {}).items()
+        keep.update(a['path'] for name, a in result.get('artifacts', {}).items()
                     if name != 'mv' or not job.get('restore_video'))
         if source_only:
             keep = self.source_files(job)
@@ -257,6 +263,14 @@ class SongCache:
         candidates = sorted((j for j in jobs if j['id'] not in protected and
                              j['status'] in ('completed', 'video_evicted', 'failed', 'evicted', 'audio_ready', 'source_ready')),
                             key=lambda j: (j.get('last_accessed_at', j['created_at']), j['id']))
+        # Discard unused working files before evicting any playable media.
+        for job in candidates:
+            if self.within_limit(used + reserve) and free >= self.minimum_free + reserve:
+                break
+            self.compact(job)
+            sizes[job['id']] = self.size(self.folder(job['id']))
+            used = self.total_size(self.folder(j['id']) for j in jobs)
+            free = shutil.disk_usage(self.store.root).free
         retained = {}
         for job in candidates:
             folder = self.folder(job['id'])

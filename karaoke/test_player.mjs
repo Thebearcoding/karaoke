@@ -1,7 +1,7 @@
 import test, {beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import {Player} from './web/player.js';
-import {isStaleRoomSnapshot, LocalPlayback, queueToTop, preparationRetry} from './web/room-state.js';
+import {isStaleRoomSnapshot, LocalPlayback, PlaybackTabs, queueToTop, preparationRetry} from './web/room-state.js';
 
 test('late HTTP replies cannot undo a newer room command or same-revision progress update', () => {
   const current = {revision:4,server_time:100,entries:[{status:'completed'}]};
@@ -11,6 +11,53 @@ test('late HTTP replies cannot undo a newer room command or same-revision progre
   assert.equal(isStaleRoomSnapshot(current,current),false);
   assert.equal(isStaleRoomSnapshot({revision:5,server_time:99},current),false);
   assert.equal(isStaleRoomSnapshot({revision:0,server_time:100},{revision:0}),false);
+});
+
+test('browser tabs share a single audio owner and reject saves from the previous tab', () => {
+  const values = new Map(), storage = {getItem:key=>values.get(key), setItem:(key,value)=>values.set(key,value)};
+  const first = new PlaybackTabs(storage,'first'), second = new PlaybackTabs(storage,'second');
+  const before = {entry:{id:'old',job_id:'old'},position:12,playing:true};
+  assert.equal(first.write(before,{claim:true}),true);
+  assert.equal(first.owns(),true); assert.equal(second.owns(),false);
+  assert.deepEqual(second.read().playback,before);
+  const after = {entry:{id:'new',job_id:'new'},position:0,playing:true};
+  assert.equal(second.write(after,{claim:true}),true);
+  assert.equal(first.write({...before,position:99}),false);
+  assert.equal(first.owns(),false); assert.equal(second.owns(),true);
+  assert.deepEqual(first.read().playback,after);
+  const reopened = new PlaybackTabs(storage,'reopened',before);
+  assert.deepEqual(reopened.read().playback,after);
+  assert.equal(first.write(before,{release:true}),false);
+  assert.equal(second.write(after,{release:true}),true);
+  assert.equal(reopened.read().owner,null);
+  const anotherBrowser = new PlaybackTabs(null,'other',before);
+  assert.deepEqual(anotherBrowser.read().playback,before);
+  assert.equal(anotherBrowser.write(before,{claim:true}),true);
+  assert.equal(anotherBrowser.owns(),true);
+});
+
+test('restored or paused deleted songs return to the queue head instead of the library copy', () => {
+  const old={id:'removed',job_id:'old',status:'completed'}, first={id:'head',job_id:'new',status:'queued'};
+  for (const playing of [false,true]) {
+    const local=new LocalPlayback({entry:old,position:120,playing,pitch_semitones:3});
+    local.reconcile({entries:[first],library:[old],playback_entry:old});
+    assert.equal(local.entry.id,'head'); assert.equal(local.state.position,0);
+    assert.equal(local.state.started_at,null); assert.equal(local.state.pitch_semitones,0);
+    assert.equal(local.state.playing,playing);
+    local.reconcile({entries:[],library:[old,first]});
+    assert.equal(local.entry,null);
+  }
+});
+
+test('removing the current song preserves pause or continuous-play intent', () => {
+  const entries=[{id:'one',job_id:'one',status:'completed'},{id:'two',job_id:'two',status:'completed'}];
+  for (const playing of [false,true]) {
+    const local=new LocalPlayback(); local.select(entries[0],playing);
+    assert.equal(local.command('remove',{entry_id:'one'},entries).finished.entry_id,'one');
+    assert.equal(local.entry.id,'two'); assert.equal(local.state.playing,playing);
+    local.command('remove',{entry_id:'two'},[entries[1]]);
+    assert.equal(local.entry,null); assert.equal(local.state.playing,playing);
+  }
 });
 
 let frame;
@@ -156,6 +203,7 @@ test('manual preparation actions cover failures and backoff without interrupting
   for (const status of ['queued','running','unprepared']) assert.equal(preparationRetry({status}),null);
   const original={...song,status:'completed'}, local=new LocalPlayback();
   local.select(original,true);
+  local.command('ready',{},[original]);
   const before=local.save();
   const replacement={...song,id:'new-entry',job_id:'new-job',status:'queued',artifacts:{}};
   local.reconcile({entries:[replacement],library:[original]});

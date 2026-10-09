@@ -20,8 +20,35 @@ export function preparationRetry(entry) {
 
 const bounded = (value, min, max, fallback) => Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
 
+// One tab owns audio. Saved progress from an older owner cannot overwrite a
+// newer tab's commands; storage is scoped to this browser, never the room.
+export class PlaybackTabs {
+  constructor(storage, id, fallback = {}) {
+    this.storage = storage; this.id = id; this.key = 'karaokeBrowserPlayback';
+    this.record = {revision:0, owner:null, playback:fallback};
+    this.read();
+  }
+  read() {
+    try {
+      const saved = JSON.parse(this.storage?.getItem(this.key) || 'null');
+      if (saved && Number.isSafeInteger(saved.revision) && saved.revision >= this.record.revision && saved.playback)
+        this.record = saved;
+    } catch { /* Private storage restrictions must not disable local playback. */ }
+    return this.record;
+  }
+  owns() { return this.read().owner === this.id; }
+  write(playback, {claim = false, release = false} = {}) {
+    const previous = this.record.revision, current = this.read();
+    if (!claim && (current.owner !== this.id || current.revision !== previous)) return false;
+    this.record = {revision:current.revision+1, owner:release ? null : this.id, playback};
+    try { this.storage?.setItem(this.key, JSON.stringify(this.record)); } catch {}
+    return true;
+  }
+}
+
 // Only the playlist and preparation results belong to the room. Transport is
-// private to this browser, including when a room update removes its active song.
+// private to this browser. Only an already-running performance may outlive a
+// queue removal on another device; paused/restored selections must be current.
 export class LocalPlayback {
   constructor(saved = {}) {
     this.entry = saved?.entry?.id && saved.entry.job_id ? saved.entry : null;
@@ -38,7 +65,9 @@ export class LocalPlayback {
       const queued = room.entries.find(entry => entry.id === this.entry.id);
       const watched = room.playback_entry?.job_id === this.entry.job_id ? room.playback_entry : null;
       const updated = queued || watched || room.library?.find(entry => entry.job_id === this.entry.job_id);
-      if (updated) this.entry = {...updated, id:this.entry.id};
+      if (!queued && (!this.state.playing || this.state.started_at === null))
+        this.select(room.entries.find(entry => !this.finished.has(entry.id)) || null, this.state.playing);
+      else if (updated) this.entry = {...updated, id:this.entry.id};
     }
     if (this.state.playing && this.entry?.status !== 'completed') {
       const ready = room.entries.find(entry => entry.status === 'completed' && !this.finished.has(entry.id));
@@ -70,12 +99,12 @@ export class LocalPlayback {
     if (extra.entry_id && !['select','lead','pitch'].includes(action) && extra.entry_id !== this.entry?.id) return {};
     this.markPlayed();
     let finished;
-    if (action === 'next' || action === 'select') {
+    if (['next','select','remove'].includes(action)) {
       const target = action === 'select' ? entries.find(entry => entry.id === extra.entry_id) : entries.find(entry => entry.id !== this.entry?.id && !this.finished.has(entry.id));
       if (action === 'select' && (!target || target.id === this.entry?.id)) return {};
-      if (this.entry && (action === 'next' || this.playedAt)) finished = {entry_id:this.entry.id, playback_started_at:this.playedAt};
+      if (this.entry && (action !== 'select' || this.playedAt)) finished = {entry_id:this.entry.id, playback_started_at:this.playedAt};
       if (finished) this.finished.add(finished.entry_id);
-      this.select(target || null, true);
+      this.select(target || null, action === 'remove' ? state.playing : true);
     } else if (action === 'lead') {
       state.levels.lead_vocals = bounded(extra.level, 0, 1, state.levels.lead_vocals);
     } else if (action === 'pitch') {

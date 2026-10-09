@@ -6471,6 +6471,33 @@ def test_audio_ready_job_releases_queue_protection_and_resumes_its_checkpoints(t
         assert calls==[resumed['id']]
 
 
+def test_complete_audio_ready_releases_intermediates_and_queues_video_only(tmp_path):
+    from karaoke.stage_cache import StageCache
+    store = Store(tmp_path)
+    original = cache_fixture(store, '1', restorable=True)
+    folder = tmp_path/original['id']
+    result = original['result']
+    result['artifacts'].pop('mv')
+    (folder/'mv.mp4').unlink()
+    (folder/'audio-result.json').write_text(json.dumps(result))
+    working = folder/'separation.wav'
+    with StageCache(folder).stage('separate', inputs=[folder/'request.json'], outputs=[working]):
+        working.write_bytes(b'no longer required')
+    job = store.update(original['id'], status='audio_ready', result=None, audio_result=result)
+    before = {name:file_hash(folder/a['path']) for name,a in result['artifacts'].items()}
+    store.cache.compact(job)
+    assert not working.exists()
+    assert not (folder/'checkpoints/separate.json').exists()
+    assert (folder/'audio-result.json').exists()
+    resumed, hit = store.create(JobRequest(**{**job['input'], 'force':False}), 'new-renderer')
+    assert not hit and resumed['id'] == job['id'] and resumed['status'] == 'queued'
+    assert resumed['restore_video'] and resumed['pipeline_version'] == job['pipeline_version']
+    assert can_restore_video(folder, resumed['result'])
+    assert {name:file_hash(folder/a['path']) for name,a in result['artifacts'].items()} == before
+    repeated, hit = store.create(JobRequest(**{**job['input'], 'force':False}), 'new-renderer')
+    assert hit and repeated['id'] == resumed['id']
+
+
 def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separate(tmp_path,monkeypatch):
     import hashlib
     import httpx
@@ -8160,6 +8187,19 @@ def test_cache_evicts_all_video_lru_before_any_computed_audio(tmp_path):
     assert can_restore_video(tmp_path/second['id'], second['result'])
 
 
+def test_lru_reclaims_unused_intermediates_before_an_older_video(tmp_path):
+    store = Store(tmp_path)
+    first, second = [cache_fixture(store, str(i), restorable=True) for i in (1, 2)]
+    working = tmp_path/second['id']/'unused.wav'
+    working.write_bytes(b'w'*10000)
+    store.cache.enforce()
+    store.cache.limit = store.cache.stats['used_bytes']-5000
+    assert store.cache.enforce()
+    assert not working.exists()
+    assert all((tmp_path/job['id']/'mv.mp4').exists() for job in (first,second))
+    assert all(store.read(job['id'])['status']=='completed' for job in (first,second))
+
+
 def test_video_eviction_still_protects_queue_and_transfers(tmp_path):
     app = create_app(tmp_path, version='test')
     store = app.state.store
@@ -8250,7 +8290,8 @@ def test_offline_cache_keeps_sources_when_reclaiming_computed_audio(tmp_path, mo
     assert pipeline.download() == ({}, 10)
 
 
-def test_video_restore_reuses_job_and_recovers_from_failure(tmp_path):
+@pytest.mark.parametrize('audio_only', [False, True])
+def test_video_restore_reuses_job_and_recovers_from_failure(tmp_path, audio_only):
     def failed_download(folder):
         assert app.state.store.read(folder.name)['restore_video']
         return [sys.executable, '-c', "import pathlib,sys; p=pathlib.Path(sys.argv[1]);"
@@ -8259,15 +8300,22 @@ def test_video_restore_reuses_job_and_recovers_from_failure(tmp_path):
     store = app.state.store
     job = cache_fixture(store, '1', restorable=True)
     folder = tmp_path/job['id']
-    store.cache.enforce()
-    store.cache.set_limit(store.cache.stats['used_bytes']-1)
-    store.cache.set_limit(GIB)
+    if audio_only:
+        result = {**job['result'], 'artifacts':{k:v for k,v in job['result']['artifacts'].items() if k != 'mv'}}
+        (folder/'audio-result.json').write_text(json.dumps(result))
+        (folder/'mv.mp4').unlink()
+        store.update(job['id'], status='audio_ready', result=None, audio_result=result)
+    else:
+        store.cache.enforce()
+        store.cache.set_limit(store.cache.stats['used_bytes']-1)
+        store.cache.set_limit(GIB)
     with TestClient(app) as client:
         song = next(s for s in client.get('/v1/library').json()['songs'] if s['id'] == job['id'])
-        assert song['job_id'] == job['id'] and song['status'] == 'video_evicted'
-        assert client.get(song['poster']).content == b'keep me'
-        assert client.get(f"/v1/jobs/{job['id']}/artifacts/mv").status_code == 410
-        assert client.get(f"/v1/jobs/{job['id']}/artifacts/lead_vocals").content == b'keep me'
+        assert song['id'] == job['id'] and song['status'] == ('unprepared' if audio_only else 'video_evicted')
+        if not audio_only:
+            assert client.get(song['poster']).content == b'keep me'
+            assert client.get(f"/v1/jobs/{job['id']}/artifacts/mv").status_code == 410
+            assert client.get(f"/v1/jobs/{job['id']}/artifacts/lead_vocals").content == b'keep me'
         entry = client.post('/v1/room/entries', json={'job_id':job['id']}).json()['entries'][0]
         assert entry['job_id'] == job['id']
         failed = finished(client, job['id'])
@@ -9433,6 +9481,9 @@ def test_compaction_keeps_outputs_and_bounded_logs_without_following_symlinks(tm
     source_failure = folder/'lyric-source-attempts/first/lyrics.json'
     source_failure.parent.mkdir(parents=True)
     source_failure.write_text('{"lines":["Original rejected text"]}')
+    duplicate_snapshot = source_failure.parent/'timing-history/previous.json'
+    duplicate_snapshot.parent.mkdir()
+    duplicate_snapshot.write_text('{"old_intermediate":"unused"}')
     render_report = dict(song_intro=dict(status='omitted', reason='Missing title glyph'))
     (folder/'captioned-picture.render.json').write_text(json.dumps(render_report))
     timing_recovery = dict(cues=[dict(text='before repair')], report=dict(constraints=[]))
@@ -9448,6 +9499,7 @@ def test_compaction_keeps_outputs_and_bounded_logs_without_following_symlinks(tm
     assert not (folder/'raw').exists() and outside.read_bytes() == b'keep me'
     assert json.loads((folder/'lyric-crosscheck.json').read_text()) == crosscheck
     assert json.loads(source_failure.read_text())['lines'] == ['Original rejected text']
+    assert not duplicate_snapshot.exists()
     assert json.loads((folder/'captioned-picture.render.json').read_text()) == render_report
     assert json.loads((folder/'timing-recovery.json').read_text()) == timing_recovery
     assert json.loads((folder/'timing-context-recovery.json').read_text()) == context_recovery

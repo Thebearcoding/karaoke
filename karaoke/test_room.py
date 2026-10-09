@@ -354,6 +354,22 @@ def test_select_archives_sung_current_and_keeps_unplayed_entries_in_queue(tmp_pa
     assert removed['current_id'] == second['id']
 
 
+def test_room_preserves_existing_entries_when_adding_past_one_hundred(tmp_path):
+    (tmp_path/'preparation.pause').write_text('test')
+    app = create_app(tmp_path, worker_command=fake_worker, version='test')
+    user_job = ready_job(app.state.store)
+    with TestClient(app) as client:
+        original = client.post('/v1/room/entries', json={'job_id':user_job['id']}).json()['entries'][0]
+        room = app.state.room.read()
+        room['entries'] = [{**room['entries'][0], 'id':str(index)} for index in range(100)]
+        app.state.room.save(room)
+        response = client.post('/v1/room/entries', json={'job_id':user_job['id']})
+        assert response.status_code == 201
+        entries = response.json()['entries']
+        assert [e['id'] for e in entries[:100]] == [str(index) for index in range(100)]
+        assert len(entries) == 101 and entries[-1]['job_id'] == original['job_id']
+
+
 def test_soak_adds_all_cases_to_room_and_only_removes_finished_owned_entries(tmp_path):
     from karaoke.tools.soak import queue_cases, release_finished_entries
     app = create_app(tmp_path, worker_command=fake_worker, version='test')

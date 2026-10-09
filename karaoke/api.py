@@ -186,6 +186,11 @@ class Store:
                     doc = json.loads(row[0])
                     if {k: v for k, v in doc['input'].items() if k != 'force'} != key_payload:
                         continue
+                    if doc['status'] == 'audio_ready' and can_restore_video(self.root/doc['id'], doc.get('audio_result')):
+                        result = {**doc['audio_result'], 'artifacts':{**doc['audio_result']['artifacts'],
+                            'mv':dict(path='mv.mp4', bytes=0, sha256='')}}
+                        doc.update(result=result, restore_video=True)
+                        (self.root/doc['id']/'result.json').write_text(json.dumps(result, ensure_ascii=False)+'\n')
                     if doc['status'] == 'queued' and not doc.get('restore_video'):
                         # Pending work has not executed the old pipeline yet.
                         doc.update(pipeline_version=version, updated_at=now())
@@ -380,7 +385,7 @@ class Worker:
             self.store.update(job['id'], status='failed', active_stages=[],
                 error=dict(code='interrupted', message='上次服务在处理时退出；可重新提交链接'))
         for job in self.store.list(100000):
-            if job['status'] in ('completed', 'video_evicted', 'failed', 'cancelled'):
+            if job['status'] in ('completed', 'video_evicted', 'failed', 'cancelled', 'audio_ready'):
                 self.store.cache.compact(job)
         self.store.cache.enforce()
         for job in self.store.list(100000, 'queued'):

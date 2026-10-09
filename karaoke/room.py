@@ -254,11 +254,9 @@ class Room:
                     existing = entry
                     request = request.model_copy(update={'url': None, 'job_id': job['id']})
                     break
-        if existing is None and len(state['entries']) >= 100:
-            raise HTTPException(409, '歌单最多保留 100 首，请先移除一些歌曲')
         if request.job_id:
             job = self.store.read(request.job_id)
-            if job and (request.force or job['status'] in ('evicted', 'video_evicted', 'cancelled') or job.get('restore_video') or
+            if job and (request.force or job['status'] in ('evicted', 'video_evicted', 'cancelled', 'audio_ready') or job.get('restore_video') or
                         (not replay and job['status'] == 'completed' and job.get('pipeline_version') != self.version)):
                 version = job['pipeline_version'] if replay and job.get('restore_video') else self.version
                 job, cached = self.store.create(JobRequest(**{**job['input'], 'force': request.force}), version)

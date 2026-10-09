@@ -206,7 +206,7 @@ curl -sS http://127.0.0.1:8746/v1/jobs/任务UUID
 
 取得下载元数据后，`song_info` 立即提供 `title`、`artist`、`duration_seconds`，并通过房间 SSE 更新歌单，不必等整首准备完成。优先使用视频的音乐标签，否则先显示视频标题；不把上传者当成原唱。歌词整理完成后再更新歌曲信息，用户填写的歌名／歌手始终优先。`input` 保持原请求，`result` 仍只在成品完成后提供。
 
-LRU 优先回收视频：任务为 `video_evicted`、`restore_video: true`，仅 MV 接口返回 HTTP 410，其余音轨、字幕和封面仍可获取。提交相同输入（`force: false`）或用原 `job_id` 点歌，会复用原任务进入 `queued` / `running`，只下载、核对源音频指纹、重新合成视频；不会重跑模型。恢复沿用原先算好的结果，即使渲染器版本更新；成功后清除 `restore_video`，恢复耗时单列在 `result.video_restore`。恢复失败保留产物，房间的 `retry` 仍只补视频。源音频指纹不同报 `verify_video_failed`，可用 `force: true` 显式完整重做。
+LRU 先清理未受保护任务的无用中间文件，再回收视频：任务为 `video_evicted`、`restore_video: true`，仅 MV 接口返回 HTTP 410，其余音轨、字幕和封面仍可获取。提交相同输入（`force: false`）或用原 `job_id` 点歌，会复用原任务进入 `queued` / `running`，只下载、核对源音频指纹、重新合成视频；不会重跑模型。完整 `audio_ready` 任务首次补视频也走同一路径。恢复沿用原先算好的结果，即使渲染器版本更新；成功后清除 `restore_video`，恢复耗时单列在 `result.video_restore`。恢复失败保留产物，房间的 `retry` 仍只补视频。源音频指纹不同报 `verify_video_failed`，可用 `force: true` 显式完整重做。
 
 视频回收后仍空间不足，才完整回收任务为 `evicted`，全部原文件接口返回 HTTP 410。重新提交同链接或用原 `job_id` 点歌会完整准备。缓存不足导致准备中断时错误码为 `cache_full`；不会删除待唱歌曲来掩盖空间不足。默认上限、统计范围和运行中写入限制见 [缓存说明](APP.md#本地缓存上限)。
 
@@ -311,7 +311,7 @@ with httpx.Client(timeout=30) as client:
 
 歌词粗定位缺失时，局部补识别也覆盖整首开头和结尾：缺口由已有唱句与录音首尾限定，再截取不超过 45 秒的片段。录音边界不作为歌词起止时间；候选必须提供有效的实际词时间并改善原有文字支持。整首没有任何可用锚点时仍失败，不猜测唱句位置。
 
-固定样本音频回归使用 `python -m karaoke.tools.soak audio-run --manifest MANIFEST.json --data-dir DATA_DIR`。逐首验证七项音频／字幕产物，遇到软件失败立即停下供修复；结果单独写入 `audio_attempts`，仅统计同一实际 pipeline 版本。`audio.pause` 可在当前首完成后暂停。通过的任务记为 `audio_ready`，移除本控制器加入的待唱条目，释放缓存保护；它没有完整 MV，因此网页仍显示未准备，后续点播从保留的检查点继续。旧 worker 队列中的此类条目不会擅自重跑。
+固定样本音频回归使用 `python -m karaoke.tools.soak audio-run --manifest MANIFEST.json --data-dir DATA_DIR`。逐首验证七项音频／字幕产物，遇到软件失败立即停下供修复；结果单独写入 `audio_attempts`，仅统计同一实际 pipeline 版本。`audio.pause` 可在当前首完成后暂停。通过的任务记为 `audio_ready`，移除本控制器加入的待唱条目，释放缓存保护；完整音轨与字幕保留，清理无用中间文件。它没有完整 MV，因此网页仍显示未准备，后续点播仅补视频。旧 worker 队列中的此类条目不会擅自重跑。
 
 先处理已有音频失败和其他已到重试时间的历史失败，再处理未完成样本；旧版本已通过样本的复验排在最后，避免延迟修复效果的验证。外部失败在到期后按最久未尝试的顺序重试，避免刚超时的请求连续抢占其他失败样本。尚处于退避期的外部失败不阻挡其他可运行样本。
 

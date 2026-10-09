@@ -1,6 +1,6 @@
 import { Player } from './player.js';
 import { mountPreview } from './preview.js';
-import { isStaleRoomSnapshot, LocalPlayback, queueToTop, preparationRetry } from './room-state.js';
+import { isStaleRoomSnapshot, LocalPlayback, PlaybackTabs, queueToTop, preparationRetry } from './room-state.js';
 import { createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
 
 const $ = id => document.getElementById(id);
@@ -9,8 +9,13 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&
 const time = seconds => `${Math.floor(Math.max(0, seconds || 0)/60)}:${String(Math.floor(Math.max(0, seconds || 0)%60)).padStart(2,'0')}`;
 let savedPlayback;
 try { savedPlayback = JSON.parse(sessionStorage.getItem('karaokePlayback')); } catch {}
-const playback = new LocalPlayback(savedPlayback);
-let roomState = {entries:[], revision:0}, viewRevision = 0, lastPlaybackSave = 0;
+let tabStorage;
+try { tabStorage = localStorage; } catch {}
+const tabs = new PlaybackTabs(tabStorage, `${Date.now()}-${Math.random()}`, savedPlayback);
+let playback = new LocalPlayback(tabs.read().playback);
+if (!tabs.record.owner) tabs.write(playback.save(), {claim:true});
+let tabRevision = tabs.record.revision;
+let roomState = {entries:[], revision:0}, receivedRoom = false, viewRevision = 0, lastPlaybackSave = 0;
 const stages = {download:'下载音频', download_video:'下载视频', verify_video:'校验视频', decode_audio:'提取音频', decode_native:'准备音频母版', separate_music:'分离伴奏', separate_lead:'分离主唱', package_two_stems:'整理音轨', package_three_stems:'整理音轨', resample_vocals:'整理人声', transcribe:'识别歌词', prepare_lyrics:'整理歌词', align_words:'对齐歌词', align_phonemes:'对齐起唱时间', align_repeats:'检查重复段落', align_context:'校准字幕', validate_timing:'核对起唱时间', render:'生成字幕画面', mux_video:'合成字幕 MV'};
 let state = {entries:[], current_id:null, playing:false, position:0, started_at:null, levels:{instrumental:1,backing_vocals:1,lead_vocals:0}, revision:0};
 let library = [], filter = 'ready', view = 'library', clockOffset = 0, readySent = null, loading = false, loadError = '', seeking = false;
@@ -77,8 +82,11 @@ async function command(action, extra = {}) {
   try {
     if (['play','pause','seek','restart','next','select','lead','pitch','ready','buffering'].includes(action) ||
         (action === 'remove' && extra.entry_id === state.current_id)) {
+      if (['ready','buffering'].includes(action) && !tabs.owns()) return null;
       if (extra.revision !== undefined && extra.revision !== state.revision) return null;
-      const {finished} = playback.command(action === 'remove' ? 'next' : action, extra, state.entries);
+      if (!['ready','buffering'].includes(action) && claimPlayback() && playback.state.playing && action !== 'pause')
+        await player.unlock();
+      const {finished} = playback.command(action, extra, state.entries);
       renderState();
       savePlayback();
       if (finished) {
@@ -576,8 +584,9 @@ function updateTransport() {
   $('player-title').textContent = song?.title || idleTitle;
   $('player-artist').textContent = song?.artist || '';
   $('player-elapsed').innerHTML = preparationElapsedHTML(song);
-  $('play-icon').setAttribute('href', state.playing && player.unlocked ? '#i-pause' : '#i-play');
-  $('play-toggle').setAttribute('aria-label', state.playing && player.unlocked ? '暂停' : '播放');
+  const playingHere = tabs.owns() && state.playing && player.unlocked;
+  $('play-icon').setAttribute('href', playingHere ? '#i-pause' : '#i-play');
+  $('play-toggle').setAttribute('aria-label', playingHere ? '暂停' : '播放');
   $('play-toggle').disabled = !song && !state.playing;
   document.querySelectorAll('[data-next]').forEach(button => button.disabled = skipping || !state.current_id);
   $('transport-restart').disabled = !song;
@@ -633,7 +642,7 @@ function updateTime(position) {
   updateCover();
 }
 
-const player = new Player($('video'), updateTime, id => command('next', {entry_id:id}));
+const player = new Player($('video'), updateTime, id => tabs.owns() && command('next', {entry_id:id}));
 let bufferingRequest;
 player.onBuffering = (position, startedAt, entryId = player.entry?.id) => {
   const token = `${entryId}:${startedAt}`;
@@ -645,6 +654,7 @@ player.onBuffering = (position, startedAt, entryId = player.entry?.id) => {
     .finally(() => { if (bufferingRequest === token) bufferingRequest = null; });
 };
 player.onError = error => {
+  if (!tabs.owns()) return;
   loadError = error.message || '视频播放失败，请重试';
   loading = false;
   updateCover(); toast(loadError);
@@ -652,7 +662,7 @@ player.onError = error => {
 
 async function syncPlayback() {
   const song = current();
-  if (!song || song.status !== 'completed') {
+  if (!tabs.owns() || !song || song.status !== 'completed') {
     player.clear(); readySent = null; loading = false; loadError = '';
     updateCover(); return;
   }
@@ -669,12 +679,12 @@ async function syncPlayback() {
     loading = !player.hasAudio(position) || !player.matches(song);
     updateCover();
     await player.load(song, position);
-    if (state.current_id !== song.id || state.revision !== revision || !player.matches(song)) return;
+    if (!tabs.owns() || state.current_id !== song.id || state.revision !== revision || !player.matches(song)) return;
     if (state.playing && !state.started_at && player.unlocked) {
       const preparing = player.prepareVideo(position);
       updateCover();
       await preparing;
-      if (state.current_id !== song.id || state.revision !== revision) return;
+      if (!tabs.owns() || state.current_id !== song.id || state.revision !== revision) return;
     }
     loading = false; loadError = '';
     if (state.playing && !state.started_at && player.unlocked && readySent !== song.id) {
@@ -685,7 +695,7 @@ async function syncPlayback() {
     player.apply(state, 0);
     updateTransport();
   } catch (error) {
-    if (state.current_id !== song.id || state.revision !== revision) return;
+    if (!tabs.owns() || state.current_id !== song.id || state.revision !== revision) return;
     player.unlocked = false;
     loading = false; loadError = error.message;
     updateCover(); toast(loadError);
@@ -695,13 +705,17 @@ async function syncPlayback() {
 function acceptState(updated) {
   if (isStaleRoomSnapshot(updated, roomState)) return;
   roomState = updated;
+  receivedRoom = true;
   clockOffset = updated.server_time - Date.now()/1000;
   renderState();
 }
 
 function renderState() {
+  if (!receivedRoom) return;
   const wasReady = current()?.status === 'completed';
+  const previous = current()?.id;
   state = {...playback.reconcile(roomState), revision:++viewRevision};
+  if (current()?.id !== previous) savePlayback();
   connectEvents();
   library = roomState.library || [];
   renderLibrary();
@@ -716,13 +730,14 @@ function renderState() {
 
 async function activate() {
   loadError = '';
+  claimPlayback();
   try { await player.unlock(); }
   catch { toast('浏览器还没有启用声音，请再点一次播放'); return false; }
   return true;
 }
 
 async function togglePlay() {
-  const wasUnlocked = player.unlocked;
+  const wasUnlocked = tabs.owns() && player.unlocked;
   if (!(await activate())) return;
   if (state.playing && !wasUnlocked) { await syncPlayback(); return; }
   await command(state.playing ? 'pause' : 'play');
@@ -968,13 +983,43 @@ function connectEvents() {
 }
 function savePlayback(position) {
   lastPlaybackSave = Date.now();
-  try { sessionStorage.setItem('karaokePlayback', JSON.stringify(playback.save(position))); } catch {}
+  const saved = playback.save(position);
+  if (tabs.write(saved)) tabRevision = tabs.record.revision;
+  try { sessionStorage.setItem('karaokePlayback', JSON.stringify(saved)); } catch {}
 }
-window.addEventListener('pagehide', () => { savePlayback(); events?.close(); });
-window.addEventListener('pageshow', event => { if (event.persisted) { events = null; connectEvents(); } });
+function followPlayback() {
+  const record = tabs.read();
+  if (record.revision === tabRevision) return;
+  tabRevision = record.revision;
+  if (record.owner !== tabs.id) {
+    player.clear(); readySent = null;
+    playback = new LocalPlayback(record.playback);
+    renderState();
+  }
+}
+function claimPlayback() {
+  followPlayback();
+  if (tabs.owns()) return false;
+  playback.reconcile(roomState);
+  playback = new LocalPlayback(playback.save());
+  tabs.write(playback.save(), {claim:true}); tabRevision = tabs.record.revision;
+  renderState();
+  return true;
+}
+window.addEventListener('storage', event => { if (event.key === tabs.key) followPlayback(); });
+window.addEventListener('pagehide', () => {
+  if (tabs.owns()) { tabs.write(playback.save(), {release:true}); player.stop(); }
+  events?.close();
+});
+function resumePage() {
+  followPlayback();
+  events?.close(); events = null; connectEvents();
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) resumePage(); });
+window.addEventListener('pageshow', event => { if (event.persisted) resumePage(); });
 connectEvents();
 updateTransport();
 if (!navigation.restore()) navigation.save();
 // A refresh can retain playback intent, but the browser still owns permission
 // to produce audio. Until unlock succeeds, no ready event starts the clock.
-if (playback.state.playing) player.unlock().then(() => renderState()).catch(() => updateTransport());
+if (tabs.owns() && playback.state.playing) player.unlock().then(() => renderState()).catch(() => updateTransport());
