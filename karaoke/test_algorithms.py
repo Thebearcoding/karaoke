@@ -814,6 +814,47 @@ class SubtitleIntegrity(unittest.TestCase):
                 else:
                     self.assertIsNone(result)
 
+    def test_coarse_interior_reuses_confirmed_bounds_without_moving_them(self):
+        from copy import deepcopy
+        from cjk_recovery import audio_floor
+        from timing_validation import compose_timing_bounds, validate_timeline
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        text = '甲乙丙丁'
+        original = [dict(first=i, stop=i+1, text=c, start=t, end=t+.1,
+                         timing_source='cross_model_ctc' if i in (0,3) else 'prior_word_fallback')
+                    for i,(c,t) in enumerate(zip(text,[1.,1.2,1.4,4.]))]
+        heard = [dict(u,start=t,end=t+.1) for u,t in zip(original,[1.3,2.9,3.4,4.2])]
+        for mode in ('repair','not_displaced','one_bound','fine_interior','silence',
+                     'outside','wrong_text','interior_constraint','views_disagree'):
+            with self.subTest(mode=mode):
+                units = deepcopy(original)
+                row = dict(witnesses=[deepcopy(heard),deepcopy(heard)])
+                proofs = [dict(line=1,text=text,first=i,stop=i+1,onset=t,start_min=t-.4,start_max=t+.4)
+                          for i,t in [(0,1.),(3,4.)]]
+                if mode == 'not_displaced':
+                    for i in (1,2): units[i].update(start=heard[i]['start'],end=heard[i]['end'])
+                if mode == 'one_bound': proofs.pop()
+                if mode == 'fine_interior': units[1]['timing_source']='singing_phonemes'
+                if mode == 'outside': row['witnesses'][1][2]['start']=4.5
+                if mode == 'wrong_text': row['witnesses'][0][1]['text']='錯'
+                if mode == 'interior_constraint':
+                    proofs.append(dict(line=1,text=text,first=1,stop=2,onset=1.2,start_min=.8,start_max=1.6))
+                if mode == 'views_disagree': row['witnesses'][1]=deepcopy(units)
+                wave = np.ones(5*44100)*(.0 if mode=='silence' else .1)
+                cue = dict(text=text,start=1.,end=4.1,units=units)
+                before = deepcopy(cue)
+                result = compose_timing_bounds([cue],0,row,[],proofs,wave,protocol,'Chinese')
+                self.assertEqual(result,compose_timing_bounds([cue],0,row,[],proofs,wave,protocol,'Chinese',
+                                                             floor=audio_floor(wave,protocol)))
+                self.assertEqual(cue,before)
+                if mode == 'repair':
+                    self.assertEqual([(u['text'],u['start']) for u in result['units']], [('甲乙丙',1.),('丁',4.)])
+                    self.assertEqual(result['units'][0]['timing_source'],'linear_fallback')
+                    self.assertEqual(result['units'][-1],units[-1])
+                    validate_timeline([result],[text],5.,proofs,'Chinese')
+                else:
+                    self.assertIsNone(result)
+
     def test_alternate_acoustic_views_only_revisit_unsettled_lines(self):
         from copy import deepcopy
         from timing_validation import reconcile_views, validate_timeline

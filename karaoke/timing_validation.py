@@ -151,8 +151,9 @@ def reconcile_views(cues, observations, protocol, language, constraints=(), *, p
     Each observation uses the same acceptance contract and retains all previous
     onset constraints. The iterator may load a different audio view lazily.
     """
+    from cjk_recovery import audio_floor
     result, report, pending = cues, dict(lines=[], constraints=list(constraints)), None
-    history = []
+    history, floors = [], {}
     for name, wave, witness, predict in observations:
         result, reviewed = reconcile_timing(result, wave, witness, predict, protocol, language,
             report['constraints'], playback=playback, _review_lines=pending)
@@ -209,8 +210,10 @@ def reconcile_views(cues, observations, protocol, language, constraints=(), *, p
                 index = row['line']-1
                 known = [u for r in [*previous, *report['lines']] if r['line']==index+1
                          for u in r.get('corroborated_units', [])]
+                if id(recorded_wave) not in floors:
+                    floors[id(recorded_wave)] = audio_floor(recorded_wave, protocol)
                 candidate = compose_timing_bounds(result, index, row, known, report['constraints'],
-                                                   recorded_wave, protocol, language)
+                                                   recorded_wave, protocol, language, floor=floors[id(recorded_wave)])
                 if candidate is not None:
                     result[index] = candidate
                     report['lines'].append(dict(line=index+1, observation=row['observation'], status='reviewed',
@@ -224,7 +227,7 @@ def reconcile_views(cues, observations, protocol, language, constraints=(), *, p
     return result, report
 
 
-def compose_timing_bounds(cues, index, row, measured, constraints, wave, protocol, language):
+def compose_timing_bounds(cues, index, row, measured, constraints, wave, protocol, language, *, floor=None):
     """Compose local playback groups from durable, independently measured onsets.
 
     A previous observation can locate one word and a later observation its
@@ -235,12 +238,51 @@ def compose_timing_bounds(cues, index, row, measured, constraints, wave, protoco
     cue = cues[index]
     proofs = [p for p in constraints if p['line']==index+1]
     failed = timing_violations(cues, proofs)
-    if not failed or len(row.get('witnesses', [])) != 2:
+    if len(row.get('witnesses', [])) != 2:
         return None
     if any(normalized(''.join(u['text'] for u in view)) != normalized(cue['text']) or
            any(u['text'] != cue['text'][u['first']:u['stop']] for u in view) for view in row['witnesses']):
         return None
     views = [{u['first']:u for u in view} for view in row['witnesses']]
+    if not failed:
+        # A displaced coarse interior can use the same playback sweep without
+        # claiming a new word onset. Its already confirmed bounding onsets stay
+        # exactly where they are; fresh label events need not repeat them.
+        units = cue['units']
+        bounds = [i for i,u in enumerate(units)
+                  if u.get('timing_source') not in ('prior_word_fallback', 'linear_fallback') and
+                  any((p['first'],p['stop'],p['onset']) == (u['first'],u['stop'],u['start']) for p in proofs)]
+        displaced = set(displaced_units(cue,row['witnesses'],protocol['maximum_change_seconds']))
+        if not displaced or len(bounds) < 2:
+            return None
+        if floor is None:
+            floor = max(1e-5, protocol['minimum_relative_rms']*float(np.sqrt(np.mean(wave**2))))
+        for lo,hi in zip(bounds,bounds[1:]):
+            left,right = units[lo],units[hi]
+            interior = units[lo+1:hi]
+            if (not any(u['first'] in displaced for u in interior) or
+                    any(u.get('timing_source') != 'prior_word_fallback' for u in interior)):
+                continue
+            observed = [[u for u in view.values() if left['stop'] <= u['first'] < u['stop'] <= right['first']]
+                        for view in views]
+            if any(normalized(''.join(u['text'] for u in view)) != normalized(cue['text'][left['stop']:right['first']]) or
+                   any(not left['start']-.1 <= u['start'] <= right['start']+.1 for u in view) for view in observed):
+                continue
+            if any(not len(piece:=wave[round(t*44100):round((t+.035)*44100)]) or
+                   not np.isfinite(piece).all() or float(np.sqrt(np.mean(piece**2)))<=floor
+                   for t in (left['start'],right['start'])):
+                continue
+            group = dict(first=left['first'],stop=right['first'],text=cue['text'][left['first']:right['first']],
+                         start=left['start'],end=right['start'],acoustic_end=None,
+                         timing_source='linear_fallback',bounds_source='cross_model_onsets')
+            candidate = dict(cue,units=[*units[:lo],group,*units[hi:]])
+            try:
+                validate_timeline([candidate],[cue['text']],len(wave)/44100,
+                                  [dict(p,line=1) for p in proofs],language)
+            except ValueError:
+                continue
+            return candidate
+        return None
     points = {}
     for unit in measured:
         first, time = unit['first'], unit['start']
@@ -256,7 +298,8 @@ def compose_timing_bounds(cues, index, row, measured, constraints, wave, protoco
     first, last = min(v['proof']['first'] for v in failed), max(v['proof']['first'] for v in failed)
     before = cues[index-1]['units'][-1]['start'] if index else -.015
     after = cues[index+1]['units'][0]['start'] if index+1<len(cues) else len(wave)/44100
-    floor = max(1e-5, protocol['minimum_relative_rms']*float(np.sqrt(np.mean(wave**2))))
+    if floor is None:
+        floor = max(1e-5, protocol['minimum_relative_rms']*float(np.sqrt(np.mean(wave**2))))
     for left in sorted((p for p in points if p<=first and p in positions), reverse=True):
         lo = positions[left]
         if points[left] <= (cue['units'][lo-1]['start'] if lo else before)+.015:
