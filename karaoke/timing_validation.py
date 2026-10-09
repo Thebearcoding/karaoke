@@ -181,7 +181,8 @@ def reconcile_views(cues, observations, protocol, language, constraints=(), *, p
                                min(bounds[1], result[i]['end']+1.5)])
                 wider[i].update(aligned_start=begin, aligned_end=end, audio_bounds=bounds)
             wider, retried = reconcile_timing(wider, wave, witness, predict, protocol, language,
-                report['constraints'], playback=playback, _retry_context=False, _review_lines=unresolved_lines)
+                report['constraints'], playback=playback, _retry_context=False,
+                _repeat_context=False, _review_lines=unresolved_lines)
             for i in unresolved_lines:
                 if wider[i]['units'] != result[i]['units']:
                     result[i] = wider[i]
@@ -203,7 +204,7 @@ def reconcile_views(cues, observations, protocol, language, constraints=(), *, p
                 candidate, replay = reconcile_timing(result, recorded_wave,
                     lambda *args, **kwargs: row['witnesses'], lambda *args: row['predictions'],
                     protocol, language, report['constraints'], playback=playback,
-                    _retry_context=False, _review_lines={line-1})
+                    _retry_context=False, _repeat_context=False, _review_lines={line-1})
                 if len(replay['unresolved']) < len(timing_violations(result, report['constraints'])):
                     result = candidate
                     report['lines'].extend(dict(r, observation=row['observation'], reused_measurement=True)
@@ -363,7 +364,7 @@ def compose_timing_bounds(cues, index, row, measured, constraints, wave, protoco
 
 
 def reconcile_timing(cues, wave, witness, predict, protocol, language, constraints=(), *,
-                     playback=False, _retry_context=True, _review_lines=None):
+                     playback=False, _retry_context=True, _repeat_context=True, _review_lines=None):
     """Corroborate displaced onsets, then replace only a compatible local span.
 
     witness returns original/vocal word views. predict returns three independent
@@ -405,7 +406,10 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             letters = [c for c in cue['text'] if c.isalpha()]
             review_language = 'English' if letters and all(c.isascii() for c in letters) else language
             observation, offset = cue, None
-            if index in repeated:
+            # Joint localization initializes occurrence identity. Later passes
+            # already selected a new crop or recorded observations: rebuilding
+            # the joint context would repeat the very observation that failed.
+            if _repeat_context and index in repeated:
                 first, stop, text, start_char = repeated[index]
                 begin = result[first-1]['units'][-1]['start']+.015 if first else 0.
                 end = result[stop]['units'][0]['start'] if stop<len(result) else len(wave)/44100
@@ -626,7 +630,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             for index, (begin,end) in windows.items():
                 retry[index].update(aligned_start=begin,aligned_end=end)
             retry, reviewed = reconcile_timing(retry, wave, witness, predict, protocol, language, ledger,
-                                               _retry_context=False, _review_lines=windows)
+                                               _retry_context=False, _repeat_context=False, _review_lines=windows)
             for index in windows:
                 cue = retry[index]
                 if cue['units'] != result[index]['units']:

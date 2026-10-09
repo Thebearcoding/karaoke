@@ -872,6 +872,7 @@ class SubtitleIntegrity(unittest.TestCase):
             dict(text='two', first=4, stop=7, start=t+.5, end=t+1., timing_source='prior_word_fallback')])
             for t in (3., 7.)]
         for mode in ('complete', 'different_coarse_occurrences', 'coarse_joint',
+                     'retry_local_context', 'retry_unstable',
                      'missing_occurrence', 'unordered', 'unstable_fine'):
             with self.subTest(mode=mode):
                 calls = []
@@ -890,10 +891,13 @@ class SubtitleIntegrity(unittest.TestCase):
                     if joint and mode=='different_coarse_occurrences':
                         views[0][0].update(start=.01,end=.1)
                         views[0][1].update(start=.1,end=.2)
+                    if not joint and mode.startswith('retry_') and cue.get('audio_bounds'):
+                        for word in views[1]:
+                            word.update(start=word['start']+.6,end=word['end']+.6)
                     return views
                 def predict(cue, views, bounds, language):
                     predictions = [[dict(u, timing_evidence='phonetic_span') for u in views[-1]] for _ in range(3)]
-                    if mode=='unstable_fine':
+                    if mode in ('unstable_fine','retry_unstable'):
                         for word in predictions[-1]:
                             word.update(start=word['start']+.2,end=word['end']+.2)
                     if mode=='coarse_joint' and '\n' in cue['text']:
@@ -902,11 +906,12 @@ class SubtitleIntegrity(unittest.TestCase):
                                 word.update(start=word['start']+.15,end=word['end']+.15)
                     return predictions
                 result, report = reconcile_timing(cues, np.ones(10*44100)*.1, witness, predict,
-                                                  protocol, 'English', _retry_context=False)
-                complete = mode in ('complete','different_coarse_occurrences','coarse_joint')
+                                                  protocol, 'English', _retry_context=mode.startswith('retry_'))
+                complete = mode in ('complete','different_coarse_occurrences','coarse_joint','retry_local_context')
                 self.assertEqual([c['start'] for c in result], [.5, 5.5] if complete else [3.,7.])
                 self.assertEqual(calls, ['one two\none two']*2 if mode in ('missing_occurrence','unordered')
-                                 else ['one two\none two','one two']*2)
+                                 else ['one two\none two','one two']*2+
+                                 (['one two']*2 if mode.startswith('retry_') else []))
                 self.assertFalse(report['unresolved'])
                 if not complete: self.assertFalse(report['constraints'])
                 validate_timeline(result, [c['text'] for c in cues], 10., report['constraints'], 'English')
