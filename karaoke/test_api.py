@@ -4913,6 +4913,78 @@ def test_caption_outline_preserves_antialiasing_and_canvas_edges(radius):
             ImageFilter.MaxFilter(2*radius+1)).tobytes()
 
 
+def test_static_lyrics_scrim_preserves_artwork_and_protects_white_and_amber():
+    from PIL import Image, ImageDraw
+    from karaoke.subtitle_style import contrast_scrim
+    image = Image.new('RGB', (256, 144), '#f7efce')
+    draw = ImageDraw.Draw(image)
+    for x in range(0,256,8):
+        draw.line((x,0,x,143),fill='#283445',width=4)
+    original = image.tobytes()
+    scrim, report = contrast_scrim(image, 80, ['#f6f4ec','#e59a24'])
+    assert report['before'] < 4.5 <= report['after'] and 0 < report['opacity'] < 1
+    assert image.tobytes() == original
+    shaded = Image.alpha_composite(image.convert('RGBA'), scrim).convert('RGB')
+    assert shaded.crop((0,0,256,55)).tobytes() == image.crop((0,0,256,55)).tobytes()
+    assert 0 < scrim.getpixel((0,68))[3] < scrim.getpixel((0,80))[3]
+    again, after = contrast_scrim(shaded,80,['#f6f4ec','#e59a24'])
+    assert again is None and after['status'] == 'already_readable'
+    dark = Image.new('RGB',(256,144),'#101511')
+    assert contrast_scrim(dark,80,['#f6f4ec','#e59a24'])[0] is None
+
+
+@pytest.mark.parametrize('motion', [False, True])
+def test_static_video_detection_checks_beyond_the_opening_and_only_shades_stills(tmp_path, motion):
+    from karaoke.subtitle_style import static_video_scrim
+    video = tmp_path/'background.mp4'
+    filters = 'testsrc2=s=160x90:r=10:d=3' if motion else 'color=c=0xeee4bd:s=160x90:r=10:d=3'
+    # A long static opening must not turn the moving remainder into an album cover.
+    command = ['ffmpeg','-v','error','-f','lavfi','-i',filters]
+    if motion:
+        command += ['-vf','tpad=start_duration=2:start_mode=clone']
+    subprocess.run(command+['-c:v','libx264','-pix_fmt','yuv420p',str(video)],check=True)
+    path, report = static_video_scrim(video,tmp_path/'scrim.png',368,['#f6f4ec','#e59a24'])
+    if motion:
+        assert path is None and report['status'] == 'moving_picture'
+        assert max(report['sample_times']) > 2
+    else:
+        assert path.is_file() and report['status'] == 'sampled_static'
+        assert len(report['sample_times']) == 9 and report['contrast']['after'] >= 4.5
+
+
+def test_picture_analysis_failure_does_not_block_subtitle_rendering(tmp_path):
+    from karaoke.subtitle_style import static_video_scrim
+    path, report = static_video_scrim(tmp_path/'missing.mp4',tmp_path/'scrim.png',368,['#ffffff'])
+    assert path is None and report['status'] == 'unavailable' and report['reason']
+
+
+@pytest.mark.parametrize('video_only', [False, True])
+def test_static_background_shading_composes_with_intro_and_audio(tmp_path, monkeypatch, video_only):
+    from pathlib import Path
+    import karaoke.render_lyric_progress as renderer
+    video, audio, output = tmp_path/'picture.mp4', tmp_path/'audio.wav', tmp_path/'output.mp4'
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
+        'color=c=0xeee4bd:s=320x180:r=30:d=0.4', '-c:v', 'libx264', str(video)], check=True)
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
+        'sine=frequency=440:duration=0.4', str(audio)], check=True)
+    cues = [dict(text='Hello', start=0, end=.4,
+                 units=[dict(first=0, stop=5, start=.1, end=.4)])]
+    (tmp_path/'cues.json').write_text(json.dumps(cues))
+    (tmp_path/'info.json').write_text(json.dumps(dict(title='Example', artist='Singer')))
+    monkeypatch.setattr(sys, 'argv', [str(Path(renderer.__file__)), '--video', str(video),
+        '--audio', str(audio), '--cues', str(tmp_path/'cues.json'),
+        '--song-info', str(tmp_path/'info.json'), '--language', 'Latin', '--duration', '0.4',
+        '--output', str(output), *(['--video-only'] if video_only else [])])
+    renderer.main()
+    report = json.loads(output.with_suffix('.render.json').read_text())
+    assert report['background_readability']['contrast']['status'] == 'shaded'
+    assert report['song_intro']['visible_in_this_export'] and report['shown_lines'] == [1]
+    probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_streams',
+        '-of', 'json', str(output)]))
+    assert {s['codec_type'] for s in probe['streams']} == ({'video'} if video_only else {'video','audio'})
+    assert json.loads((tmp_path/'cues.json').read_text()) == cues
+
+
 @pytest.mark.parametrize('timing_source', [None, 'cross_model_phonemes', 'linear_fallback'])
 def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatch, timing_source):
     from PIL import Image

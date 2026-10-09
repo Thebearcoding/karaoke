@@ -4,6 +4,14 @@ export function isStaleRoomSnapshot(incoming, current) {
     (incoming.revision === current.revision && incoming.server_time < current.server_time);
 }
 
+export function queueToTop(entries, id, playingId = null) {
+  const ids = entries.map(entry => entry.id);
+  if (!ids.includes(id) || id === playingId) return null;
+  const first = ids.includes(playingId) ? [playingId, id] : [id];
+  const order = [...first, ...ids.filter(item => !first.includes(item))];
+  return order.some((item, index) => item !== ids[index]) ? order : null;
+}
+
 const bounded = (value, min, max, fallback) => Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
 
 // Only the playlist and preparation results belong to the room. Transport is

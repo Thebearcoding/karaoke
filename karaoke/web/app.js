@@ -1,5 +1,5 @@
 import { Player } from './player.js';
-import { isStaleRoomSnapshot, LocalPlayback } from './room-state.js';
+import { isStaleRoomSnapshot, LocalPlayback, queueToTop } from './room-state.js';
 import { createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
 
 const $ = id => document.getElementById(id);
@@ -539,7 +539,7 @@ function renderQueue() {
     return `<article class="queue-entry ${active ? 'current' : ''}" data-entry="${escape(entry.id)}"><span class="entry-number">${active && state.playing ? '♫' : String(i+1).padStart(2,'0')}</span>
       <button class="entry-cover" data-action="preview" aria-label="${active ? '查看播放' : '预览'}：${escape(entry.title)}">${entry.poster ? `<img class="entry-art" src="${escape(entry.poster)}" alt="">` : `<span class="entry-art">♪</span>`}</button>
       <div class="entry-info"><h3 class="entry-title"><button data-action="preview">${escape(entry.title)}</button></h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || 'YouTube 视频')}</p>${entry.status === 'failed' ? '' : preparationElapsedHTML(entry) || status}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : entry.status === 'failed' ? `<p class="entry-error">${escape(statusText(entry))} <button data-action="retry">重试</button></p>` : ''}</div>
-      <div class="entry-tools">${entry.status === 'completed' ? `<button class="queue-sing" data-action="sing" aria-label="${active && state.playing ? '回到播放' : '开始唱'}：${escape(entry.title)}">${icon('play')}${active && state.playing ? '回到播放' : '开始唱'}</button>` : ''}<button data-action="up" aria-label="上移：${escape(entry.title)}" ${i === 0 ? 'disabled' : ''}>${icon('up')}上移</button><button data-action="remove" aria-label="移除：${escape(entry.title)}">${icon('trash')}移除</button></div></article>`;
+      <div class="entry-tools">${entry.status === 'completed' ? `<button class="queue-sing" data-action="sing" aria-label="${active && state.playing ? '回到播放' : '开始唱'}：${escape(entry.title)}">${icon('play')}${active && state.playing ? '回到播放' : '开始唱'}</button>` : ''}<button data-action="top" aria-label="置顶：${escape(entry.title)}" ${queueToTop(state.entries, entry.id, state.playing ? state.current_id : null) ? '' : 'disabled'}>${icon('up')}置顶</button><button data-action="remove" aria-label="移除：${escape(entry.title)}">${icon('trash')}移除</button></div></article>`;
   }).join('');
 }
 
@@ -825,10 +825,9 @@ $('queue-list').onclick = async event => {
   const action = button.dataset.action;
   if (action === 'sing') return openQueuedSong(id);
   if (action === 'preview') return previewVideo(state.entries.find(entry => entry.id === id));
-  if (action === 'up') {
-    const order = state.entries.map(e => e.id), index = order.indexOf(id), target = index - 1;
-    [order[index],order[target]] = [order[target],order[index]];
-    await command('reorder', {order, revision:roomState.revision});
+  if (action === 'top') {
+    const order = queueToTop(state.entries, id, state.playing ? state.current_id : null);
+    if (order) await command('reorder', {order, revision:roomState.revision});
   } else {
     await command(action, {entry_id:id});
   }

@@ -1,10 +1,13 @@
 """Shared, transparent subtitle typography for previews and exported videos."""
 
 from functools import lru_cache
+import io
 import json
 import os
 from pathlib import Path
 import re
+import subprocess
+import time
 import unicodedata
 
 from fontTools.ttLib import TTFont
@@ -19,6 +22,92 @@ KANJI = r'[\u3400-\u9fff\uf900-\ufaff\U00020000-\U0002ffff々〆]+'
 
 class CaptionOverflow(ValueError):
     pass
+
+
+def contrast_scrim(picture, text_top, colors, minimum=4.5):
+    """The least black shading that protects every pixel in the lyric region."""
+    import numpy as np
+
+    def luminance(rgb):
+        value = np.asarray(rgb, dtype=np.float64)/255
+        linear = np.where(value <= .04045, value/12.92, ((value+.055)/1.055)**2.4)
+        return linear @ np.array([.2126, .7152, .0722])
+
+    text_top = max(0, min(picture.height-1, int(text_top)))
+    pixels = np.asarray(picture.convert('RGB'), dtype=np.uint16)[text_top:]
+    foreground = luminance([ImageColor.getrgb(color) for color in colors])
+
+    def contrast(alpha):
+        background = luminance((pixels*(255-alpha)+127)//255)
+        return min(float(np.min((np.maximum(background, value)+.05)/(np.minimum(background, value)+.05)))
+                   for value in foreground)
+
+    before = contrast(0)
+    report = dict(minimum=minimum, before=before, text_top=text_top, colors=list(colors))
+    if before >= minimum:
+        return None, dict(report, after=before, opacity=0., status='already_readable')
+    if contrast(255) < minimum:
+        return None, dict(report, status='unsupported_foreground')
+    low, high = 1, 255
+    while low < high:
+        middle = (low+high)//2
+        if contrast(middle) >= minimum:
+            high = middle
+        else:
+            low = middle+1
+    # Keep the upper artwork untouched; ease smoothly into a constant lyric backdrop.
+    fade_start = max(0, text_top-round(picture.height/6))
+    ramp = np.clip((np.arange(picture.height)-fade_start)/max(1, text_top-fade_start), 0, 1)
+    alpha = np.rint(low*ramp*ramp*(3-2*ramp)).astype('uint8')
+    scrim = Image.new('RGBA', picture.size)
+    scrim.putalpha(Image.fromarray(np.repeat(alpha[:, None], picture.width, axis=1)))
+    return scrim, dict(report, after=contrast(low), opacity=low/255,
+                       fade_start=fade_start, status='shaded')
+
+
+def static_video_scrim(video, output, text_top, colors):
+    """Sample the original picture, never the rendered captions; keep motion intact."""
+    import numpy as np
+    started = time.perf_counter()
+    report = dict(status='unchecked', sample_times=[], max_mean_difference=0., max_pixel_difference=0)
+    try:
+        duration = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',
+            'format=duration', '-of', 'default=nw=1:nk=1', str(video)], stderr=subprocess.PIPE, timeout=10))
+        if not np.isfinite(duration) or duration <= 0:
+            raise ValueError('Invalid picture duration')
+
+        def frame(instant, width, height, raw):
+            scale = (f'scale={width}:{height}:force_original_aspect_ratio=decrease,'
+                     f'pad={width}:{height}:(ow-iw)/2:(oh-ih)/2')
+            return subprocess.check_output(['ffmpeg', '-v', 'error', '-nostdin', '-threads', '1',
+                '-ss', str(instant), '-i', str(video), '-frames:v', '1', '-an', '-sn',
+                '-vf', scale, '-threads', '1', '-pix_fmt', 'rgb24',
+                *(['-f', 'rawvideo'] if raw else ['-f', 'image2pipe', '-c:v', 'png']), '-'],
+                stderr=subprocess.PIPE, timeout=10)
+
+        reference = None
+        for fraction in (.02, .09, .19, .32, .46, .61, .75, .88, .98):
+            instant = min(fraction*duration, max(0., duration-.1))
+            sampled = np.frombuffer(frame(instant, 128, 72, True), dtype=np.uint8).reshape(72, 128, 3)
+            report['sample_times'].append(instant)
+            if reference is not None:
+                difference = np.abs(sampled.astype('int16')-reference)
+                mean, maximum = float(difference.mean()), int(difference.max())
+                report['max_mean_difference'] = max(report['max_mean_difference'], mean)
+                report['max_pixel_difference'] = max(report['max_pixel_difference'], maximum)
+                if mean > .75 or maximum > 16 or np.percentile(difference, 99.9) > 4:
+                    return None, dict(report, status='moving_picture', seconds=time.perf_counter()-started)
+            else:
+                reference = sampled.astype('int16')
+        picture = Image.open(io.BytesIO(frame(duration*.46, 1280, 720, False))).convert('RGB')
+        scrim, contrast = contrast_scrim(picture, text_top, colors)
+        report.update(status='sampled_static', contrast=contrast)
+        if scrim is not None:
+            scrim.save(output)
+            return output, dict(report, seconds=time.perf_counter()-started)
+    except Exception as error:
+        report.update(status='unavailable', reason=f'{type(error).__name__}: {error}')
+    return None, dict(report, seconds=time.perf_counter()-started)
 
 
 @lru_cache(maxsize=4096)

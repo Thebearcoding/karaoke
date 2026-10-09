@@ -1,7 +1,7 @@
 import test, {beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import {Player} from './web/player.js';
-import {isStaleRoomSnapshot, LocalPlayback} from './web/room-state.js';
+import {isStaleRoomSnapshot, LocalPlayback, queueToTop} from './web/room-state.js';
 
 test('late HTTP replies cannot undo a newer room command or same-revision progress update', () => {
   const current = {revision:4,server_time:100,entries:[{status:'completed'}]};
@@ -101,6 +101,26 @@ test('finishing on one device does not interrupt the other or resurrect a remove
   assert.equal(phone.entry,null);
   room.entries.push({...song,id:'three'}); phone.reconcile(room);
   assert.equal(phone.entry.id,'three'); assert.equal(phone.state.playing,false);
+});
+
+test('queue to top inserts after the playing song without changing either device transport', () => {
+  const entries = ['one', 'two', 'three', 'four'].map(id => ({...song,id,status:'completed'}));
+  assert.deepEqual(queueToTop(entries,'four'),['four','one','two','three']);
+  assert.deepEqual(queueToTop(entries,'four','one'),['one','four','two','three']);
+  assert.deepEqual(queueToTop(entries,'four','two'),['two','four','one','three']);
+  assert.equal(queueToTop(entries,'one'),null);
+  assert.equal(queueToTop(entries,'one','one'),null);
+  assert.equal(queueToTop(entries,'two','one'),null);
+  assert.equal(queueToTop(entries,'deleted'),null);
+  assert.deepEqual(queueToTop(entries,'four','removed-playing-entry'),['four','one','two','three']);
+  assert.deepEqual(entries.map(e=>e.id),['one','two','three','four']);
+  const computer = new LocalPlayback(), phone = new LocalPlayback();
+  computer.select(entries[1],true); phone.select(entries[0],true);
+  const before = [computer,phone].map(p=>p.save());
+  const room = {entries:queueToTop(entries,'four',computer.entry.id).map(id=>entries.find(e=>e.id===id))};
+  for (const device of [computer,phone]) device.reconcile(room);
+  assert.deepEqual([computer,phone].map(p=>p.save()),before);
+  assert.ok(computer.state.playing && phone.state.playing);
 });
 
 test('browser refresh restores only its own song, position and mix, paused until a gesture', t => {

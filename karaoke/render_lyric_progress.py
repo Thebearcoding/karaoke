@@ -9,7 +9,7 @@ import time
 from PIL import Image, ImageChops, ImageColor, ImageDraw
 
 from subtitle_style import (TOKENS, STYLES, CaptionOverflow, caption_height, caption_image,
-                            compact_caption_image, japanese_readings, song_intro_image)
+                            compact_caption_image, japanese_readings, song_intro_image, static_video_scrim)
 from subtitles import countdown_events, countdown_state, normalized, read_ahead_state
 from stage_progress import progress_items, report_progress
 
@@ -187,6 +187,11 @@ def main():
                       if args.next_line else 0)
     args.bottom_margin = max(args.bottom_margin, preview_height)
     width, height, fps = 1280, main_height+preview_height, 30
+    started = time.perf_counter()
+    report_progress(detail='检查画面对比度')
+    scrim_path, background = static_video_scrim(args.video, args.output.with_suffix('.contrast.png'),
+        720-main_height-args.bottom_margin,
+        [STYLES[args.style]['color'], STYLES[args.style].get('progress_color', '#efd29a')])
     intro = None
     intro_path = None
     if args.song_info:
@@ -211,13 +216,20 @@ def main():
     if args.audio and not args.video_only:
         command += ['-ss', str(args.start), '-i', str(args.audio)]
     audio_index = 2 if args.audio and not args.video_only else 0
+    next_input = 3 if args.audio and not args.video_only else 2
+    if scrim_path:
+        scrim_index = next_input
+        next_input += 1
+        command += ['-loop', '1', '-framerate', str(fps), '-i', str(scrim_path)]
     if intro_path:
-        intro_index = 3 if args.audio and not args.video_only else 2
+        intro_index = next_input
         command += ['-loop', '1', '-framerate', str(fps), '-i', str(intro_path)]
     filters = (
         '[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,'
-        'fps=30,setpts=PTS-STARTPTS[base];[1:v]setpts=PTS-STARTPTS[text];'
-        f'[base][text]overlay=0:H-{main_height}-{args.bottom_margin}:format=auto')
+        'fps=30,setpts=PTS-STARTPTS[base];[1:v]setpts=PTS-STARTPTS[text];')
+    if scrim_path:
+        filters += f'[base][{scrim_index}:v]overlay=0:0:format=auto[readable];'
+    filters += f'[{"readable" if scrim_path else "base"}][text]overlay=0:H-{main_height}-{args.bottom_margin}:format=auto'
     if intro_path:
         filters += (f'[captioned];[captioned][{intro_index}:v]overlay=0:{intro["top"]}:format=auto:'
                     f'enable=\'lt(t,{intro["end"]-args.start:.9f})\'')
@@ -230,7 +242,6 @@ def main():
     command += [
         '-t', str(args.duration), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19',
         '-threads', '4', '-movflags', '+faststart', str(args.output)]
-    started = time.perf_counter()
     blank = Image.new('RGBA', (width, height))
     cue_starts = [c['start'] for c in cues]
     countdown = countdown_events(cues, minimum_silence=TOKENS['countdown']['minimum_silence_seconds'],
@@ -314,6 +325,7 @@ def main():
         'shown_lines': sorted(i+1 for i in shown),
         'display_pages': pagination,
         'furigana': readings_report,
+        'background_readability': background,
         'decode_check': 'pending_final_mux' if args.video_only else 'passed', 'probe': probe,
         'motion': 'Fixed text positions; hard line cuts; linear left-to-right fill within each existing timing unit',
         'next_line_enabled': args.next_line,
