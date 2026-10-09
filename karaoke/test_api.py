@@ -2583,6 +2583,29 @@ def test_scattered_missing_tokens_do_not_trigger_whole_song_recognition():
     assert result['result']==block['result']
 
 
+@pytest.mark.parametrize('gap', [6, 35])
+def test_localized_partial_phrase_preserves_good_word_times_for_phonetic_refinement(gap):
+    from copy import deepcopy
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines = ['earlier verse', 'we carry every dream', 'the next verse']
+    segments = [dict(words=[dict(word=w,start=i*gap+j*.4,end=i*gap+(j+1)*.4)
+                           for j,w in enumerate(text.split())]) for i,text in enumerate(lines)]
+    observation = deepcopy(segments)
+    segments[1]['words'][2]['end'] = segments[1]['words'][2]['start']
+    duration=gap*3+5
+    block = dict(range=[0,3],context=[0,3],source_range=[0.,duration],result=dict(segments=segments))
+    calls=[]
+    def recognize(begin,end):
+        calls.append((begin,end))
+        return dict(segments=[dict(words=[dict(w,start=w['start']-begin,end=w['end']-begin)
+                                         for w in segment['words']]) for segment in observation])
+    result = recover_with_local_asr(block,lines,np.zeros(duration*16000),'English',recognize,
+        lambda *a,**k:pytest.fail('Already localized phrase lost its valid word times'))
+    assert len(calls)==1 and result['result']==block['result']
+    assert calls[0][1]<duration
+    assert not result['asr_localizations'][0]['global_localization']
+
+
 def test_missing_recognition_uses_original_audio_before_spending_alignment_retries():
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines, starts = ['alpha', 'bravo', 'charlie'], [1.,4.,8.]

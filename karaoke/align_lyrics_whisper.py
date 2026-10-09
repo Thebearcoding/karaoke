@@ -333,8 +333,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         windows.append((left, right, begin, end))
     # Scattered partial word failures do not invalidate the song's anchors.
     # Keep them local even when many lines contain a missing token.
-    global_recovery = force_global or bool(quiet) or len(unanchored) >= max(4, (stop-first+4)//5) or any(
-        e-b > 45 and unanchored.intersection(range(left,right)) for left,right,b,e in windows)
+    global_recovery = force_global or bool(quiet) or len(unanchored) >= max(4, (stop-first+4)//5)
     untimed = {i for i in bad if cues[i]['status'] == 'unresolved_timing'}
     if global_recovery:
         windows = [(first, stop, block['source_range'][0], block['source_range'][1])]
@@ -352,7 +351,10 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         if needs_relocation and not untimed.intersection(range(left, right)):
             report['reason'] = 'deferred_until_missing_lines_are_located'
             continue
-        if not 0 <= begin < end <= duration or end-begin > (600 if global_recovery else 45):
+        # A long interlude does not invalidate neighbouring lyric anchors.
+        # recognize_audio divides this bounded search into overlapping chunks;
+        # recovered phrase bounds then narrow the acoustic alignment itself.
+        if not 0 <= begin < end <= duration or end-begin > 600:
             report['reason'] = 'localization_budget_exceeded'
             continue
         try:
@@ -434,6 +436,15 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                     mislocalized.add(i+left)
         targets.update(mislocalized)
         bad.update(mislocalized)
+        # A localized phrase with a missing token still has usable neighbours.
+        # Leave those times to phonetic refinement instead of realigning the
+        # whole sentence just because its display fallback merged one word.
+        located_partial = {i for i in targets-unanchored-mislocalized
+            if anchors[i-left]['status']=='candidate' and cues[i]['status']=='candidate'
+            and max(cues[i]['start'],anchors[i-left]['start']) <
+                min(cues[i]['end'],anchors[i-left]['end'])}
+        targets.difference_update(located_partial)
+        bad.difference_update(located_partial)
         revisited.update(targets)
         report['contradicted_lines'] = sorted(i+1 for i in mislocalized)
         proposed, replaced = deepcopy(result), []
