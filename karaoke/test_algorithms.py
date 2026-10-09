@@ -670,6 +670,44 @@ class SubtitleIntegrity(unittest.TestCase):
                     self.assertEqual(result[0]['units'][0]['start'],1.)
                     self.assertFalse(report['constraints'])
 
+    def test_label_boundary_uncertainty_does_not_preserve_a_displaced_first_word(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        cue = dict(text='あいう', start=.2, end=4.6, units=[
+            dict(first=i, stop=i+1, text=c, start=s, end=e)
+            for i,(c,s,e) in enumerate(zip('あいう', [.2,4.,4.3], [2.8,4.2,4.6]))])
+        for mode in ('label_span', 'untyped', 'different_end', 'different_phrase',
+                     'silent', 'unstable', 'display_hold'):
+            with self.subTest(mode=mode):
+                views = [[dict(u, timing_evidence='ctc_label_event') for u in cue['units']] for _ in range(2)]
+                views[0][0].update(start=3., end=3.78)
+                views[1][0].update(start=3.16, end=3.78)
+                predictions = [[dict(u, timing_evidence='ctc_event', emission_end=u['end']-.02)
+                                for u in cue['units']] for _ in range(3)]
+                for v in predictions: v[0].update(start=3.01, end=3.9, emission_end=3.75)
+                if mode == 'untyped':
+                    for v in views: v[0].pop('timing_evidence')
+                if mode == 'different_end': views[1][0]['end'] = 3.98
+                if mode == 'different_phrase': views[1][0]['start'] = 3.6
+                if mode == 'unstable': predictions[0][0]['start'] = 3.2
+                if mode == 'display_hold':
+                    for v in predictions: v[0]['emission_end'] = 3.05
+                wave = np.ones(44100*5)*.1
+                if mode == 'silent': wave[3*44100:round(3.1*44100)] = 0.
+                result, report = reconcile_timing([cue], wave, lambda *a,**k: views,
+                    lambda *a: predictions, protocol, 'Japanese', _retry_context=False)
+                self.assertEqual(cue['units'][0]['start'], .2)
+                self.assertEqual(result[0]['units'][1:], [dict(u, acoustic_end=u['end']) for u in cue['units'][1:]])
+                if mode == 'label_span':
+                    self.assertEqual(result[0]['units'][0]['start'], 3.01)
+                    self.assertEqual(result[0]['units'][0]['independent_evidence'], 'ctc_label_localization')
+                    self.assertEqual(report['constraints'][0]['onset'], 3.01)
+                    validate_timeline(result, [cue['text']], 5., report['constraints'], 'Japanese')
+                else:
+                    self.assertEqual(result[0]['units'][0]['start'], .2)
+                    self.assertFalse(report['constraints'])
+
     def test_internal_merged_word_reobserves_a_stale_phrase_window_once(self):
         from copy import deepcopy
         from timing_validation import reconcile_timing, validate_timeline

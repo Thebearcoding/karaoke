@@ -93,6 +93,20 @@ class AcousticWitness:
         return result
 
 
+def same_acoustic_event(a, b, localization_tolerance):
+    """CTC label spans may lose a leading blank without moving the word."""
+    if abs(a['start']-b['start']) <= .1:
+        return True
+    if any(u.get('timing_evidence') != 'ctc_label_event' for u in (a, b)):
+        return False
+    ends = [u.get('first_event_end', u['end']) for u in (a, b)]
+    return (all(isinstance(end, (int, float)) and np.isfinite(end) and u['start'] < end <= u['end']
+                for u, end in zip((a, b), ends))
+            and abs(a['start']-b['start']) <= localization_tolerance
+            and abs(ends[0]-ends[1]) <= .1
+            and max(a['start'], b['start']) < min(ends))
+
+
 def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *, spans=None):
     """Return measured boundaries only when all views independently agree."""
     expected = spans if spans is not None else [
@@ -141,9 +155,17 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *,
             event_end = float(np.median(primary_ends))
             supported = all(u['start'] <= event_end+.1 and end >= start-.1
                             for u,end in zip(secondary,secondary_ends))
+            if abs(secondary[0]['start']-secondary[1]['start']) > .1:
+                # An uncertain label onset is only localization evidence. Its
+                # whole event must fit the stable phonetic event, not a long
+                # display hold or the rest of a joined lyric group.
+                supported = supported and all(start-.1 <= u['start'] < end <= event_end+.1
+                    for u,end in zip(secondary,secondary_ends))
+            independent = same_acoustic_event(*secondary, protocol['maximum_change_seconds'])
         else:
             supported = all(abs(u['start']-start) <= .1 for u in secondary)
-        if (not supported or abs(secondary[0]['start']-secondary[1]['start']) > .1):
+            independent = abs(secondary[0]['start']-secondary[1]['start']) <= .1
+        if not supported or not independent:
             return None, 'independent acoustic disagreement'
         if not bounds[0] <= start < end <= bounds[1] or (result and start-result[-1]['start'] < .015):
             return None, 'conflict with adjacent words'

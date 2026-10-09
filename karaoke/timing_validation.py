@@ -277,7 +277,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
     witness returns original/vocal word views. predict returns three independent
     context predictions without old word priors. Both are cacheable adapters.
     """
-    from cjk_recovery import corroborated_group
+    from cjk_recovery import corroborated_group, same_acoustic_event
     result, reports, ledger = deepcopy(cues), [], deepcopy(list(constraints))
     context_hints = {}
     for cue in result:
@@ -326,7 +326,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             challenged = {v['proof']['first'] for v in timing_violations(result, ledger)
                           if v['proof']['line']==index+1}
             suspects = [a for a,b in zip(*views) if a['first'] in old
-                        and abs(a['start']-b['start']) <= .1
+                        and same_acoustic_event(a, b, protocol['maximum_change_seconds'])
                         and (a['first'] in challenged or
                              abs(old[a['first']]['start']-a['start']) > protocol['maximum_change_seconds'])]
             if not suspects:
@@ -396,7 +396,9 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                     original={u['first']:u for u in views[0]}
                     other={u['first']:u for u in views[1]}
                     localized=all(abs(original[u['first']]['start']-other[u['first']]['start'])<=protocol['maximum_change_seconds'] for u in members)
-                    if any(abs(original[u['first']]['start']-other[u['first']]['start'])>.1 for u in members):
+                    if any(not (u.get('independent_evidence') == 'ctc_label_localization' and
+                                same_acoustic_event(original[u['first']], other[u['first']], protocol['maximum_change_seconds']))
+                           and abs(original[u['first']]['start']-other[u['first']]['start'])>.1 for u in members):
                         reason='original and vocal localization disagree'
                     limit=units[hi]['start'] if hi<len(units) else bounds[1]
                     for member_index,(unit,following) in enumerate(zip(members,[*members[1:],dict(start=limit)])):
