@@ -10,9 +10,9 @@ from itertools import groupby
 import numpy as np
 
 if __package__:
-    from .subtitles import acoustic_end, collapsed_phrase, normalized, highlight_coverage_errors
+    from .subtitles import acoustic_end, collapsed_phrase, normalized, highlight_coverage_errors, latin_word_text
 else:
-    from subtitles import acoustic_end, collapsed_phrase, normalized, highlight_coverage_errors
+    from subtitles import acoustic_end, collapsed_phrase, normalized, highlight_coverage_errors, latin_word_text
 
 
 def timing_violations(cues, constraints):
@@ -438,7 +438,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             # window budget; predict() still requires three contexts <= 32 s.
             if cue['aligned_end']-cue['aligned_start'] > 60:
                 raise ValueError('Acoustic localization context exceeds 60 seconds')
-            letters = [c for c in cue['text'] if c.isalpha()]
+            letters = [c for c in latin_word_text(cue['text']) if c.isalpha()]
             review_language = 'English' if letters and all(c.isascii() for c in letters) else language
             observation, offset = cue, None
             # Joint localization initializes occurrence identity. Later passes
@@ -969,7 +969,7 @@ class AcousticReview:
                 # its language. The caller still corroborates every onset.
                 parts = []
                 for unit in views[0]:
-                    letters = [c for c in unit['text'] if c.isalpha()]
+                    letters = [c for c in latin_word_text(unit['text']) if c.isalpha()]
                     local_language = 'English' if letters and all(c.isascii() for c in letters) else language
                     if parts and parts[-1][0] == local_language:
                         parts[-1][2] = unit['stop']

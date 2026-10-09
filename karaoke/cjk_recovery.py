@@ -228,7 +228,7 @@ def latin_recovery_groups(cue):
         parts = cue['units'][lo:hi]
         first, stop = parts[0]['first'], parts[-1]['stop']
         text = cue['text'][first:stop]
-        if (any(c.isalnum() and not c.isascii() for c in text)
+        if (any(c.isalnum() and not c.isascii() for c in latin_word_text(text))
                 or any(u.get('timing_source') == 'repeated_lyric_audio' for u in parts)
                 or any(a < first < b or a < stop < b for a, b in words)):
             continue
@@ -241,7 +241,7 @@ def recover_latin_groups(cues, wave, witness, protocol, model=None):
     result, reports = deepcopy(cues), []
     floor = None
     for line, cue in enumerate(cues):
-        foreign = [i for i, c in enumerate(cue['text']) if c.isalnum() and not c.isascii()]
+        foreign = [i for i, c in enumerate(latin_word_text(cue['text'])) if c.isalnum() and not c.isascii()]
         contexts, replacements = {}, []
         # Each run keeps its original character positions and foreign-word
         # audio boundaries; only the English text reaches the English model.

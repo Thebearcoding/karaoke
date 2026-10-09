@@ -668,10 +668,10 @@ class SubtitleIntegrity(unittest.TestCase):
         from copy import deepcopy
         from types import SimpleNamespace
         from timing_validation import AcousticReview
-        from subtitles import highlight_spans
+        from subtitles import highlight_spans, latin_word_text
         protocol = dict(context_padding_seconds=[.2, .4, .6])
         wave = np.arange(12*44100, dtype=np.float32)/44100
-        for text in ('甲乙 go now 丙丁', 'go 甲乙', '甲乙 now', '甲乙', 'go now'):
+        for text in ('甲乙 go now 丙丁', 'go 甲乙', '甲乙 now', '甲乙', 'go now', '甲乙 gо nоw 丙丁'):
             with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
                 spans = list(highlight_spans(text, 'Chinese'))
                 measured = [dict(first=a, stop=b, text=text[a:b], start=4.+i*.5, end=4.3+i*.5)
@@ -685,7 +685,7 @@ class SubtitleIntegrity(unittest.TestCase):
                     return dict(units=[dict(u, start=positions[u['text']], end=positions[u['text']]+.3)
                                        for u in units])
                 def english(audio, words):
-                    self.assertTrue(all(w.isascii() for w in words))
+                    self.assertTrue(all(latin_word_text(w).isascii() for w in words))
                     calls.append(('English', 'phonemes', words))
                     return ([dict(text=w, start=positions[w]-float(audio[0]),
                                   end=positions[w]+.3-float(audio[0])) for w in words], None, None)
@@ -700,7 +700,7 @@ class SubtitleIntegrity(unittest.TestCase):
                 self.assertEqual(len(result), 3)
                 for predicted in result:
                     for unit in predicted:
-                        if unit['text'].isascii():
+                        if latin_word_text(unit['text']).isascii():
                             self.assertEqual(unit['timing_evidence'], 'phonetic_span')
                     self.assertEqual([(u['first'],u['stop'],u['text']) for u in predicted],
                                      [(u['first'],u['stop'],u['text']) for u in measured])
@@ -1142,15 +1142,20 @@ class SubtitleIntegrity(unittest.TestCase):
     def test_timing_contract_checks_middle_words_and_all_languages(self):
         from copy import deepcopy
         from timing_validation import reconcile_timing
+        from subtitles import highlight_spans
         protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
-        for language,text in [('Chinese','甲乙丙'),('Japanese','あいう'),('English','one two three')]:
-            with self.subTest(language=language):
-                spans=[(0,1),(1,2),(2,3)] if language!='English' else [(0,3),(4,7),(8,13)]
+        for language,text,spoken in [('Chinese','甲乙丙','Chinese'),('Japanese','あいう','Japanese'),
+                                     ('English','one two three','English'),('Japanese','onе two three','English')]:
+            with self.subTest(language=language, text=text):
+                spans=list(highlight_spans(text, language)) if spoken=='English' else [(i,i+1) for i in range(len(text))]
                 units=[dict(first=a,stop=b,text=text[a:b],start=t,end=t+.2,timing_source='singing_phonemes')
                        for (a,b),t in zip(spans,[.2,1.,4.])]
                 cues=[dict(text=text,start=.2,end=4.2,aligned_start=.2,aligned_end=4.2,units=units)]
                 observed=deepcopy(units);observed[1].update(start=3.,end=3.3)
-                result,report=reconcile_timing(cues,np.ones(44100*5)*.1,lambda *a,**k:[observed,observed],
+                def witness(*args, language):
+                    self.assertEqual(language, spoken)
+                    return [observed,observed]
+                result,report=reconcile_timing(cues,np.ones(44100*5)*.1,witness,
                     lambda *a:[observed]*3,protocol,language)
                 self.assertEqual([u['start'] for u in result[0]['units']],[.2,3.,4.])
                 self.assertFalse(report['unresolved'])
@@ -1844,20 +1849,21 @@ class SubtitleIntegrity(unittest.TestCase):
         from cjk_recovery import recover_latin_groups
         protocol = dict(context_padding_seconds=[.35, .6, 1.],
                         maximum_spread_seconds=.08, minimum_relative_rms=.03)
-        for mode in ('english', 'foreign', 'repeated'):
+        for mode in ('english', 'mixed_script', 'foreign', 'repeated'):
             with self.subTest(mode=mode):
                 calls = []
+                text = 'hоme' if mode == 'mixed_script' else 'home'
                 class Model:
                     model_identity = {'model': 'independent phoneme model'}
                     def align(_, audio, words):
-                        self.assertEqual(words, ['home'])
+                        self.assertEqual(words, [text])
                         begin = float(audio[0])-.1
                         calls.append(begin)
-                        return [dict(text='home', start=2.05-begin, end=2.55-begin)], None, .01
+                        return [dict(text=text, start=2.05-begin, end=2.55-begin)], None, .01
                 def witness(cue, wave):
-                    return [[dict(first=0, stop=4, text='home', start=2.06, end=2.54)] for _ in range(2)]
-                cue = dict(text='home', aligned_start=2., aligned_end=2.8, units=[
-                    dict(first=0, stop=2, text='ho', start=2., end=2.4),
+                    return [[dict(first=0, stop=4, text=text, start=2.06, end=2.54)] for _ in range(2)]
+                cue = dict(text=text, aligned_start=2., aligned_end=2.8, units=[
+                    dict(first=0, stop=2, text=text[:2], start=2., end=2.4),
                     dict(first=2, stop=4, text='me', start=2.4, end=2.8)])
                 if mode == 'foreign':
                     cue.update(text='あ home', units=[
@@ -1867,9 +1873,9 @@ class SubtitleIntegrity(unittest.TestCase):
                     cue['units'][0]['timing_source'] = 'repeated_lyric_audio'
                 actual, report = recover_latin_groups([cue], np.arange(44100*6)/44100+.1,
                                                        witness, protocol, Model())
-                if mode == 'english':
+                if mode in ('english', 'mixed_script'):
                     self.assertEqual(len(calls), 3)
-                    self.assertEqual(actual[0]['units'], [dict(first=0, stop=4, text='home',
+                    self.assertEqual(actual[0]['units'], [dict(first=0, stop=4, text=text,
                         start=2.05, end=2.55, timing_source='cross_model_phonemes')])
                     self.assertFalse(highlight_coverage_errors(actual, 'Japanese'))
                 else:
