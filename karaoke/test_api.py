@@ -5127,7 +5127,8 @@ def test_playback_fallback_backtracks_refinements_that_block_later_lyrics(tmp_pa
 
 
 @pytest.mark.parametrize('shift', [.1, 2.])
-def test_failed_refinement_cannot_take_priority_in_an_unrelated_gap(tmp_path, shift):
+@pytest.mark.parametrize('independently_located', [False, True])
+def test_failed_refinement_cannot_take_priority_in_an_unrelated_gap(tmp_path, shift, independently_located):
     pipeline = Pipeline(dict(url=URL), tmp_path)
     (tmp_path/'lyrics.json').write_text(json.dumps(dict(language='English',lines=['first','last'],provenance={})))
     def cue(text,start):
@@ -5136,9 +5137,16 @@ def test_failed_refinement_cannot_take_priority_in_an_unrelated_gap(tmp_path, sh
     coarse=[cue('first',1.),cue('last',5.)];refined=[cue('first',1.+shift),cue('last',5.)]
     for name,values in [('word-cues.json',coarse),('ordered-cues.json',refined)]:
         path=tmp_path/name;path.write_text(json.dumps(values));pipeline.alignment_outputs.add(path)
+    if independently_located:
+        folder=tmp_path/'alignment';folder.mkdir();pipeline.alignment_outputs.add(folder)
+        raw=[dict(range=[0,2],context=[0,2],source_range=[0.,8.],
+            result=dict(segments=[dict(words=[dict(word=c['text'],start=c['start'],end=c['end'])]) for c in coarse]),
+            asr_localizations=[dict(context=[0,2],source_range=[0.,8.],recognition=dict(segments=[{}]),
+                accepted_lines=[1],anchors=refined)])]
+        (folder/'raw.json').write_text(json.dumps(raw))
     pipeline.playback_fallback({},8.,StageFailure('align_phonemes','fixture'))
     actual=json.loads((tmp_path/'cues.json').read_text())
-    assert actual == (refined if shift<.5 else coarse)
+    assert actual == (refined if shift<.5 or independently_located else coarse)
 
 
 @pytest.mark.parametrize('fresh', [True, False])

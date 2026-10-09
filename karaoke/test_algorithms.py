@@ -2588,6 +2588,50 @@ class AlignmentIntegrity(unittest.TestCase):
             cues = json.loads((root/'output/cues.json').read_text())
             np.testing.assert_allclose([c['start'] for c in cues], [1.1, 6.8, 12.1])
 
+    def test_independent_phrase_location_does_not_reuse_a_displaced_coarse_word(self):
+        import copy
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from align_english_onsets import align_job
+        from karaoke.pipeline import phrase_locations
+
+        lines=['morning','again','evening']
+        coarse=[dict(text=t,start=s,end=s+.5,status='candidate') for t,s in zip(lines,[1.,5.,10.])]
+        located=[dict(coarse[1],start=8.,end=9.),coarse[2]]
+        evidence=dict(context=[1,3],source_range=[4.,12.],anchors=located,
+                      recognition=dict(segments=[{}]),accepted_lines=[2])
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);sf.write(root/'audio.wav',np.zeros(15*16000),16000)
+            (root/'lyrics.json').write_text(json.dumps(dict(language='English',lines=lines)))
+            for mode in ('accepted','unaccepted','other_block','wrong_text','no_recognition','no_context'):
+                with self.subTest(mode=mode):
+                    raw=[dict(range=[1,3],asr_localizations=[copy.deepcopy(evidence)])]
+                    observed=raw[0]['asr_localizations'][0]
+                    if mode=='unaccepted':observed['accepted_lines']=[]
+                    if mode=='other_block':raw[0]['range']=[2,3]
+                    if mode=='wrong_text':observed['anchors'][0]['text']='different'
+                    if mode=='no_recognition':observed.pop('recognition')
+                    if mode=='no_context':observed.pop('context')
+                    original=copy.deepcopy((coarse,raw))
+                    locations=phrase_locations(lines,raw)
+                    anchors=[locations.get(i,c) for i,c in enumerate(coarse)]
+                    self.assertEqual((coarse,raw),original)
+                    (root/'anchors.json').write_text(json.dumps(anchors))
+                    def align(audio,words):
+                        starts=[1.,8.5,10.] if len(audio)==15*16000 else [.6,8.1,9.6]
+                        return [dict(text=t,start=s,end=s+.3,confidence=.8)
+                                for t,s in zip(words,starts)],None,.02
+                    model=SimpleNamespace(method='singing',device='cpu',onset_ratio=.02,
+                                          model_identity={},align=Mock(side_effect=align))
+                    out=root/mode
+                    report=align_job(model,dict(audio=str(root/'audio.wav'),lyrics=str(root/'lyrics.json'),
+                        anchors=str(root/'anchors.json'),output=str(out)),full_song=True)
+                    self.assertEqual(bool(report['failures']),mode!='accepted')
+                    if mode=='accepted':
+                        self.assertEqual(model.align.call_count,1)
+                        self.assertEqual([c['start'] for c in json.loads((out/'cues.json').read_text())],[1.,8.5,10.])
+
     def test_english_phrase_retry_repairs_crossing_with_its_neighbor(self):
         import json
         from types import SimpleNamespace

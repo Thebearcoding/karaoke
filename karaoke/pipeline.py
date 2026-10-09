@@ -170,6 +170,26 @@ def alignment_recovery_summary(raw):
         asr_localization_windows=len({tuple(r['source_range']) for r in localized if r.get('recognition')}))
 
 
+def phrase_locations(lines, blocks):
+    """Keep accepted independent locations, not a timing candidate's own bounds."""
+    locations = {}
+    for block in blocks:
+        first, stop = block['range']
+        for observed in block.get('asr_localizations', []):
+            if not observed.get('recognition') or 'context' not in observed:
+                continue
+            anchors = observed.get('anchors', [])
+            offset = observed['context'][0]
+            for line in observed['accepted_lines']:
+                index, local = line-1, line-1-offset
+                if not first <= index < min(stop, len(lines)) or not 0 <= local < len(anchors):
+                    continue
+                anchor = anchors[local]
+                if anchor['status'] == 'candidate' and anchor['text'] == lines[index]:
+                    locations[index] = anchor
+    return locations
+
+
 class Pipeline:
     def __init__(self, request, output, *, separator_python=None, device='auto', text_model='gpt-5-mini',
                  max_duration=900, catalog_root=ROOT, cookies_file=None, audio_only=False,
@@ -234,7 +254,7 @@ class Pipeline:
                                     ['stems'], [ROOT/'exact_stems.py', ROOT/'three_stems.py']),
             'align_words': (['vocals-16k.wav', 'source-44100.wav', 'lyrics.json', 'anchors.json', 'alignment-jobs.json'],
                             ['alignment'], alignment_code['align_words']),
-            'align_phonemes': ((['vocals-16k.wav', 'lyrics.json', 'word-cues.json', 'english-jobs.json'] if english else
+            'align_phonemes': ((['vocals-16k.wav', 'lyrics.json', 'word-cues.json', 'english-anchors.json', 'english-jobs.json'] if english else
                                 ['music-separation/song/vocals.wav', 'word-cues.json', 'phoneme-jobs.json']),
                                ['english-onsets' if english else 'phonemes'], alignment_code['align_phonemes']),
             'align_repeats': (['music-separation/song/vocals.wav', 'phonemes/cues.json', 'word-cues.json', 'repeat-jobs.json'],
@@ -888,8 +908,10 @@ class Pipeline:
             cues = json.loads((output/'context/song/cues.json').read_text())
         else:
             from onset_consensus import blend_cues, context_scope_violations
+            locations = phrase_locations(lyrics['lines'], raw)
+            write_json(output/'english-anchors.json', [locations.get(i, cue) for i, cue in enumerate(words)])
             job = dict(audio=str(output/'vocals-16k.wav'), lyrics=str(output/'lyrics.json'),
-                       anchors=str(output/'word-cues.json'), output=str(output/'english-onsets'))
+                       anchors=str(output/'english-anchors.json'), output=str(output/'english-onsets'))
             write_json(output/'english-jobs.json', [job])
             self.run('align_phonemes', [sys.executable, ROOT/'align_english_onsets.py', '--method', 'singing',
                 '--onset-ratio', '.02', '--full-song', '--jobs', output/'english-jobs.json', '--device', self.device])
@@ -1324,12 +1346,14 @@ class Pipeline:
             except (OSError, ValueError, KeyError, TypeError):
                 continue
         cues, sources, estimated, omitted = [], [], [], []
+        locations = {}
         raw_path = self.output/'alignment/raw.json'
         if not unverified_draft and raw_path.parent in self.alignment_outputs and raw_path.is_file():
             from lyric_progress import partial_alignment_cues
             try:
                 blocks = json.loads(raw_path.read_text())
                 recovery = alignment_recovery_summary(blocks)
+                locations = phrase_locations(lyrics['lines'], blocks)
                 raw = ('alignment/raw.json', partial_alignment_cues(lyrics['lines'],
                     blocks, duration, lyrics['language']))
                 # Coarse captions have no word timings. Do not discard usable
@@ -1366,11 +1390,13 @@ class Pipeline:
                 options[-1].append((name, dict(cue, units=units)))
             located = next((c for name in ('word-cues.json', 'alignment/raw.json', 'alignment/cues.json', 'anchors.json')
                             for n,c in options[-1] if n==name), None)
-            if located is not None and not constraints:
+            if (located is not None or line in locations) and not constraints:
                 # A failed refinement may remain ordered while drifting into
                 # the following gap. Prefer the located phrase, retaining the
                 # other candidate only if it is needed for a complete path.
-                low, high = located['units'][0]['start'], located['units'][-1]['end']
+                location = locations.get(line)
+                low, high = ((location['start'], location['end']) if location else
+                             (located['units'][0]['start'], located['units'][-1]['end']))
                 options[-1].sort(key=lambda pair: pair[1]['units'][-1]['end'] <= low or
                                  pair[1]['units'][0]['start'] >= high)
         def follows(previous, current):

@@ -645,7 +645,7 @@ def record_failure(attempt, job, folder):
     for pattern in ('asr/*.json', 'asr-requests/*.json', 'alignment/*.json', 'phonemes/*.json', 'context/**/*.json',
                     'lyric-source-attempts/**/*.json',
                     'repeated-lyrics/*.json', 'english-onsets/*.json',
-                    'lyrics.json', 'anchors.json', 'word-cues.json', 'ordered-cues.json', 'cues.json', 'quality.json',
+                    'lyrics.json', 'anchors.json', 'english-anchors.json', 'word-cues.json', 'ordered-cues.json', 'cues.json', 'quality.json',
                     'prepared-lyrics.json', 'playback-warning.json', 'lyrics-first-lookup.json',
                     'published-lyrics.json', 'lyric-lookup.json', 'song-metadata.json',
                     'audio-result.json', 'result.json', 'lyric-coverage-validation.json',
