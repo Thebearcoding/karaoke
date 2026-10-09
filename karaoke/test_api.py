@@ -53,6 +53,21 @@ def finished(client, job_id):
     raise AssertionError('Worker did not finish')
 
 
+def test_parallel_workers_share_periodic_budget_scan_and_recheck_pressure(tmp_path,monkeypatch):
+    from karaoke.api import Worker
+    worker=Worker(Store(tmp_path),concurrency=8)
+    stamp=[10.]
+    monkeypatch.setattr('karaoke.api.time.monotonic',lambda:stamp[0])
+    scan=Mock(side_effect=[True,False,True])
+    monkeypatch.setattr(worker.store.cache,'enforce',scan)
+    assert all(worker.check_budget() for _ in range(8))
+    assert scan.call_count==1
+    stamp[0]+=1.1
+    assert not worker.check_budget()  # Newly observed pressure still stops work.
+    assert worker.check_budget()  # A completed job may have released its files.
+    assert scan.call_count==3
+
+
 @pytest.mark.parametrize('bad_state', ['{', '[]', 'true', 'NaN', '-1'])
 def test_corrupt_provider_backoff_does_not_kill_dispatch_or_bypass_hold(tmp_path, bad_state):
     app = create_app(tmp_path, worker_command=fake_worker, version='test')
@@ -4790,6 +4805,32 @@ def test_prepared_lyrics_preserve_provenance_and_reject_different_inputs(tmp_pat
             assert json.loads((pipeline.output/'anchors.json').read_text()) == []
 
 
+@pytest.mark.parametrize('change', [None, 'url', 'metadata', 'code', 'override', 'force', 'empty', 'corrupt'])
+def test_normal_preparation_reuses_bound_lyrics_and_refetches_stale_cache(tmp_path, monkeypatch, change):
+    from karaoke.lyric_lookup import prepared_lyrics_identity, read_prepared_lyrics
+    metadata = dict(title='Example', artist='Singer')
+    lyrics = dict(title='Example', artist='Singer', language='English', lines=['Original published text'],
+                  source_url=URL, provenance=dict(route='lyrics_first', kind='online_lyric_text'))
+    packet = dict(identity=prepared_lyrics_identity(URL, metadata), lyrics=lyrics)
+    request = dict(url=URL)
+    if change == 'url': packet['identity']['url'] = 'https://www.youtube.com/watch?v=abcdefghijk'
+    if change == 'metadata': metadata['title'] = 'Changed recording'
+    if change == 'code': packet['identity']['code_sha256']['lyric_lookup.py'] = 'old'
+    if change == 'override': request['title'] = 'Explicit song choice'
+    if change == 'force': request['force'] = True
+    if change == 'empty': packet['lyrics'] = None
+    cached=tmp_path/'prepared-lyrics.json'
+    cached.write_text('{' if change == 'corrupt' else json.dumps(packet))
+    fresh=dict(lyrics,lines=['Newly fetched text'])
+    fetch=Mock(return_value=fresh)
+    monkeypatch.setattr('karaoke.lyric_lookup.prepare_online_lyrics', fetch)
+    monkeypatch.setattr('karaoke.pipeline.local_asr.offline', lambda:False)
+    actual=Pipeline(request,tmp_path).prepare_text(metadata,10)
+    assert actual == (fresh if change else lyrics)
+    assert fetch.call_count == int(change is not None)
+    assert read_prepared_lyrics(cached,URL,metadata) == actual
+
+
 @pytest.mark.parametrize('mode', ['success', 'other_recording', 'all_fail', 'resource_failure', 'stale', 'supplied', 'soft',
                                 'missing_language', 'null_language', 'cached_credits', 'primary_credits', 'credits_only'])
 @pytest.mark.parametrize('prepared', [False, True])
@@ -6305,6 +6346,7 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
     # A recorded timing fallback does not authorize dropping lyric lines.
     result['quality']['playback_fallback'] = dict(subtitle_mode='estimated_word')
     (folder/'audio-result.json').write_text(json.dumps(result))
+    (folder/'prepared-lyrics.json').write_text('{"source":"verified lyric cache"}')
     assert verify_outputs(None, '', tmp_path, {'id':'job'}, audio_only=True,
                           playback_policy=True)['subtitle_lines'] == 1
     (folder/'lyrics.json').write_text(json.dumps(dict(lines=['Hello', 'Missing verse'])))
@@ -6490,6 +6532,7 @@ def test_complete_audio_ready_releases_intermediates_and_queues_video_only(tmp_p
     assert not working.exists()
     assert not (folder/'checkpoints/separate.json').exists()
     assert (folder/'audio-result.json').exists()
+    assert json.loads((folder/'prepared-lyrics.json').read_text())['source']=='verified lyric cache'
     resumed, hit = store.create(JobRequest(**{**job['input'], 'force':False}), 'new-renderer')
     assert not hit and resumed['id'] == job['id'] and resumed['status'] == 'queued'
     assert resumed['restore_video'] and resumed['pipeline_version'] == job['pipeline_version']

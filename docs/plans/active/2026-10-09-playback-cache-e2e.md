@@ -14,9 +14,9 @@ the existing Blue Bird entry, history, settings, credentials, and source files.
 - [x] Reproduce stale-tab and audio-ready cleanup failures with behavior tests.
 - [x] Fix the owning state/cache mechanisms and document the behavior.
 - [ ] Run full regression, fresh-directory startup, commit, push, and CI.
-- [ ] Inventory and migrate job directories/records with rollback evidence.
-- [ ] Deploy, verify real desktop/mobile interactions and aesthetic consistency.
-- [ ] Add the fixed100 to the live queue and measure the normal worker E2E path.
+- [x] Inventory and migrate job directories/records with rollback evidence.
+- [x] Deploy, verify real desktop/mobile interactions and aesthetic consistency.
+- [x] Add the fixed100 to the live queue and measure the normal worker E2E path.
 - [ ] Retain all failures, repair general causes, and report actual results.
 
 ## Findings and Decisions
@@ -51,6 +51,18 @@ the existing Blue Bird entry, history, settings, credentials, and source files.
 - Desktop and 390x844 screenshots were reviewed: existing grouping, alignment,
   button sizes and text truncation remain consistent, with no new UI controls.
   This is browser/mobile-viewport validation, not a physical iPad verification.
+- Migration moved all100 directories and merged job records while preserving the
+  live room. Verified files shrank from 53,474,987,844 to 6,117,060,347 bytes after
+  compaction; all53 surviving audio/subtitle results retained their hashes.
+- Live100 exposed repeated global budget scans (one per running job), delaying
+  API responses. Share the periodic check across jobs; keep direct admission and
+  final checks fresh. Active jobs drained before this backend update.
+- Live100 also exposed ignored prepared lyric caches. A source-bound 45-line
+  packet for Compromise passed the existing identity check, but normal playback
+  unnecessarily refetched and failed during a provider503. Reuse these packets
+  in the normal route, bind new packets to user overrides, and retain them during
+  compaction. Explicit force, changed input/implementation and invalid caches
+  still refetch; alignment acceptance remains unchanged.
 
 ## Work and Invariants
 

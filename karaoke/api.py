@@ -275,6 +275,16 @@ class Worker:
         self.queue, self.processes = asyncio.Queue(), {}
         self.tasks, self.cancelled = {}, set()
         self.dispatch_errors = {}
+        self.budget_checked_at, self.budget_ok = -float('inf'), True
+
+    def check_budget(self):
+        # Every job watches the same disk budget. Share its periodic scan rather
+        # than walking the whole cache once per running job on the API thread.
+        stamp = time.monotonic()
+        if not self.budget_ok or stamp-self.budget_checked_at >= 1:
+            self.budget_ok = self.store.cache.enforce(self.reserve)
+            self.budget_checked_at = stamp
+        return self.budget_ok
 
     @property
     def current(self):
@@ -560,7 +570,7 @@ class Worker:
         async def budget():
             while True:
                 await asyncio.sleep(1)
-                if not self.store.cache.enforce(self.reserve):
+                if not self.check_budget():
                     raise CacheFull('预处理达到缓存或磁盘空间限制，已停止并清理临时文件；请释放空间后重试')
 
         tasks = [asyncio.create_task(output()), asyncio.create_task(budget())]

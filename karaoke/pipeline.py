@@ -679,7 +679,7 @@ class Pipeline:
 
     def prepare_text(self, metadata, duration, lead_task=None):
         if not self.strict_audio:
-            from .lyric_lookup import prepare_online_lyrics, read_prepared_lyrics
+            from .lyric_lookup import prepare_online_lyrics, read_prepared_lyrics, prepared_lyrics_identity
             self.phase('prepare_lyrics', True)
             self.stage_event('prepare_lyrics', 'ready')
             self.stage_event('prepare_lyrics', 'started')
@@ -691,9 +691,26 @@ class Pipeline:
                         raise RuntimeError('Prepared lyric lookup failed: '+error['type'])
                     lyrics = read_prepared_lyrics(self.prepared_lyrics, self.request['url'], metadata)
                 else:
-                    lyrics = (prepare_online_lyrics(self.request, metadata, duration, self.checkpoints,
-                                                    self.text_model, self.catalog_root)
-                              if not local_asr.offline() or self.request.get('lyrics') else None)
+                    cached = self.output/'prepared-lyrics.json'
+                    keys = ('title', 'artist', 'language', 'lyrics')
+                    overrides = {key:self.request.get(key) for key in keys}
+                    lyrics = None
+                    if cached.is_file() and not self.request.get('force'):
+                        try:
+                            packet = json.loads(cached.read_text())
+                            if packet.get('request_overrides', dict.fromkeys(keys)) == overrides:
+                                lyrics = read_prepared_lyrics(cached, self.request['url'], metadata)
+                                if not lyrics or not lyrics.get('lines'):
+                                    lyrics = None
+                        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
+                            write_json(self.output/'prepared-lyrics-cache-error.json', dict(reason=str(error)))
+                    if lyrics is None:
+                        lyrics = (prepare_online_lyrics(self.request, metadata, duration, self.checkpoints,
+                                                        self.text_model, self.catalog_root)
+                                  if not local_asr.offline() or self.request.get('lyrics') else None)
+                        if lyrics is not None:
+                            write_json(cached, dict(identity=prepared_lyrics_identity(self.request['url'], metadata),
+                                                   request_overrides=overrides, lyrics=lyrics))
                 if lyrics is not None:
                     write_json(self.output/'lyrics.json', lyrics)
                     # An empty anchor list selects direct acoustic alignment.

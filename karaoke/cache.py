@@ -145,7 +145,7 @@ class SongCache:
         keep = {'request.json', 'result.json', 'audio-result.json', 'error.json', 'worker.log', 'lyric-crosscheck.json',
                 'captioned-picture.render.json', 'lyric-readings.json',
                 'song-metadata.json', 'checkpoints/extract_song_metadata.json',
-                'lyrics.json', 'timing-constraints.json', 'timing-checked/report.json', 'timing-recovery.json',
+                'lyrics.json', 'prepared-lyrics.json', 'timing-constraints.json', 'timing-checked/report.json', 'timing-recovery.json',
                 'timing-context-recovery.json',
                 'quality.json', 'alignment/raw.json', 'lyric-coverage-validation.json',
                 'highlight-validation.json', 'storage-migration.json'}
