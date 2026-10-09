@@ -312,7 +312,7 @@ def align_job(aligner, job, full_song=False):
             # Independent phrase locations also expose words stretched into
             # neighbouring audio. A held final word may legitimately end later;
             # only its onset requests this retry, not its duration.
-            a.get('match_basis') in ('complete_phrase', 'complete_clause') and (
+            a.get('match_basis') == 'complete_phrase' and (
                 c['start']+2 < a['start'] or c['units'][-1]['start'] > a['end']+2))
     if scope_blocks and not failures and not order_conflicts():
         for i in range(len(cues)):

@@ -2724,6 +2724,10 @@ class AlignmentIntegrity(unittest.TestCase):
                                        for t,a,b in zip(lines, [1.,8.,20.], [2.,14.,21.])]
                             if basis:
                                 anchors[1]['match_basis'] = basis
+                            if basis == 'complete_clause':
+                                # Hearing one complete clause does not locate
+                                # the words or echoes outside that clause.
+                                anchors[1]['observed_range'] = [8.,11.]
                             (root/'anchors.json').write_text(json.dumps(anchors))
                             middle = ([3.3,10.,12.,13.5] if side=='early' else
                                       [8.1,10.,12.,16.3] if side=='late' else [8.1,10.,12.,13.5])
@@ -2741,7 +2745,7 @@ class AlignmentIntegrity(unittest.TestCase):
                                     anchors=str(root/'anchors.json'), output=str(out)), full_song=True)
                             cues = json.loads((out/'cues.json').read_text())
                             self.assertFalse(report['failures'])
-                            retried = basis and side != 'held_tail'
+                            retried = basis == 'complete_phrase' and side != 'held_tail'
                             self.assertEqual(model.align.call_count, 2 if retried else 1)
                             self.assertEqual([cues[0]['start'],cues[2]['start']], [1.1,20.1])
                             if retried:
