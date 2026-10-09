@@ -16,7 +16,7 @@ from align_lyrics_whisper import alignment_blocks, sha
 from stage_progress import progress_items
 from word_onset_metrics import canonical
 from onset_consensus import context_scope_violations
-from subtitles import highlight_spans, latin_word_text
+from subtitles import latin_word_spans, latin_word_text
 
 ROOT = Path(__file__).resolve().parent
 SINGING_ROOT = ROOT / 'research/word-onset-2026-09-18/lyrics-alignment-multilingual'
@@ -176,7 +176,7 @@ def align_job(aligner, job, full_song=False):
         raise ValueError(f'Expected {expected_rate} Hz audio with a valid mono mix')
     lines = lyrics['lines']
     anchors = json.loads(Path(job['anchors']).read_text()) if job.get('anchors') else None
-    matches = [list(highlight_spans(line, 'English')) for line in lines]
+    matches = [list(latin_word_spans(line)) for line in lines]
     unsupported = {i for i, row in enumerate(matches) if not row or
                    canonical(''.join(lines[i][a:b] for a, b in row)) != canonical(lines[i])}
     # An unsupported line is a boundary for this model, not a reason to lose

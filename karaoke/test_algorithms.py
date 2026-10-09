@@ -667,11 +667,12 @@ class SubtitleIntegrity(unittest.TestCase):
     def test_multilingual_review_reuses_measured_words_without_english_phonetics(self):
         from copy import deepcopy
         from types import SimpleNamespace
+        from unittest.mock import patch
         from timing_validation import AcousticReview
         from subtitles import highlight_spans
         from local_asr import whisper_language
         for language, text in [('Korean', '우리 함께 노래해'), ('Russian', 'Привет мой друг'),
-                               ('French', 'Chantons avec joie')]:
+                               ('French', 'Chantons avec joie'), (None, '우리 함께 노래해')]:
             with self.subTest(language=language), tempfile.TemporaryDirectory() as directory:
                 calls = []
                 spans = list(highlight_spans(text, language))
@@ -679,7 +680,7 @@ class SubtitleIntegrity(unittest.TestCase):
                             for i, (a,b) in enumerate(spans)]
                 def align(audio, supplied, **options):
                     self.assertEqual(supplied, text)
-                    self.assertEqual(options['language'], whisper_language(language))
+                    self.assertEqual(options['language'], whisper_language(language) if language else 'ko')
                     calls.append(options)
                     # Model output already contains the token boundaries; the
                     # renderer must not invent times by splitting these words.
@@ -694,7 +695,10 @@ class SubtitleIntegrity(unittest.TestCase):
                 views = [deepcopy(measured),deepcopy(measured)]
                 before = deepcopy((cue,views))
                 predict = review.predict(np.ones(12*44100,dtype='float32'))
-                result = predict(cue,views,[0.,12.],language)
+                with patch('local_asr.detect_whisper_language',return_value=('ko',[
+                        dict(language='ko',probability=.9,start=0.,end=2.)])) as detect:
+                    result = predict(cue,views,[0.,12.],language)
+                    self.assertEqual(detect.call_count,0 if language else 3)
                 self.assertEqual(len(result),3)
                 for row in result:
                     self.assertEqual([(u['first'],u['stop']) for u in row],spans)

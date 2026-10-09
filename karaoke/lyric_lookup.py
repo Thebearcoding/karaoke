@@ -420,8 +420,6 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
                 text_sha256=hashlib.sha256(text.encode()).hexdigest(), excluded_credit_lines=excluded))
             continue
         language = song.get('language') or text_language('\n'.join(lines))
-        if language is None:
-            continue
         identity_support = None
         if not title_match:
             left = text_units(''.join(lines), language)
@@ -678,11 +676,11 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
         (cache.root/'lyrics-first-lookup.json').write_text(json.dumps(report, ensure_ascii=False)+'\n')
         if not lines:
             return None
-        song['language'] = report['language']
+        song['language'] = report.get('language')
         provenance = dict(kind='online_lyric_text', lyric_lookup=report,
                           text_transform=report.get('text_transform', 'whitespace_only'))
     language = song.get('language') or text_language(''.join(lines))
-    if not language or len(lines) > 1000 or any(not line.strip() or len(line) > 200 for line in lines):
+    if len(lines) > 1000 or any(not line.strip() or len(line) > 200 for line in lines):
         return None
     return dict(song, id='song', source_url=request['url'], language=language, lines=lines,
                 provenance=dict(provenance, needs_review=True, route='lyrics_first', independent_asr_coverage=None,
@@ -756,8 +754,6 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
                     text_sha256=hashlib.sha256(raw_text.encode()).hexdigest(), excluded_credit_lines=excluded))
                 continue
             language = song.get('language') or text_language(text)
-            if language is None:
-                continue
             lines = clean_lines
             if transcription is None and (issue := short_lyric_text(lines, duration)):
                 report['rejected_candidates'].append(dict(issue, id=row.get('id'),

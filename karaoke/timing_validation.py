@@ -934,7 +934,7 @@ def acoustic_model_files(root, language=None):
            root/'research/word-onset-2026-09-18/labelmakr/models/g2p_model.py']
     files.extend(p for p in (root/'models/alignment/sofa').rglob('*')
                  if p.suffix in ('.ckpt','.ptsd','.yaml') or p.name=='dict.txt')
-    if language and language not in ('Chinese','Japanese','English'):
+    if language not in ('Chinese','Japanese','English'):
         files.append(root/'models/alignment/whisper/large-v3-turbo.pt')
     return sorted(p for p in files if p.is_file())
 
@@ -967,7 +967,7 @@ class AcousticReview:
     def predict(self, wave, *, decoder='ctc'):
         def run(cue, views, bounds, language):
             from phoneme_progress import spoken_units
-            from subtitles import highlight_spans
+            from subtitles import highlight_spans, latin_word_spans
             if language == 'Chinese':
                 # Keep source offsets while giving each phonetic model only
                 # its language. The caller still corroborates every onset.
@@ -1016,7 +1016,7 @@ class AcousticReview:
                 for a,b in windows:
                     audio=wave[round(a*44100):round(b*44100)]
                     if language=='English':
-                        spans=list(highlight_spans(cue['text'],language))
+                        spans=list(latin_word_spans(cue['text']))
                         words=[cue['text'][s:e] for s,e in spans]
                         predicted,_,_=model.align(audio,words)
                         if [u['text'] for u in predicted]!=words:
@@ -1027,9 +1027,11 @@ class AcousticReview:
                     elif language not in ('Chinese','Japanese'):
                         from scipy.signal import resample_poly
                         from lyric_progress import map_words
-                        from local_asr import whisper_language
-                        aligned=model.align(resample_poly(audio,160,441).astype('float32'),
-                            cue['text'],language=whisper_language(language),original_split=True,regroup=False,token_step=80,
+                        from local_asr import alignment_language
+                        clip=resample_poly(audio,160,441).astype('float32')
+                        selected_language, probes=alignment_language(model,clip,language)
+                        aligned=model.align(clip,
+                            cue['text'],language=selected_language,original_split=True,regroup=False,token_step=80,
                             max_word_dur=None,word_dur_factor=None,gap_padding=None,
                             dynamic_heads=True,verbose=None)
                         if aligned is None:
@@ -1040,7 +1042,8 @@ class AcousticReview:
                         if len(units)!=len(spans) or any(normalized(u['text'])!=normalized(cue['text'][s:e])
                                 for u,(s,e) in zip(units,spans)):
                             raise ValueError('Multilingual acoustic review omitted or merged words')
-                        result.append([dict(u,first=s,stop=e,text=cue['text'][s:e],timing_evidence='attention_span')
+                        result.append([dict(u,first=s,stop=e,text=cue['text'][s:e],timing_evidence='attention_span',
+                                            alignment_language=selected_language, language_detection=probes)
                                        for u,(s,e) in zip(units,spans)])
                     else:
                         parsed=spoken_units(cue['text'],language)

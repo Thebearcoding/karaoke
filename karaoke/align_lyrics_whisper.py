@@ -21,8 +21,7 @@ from whisper.timing import dtw_cpu
 from lyric_progress import map_words
 from subtitles import lyric_cues, normalized, presentation_cues, write_captions
 from stage_progress import progress_items, report_progress
-from local_asr import detect_whisper_language
-from local_asr import whisper_language
+from local_asr import alignment_language
 
 
 def sha(path):
@@ -1251,7 +1250,7 @@ def main():
         if audio_info.samplerate != 16000 or audio_info.channels != 1:
             raise ValueError('Whisper alignment requires 16000 Hz mono audio')
         audio, _ = sf.read(job['audio'], dtype='float32')
-        language = whisper_language(lyrics['language'])
+        language = lyrics.get('language')
         blocks = [(0, len(lyrics['lines']), 0, len(lyrics['lines']), 0., duration)]
         anchors = None
         if job.get('anchors'):
@@ -1316,10 +1315,9 @@ def main():
 
             def align_audio(start, stop, text, **options):
                 clip = audio_clip(start, stop, options.pop('original_mix', False))
-                selected_language = language
-                if options.pop('detect_language', False):
-                    detected, probes = detect_whisper_language(model, clip)
-                    selected_language = detected or language
+                selected_language, probes = alignment_language(model, clip, language,
+                    detect=options.pop('detect_language', False))
+                if probes:
                     language_detections.append(dict(source_range=[start, stop], language=selected_language, probes=probes))
                 aligned = model.align(clip, text, language=selected_language,
                     original_split=True, regroup=False, token_step=80, max_word_dur=options.pop('max_word_dur', 4.),

@@ -52,7 +52,7 @@ def cached_local_recognition(audio, language, output, *, weights=None):
     if not weights.is_file():
         raise ValueError('Local ASR repair requires the installed large-v3-turbo alignment model')
     config = dict(language=language, implementation=inspect.getsource(cached_local_recognition),
-                  language_detection=inspect.getsource(recording_language) if language == 'auto' else None,
+                  language_detection=inspect.getsource(recording_language) if language in (None, 'auto') else None,
                   packages={name: version(name) for name in ('openai-whisper', 'torch')})
     key = hashlib.sha256((digest(audio)+json.dumps(config, sort_keys=True)).encode()).hexdigest()[:16]
     path = output.parent/'asr-requests'/('local-'+key+'.json')
@@ -73,13 +73,26 @@ def cached_local_recognition(audio, language, output, *, weights=None):
             if device == 'mps':
                 timing.dtw = lambda matrix: timing.dtw_cpu(matrix.detach().cpu().double().numpy())
             detection = None
-            if language == 'auto':
+            if language in (None, 'auto'):
                 code, detection = recording_language(model, audio)
             else:
                 code = whisper_language(language)
-            data = (whisper.transcribe(model, str(audio), language=code, fp16=False,
-                temperature=0, condition_on_previous_text=False, word_timestamps=True, verbose=False)
-                if code is not None else dict(language=None, text='', segments=[]))
+            options = dict(fp16=False, temperature=0, condition_on_previous_text=False,
+                           word_timestamps=True, verbose=False)
+            mixed = detection and len({w['language'] for w in detection['windows']}) > 1
+            if mixed or code is None:
+                samples = whisper.load_audio(str(audio))
+                segments, windows = [], []
+                for first in range(0, len(samples), 30*16000):
+                    clip = samples[first:first+30*16000]
+                    response = whisper.transcribe(model, clip, language=None, **options)
+                    segments.extend(local_asr.offset_segments(response['segments'], first/16000))
+                    windows.append(dict(start=first/16000, end=(first+len(clip))/16000,
+                                        language=response.get('language')))
+                data = dict(language=None, text=''.join(s.get('text', '') for s in segments),
+                            segments=segments, decoded_windows=windows)
+            else:
+                data = whisper.transcribe(model, str(audio), language=code, **options)
             if detection is not None:
                 data['language_detection'] = detection
             data['words'] = [word for segment in data['segments'] for word in segment['words']]
@@ -209,8 +222,6 @@ def splice_loop_window(original, replacement, left, right, begin, end=None):
     from subtitles import normalized
     segments = original['segments']
     parts = replacement.get('segments') or []
-    if song_language(replacement.get('language')) != song_language(original.get('language')):
-        return None
 
     def boundary(anchor, side):
         expected = normalized(anchor['text']).casefold()
@@ -284,7 +295,7 @@ def repair_loop_window(data, audio, duration, recognize, output, local_recognize
     bad = sorted(set(bad) | {i for i, s in enumerate(segments)
                             if type(s.get('seek')) is int and s['seek'] in decoder_windows
                             and normalized(s['text'])})
-    if not bad or not data.get('words') or song_language(data.get('language')) is None:
+    if not bad or not data.get('words'):
         return None
 
     def usable_anchor(index):
@@ -336,7 +347,7 @@ def recover_audio(audio, language, duration, output, name):
         if 'language_detection' in candidate:
             report['language_detection'] = candidate['language_detection']
         detected = song_language(candidate.get('language'))
-        if detected is None or (language != 'auto' and detected != song_language(language)):
+        if detected and language not in (None, 'auto') and detected != song_language(language):
             raise ValueError('Recovery audio has an unsupported or conflicting language')
         if needs_recovery(candidate) or not candidate.get('words') or not candidate.get('segments'):
             raise ValueError('Recovery audio still has unusable text or timing')
@@ -352,11 +363,7 @@ def recover_audio(audio, language, duration, output, name):
 
 def transcribe(client, audio, language, hint, output, *, allow_unresolved_text=False,
                original_audio=None, lead_audio=None):
-    options = {} if language == 'auto' else {'language': language}
-
-    def unusable(prediction):
-        return needs_recovery(prediction) or (language == 'auto' and
-            song_language(prediction.get('language')) is None)
+    options = {} if language in (None, 'auto') else {'language': language}
 
     def recognize(path, model='whisper-1', instruction=None):
         if local_asr.offline():
@@ -368,7 +375,7 @@ def transcribe(client, audio, language, hint, output, *, allow_unresolved_text=F
 
     data = recognize(audio)
     recovery = dict(triggered=False, chunks=[])
-    if not unusable(data):
+    if not needs_recovery(data):
         return data, recovery
     (output/'initial-transcription.json').write_text(json.dumps(data, ensure_ascii=False)+'\n')
     # Verify against the uploaded recording, before an empty tail can trigger
@@ -386,20 +393,20 @@ def transcribe(client, audio, language, hint, output, *, allow_unresolved_text=F
         ensure_ascii=False)+'\n')
     if applied:
         data = filtered
-        if not unusable(data):
+        if not needs_recovery(data):
             return data, recovery
     report_progress(detail='识别结果异常，分段重试')
     # An unusable transcript's language detection is also untrusted. Preserve an
     # explicit user language, but let recovery re-detect automatic requests.
     duration = len(pcm)/rate
     repaired = repair_loop_window(data, audio, duration, recognize, output,
-        local_recognize=lambda path: cached_local_recognition(path, data['language'], output))
+        local_recognize=lambda path: cached_local_recognition(path, language, output))
     if repaired is not None:
         data, report = repaired
         return data, dict(recovery, triggered=True,
             text_model=('local-large-v3-turbo' if report['right'] is None else
                         'local-whisper-large-v3' if local_asr.offline() else 'whisper-1'), loop_repair=report)
-    if repeated_tail(data) is not None and song_language(data.get('language')) is not None:
+    if repeated_tail(data) is not None:
         raise ValueError('重复的结尾转录未通过局部核验，已保留诊断')
     for name, track in (('original', original_audio), ('lead', lead_audio)):
         if track is not None:
@@ -434,7 +441,7 @@ def transcribe(client, audio, language, hint, output, *, allow_unresolved_text=F
         try:
             part = recognize(path)
             diagnostic = dict(start=start, end=start+length, whisper=part)
-            fallback = unusable(part)
+            fallback = needs_recovery(part)
             if fallback:
                 path.with_suffix('.json').write_text(json.dumps(diagnostic, ensure_ascii=False)+'\n')
             # Do not give the text-only transcript invented word times. Unresolved

@@ -8,7 +8,7 @@ from scipy.signal import resample_poly
 
 from align_lyric_phonemes import protect_line_order
 from phoneme_progress import ROOT, chinese_pronunciation_text, spoken_units
-from subtitles import highlight_coverage_errors, highlight_spans, latin_word_text
+from subtitles import highlight_coverage_errors, highlight_spans, latin_word_spans, latin_word_text
 
 
 class AcousticWitness:
@@ -50,7 +50,7 @@ class AcousticWitness:
             tokens = [re.sub("[^a-z']", '', ''.join(syllables[a:b]).lower()) for a, b in spans]
         elif language == 'English':
             import unicodedata
-            spans = list(highlight_spans(cue['text'], language))
+            spans = list(latin_word_spans(cue['text']))
             text = latin_word_text(cue['text'])
             tokens = [re.sub("[^a-z']", '', unicodedata.normalize('NFKD',
                       text[a:b].lower().replace('’', "'"))) for a, b in spans]
@@ -229,7 +229,7 @@ def latin_recovery_groups(cue):
             merged[-1] = (merged[-1][0], max(hi, merged[-1][1]))
         else:
             merged.append((lo, hi))
-    words = list(highlight_spans(cue['text'], 'English'))
+    words = list(latin_word_spans(cue['text']))
     for lo, hi in merged:
         parts = cue['units'][lo:hi]
         first, stop = parts[0]['first'], parts[-1]['stop']
@@ -275,7 +275,7 @@ def recover_latin_groups(cues, wave, witness, protocol, model=None):
                     model = EnglishSofaAligner(witness.device)
                 if context['aligned_end']-context['aligned_start'] > 30:
                     raise ValueError('English lyric recovery context exceeds 30 seconds')
-                spans = list(highlight_spans(context['text'], 'English'))
+                spans = list(latin_word_spans(context['text']))
                 words = [context['text'][a:b] for a, b in spans]
                 windows = [(max(left, context['aligned_start']-pad),
                             min(right, context['aligned_end']+pad))

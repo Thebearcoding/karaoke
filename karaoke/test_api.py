@@ -1354,10 +1354,30 @@ def test_model_language_aliases_survive_metadata_and_request_round_trip(tag, can
     assert whisper_language(request.language)==model_code
 
 
+@pytest.mark.parametrize('hint,detected,expected', [(None,'ko','ko'),('unrecognized', 'fr','fr'),
+                                                 ('English',None,'en'),(None,None,'de')])
+def test_audio_language_supplies_the_real_alignment_tokenizer(monkeypatch, hint, detected, expected):
+    from karaoke import local_asr
+    from stable_whisper.alignment import get_alignment_tokenizer
+    probes = [dict(language=code,probability=p) for code,p in [('en',.6),('fr',.7),('de',.9)]]
+    calls = []
+    def detect(model, samples):
+        calls.append(len(samples))
+        return detected, probes
+    monkeypatch.setattr(local_asr,'detect_whisper_language',detect)
+    model=SimpleNamespace(is_multilingual=True,num_languages=100)
+    code, evidence=local_asr.alignment_language(model,np.zeros(16000,dtype='float32'),hint)
+    tokenizer,_=get_alignment_tokenizer(model,False,'A supplied lyric',language=code)
+    assert tokenizer.language==expected
+    assert bool(calls)==(hint!='English')
+    assert evidence==(probes if calls else [])
+
+
 @pytest.mark.parametrize('code,name,text', [
     ('ko-KR','Korean','우리 함께 노래해 밤하늘 별을 바라보며 함께 걸어가'),
     ('fr','French','Nous marchons ensemble dans la lumière et nous chantons cette chanson pour nos amis'),
-    ('ru','Russian','Мы идём вместе по дороге и поём эту песню для наших друзей')])
+    ('ru','Russian','Мы идём вместе по дороге и поём эту песню для наших друзей'),
+    (None,None,'우리 함께 노래해 밤하늘 별을 바라보며 함께 걸어가')])
 def test_new_language_uses_native_metadata_and_multilingual_alignment(tmp_path, monkeypatch, code, name, text):
     from karaoke.job_schema import song_language
     from karaoke.lyric_lookup import text_language
@@ -1365,8 +1385,10 @@ def test_new_language_uses_native_metadata_and_multilingual_alignment(tmp_path, 
     from karaoke.subtitles import lyric_cues
     from karaoke.local_asr import whisper_language
     request=JobRequest(url=URL,language=code)
-    assert request.language==name==song_language(code)==text_language(text)
-    assert whisper_language(name)==code.split('-')[0]
+    assert request.language==name==song_language(code)
+    if code:
+        assert name==text_language(text)
+    assert whisper_language(name)==(code.split('-')[0] if code else None)
     pipeline=Pipeline(request.model_dump(),tmp_path,device='cpu')
     lyrics=dict(language=name,lines=[text],provenance=dict(route='lyrics_first'))
     words=[dict(word=text[a:b],start=1.+i*.5,end=1.3+i*.5)
@@ -1858,7 +1880,8 @@ def test_published_lyric_release_preference_keeps_complete_fallbacks():
 
 @pytest.mark.parametrize('same_recording', [True, False])
 @pytest.mark.parametrize('artist', ['Singer', ''])
-def test_music_lyrics_are_bound_to_the_requested_video(tmp_path, monkeypatch, same_recording, artist):
+@pytest.mark.parametrize('language', ['English', None])
+def test_music_lyrics_are_bound_to_the_requested_video(tmp_path, monkeypatch, same_recording, artist, language):
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
     import ytmusicapi
@@ -1873,6 +1896,7 @@ def test_music_lyrics_are_bound_to_the_requested_video(tmp_path, monkeypatch, sa
         def get_lyrics(self, key):
             return dict(lyrics=body,source='Source: LyricFind')
     monkeypatch.setattr(ytmusicapi,'YTMusic',Music)
+    monkeypatch.setattr(module.lookup,'text_language',lambda text: language)
     for _ in range(2):
         lines, report = module.fetch_additional_lyrics('youtube_music',dict(title='Evening',artist=artist),
             dict(id='abcdefghijk'),StageCache(tmp_path))
@@ -1880,10 +1904,38 @@ def test_music_lyrics_are_bound_to_the_requested_video(tmp_path, monkeypatch, sa
     assert len(calls) == 1
     if same_recording:
         assert lines == [body]
+        assert report['language'] == language
         assert report['publisher'] == 'lyricfind' and not report['provider_timestamps_used']
         assert report['recording_identity']['artist'] == 'Confirmed singer'
     else:
         assert not report.get('recording_identity')
+
+
+@pytest.mark.parametrize('language', ['English', None])
+@pytest.mark.parametrize('source', ['published', 'lrclib', 'supplied', 'online'])
+def test_lyric_text_survives_an_unknown_language(tmp_path, monkeypatch, language, source):
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    body = ['Stars above the quiet shore will guide me home tonight']*8
+    song = dict(title='Evening', artist='Singer')
+    monkeypatch.setattr(lyric_lookup, 'text_language', lambda text: language)
+    if source == 'published':
+        row = dict(trackId=1,trackTitle='Evening',artists=[dict(artistName='Singer')],
+                   album=dict(albumTitle='Album'),duration_seconds=100.,lyrics='\n'.join(body))
+        lines, report = lyric_lookup.published_candidate([row],song,'',duration=100.)
+        assert lines == body and report['language'] == language
+    elif source == 'lrclib':
+        row = dict(id=1,trackName='Evening',artistName='Singer',albumName='Album',
+                   duration=100.,instrumental=False,plainLyrics='\n'.join(body))
+        lines, report = lyric_lookup.lyric_candidate(dict(status='ok',results=[row]),song,None,100.)
+        assert lines == body and report['language'] == language
+    else:
+        monkeypatch.setattr(lyric_consensus,'fetch_lyric_consensus',lambda *a,**kw:
+            (body,dict(provider='youtube_music',language=language)))
+        request = dict(url=URL, **(dict(lyrics=body) if source=='supplied' else {}))
+        result = lyric_lookup.prepare_online_lyrics(request,dict(track='Evening',artist='Singer'),
+            100.,StageCache(tmp_path),'unused',None)
+        assert result['lines'] == body and result['language'] == language
 
 
 @pytest.mark.parametrize('lyric_response', ['absent', 'failure'])
@@ -3314,6 +3366,21 @@ def test_latin_lyric_matching_retains_source_with_cyrillic_lookalikes(written,he
     assert [u['start'] for u in mapped]==[w['start'] for w in words]
     for unrelated in ['нет', 'СЕРВЕР', 'жe', 'θεός']:
         assert text_units(unrelated,'English')==list(unrelated.lower())
+
+
+@pytest.mark.parametrize('language', [None, 'English', 'Chinese', 'Japanese', 'Korean', 'Russian'])
+def test_display_words_do_not_inherit_a_phonetic_models_alphabet(language):
+    from karaoke.subtitles import highlight_spans, latin_word_spans
+    from karaoke.lyric_progress import map_words
+    text = 'Hello 우리 함께 мой друг'
+    assert [text[a:b] for a,b in highlight_spans(text,language)] == text.split()
+    assert [text[a:b] for a,b in latin_word_spans(text)] == ['Hello']
+    parts = ['Hello','우','리','함','께','мой','друг']
+    words = [dict(word=w,start=1.+i*.2,end=1.15+i*.2) for i,w in enumerate(parts)]
+    cue = dict(text=text,start=1.,end=3.)
+    mapped = map_words(cue,words,0.,language)
+    assert [u['text'].strip() for u in mapped] == text.split()
+    assert [u['start'] for u in mapped] == [1.,1.2,1.6,2.,2.2]
 
 
 def test_recognition_windows_keep_language_switches_and_boundary_words():
@@ -8113,7 +8180,7 @@ def test_pipeline_materializes_all_media_before_ready(tmp_path, monkeypatch):
 @pytest.mark.parametrize('fallback_text', ['恢复的歌词', '哒'*100])
 @pytest.mark.parametrize('initial_kind', ['loop', 'punctuation', 'fragmented_loop',
                                         'backward_segments', 'backward_words', 'invalid_range',
-                                        'collapsed_words', 'unsupported_language',
+                                        'collapsed_words',
                                         'short_window_recovery', 'short_tail_recovery', 'local_loop',
                                         'suspected_silence', 'compressed_silence'])
 def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, fallback_text, initial_kind):
@@ -8156,9 +8223,6 @@ def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, f
         elif initial_kind == 'collapsed_words' and (name == str(audio) or bad_chunk):
             data = dict(language='japanese', segments=[dict(start=1,end=5,text='一緒に歌うこの歌の続きを')],
                         words=[dict(start=1,end=1,word=c) for c in '一緒に歌うこの歌の続きを'])
-        elif initial_kind == 'unsupported_language' and (name == str(audio) or bad_chunk):
-            data = dict(language='unknown', segments=[dict(start=1,end=2,text='пример слов')],
-                        words=[dict(start=1,end=2,word='пример слов')])
         elif initial_kind in ('backward_segments', 'backward_words', 'invalid_range') and (
                 name == str(audio) or bad_chunk):
             data = dict(language='english', segments=[dict(start=1,end=2,text='第一句'),
@@ -8360,10 +8424,11 @@ def test_local_asr_language_uses_the_recording_instead_of_only_the_intro(tmp_pat
             register_buffer=lambda *a, **k: None, detect_language=detect)
     def transcribe(model, path, *, language, **kwargs):
         if language is None:
-            _, probabilities = model.detect_language(torch.tensor([0.]))
+            _, probabilities = model.detect_language(torch.tensor([float(path[0])]))
             language = max(probabilities, key=probabilities.get)
         decodes.append(language)
-        return dict(language=language, segments=[dict(words=[dict(word='song', start=1., end=2.)])])
+        return dict(language=language, segments=[dict(text='song',start=1.,end=2.,
+            words=[dict(word='song', start=1., end=2.)])])
     monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
     monkeypatch.setattr(torch.backends.mps, 'is_available', lambda: False)
     monkeypatch.setattr(whisper, 'load_model', load)
@@ -8373,10 +8438,13 @@ def test_local_asr_language_uses_the_recording_instead_of_only_the_intro(tmp_pat
     language = 'en' if scenario == 'explicit' else 'auto'
     if scenario == 'disagreement':
         result = cached_local_recognition(audio, language, output, weights=weights)
-        assert result['language'] is None and not result['words'] and not decodes
-        before = list(windows)
+        assert result['language'] is None
+        assert [w['start'] for w in result['words']] == [1.,31.,61.,91.,121.,151.]
+        assert [w['end'] for w in result['words']] == [2.,32.,62.,92.,122.,152.]
+        assert len(decodes)==6 and set(decodes)=={'en','zh','ja'}
+        before = list(windows), list(decodes)
         assert cached_local_recognition(audio, language, output, weights=weights) == result
-        assert windows == before
+        assert (windows,decodes) == before
     else:
         result = cached_local_recognition(audio, language, output, weights=weights)
         assert result['language'] == ('zh' if scenario == 'intro' else 'en')
@@ -8392,7 +8460,7 @@ def test_local_asr_language_uses_the_recording_instead_of_only_the_intro(tmp_pat
 
 
 @pytest.mark.parametrize('batch_size', [1, 8])
-@pytest.mark.parametrize('language', ['en', 'auto', 'disagreement'])
+@pytest.mark.parametrize('language', ['en', 'auto', None, 'disagreement', 'mixed_majority'])
 def test_local_whisper_batches_cover_the_recording_and_keep_word_times(monkeypatch, batch_size, language):
     from dataclasses import dataclass
     from karaoke import local_asr
@@ -8406,20 +8474,28 @@ def test_local_whisper_batches_cover_the_recording_and_keep_word_times(monkeypat
     samples = np.arange(61*16000+37, dtype=np.float32)/16000
     def detect(*, audio, vad_filter):
         detected.append(float(audio[0]))
-        code = ('en', 'zh', 'ja')[len(detected)-1] if language == 'disagreement' else 'ja'
+        choices = ('en','zh','ja') if language=='disagreement' else ('en','en','ja')
+        code = choices[len(detected)-1] if language in ('disagreement','mixed_majority') else 'ja'
         return code, .99, []
     def run(audio, **options):
+        calls.append(dict(options,start=float(audio[0]),samples=len(audio)))
+        if language in ('disagreement','mixed_majority'):
+            assert options['language'] is None and len(audio)<=30*16000
+            return iter([Segment(' song',.125,.75,[dict(word='song',start=.125,end=.75)])]), SimpleNamespace(language='ja')
         assert audio is samples
-        calls.append(options)
         return iter([Segment(' quiet song', 30.125, 32.75,
                              [dict(word='quiet', start=30.125, end=31.25),
                               dict(word='song', start=31.375, end=32.75)])]), None
     monkeypatch.setitem(sys.modules, 'faster_whisper', SimpleNamespace(
         BatchedInferencePipeline=lambda model: SimpleNamespace(transcribe=run)))
     result = local_asr.transcribe(SimpleNamespace(detect_language=detect), samples,
-                                 'auto' if language == 'disagreement' else language, batch_size)
-    if language == 'disagreement':
-        assert result['language'] is None and not calls and not result['words']
+                                 'auto' if language in ('disagreement','mixed_majority') else language, batch_size)
+    if language in ('disagreement','mixed_majority'):
+        assert result['language'] is None and len(calls)==3
+        assert sum(c['samples'] for c in calls)==len(samples)
+        assert [w['start'] for w in result['words']]==[.125,30.125,60.125]
+        assert [w['end'] for w in result['words']]==[.75,30.75,60.75]
+        assert result['text']==' song song song'
     else:
         assert result['words'][0]['start'] == 30.125 and result['words'][-1]['end'] == 32.75
         assert result['text'] == ' quiet song'
@@ -8427,7 +8503,7 @@ def test_local_whisper_batches_cover_the_recording_and_keep_word_times(monkeypat
         assert calls[0]['batch_size'] == batch_size and not calls[0]['vad_filter']
         assert calls[0]['clip_timestamps'] == [dict(start=0., end=30.), dict(start=30., end=60.),
                                                dict(start=60., end=len(samples)/16000)]
-        assert bool(detected) == (language == 'auto')
+        assert bool(detected) == (language in (None,'auto'))
 
 
 @pytest.mark.parametrize('failure', [None, 'value', 'fatal'])
@@ -8593,7 +8669,7 @@ def test_unusable_vocal_asr_rechecks_recording_tracks_before_whole_song_retry(tm
     monkeypatch.setattr('karaoke.transcribe_lyrics.cached_local_recognition', local)
     client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create)))
     options = {track+'_audio': original}
-    if problem is None:
+    if problem in (None,'unsupported_language'):
         data, recovery = transcribe(client, audio, language, '', output, **options)
         assert data == candidate and recovery[track+'_audio']['accepted']
         assert recovery['text_model'] == 'local-large-v3-turbo'
@@ -8637,7 +8713,7 @@ def test_failed_original_asr_uses_lead_before_another_remote_request(tmp_path, m
     assert json.loads((output/'initial-transcription.json').read_text()) == broken
 
 
-@pytest.mark.parametrize('problem', [None, 'padding', 'missing_boundary', 'wrong_language', 'overlap', 'loop'])
+@pytest.mark.parametrize('problem', [None, 'padding', 'missing_boundary', 'different_language', 'unknown_language', 'overlap', 'loop'])
 @pytest.mark.parametrize('initial_error', ['loop', 'silence_warning', 'collapsed_phrase'])
 def test_local_asr_repair_keeps_surrounding_words_and_requires_matching_boundaries(tmp_path, problem, initial_error):
     from copy import deepcopy
@@ -8673,8 +8749,10 @@ def test_local_asr_repair_keeps_surrounding_words_and_requires_matching_boundari
     damaged = deepcopy(replacement)
     if problem == 'missing_boundary':
         damaged['segments'][-1]['text'] = '完全无关的一句话'
-    elif problem == 'wrong_language':
+    elif problem == 'different_language':
         damaged['language'] = 'english'
+    elif problem == 'unknown_language':
+        damaged['language'] = None
     elif problem == 'overlap':
         damaged['words'][1]['end'] = 46.
     elif problem == 'loop':
@@ -8684,7 +8762,7 @@ def test_local_asr_repair_keeps_surrounding_words_and_requires_matching_boundari
         damaged['segments'].append(dict(start=45.5,end=45.5,text='啦'*100))
         damaged['words'].append(dict(start=45.5,end=45.5,word='啦'*100))
     result = splice_loop_window(original, damaged, 0, 2, 2.5)
-    if problem not in (None, 'padding'):
+    if problem not in (None, 'padding', 'different_language', 'unknown_language'):
         assert result is None
     else:
         assert result['segments'][0] == original['segments'][0]
@@ -8829,7 +8907,8 @@ def test_truncated_recovery_text_cannot_drop_later_sung_words(tmp_path, recovera
 
 
 @pytest.mark.parametrize('ending', ['hallucinated', 'genuine', 'clean', 'earlier_anchor', 'wrong_anchor', 'outside_audio'])
-def test_repeated_asr_ending_is_redecoded_locally_without_dropping_genuine_repeats(tmp_path, monkeypatch, ending):
+@pytest.mark.parametrize('requested_language', ['auto', 'en', None])
+def test_repeated_asr_ending_is_redecoded_locally_without_dropping_genuine_repeats(tmp_path, monkeypatch, ending, requested_language):
     import soundfile as sf
     from copy import deepcopy
     from pathlib import Path
@@ -8838,7 +8917,8 @@ def test_repeated_asr_ending_is_redecoded_locally_without_dropping_genuine_repea
     output.mkdir()
     prefix = [dict(start=0., end=1., text='Before the ending'),
               dict(start=3., end=5., text='A familiar opening phrase')]
-    initial = dict(language='english', segments=prefix+[
+    # A failed decoder's language guess must not force the local retry.
+    initial = dict(language='japanese', segments=prefix+[
         dict(start=8.+i, end=8.8+i, text='Sing this phrase', no_speech_prob=.9 if i >= 6 else .1)
         for i in range(8)], words=[dict(start=s['start'], end=s['end'], word=s['text']) for s in prefix]+[
         dict(start=8.+i, end=8.+i+(.5 if ending == 'clean' else 0), word='Sing this phrase') for i in range(8)])
@@ -8866,17 +8946,17 @@ def test_repeated_asr_ending_is_redecoded_locally_without_dropping_genuine_repea
 
     def local(path, language, target):
         calls.append((path.name, 'local-large-v3-turbo'))
-        assert path.is_file() and target == output and language == 'english'
+        assert path.is_file() and target == output and language == requested_language
         return replacement
 
     monkeypatch.setattr('karaoke.transcribe_lyrics.cached_local_recognition', local)
     client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create)))
     if ending in ('wrong_anchor', 'outside_audio'):
         with pytest.raises(ValueError, match='局部核验'):
-            transcribe(client, audio, 'auto', '', output)
+            transcribe(client, audio, requested_language, '', output)
         assert not json.loads((output/'loop-repair.json').read_text())['accepted']
     else:
-        result, recovery = transcribe(client, audio, 'auto', '', output)
+        result, recovery = transcribe(client, audio, requested_language, '', output)
         if ending == 'clean':
             assert not recovery['triggered'] and result == initial and len(calls) == 1
         else:

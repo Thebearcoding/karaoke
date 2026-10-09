@@ -21,6 +21,8 @@ else:
 
 def whisper_language(value):
     """Resolve against the installed model's vocabulary, never default to English."""
+    if value is None or value == 'auto':
+        return None
     from whisper.tokenizer import LANGUAGES, TO_LANGUAGE_CODE
     for name in (language_code(value), value, song_language(value)):
         key = str(name or '').lower()
@@ -51,13 +53,29 @@ def configuration():
         packages={name: version(name) for name in ('faster-whisper', 'ctranslate2')})
 
 
+def offset_segments(segments, offset):
+    """Translate decoder-local times without clipping words at chunk edges."""
+    if not offset:
+        return segments
+    from copy import deepcopy
+    result = deepcopy(segments)
+    for segment in result:
+        for unit in (segment, *(segment.get('words') or [])):
+            for key in ('start', 'end'):
+                if key in unit:
+                    unit[key] += offset
+        if 'seek' in segment:
+            segment['seek'] += round(offset*100)
+    return result
+
+
 def transcribe(model, samples, language, batch_size):
     from faster_whisper import BatchedInferencePipeline
     if not len(samples):
         raise ValueError('Local Whisper input is empty')
     duration, window = len(samples)/16000, 30*16000
     detection = []
-    if language == 'auto':
+    if language is None or language == 'auto':
         language, detection = detect_audio_language(samples,
             lambda clip: model.detect_language(audio=clip, vad_filter=False)[:2])
     else:
@@ -66,17 +84,29 @@ def transcribe(model, samples, language, batch_size):
     # window, including the final partial window. These are ASR bounds, not cues.
     windows = [dict(start=start/16000, end=min(start+window, len(samples))/16000)
                for start in range(0, len(samples), window)]
-    segments = []
-    if language is not None:
-        result, _ = BatchedInferencePipeline(model).transcribe(samples, language=language,
+    # Disagreement is evidence of a possible language switch, not empty audio.
+    # Decode the existing windows independently when one language cannot
+    # describe them all. A single-language recording keeps its batched path.
+    mixed = len({d['language'] for d in detection}) > 1
+    requests = windows if mixed or language is None else [dict(start=0., end=duration)]
+    segments, decoded_windows = [], []
+    engine = BatchedInferencePipeline(model)
+    for request in requests:
+        start, end = request['start'], request['end']
+        clip = samples if len(requests) == 1 else samples[round(start*16000):round(end*16000)]
+        result, info = engine.transcribe(clip,
+            language=None if mixed else language,
             batch_size=batch_size, beam_size=5, temperature=0, word_timestamps=True,
             without_timestamps=False, condition_on_previous_text=False,
-            vad_filter=False, clip_timestamps=windows)
-        segments = [asdict(segment) for segment in result]
+            vad_filter=False, clip_timestamps=(windows if len(requests) == 1 else [dict(start=0., end=end-start)]))
+        segments.extend(offset_segments([asdict(segment) for segment in result], start))
+        decoded_windows.append(dict(start=start, end=end, language=getattr(info, 'language', language)))
+    if mixed:
+        language = None
     return dict(language=language, duration=duration, text=''.join(s['text'] for s in segments),
         segments=segments, words=[w for s in segments for w in s['words'] or []],
         local_inference=dict(language_detection=detection, windows=windows,
-                             batch_size=batch_size, vad_filter=False))
+                             decoded_windows=decoded_windows, batch_size=batch_size, vad_filter=False))
 
 
 def detect_audio_language(samples, detect):
@@ -102,6 +132,21 @@ def detect_whisper_language(model, samples):
         code = max(probabilities, key=probabilities.get)
         return code, probabilities[code]
     return detect_audio_language(samples, detect)
+
+
+def alignment_language(model, samples, hint=None, *, detect=False):
+    """Give the aligner's required tokenizer a hint from this audio crop."""
+    try:
+        code = whisper_language(hint)
+    except ValueError:
+        code = None  # A metadata label is not proof that the audio is unsupported.
+    if code is not None and not detect:
+        return code, []
+    selected, probes = detect_whisper_language(model, samples)
+    # A multilingual crop can lack a majority. The tokenizer still requires
+    # one code; retain all observations and use its strongest audio hint.
+    # This never removes text or establishes word-time accuracy.
+    return selected or max(probes, key=lambda p:p['probability'])['language'], probes
 
 
 @contextmanager

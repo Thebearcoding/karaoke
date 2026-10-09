@@ -360,7 +360,7 @@ def find_verified_lyrics(url, duration, root):
         if expected is None or abs(float(expected)-duration) > 1.0:
             continue
         artist = data.get('artist') or ' · '.join(metadata.get('artists', []))
-        return dict(title=data.get('title', ''), artist=artist, language=data['language'],
+        return dict(title=data.get('title', ''), artist=artist, language=data.get('language'),
                     lines=data['lines'], provenance=dict(kind='verified_catalog', file=str(path)))
     return None
 
@@ -401,16 +401,12 @@ def prepare_song_text(request, metadata, transcription, duration, *, catalog_roo
     detected = song_language(transcription.get('language'))
     if request.get('lyrics'):
         language = request.get('language') or detected
-        if language is None:
-            raise ValueError('无法识别歌词语言，请提供 language（zh / ja / en）')
         result = dict(title=request.get('title') or metadata.get('track') or metadata.get('title') or 'Untitled',
             artist=request.get('artist') or metadata.get('artist') or '', language=language,
             lines=request['lyrics'], provenance=dict(kind='user_supplied'))
     else:
         result = find_verified_lyrics(request['url'], duration, catalog_root)
         if result is None:
-            if detected is None and not request.get('language'):
-                raise ValueError('当前歌词对齐支持中文、日文和英文；请检查视频是否有清楚的演唱')
             language = request.get('language') or detected
             result = dict(video_song_info(metadata), language=language,
                 lines=transcript_lines(transcription, language),

@@ -1491,7 +1491,7 @@ class Pipeline:
                 write_json(self.output/'song-info.json', dict(title=result['title'], artist=result['artist']))
                 self.run('render', [sys.executable, ROOT/'render_lyric_progress.py', '--video', self.video,
                     '--video-only', '--cues', subtitles, '--song-info', self.output/'song-info.json',
-                    '--language', {'English': 'Latin'}.get(result['language'], result['language']),
+                    '--language', {'English': 'Latin'}.get(result['language'], result['language']) or 'auto',
                     '--duration', result['duration_seconds'], '--bottom-margin', '96', '--next-line',
                     '--countdown', '--output', picture])
         return picture

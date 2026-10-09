@@ -28,7 +28,7 @@ def normalized(text):
                    if unicodedata.category(c)[0] in ('L', 'N') or c == "'")
 
 
-def highlight_spans(text, language):
+def highlight_spans(text, language=None):
     """Display atoms: Unicode words and Chinese characters, in source offsets.
 
     Japanese reading groups are chosen by the pronunciation model, not here.
@@ -60,7 +60,7 @@ def highlight_spans(text, language):
         elif language == 'Chinese' and unicodedata.name(char, '').startswith(
                 ('CJK UNIFIED IDEOGRAPH', 'CJK COMPATIBILITY IDEOGRAPH')):
             yield first, index
-        elif language not in ('Chinese', 'Japanese', 'English', 'Latin') and word_letter(char):
+        elif word_letter(char):
             while index < len(text):
                 char = text[index]
                 if word_letter(char) or char.isdecimal() or unicodedata.category(char).startswith('M'):
@@ -70,6 +70,15 @@ def highlight_spans(text, language):
                 else:
                     break
             yield first, index
+
+
+def latin_word_spans(text):
+    """Words representable by the Latin phonetic adapters, not display policy."""
+    text = latin_word_text(text)
+    for first, stop in highlight_spans(text):
+        if all(not c.isalpha() or unicodedata.name(c, '').startswith('LATIN ')
+               for c in text[first:stop]):
+            yield first, stop
 
 
 def highlight_coverage_errors(cues, language):
