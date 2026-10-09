@@ -1,6 +1,7 @@
 """Render line captions with Pillow and FFmpeg, without requiring libass."""
 
 import argparse
+from fractions import Fraction
 import json
 from pathlib import Path
 import subprocess
@@ -9,6 +10,21 @@ import time
 from PIL import Image, ImageDraw, ImageFont
 from subtitle_style import (TOKENS, STYLES, DEFAULT_STYLE, caption_height, caption_image,
                             japanese_readings, resolve_font, script_for, with_opacity, cue_opacity)
+
+
+def video_frame_rate(video):
+    """Keep the source cadence, including fractional broadcast frame rates."""
+    probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+        '-show_entries', 'stream=avg_frame_rate,r_frame_rate', '-of', 'json', str(video)]))
+    stream = next(iter(probe.get('streams', [])), {})
+    for field in ('avg_frame_rate', 'r_frame_rate'):
+        try:
+            rate = Fraction(stream.get(field, '0/0'))
+        except (ValueError, ZeroDivisionError):
+            continue
+        if rate > 0:
+            return rate
+    return Fraction(30)
 
 
 def main():
@@ -79,7 +95,9 @@ def main():
     concat.write_text('\n'.join(script)+'\n')
     if args.video:
         video_input = ['-i', str(args.video)]
+        fps = video_frame_rate(args.video)
     else:
+        fps = Fraction(30)
         still = folder/'background.png'
         picture = Image.new('RGB', (1280, 720), '#11141b')
         title_font, index, _ = resolve_font(args.title, args.style, args.language, args.font)
@@ -89,8 +107,8 @@ def main():
         video_input = ['-loop', '1', '-framerate', '30', '-i', str(still)]
     command = ['ffmpeg', '-v', 'error', '-nostdin']+video_input+[
         '-f', 'concat', '-safe', '0', '-i', str(concat), '-i', str(args.audio),
-        '-filter_complex', '[0:v]scale=1280:-2,fps=30,setpts=PTS-STARTPTS[base];'
-        '[1:v]fps=30,setpts=PTS-STARTPTS,format=rgba[text];'
+        '-filter_complex', f'[0:v]scale=1280:-2,fps={fps},setpts=PTS-STARTPTS[base];'
+        f'[1:v]fps={fps},setpts=PTS-STARTPTS,format=rgba[text];'
         f'[base][text]overlay=0:H-h-{args.bottom_margin}:eof_action=repeat:format=auto,format=yuv420p[v]',
         '-map', '[v]', '-map', '2:a:0', '-af', f'volume={args.gain:.12g},asetpts=PTS-STARTPTS',
         '-t', str(args.duration), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
@@ -104,6 +122,7 @@ def main():
     if abs(float(probe['format']['duration'])-args.duration) > .1:
         raise ValueError('Rendered duration differs from the complete recording')
     metadata = {'command': command, 'render_seconds': elapsed, 'decode_check': 'passed',
+                'frame_rate': str(fps),
                 'duration_seconds': args.duration, 'caption_count': len(cues), 'probe': probe,
                 'style': args.style, 'tone': args.tone, 'language': args.language,
                 'animated': args.animate, 'style_version': TOKENS['version'],

@@ -5975,6 +5975,37 @@ def test_lyric_renderer_rejects_unordered_or_empty_intervals(tmp_path, monkeypat
         renderer.main()
 
 
+@pytest.mark.parametrize('rate', ['24', '24000/1001', '25', '30000/1001', '30'])
+def test_lyric_video_preserves_source_frames_and_fractional_cadence(tmp_path, monkeypatch, rate):
+    from fractions import Fraction
+    import numpy as np
+    import karaoke.render_lyric_progress as renderer
+    source, output = tmp_path/'source.mp4', tmp_path/'output.mp4'
+    # Every source frame has a distinct luminance, well beyond codec rounding. Counts alone
+    # would miss a dropped frame replaced by a duplicate elsewhere in the video.
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
+        f"nullsrc=s=160x90:r={rate}:d=1,geq=lum='32+mod(N*47,192)':cb=128:cr=128",
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(source)], check=True)
+    cues = [dict(text='Hello', start=.2, end=.8,
+                 units=[dict(first=0, stop=5, start=.2, end=.8)])]
+    cue_path = tmp_path/'cues.json'
+    cue_path.write_text(json.dumps(cues))
+    monkeypatch.setattr(sys, 'argv', [renderer.__file__, '--video', str(source), '--video-only',
+        '--cues', str(cue_path), '--language', 'Latin', '--duration', '1', '--output', str(output)])
+    renderer.main()
+    frames = []
+    for video in (source, output):
+        raw = subprocess.check_output(['ffmpeg', '-v', 'error', '-i', str(video),
+            '-vf', 'crop=16:16:0:0,format=gray', '-fps_mode', 'passthrough', '-f', 'rawvideo', '-'])
+        frames.append(np.frombuffer(raw, dtype=np.uint8).reshape(-1, 256).mean(axis=1))
+    np.testing.assert_allclose(frames[1], frames[0], atol=4, rtol=0)
+    probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+        '-show_entries', 'stream=avg_frame_rate,duration', '-of', 'json', str(output)]))['streams'][0]
+    assert Fraction(probe['avg_frame_rate']) == Fraction(rate)
+    assert abs(float(probe['duration'])-1) <= 1/float(Fraction(rate))
+    assert json.loads(cue_path.read_text()) == cues
+
+
 @pytest.mark.parametrize('radius', [1, 3, 6])
 def test_caption_outline_preserves_antialiasing_and_canvas_edges(radius):
     from PIL import Image, ImageDraw, ImageFilter

@@ -13,6 +13,7 @@ from subtitle_style import (TOKENS, STYLES, CaptionOverflow, caption_height, cap
 from subtitles import countdown_events, countdown_state, normalized, read_ahead_state
 from stage_progress import progress_items, report_progress
 from lyric_readings import load_readings, resolve_readings
+from render_subtitles import video_frame_rate
 
 
 class Caption:
@@ -194,7 +195,8 @@ def main():
     preview_height = (64+(TOKENS['furigana']['preview_extra_height'] if args.language == 'Japanese' else 0)
                       if args.next_line else 0)
     args.bottom_margin = max(args.bottom_margin, preview_height)
-    width, height, fps = 1280, main_height+preview_height, 30
+    width, height = 1280, main_height+preview_height
+    fps = video_frame_rate(args.video)
     started = time.perf_counter()
     report_progress(detail='检查画面对比度')
     scrim_path, background = static_video_scrim(args.video, args.output.with_suffix('.contrast.png'),
@@ -234,7 +236,7 @@ def main():
         command += ['-loop', '1', '-framerate', str(fps), '-i', str(intro_path)]
     filters = (
         '[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,'
-        'fps=30,setpts=PTS-STARTPTS[base];[1:v]setpts=PTS-STARTPTS[text];')
+        f'fps={fps},setpts=PTS-STARTPTS[base];[1:v]setpts=PTS-STARTPTS[text];')
     if scrim_path:
         filters += f'[base][{scrim_index}:v]overlay=0:0:format=auto[readable];'
     filters += f'[{"readable" if scrim_path else "base"}][text]overlay=0:H-{main_height}-{args.bottom_margin}:format=auto'
@@ -327,6 +329,7 @@ def main():
         opening = dict(countdown[0], **geometry, width=width, height=720)
         opening['y'] += 720-main_height-args.bottom_margin
     report = {'command': command, 'seconds': time.perf_counter()-started, 'start': args.start,
+        'frame_rate': str(fps),
         'duration': args.duration, 'mode': args.mode, 'style': args.style, 'style_version': TOKENS['version'],
         'style_parameters': STYLES[args.style],
         'font': 'Bold Songti / Hiragino Mincho W6; source glyphs verified',
