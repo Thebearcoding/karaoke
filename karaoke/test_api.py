@@ -1166,6 +1166,63 @@ def test_isolated_lyric_source_reuses_native_metadata_but_requires_corroboration
     assert recovery['attempts'][0]['lookup']['candidate_texts'][0]==recovered
 
 
+@pytest.mark.parametrize('outcome', ['matched', 'ambiguous', 'single_source', 'explicit'])
+def test_uncredited_upload_recovers_lyrics_from_catalogue_without_guessing_artist(tmp_path, monkeypatch, outcome):
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    searches, lookups = [], []
+    body = ['星空の向こうまであなたと歩いてゆこう'] * 4
+    rows = [dict(id=1, name='夜の色', ar=[dict(name='はる')], dt=30100),
+            dict(id=2, name='違う曲', ar=[dict(name='はる')], dt=30000),
+            dict(id=3, name='夜の色', ar=[dict(name='他の歌手')], dt=60000)]
+    if outcome == 'ambiguous':
+        rows.append(dict(id=4, name='夜の色', ar=[dict(name='同名曲の歌手')], dt=30300))
+    def catalogue(provider, url, cache, request):
+        searches.append(url)
+        return dict(code=200, result=dict(songs=rows))
+    def consensus(song, metadata, duration, cache, *args, **kwargs):
+        song['artist'] = song.get('artist') or metadata['uploader']
+        lookups.append(song['artist'])
+        if song['artist'] == 'はる':
+            assert 'youtube_music' in kwargs['prefetched']
+            return body, dict(language='Japanese', crosscheck=dict(
+                status='insufficient_sources' if outcome == 'single_source' else 'corroborated'))
+        return None, dict(crosscheck=dict(unavailable_sources=[dict(provider='youtube_music', status='unavailable')]))
+    monkeypatch.setattr(lyric_lookup, 'cached_lyric_request', catalogue)
+    monkeypatch.setattr(lyric_consensus, 'fetch_lyric_consensus', consensus)
+    monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', lambda *a:dict(parsed=dict(title='夜の色',artist='')))
+    metadata = dict(title='夜の色', uploader='音楽のチャンネル', description='')
+    if outcome == 'explicit':
+        metadata['artist'] = '明示された歌手'
+    result = lyric_lookup.prepare_online_lyrics(dict(url=URL), metadata, 30, StageCache(tmp_path), 'unused', None)
+    report = json.loads((tmp_path/'lyrics-first-lookup.json').read_text())
+    assert bool(result) == (outcome in ('matched', 'single_source'))
+    assert len(searches) == int(outcome != 'explicit')
+    assert lookups == ([metadata['artist']] if outcome == 'explicit' else
+                       ['音楽のチャンネル'] + (['はる'] if outcome != 'ambiguous' else []))
+    if result:
+        assert result['artist'] == 'はる' and result['lines'] == body
+        assert result['provenance']['lyric_lookup']['identity_recovery']['recovered']
+        assert result['provenance']['independent_asr_coverage'] is None
+        assert result['provenance']['needs_review']
+        assert result['provenance']['lyric_lookup']['crosscheck']['status'] == (
+            'insufficient_sources' if outcome == 'single_source' else 'corroborated')
+    elif outcome != 'explicit':
+        assert not report['identity_recovery']['recovered']
+        if outcome == 'ambiguous':
+            assert report['identity_recovery']['catalogue']['status'] == 'ambiguous'
+
+
+def test_catalogue_identity_respects_existing_provider_access_hold(tmp_path, monkeypatch):
+    from karaoke import lyric_lookup
+    from karaoke.stage_cache import StageCache
+    hold = dict(status='unavailable', http_status=429, retry_at=time.time()+60, requires_access=True)
+    def blocked(*args):
+        raise lyric_lookup.LyricRequestError(hold)
+    monkeypatch.setattr(lyric_lookup, 'cached_lyric_request', blocked)
+    assert lyric_lookup.catalogue_lyric_identity(dict(title='夜の色'), 30, StageCache(tmp_path)) == (None, hold)
+
+
 @pytest.mark.parametrize('failure', ['timeout', 'server', 'long_backoff', 'authentication'])
 def test_missing_lyrics_retry_transient_metadata_and_keep_confirmed_artist(tmp_path, monkeypatch, failure):
     import httpx

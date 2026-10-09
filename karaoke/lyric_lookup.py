@@ -489,6 +489,51 @@ def fetch_published_lyrics(song, source_title, cache, duration=None, *, referenc
     return packet['lines'], dict(packet['report'], **({'retry_at':packet['retry_at']} if packet.get('retry_at') else {}))
 
 
+def catalogue_lyric_identity(song, duration, cache):
+    """Recover an uncredited work by title and duration, never by upload channel."""
+    query = names(song.get('title'), title=True)
+    if not query or not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0:
+        return None, dict(status='missing_title_or_duration')
+    url = 'https://music.163.com/api/cloudsearch/pc?'+urlencode(dict(s=query[-1], type=1, limit=30, offset=0))
+    try:
+        packet = cached_lyric_request('netease', url, cache, lambda: read_document(url, timeout=10))
+        if packet.get('code') != 200:
+            raise ValueError('NetEase catalogue search rejected the request')
+        rows = packet.get('result', {}).get('songs', [])
+        if not isinstance(rows, list):
+            raise ValueError('Invalid catalogue search response')
+    except Exception as error:
+        return None, lyric_request_error(error)
+    candidates = {}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get('ar'), list):
+            continue
+        if not identity(song['title'], title=True) & identity(row.get('name'), title=True):
+            continue
+        artists = [a['name'] for a in row.get('ar', []) if isinstance(a, dict) and isinstance(a.get('name'), str) and a['name'].strip()]
+        milliseconds = row.get('dt')
+        if not artists or not isinstance(milliseconds, (int, float)) or not math.isfinite(milliseconds):
+            continue
+        delta = abs(milliseconds/1000-duration)
+        if delta > max(3., min(10., duration*.02)):
+            continue
+        key = tuple(sorted(tuple(sorted(identity(a))) for a in artists))
+        candidate = dict(title=row['name'], artist=' · '.join(artists), duration_seconds=milliseconds/1000,
+                         duration_difference=delta, url='https://music.163.com/#/song?id='+str(row['id']))
+        if key not in candidates or delta < candidates[key]['duration_difference']:
+            candidates[key] = candidate
+    ordered = sorted(candidates.values(), key=lambda c:c['duration_difference'])
+    report = dict(status='no_match', provider='netease', query=query[-1], candidates=ordered,
+                  basis='Matching title and recording duration; candidate text still requires acoustic alignment')
+    if ordered:
+        # Sub-second differences between different credits are within metadata
+        # rounding/encoder padding uncertainty, not evidence for one singer.
+        if len(ordered) > 1 and ordered[1]['duration_difference'] < ordered[0]['duration_difference']+1:
+            return None, dict(report, status='ambiguous')
+        return ordered[0], dict(report, status='candidate')
+    return None, report
+
+
 def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_root):
     """Find supplied text before ASR; this is a candidate, not independent audio validation."""
     song = video_song_info(metadata)
@@ -589,6 +634,27 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 report = dict(report, identity_recovery=dict(original=original,
                     resolved={key: song.get(key) for key in original}, recovered=accepted,
                     attempts=attempts, previous_lookup=previous))
+        # Watch-page "artists" can merely repeat a video's upload channel.
+        # Only recover missing credits; never replace an explicit performer.
+        if (not lines and not request.get('artist') and not video_song_info(metadata).get('artist')
+                and not (parsed and parsed.artist) and (not song.get('artist') or
+                artist_credit_matches(song['artist'], [metadata.get('uploader'), metadata.get('channel')]))):
+            candidate, recovery = catalogue_lyric_identity(song, duration, cache)
+            original_report, original_song = report, dict(song)
+            if candidate:
+                song.update({key:candidate[key] for key in ('title','artist')})
+                reused = {r['provider']:(None,r) for r in original_report.get('crosscheck', {}).get('unavailable_sources', [])
+                          if r.get('provider') and (r.get('error') or r['provider'] == 'youtube_music')}
+                lines, report = fetch_lyric_consensus(song, metadata, duration, cache, None, True, prefetched=reused)
+                if not lines:
+                    recovery = dict(recovery, rejected_lookup=report)
+                    lines, report = None, original_report
+                    song.clear()
+                    song.update(original_song)
+            report = dict(report, identity_recovery=dict(method='catalogue_title_and_duration',
+                          catalogue=recovery, recovered=bool(lines), previous_lookup=original_report,
+                          original={k:original_song.get(k) for k in ('title','artist')},
+                          resolved={k:song.get(k) for k in ('title','artist')}))
         if metadata_language and report.get('language') and metadata_language != report['language']:
             report = dict(report, metadata_language_corrected=dict(original=metadata_language, resolved=report['language']))
         if metadata_error:
