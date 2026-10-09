@@ -896,7 +896,8 @@ class AcousticReview:
                         predicted,_,_=model.align(audio,words)
                         if [u['text'] for u in predicted]!=words:
                             raise ValueError('Acoustic review changed lyric text')
-                        result.append([dict(first=s,stop=e,text=u['text'],start=a+u['start'],end=a+u['end'])
+                        result.append([dict(first=s,stop=e,text=u['text'],start=a+u['start'],end=a+u['end'],
+                                            timing_evidence='phonetic_span')
                                        for (s,e),u in zip(spans,predicted)])
                     else:
                         parsed=spoken_units(cue['text'],language)

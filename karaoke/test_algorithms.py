@@ -528,6 +528,39 @@ class SubtitleIntegrity(unittest.TestCase):
                     self.assertEqual([u['start'] for u in result[0]['units']],[u['start'] for u in old])
                     self.assertFalse(report['constraints'])
 
+    def test_dense_phonetic_span_can_contain_a_later_grapheme_event(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        for mode in ('valid', 'untyped', 'outside', 'unstable_end', 'silent_onset', 'wrong_text'):
+            with self.subTest(mode=mode):
+                old = [dict(first=0, stop=3, text='you', start=1., end=3.5),
+                       dict(first=4, stop=8, text='know', start=3.6, end=4.)]
+                cue = dict(text='you know', start=1., end=4., units=old)
+                measured = [dict(old[0], start=3., end=3.4, timing_evidence='phonetic_span'),
+                            dict(old[1], timing_evidence='phonetic_span')]
+                predictions = [deepcopy(measured) for _ in range(3)]
+                views = [[dict(measured[0], start=3.2, end=3.3, timing_evidence='ctc_label_event'),
+                          dict(measured[1], timing_evidence='ctc_label_event')] for _ in range(2)]
+                if mode == 'untyped':
+                    for view in predictions:
+                        view[0].pop('timing_evidence')
+                if mode == 'outside':
+                    for view in views:
+                        view[0].update(start=3.55, end=3.58)
+                if mode == 'unstable_end': predictions[0][0]['end'] = 3.55
+                if mode == 'wrong_text': views[1][0]['text'] = 'why'
+                wave = np.full(5*44100, .1)
+                wave[44100:3*44100] = 0.
+                if mode == 'silent_onset': wave[3*44100:round(3.04*44100)] = 0.
+                result, report = reconcile_timing([cue], wave, lambda *a, **k: views,
+                    lambda *a: predictions, protocol, 'English', _retry_context=False)
+                self.assertEqual(result[0]['units'][0]['start'], 3. if mode in ('valid', 'unstable_end') else 1.)
+                self.assertEqual(result[0]['units'][1], dict(old[1], acoustic_end=4.))
+                self.assertEqual(old[0]['start'], 1.)
+                self.assertFalse(report['unresolved'])
+                validate_timeline(result, ['you know'], 5., report['constraints'], 'English')
+
     def test_long_coarse_phrase_can_be_localized_before_short_phonetic_review(self):
         from copy import deepcopy
         from timing_validation import AcousticReview, reconcile_timing
@@ -604,6 +637,9 @@ class SubtitleIntegrity(unittest.TestCase):
                 result = review.predict(wave)(cue, views, [0.,12.], 'Chinese')
                 self.assertEqual(len(result), 3)
                 for predicted in result:
+                    for unit in predicted:
+                        if unit['text'].isascii():
+                            self.assertEqual(unit['timing_evidence'], 'phonetic_span')
                     self.assertEqual([(u['first'],u['stop'],u['text']) for u in predicted],
                                      [(u['first'],u['stop'],u['text']) for u in measured])
                     np.testing.assert_allclose([u['start'] for u in predicted],

@@ -146,12 +146,16 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *,
         start, end = float(np.median(starts)), min(bounds[1], float(np.median([u['end'] for u in primary])))
         if max(starts)-min(starts) > protocol['maximum_spread_seconds']:
             return None, 'context disagreement'
-        label_events = all(events) and all(u.get('timing_evidence')=='ctc_label_event' for u in secondary)
+        phonetic_spans = all(u.get('timing_evidence')=='phonetic_span' for u in primary)
+        label_events = (all(events) or phonetic_spans) and all(
+            u.get('timing_evidence')=='ctc_label_event' for u in secondary)
         if label_events:
             # Grapheme CTC spikes identify the word inside its acoustic event;
             # they are not estimates of the first audible phoneme. Compare
-            # events, never the display hold until the following word.
-            primary_ends = [u.get('first_event_end',u['emission_end']) for u in primary]
+            # events, never the display hold until the following word. Dense
+            # phonetic intervals also provide a measured acoustic end.
+            primary_ends = [u.get('first_event_end',u.get('emission_end') if all(events) else u['end'])
+                            for u in primary]
             secondary_ends = [u.get('first_event_end',u['end']) for u in secondary]
             if any(not isinstance(end,(int,float)) or not np.isfinite(end)
                    or not u['start'] < end <= u['end']
@@ -178,7 +182,7 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *,
             return None, 'CTC event lacks room before the following word'
         # CTC emissions can be one frame wide. Verify actual vocal support at
         # the onset; a longer display hold alone cannot supply that evidence.
-        support_end = min(end, start+.035) if all(events) else end
+        support_end = min(end, start+.035) if all(events) or label_events else end
         piece = wave[round(start*44100):round(support_end*44100)]
         if not len(piece) or not np.isfinite(piece).all() or float(np.sqrt(np.mean(piece**2))) <= floor:
             return None, 'insufficient audible vocal support'
