@@ -215,6 +215,59 @@ class SubtitleIntegrity(unittest.TestCase):
             self.assertEqual(attempt['accepted_units'], 0)
             self.assertIn('No valid sub-sequence warping path', attempt['error'])
 
+    def test_repeat_recovery_preserves_local_work_until_shared_order_repair(self):
+        from copy import deepcopy
+        from itertools import product
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from align_repeated_lyrics import main
+        from subtitles import playback_units
+
+        def cue(text, start, end):
+            return dict(text=text, status='candidate', start=start, end=end,
+                        aligned_start=start, aligned_end=end,
+                        units=[dict(text=text, first=0, stop=len(text), start=start, end=end,
+                                    timing_source='singing_phonemes')])
+
+        prior = [cue('甲乙丙丁戊己', 1., 2.), cue('甲乙丙丁戊己', 4., 5.),
+                 cue('另一句', 8., 9.), cue('最后一句', 10.5, 11.)]
+        prior[1]['units'][0]['timing_source'] = 'prior_word_fallback'
+        for conflict, onset in product((False, True), (3.8, 4.2)):
+            with self.subTest(conflict=conflict, onset=onset), tempfile.TemporaryDirectory() as directory:
+                cues = deepcopy(prior)
+                if conflict:
+                    # An unrelated upstream refinement crosses the next line.
+                    cues[2]['units'][0].update(start=10.507, end=10.8)
+                folder = Path(directory)
+                (folder/'cues.json').write_text(json.dumps(cues))
+                (folder/'jobs.json').write_text(json.dumps([dict(song='test', language='Chinese',
+                    audio='unused.wav', cues=str(folder/'cues.json'), output=str(folder/'output'))]))
+                path = (np.array([1., 2.]), np.array([onset, onset+.6]), .1)
+                with patch('sys.argv', ['align_repeated_lyrics', '--jobs', str(folder/'jobs.json'), '--device', 'cpu']), \
+                     patch('align_repeated_lyrics.sf.read', return_value=(np.ones((200, 1)), 10)), \
+                     patch('align_repeated_lyrics.sf.info', return_value=SimpleNamespace(duration=20.)), \
+                     patch('align_repeated_lyrics.audio_features', return_value={'pitch': None, 'spectrum': None}), \
+                     patch('align_repeated_lyrics.audio_path', return_value=path), \
+                     patch('align_repeated_lyrics.SingingAligner'), \
+                     patch('align_repeated_lyrics.reference_units', return_value={0: dict(start=1., spread=.01)}):
+                    main()
+                recovered = json.loads((folder/'output/cues.json').read_text())
+                self.assertEqual(recovered[1]['units'][0]['start'], onset)
+                self.assertEqual(recovered[1]['start'], onset)
+                self.assertEqual(playback_units(recovered[1], 'Chinese')[0]['start'], onset)
+                self.assertEqual(recovered[1]['units'][0]['timing_source'], 'repeated_lyric_audio')
+                self.assertEqual([recovered[i] for i in (0, 2, 3)], [cues[i] for i in (0, 2, 3)])
+                attempt = json.loads((folder/'output/run.json').read_text())['attempts'][0]
+                self.assertEqual(attempt['accepted_units'], 1)
+                if conflict:
+                    with self.assertRaisesRegex(ValueError, 'Unordered alignment'):
+                        presentation_cues(recovered, 20.)
+                ordered, reverted = protect_line_order(recovered, prior)
+                self.assertEqual(reverted, [3, 4] if conflict else [])
+                self.assertEqual(ordered[1], recovered[1])
+                presentation_cues(ordered, 20., lead=0, tail=0, bridge_gap=0)
+
     def test_repeated_phonemes_keep_independent_time_windows(self):
         anchors = [{'first': 0, 'stop': 1, 'start': 0., 'end': .2},
                    {'first': 1, 'stop': 2, 'start': 1.2, 'end': 1.5}]
@@ -2434,6 +2487,47 @@ class AlignmentIntegrity(unittest.TestCase):
             self.assertFalse(report['failures'])
             cues = json.loads((root/'output/cues.json').read_text())
             np.testing.assert_allclose([c['start'] for c in cues], [1.1, 6.8, 12.1])
+
+    def test_english_phrase_retry_repairs_crossing_with_its_neighbor(self):
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from align_english_onsets import align_job
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sf.write(root/'audio.wav', np.zeros(15*16000), 16000)
+            lines = ['morning', 'river runs', 'evening']
+            (root/'lyrics.json').write_text(json.dumps(dict(language='English', lines=lines)))
+            (root/'anchors.json').write_text(json.dumps([
+                dict(text=t, start=s, end=s+1., status='candidate')
+                for t, s in zip(lines, [1., 5., 10.])]))
+            for repaired in (True, False):
+                with self.subTest(repaired=repaired):
+                    def prediction(starts):
+                        return ([dict(text=t, start=s, end=s+.2, confidence=.8)
+                                 for t, s in zip('morning river runs evening'.split(), starts)], None, .02)
+                    model = SimpleNamespace(method='singing', device='cpu', onset_ratio=.02,
+                        model_identity={}, align=Mock(side_effect=[
+                            prediction([1., 8.5, 8.9, 10.]),
+                            prediction([.8, 4.8, 10.2, 10.6]),
+                            prediction([.8, 4.8, 5.6 if repaired else 10.2, 9.8])]))
+                    output = root/str(repaired)
+                    report = align_job(model, dict(audio=str(root/'audio.wav'),
+                        lyrics=str(root/'lyrics.json'), anchors=str(root/'anchors.json'),
+                        output=str(output)), full_song=True)
+                    cues = json.loads((output/'cues.json').read_text())
+                    self.assertEqual(model.align.call_count, 3)
+                    self.assertEqual(len(report['boundary_retries']), 1)
+                    self.assertEqual(report['boundary_retries'][0]['accepted'], repaired)
+                    self.assertEqual(bool(report['failures']), not repaired)
+                    self.assertEqual(cues[0]['start'], 1.)
+                    if repaired:
+                        np.testing.assert_allclose([u['start'] for c in cues for u in c['units']],
+                                                   [1., 5.2, 6., 10.2])
+                    else:
+                        self.assertEqual(cues[2]['start'], 10.)
+                        self.assertEqual(cues[1]['status'], 'unresolved_timing')
 
     def test_english_context_crossings_expand_without_moving_acceptance_bounds(self):
         import json

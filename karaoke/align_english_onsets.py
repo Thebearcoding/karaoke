@@ -256,8 +256,11 @@ def align_job(aligner, job, full_song=False):
         units = [(i, u) for i, cue in enumerate(cues) for u in cue['units']]
         return {(i, j) for (i, a), (j, b) in zip(units, units[1:]) if a['start'] >= b['start']}
 
-    boundary_retries = []
-    if scope_blocks and not failures:
+    boundary_retries, phrase_retries = [], []
+
+    def repair_boundaries():
+        if not scope_blocks or failures:
+            return
         for initial in sorted(order_conflicts()):
             if initial not in order_conflicts():
                 continue
@@ -272,7 +275,7 @@ def align_job(aligner, job, full_song=False):
                     break
                 previous = cues[first:last+1]
                 run_blocks([(first, last+1, left, right, begin, end)],
-                           start_id=len(blocks)+len(context_retries)+len(boundary_retries))
+                           start_id=len(blocks)+len(context_retries)+len(boundary_retries)+len(phrase_retries))
                 after = order_conflicts()
                 outside = context_scope_violations(cues, scope_blocks) if not failures else []
                 accepted = not failures and after < before and not outside
@@ -290,10 +293,11 @@ def align_job(aligner, job, full_song=False):
                     break
                 first = min(first, min(a for a, _ in moved))
                 last = max(last, max(b for _, b in moved))
+
+    repair_boundaries()
     # A prediction can stay inside a multi-line context yet move a complete
     # phrase into the following dialogue. Revisit only disjoint phrases, with
     # neighbouring text for context; never clamp words to the rough anchor.
-    phrase_retries = []
     def displaced(i):
         a, c = anchors[i], cues[i]
         return a['status'] == 'candidate' and (c['end']+2 < a['start'] or c['start']-2 > a['end'])
@@ -316,6 +320,10 @@ def align_job(aligner, job, full_song=False):
         if outside:
             failures.append(dict(lines=[b[:2] for b in outside], error='Phrase retry left its acoustic context'))
 
+    # A corrected phrase can cross a neighbor that was previously ordered.
+    # Resolve the new boundary jointly before accepting or rejecting the song.
+    if phrase_retries:
+        repair_boundaries()
     if order_conflicts():
         failures.append(dict(lines=sorted(order_conflicts()), error='Word onsets remain out of order'))
     if scope_blocks:

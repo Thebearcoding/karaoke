@@ -201,16 +201,14 @@ def main():
                 if ordered and accepted and rank > best.get(target_id, (0, 0)):
                     for i, unit in enumerate(candidate['units']):
                         unit['end'] = candidate['units'][i+1]['start'] if i+1 < len(candidate['units']) else candidate['aligned_end']
-                    candidate['aligned_start'] = candidate['units'][0]['start']
+                    candidate['start'] = candidate['aligned_start'] = candidate['units'][0]['start']
+                    candidate['end'] = candidate['aligned_end']
                     candidate['timing_status'] = 'repeat_rescue_candidate'
                     updated[target_id] = candidate
                     best[target_id] = rank
                 reports.append(report)
-        # Use the existing presentation policy after acoustic timing changes.
-        if best:
-            from subtitles import presentation_cues
-            acoustic = [dict(c, start=c['aligned_start'], end=c['aligned_end']) for c in updated]
-            updated, _ = presentation_cues(acoustic, sf.info(job['audio']).duration)
+        # Keep acoustic candidates for the shared line-order repair. An
+        # unrelated upstream crossing must not discard recovered repetitions.
         output.mkdir(parents=True)
         report = {'input': job, 'seconds': time.perf_counter()-started, 'attempts': reports,
                   'runner_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
