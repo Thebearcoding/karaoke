@@ -2647,9 +2647,15 @@ class SubtitleIntegrity(unittest.TestCase):
             return dict(text=text, start=start, end=start+len(text)*.4, units=[
                 dict(text=w, first=i, stop=i+1, start=start+i*.4, end=start+(i+1)*.4)
                 for i,w in enumerate(text)])
-        early = timeline_support([caption(1.)],words,'Chinese')
-        self.assertEqual([c['line'] for c in early['conflicts']],[1])
-        self.assertEqual(timeline_support([caption(10.)],words,'Chinese')['conflicts'],[])
+        for split_pause in (False, True):
+            with self.subTest(split_pause=split_pause):
+                if split_pause:
+                    # Recognition can divide a silent gap between the first
+                    # two tokens; neither token is an independent onset proof.
+                    words[0]['end'] = words[1]['start'] = 5.
+                early = timeline_support([caption(1.)],words,'Chinese')
+                self.assertEqual([c['line'] for c in early['conflicts']],[1])
+                self.assertEqual(timeline_support([caption(10.)],words,'Chinese')['conflicts'],[])
 
     def test_missing_phrase_cannot_consume_a_later_observed_phrase(self):
         words = [dict(word='blue river', start=20., end=24.),

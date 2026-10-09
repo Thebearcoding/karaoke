@@ -197,8 +197,10 @@ def _match_words(lines, words, units, *, word_evidence=True):
             for a,b,c,d in clauses:
                 first, stop = source_ranges[a,b]
                 inside = matching_spans(line[first:stop])
-                for lo,hi in ([inside[0],inside[-1]] if inside else []):
-                    lo, hi = first+lo, first+hi
+                # ASR may spread a pause across its first or last tokens.
+                # Locate consecutive words, not an isolated token boundary.
+                for group in (inside[:3], inside[-3:]) if inside else []:
+                    lo, hi = first+group[0][0], first+group[-1][1]
                     begin, end = position+len(units(line[:lo])), position+len(units(line[:hi]))
                     edge = dict(first=lo, stop=hi,
                         start=words[owners[c+begin-a]]['start'], end=words[owners[c+end-a-1]]['end'])
