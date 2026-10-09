@@ -110,21 +110,10 @@ export class Player {
     // prepare one fixed position if the video needs to load or catch up.
     if (Math.abs(drift) > 1) {
       this.waitForMedia(position);
-    } else {
-      // WebKit may briefly stall decoded frames after a rate change. Hold a
-      // correction long enough to take effect instead of retuning every frame.
-      // Separate enter/exit thresholds also avoid oscillating at the boundary.
-      const correcting = (video.playbackRate - 1) * drift > 0;
-      const settled = Math.abs(drift) < (correcting ? .01 : .04);
-      // At 3%, one held second corrects 30 ms, so a small error cannot
-      // overshoot both thresholds and trigger alternating speed changes.
-      const rate = settled ? 1 : drift > 0 ? 1.03 : .97;
-      if (rate !== video.playbackRate &&
-          this.context.currentTime - (this.videoRateChangedAt ?? -Infinity) >= 1) {
-        video.playbackRate = rate;
-        this.videoRateChangedAt = this.context.currentTime;
-      }
     }
+    // Leave normal playback at native speed. On WebKit, changing rate stalls
+    // the decoder and shifts its clock; correcting that shift repeats the
+    // stall. Small timestamp differences must not create playback interruptions.
   }
 
   waitForMedia(position) {
@@ -277,7 +266,6 @@ export class Player {
     this.videoRun = null;
     this.videoPending = false;
     if (this.video.playbackRate !== 1) this.video.playbackRate = 1;
-    this.videoRateChangedAt = null;
     if (wasPlaying) this.pitchChain?.stop();
     this.video.pause();
   }
@@ -333,6 +321,7 @@ export class Player {
     }).catch(error => {
       if (signal.aborted) return;
       this.key = null;
+      this.abort.abort();
       throw error;
     });
     return this.loading;

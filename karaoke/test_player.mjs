@@ -682,54 +682,58 @@ test('a stalled video freezes the shared clock instead of chasing it with seeks'
   p.clear();
 });
 
-test('small video drift uses playback rate without seeking or changing audio', async () => {
+test('small video drift leaves native playback uninterrupted; genuine desync still buffers', async () => {
   const p=setup(); await p.unlock(); await p.load(song); await p.apply(state,clockOffset());
-  p.context.currentTime+=2; p.video.currentTime=p.context.currentTime-p.anchor-.12;
-  const before=p.video.currentTime, sources=[...p.sources];
-  frame(); assert.equal(p.video.currentTime,before); assert.ok(p.video.playbackRate>1 && p.video.playbackRate<=1.1);
-  p.context.currentTime+=1;
-  p.video.currentTime=p.context.currentTime-p.anchor+.12; frame(); assert.ok(p.video.playbackRate<1);
-  p.context.currentTime+=1;
-  p.video.currentTime=p.context.currentTime-p.anchor; frame(); assert.equal(p.video.playbackRate,1);
-  assert.deepEqual(p.sources,sources);
-  p.clear(); assert.equal(p.video.playbackRate,1);
+  p.context.currentTime=p.audibleWhen; frame();
+  const sources=[...p.sources], anchor=p.anchor, waiting=[];
+  p.onBuffering=(...args)=>waiting.push(args);
+  for(const drift of [.05,-.05,.12,-.12]) {
+    p.context.currentTime+=1;
+    p.video.currentTime=p.outputTime()-p.anchor-drift;
+    const before=p.video.currentTime;
+    frame();
+    assert.equal(p.video.currentTime,before); assert.equal(p.video.playbackRate,1);
+    assert.equal(p.anchor,anchor); assert.deepEqual(p.sources,sources);
+  }
+  p.video.currentTime=p.outputTime()-p.anchor-1.2; frame();
+  assert.equal(waiting.length,1); assert.equal(p.anchor,null);
+  assert.ok(sources.every(source=>source.stopped));
+  p.clear();
 });
 
-test('video frames keep advancing when a rate change briefly stalls the decoder', async () => {
-  for (const drift of [.045,.12,-.045,-.12]) {
-    const p=setup(); await p.unlock(); await p.load(song); await p.apply(state,clockOffset());
-    p.context.currentTime=p.audibleWhen; frame();
-    const sources=[...p.sources];
-    let position=p.video.currentTime-drift, last=p.context.currentTime, rate=1, blockedUntil=last;
-    const advance=()=>{
-      const now=p.context.currentTime;
-      if (!p.video.paused) position+=(now-last)*rate;
-      last=now;
-    };
-    Object.defineProperty(p.video,'currentTime',{configurable:true,
-      get(){advance();return position;},set(value){advance();position=value;}});
-    Object.defineProperty(p.video,'playbackRate',{configurable:true,
-      get(){return rate;},set(value){
-        advance();
-        if (value!==rate) blockedUntil=p.context.currentTime+.25;
-        rate=value;
-      }});
-    let lastFrame=last, longestFreeze=0, stalledFrames=0;
-    try {
-      for (let i=0;i<720;i++) {
-        p.context.currentTime+=1/60;
-        frame();
-        if (p.context.currentTime>=blockedUntil) lastFrame=p.context.currentTime;
-        else stalledFrames++;
-        longestFreeze=Math.max(longestFreeze,p.context.currentTime-lastFrame);
-      }
-      assert.ok(stalledFrames<60,`drift ${drift}: lost ${stalledFrames}/720 frames to repeated rate changes`);
-      assert.ok(longestFreeze<.35,`video froze for ${longestFreeze.toFixed(2)} seconds`);
-      assert.ok(Math.abs(p.video.currentTime-(p.outputTime()-p.anchor))<.05);
-      assert.ok(sources.every(source=>!source.stopped));
-      assert.deepEqual(p.sources,sources);
-    } finally { p.clear(); }
-  }
+test('a WebKit rate-change clock setback cannot cause a repeating video stall', async () => {
+  const p=setup(); await p.unlock(); await p.load(song); await p.apply(state,clockOffset());
+  p.context.currentTime=p.audibleWhen; frame();
+  const sources=[...p.sources];
+  // The device trace has ~52 ms stable native skew. A rate change then
+  // stalls BOTH presented frames and the video clock by about 250 ms.
+  let position=p.video.currentTime-.052, last=p.context.currentTime, rate=1;
+  let blockedUntil=last, changes=0;
+  const advance=()=>{
+    const now=p.context.currentTime;
+    if(!p.video.paused) position+=Math.max(0,now-Math.max(last,blockedUntil))*rate;
+    last=now;
+  };
+  Object.defineProperty(p.video,'currentTime',{configurable:true,
+    get(){advance();return position;},set(value){advance();position=value;}});
+  Object.defineProperty(p.video,'playbackRate',{configurable:true,
+    get(){return rate;},set(value){
+      advance();
+      if(value!==rate){blockedUntil=p.context.currentTime+.25;changes++;}
+      rate=value;
+    }});
+  try {
+    let previous=position;
+    for(let i=0;i<720;i++) {
+      p.context.currentTime+=1/60; frame();
+      assert.ok(p.video.currentTime>previous,'buffered video must keep presenting frames');
+      assert.ok(Math.abs(p.video.currentTime-(p.outputTime()-p.anchor))<.06);
+      previous=p.video.currentTime;
+    }
+    assert.equal(changes,0);
+    assert.ok(sources.every(source=>!source.stopped));
+    assert.deepEqual(p.sources,sources);
+  } finally {p.clear();}
 });
 
 test('an unopened playback tab does not seek through another device\'s playing clock', async () => {
@@ -797,11 +801,16 @@ test('prefetch prioritizes the current window and bounds concurrent network requ
   } finally { p.clear(); for (const item of pending) item.resolve(); globalThis.fetch=fetchAudio; }
 });
 
-test('long songs retain bounded lookahead and schedule adjacent stems on exact common boundaries', async () => {
-  globalThis.fetch=streamingFetch();
+test('the complete song downloads while paused, but decoded audio stays bounded through playback and rewind', async () => {
+  const requests=[];
+  globalThis.fetch=streamingFetch(url=>{requests.push(url);return null;});
   const p=setup();
   try {
     await p.unlock(); await p.load({...song,duration:80}); await settled();
+    assert.equal(requests.filter(url=>/\/(instrumental|backing_vocals|lead_vocals)\/\d+$/.test(url)).length,30);
+    assert.ok(requests.includes('/v1/jobs/one/playback/lead_vocals/9'));
+    assert.equal(p.sources.length,0);
+    const fetched=requests.length;
     await p.apply({...state,position:0},clockOffset());
     assert.equal(p.sources.length,12);
     const first=p.sources.slice(0,3), next=p.sources.slice(3,6);
@@ -820,6 +829,12 @@ test('long songs retain bounded lookahead and schedule adjacent stems on exact c
       assert.ok(p.sources.length<=12);
       assert.ok([...p.stream.windows.keys()].every(i=>i>=Math.floor(position/8)));
     }
+    p.stop();
+    await p.load({...song,duration:80},0); await settled();
+    await p.apply({...state,position:0},clockOffset());
+    assert.ok(p.hasAudio(0));
+    assert.equal(requests.length,fetched);
+    assert.ok(p.stream.windows.size<=4);
   } finally { p.clear(); globalThis.fetch=fetchAudio; }
 });
 
@@ -883,5 +898,86 @@ test('a failed prefetch does not retry in a loop or interrupt the buffered windo
     globalThis.fetch=streamingFetch();
     await p.load({...song,duration:80},8);
     assert.ok(p.hasAudio(8));
+  } finally { p.clear(); globalThis.fetch=fetchAudio; }
+});
+
+test('transient HTTP and body failures recover inside the audio reserve', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  let attempts=0;
+  globalThis.fetch=streamingFetch(url=>{
+    if (!url.endsWith('/lead_vocals/1')) return null;
+    attempts++;
+    if (attempts===1) return {ok:false,status:503};
+    return {ok:true,arrayBuffer:async()=>{
+      if (attempts===2) throw new TypeError('network connection lost while reading body');
+      return url;
+    }};
+  });
+  const p=setup(), waiting=[]; p.onBuffering=(...args)=>waiting.push(args);
+  try {
+    await p.unlock(); await p.load({...song,duration:80}); await settled();
+    await p.apply({...state,position:0},clockOffset());
+    const first=[...p.sources];
+    p.context.currentTime=p.audibleWhen; frame();
+    assert.equal(attempts,1);
+    t.mock.timers.tick(250); await settled(); assert.equal(attempts,2);
+    t.mock.timers.tick(1000); await settled(); assert.equal(attempts,3);
+    assert.ok(p.stream.windows.get(1).audio);
+    p.context.currentTime=p.anchor+8.1; frame();
+    assert.deepEqual(waiting,[]);
+    assert.ok(first.every(source=>!source.stopped));
+  } finally { p.clear(); globalThis.fetch=fetchAudio; }
+});
+
+test('audio retry respects Retry-After and changing songs cancels the obsolete retry', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  let attempts=0;
+  globalThis.fetch=streamingFetch(url=>url==='/v1/jobs/one/playback/lead_vocals/1' ?
+    (attempts++, {ok:false,status:429,headers:{get:()=> '2'}}) : null);
+  const p=setup();
+  try {
+    await p.load({...song,duration:80}); await settled();
+    t.mock.timers.tick(1999); await settled(); assert.equal(attempts,1);
+    t.mock.timers.tick(1); await settled(); assert.equal(attempts,2);
+    await p.load({...song,id:'two',job_id:'two',duration:80},60);
+    t.mock.timers.tick(2000); await settled(); assert.equal(attempts,2);
+    assert.ok(p.hasAudio(60));
+  } finally { p.clear(); globalThis.fetch=fetchAudio; }
+});
+
+test('persistent server failures exhaust a bounded retry without a request storm', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  let attempts=0;
+  globalThis.fetch=streamingFetch(url=>url.endsWith('/lead_vocals/1') ?
+    (attempts++, {ok:false,status:503}) : null);
+  const p=setup();
+  try {
+    await p.unlock(); await p.load({...song,duration:80}); await settled();
+    await p.apply({...state,position:0},clockOffset());
+    t.mock.timers.tick(250); await settled();
+    t.mock.timers.tick(1000); await settled();
+    for(let i=0;i<30;i++) {p.context.currentTime+=.1;frame();}
+    t.mock.timers.tick(10000); await settled();
+    assert.equal(attempts,3); assert.ok(p.stream.windows.get(1).error);
+  } finally { p.clear(); globalThis.fetch=fetchAudio; }
+});
+
+test('an audio fetch that never finishes times out and retries without stopping buffered audio', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  let attempts=0;
+  globalThis.fetch=streamingFetch((url,{signal})=>{
+    if (!url.endsWith('/lead_vocals/4') || ++attempts>1) return null;
+    return new Promise((resolve,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));
+  });
+  const p=setup(), waiting=[]; p.onBuffering=(...args)=>waiting.push(args);
+  try {
+    await p.unlock(); await p.load({...song,duration:80}); await settled();
+    await p.apply({...state,position:0},clockOffset());
+    t.mock.timers.tick(20000); await settled();
+    t.mock.timers.tick(250); await settled();
+    assert.equal(attempts,2);
+    assert.ok(await p.stream.encoded.get(4));
+    assert.deepEqual(waiting,[]);
+    assert.notEqual(p.anchor,null);
   } finally { p.clear(); globalThis.fetch=fetchAudio; }
 });
