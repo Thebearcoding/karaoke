@@ -18,6 +18,9 @@ the existing Blue Bird entry, history, settings, credentials, and source files.
 - [x] Deploy, verify real desktop/mobile interactions and aesthetic consistency.
 - [x] Add the fixed100 to the live queue and measure the normal worker E2E path.
 - [ ] Retain all failures, repair general causes, and report actual results.
+- [ ] Add the requested local-library pagination, preserving per-tab pages, and inspect desktop/mobile rendering.
+- [ ] Separate enqueue, reorder, and play: disable already-queued add buttons, remove per-row play shortcuts, and keep idle selection at queue head.
+- [ ] Verify continuous playback and resume an already-enabled mobile audio context between songs.
 
 ## Findings and Decisions
 

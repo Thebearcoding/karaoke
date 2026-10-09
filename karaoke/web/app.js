@@ -1,7 +1,7 @@
 import { Player } from './player.js';
 import { mountPreview } from './preview.js';
 import { isStaleRoomSnapshot, LocalPlayback, PlaybackTabs, queueToTop, preparationRetry } from './room-state.js';
-import { createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
+import { createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
 
 const $ = id => document.getElementById(id);
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -21,13 +21,14 @@ let state = {entries:[], current_id:null, playing:false, position:0, started_at:
 let library = [], filter = 'ready', view = 'library', clockOffset = 0, readySent = null, loading = false, loadError = '', seeking = false;
 let toastTimer, librarySignature = '', queueSignature = '', historySignature = '', discoverySignature = '';
 let queueTab = 'upcoming';
+let libraryPage = 1;
 let pitchRequest = Promise.resolve();
 let searchTimer, searchQuery = '', searchSongs = [], previewSong = null, skipping = false, composing = false;
 let videoSource = 'songs', searchOrder = 'relevance', searchSnapshot = null, catalogueSelection = null;
 const addingVideos = new Set();
 const videoSearch = createVideoSearch(renderVideoResults, fetch, query => searchLibrary(library, query));
 const navigation = createViewHistory(history, () => ({query:$('song-input').value, title:$('title-input').value,
-  filter, view, queueTab, historyQuery:$('history-query').value,
+  filter, view, queueTab, libraryPage, historyQuery:$('history-query').value,
   videoSource, searchOrder, catalogueSelection, search:videoSearch.snapshot(), scroll:scrollY}), restoreView);
 const current = () => playback.entry;
 
@@ -62,8 +63,8 @@ function toast(message, entry) {
   $('toast').textContent = message;
   if (entry) {
     const button = document.createElement('button');
-    button.textContent = entry.status === 'completed' ? '开始唱 →' : '查看进度 →';
-    button.onclick = () => openQueuedSong(entry.id);
+    button.textContent = '查看待唱 →';
+    button.onclick = () => showQueuedSong(entry.id);
     $('toast').append(button);
   }
   $('toast').hidden = false;
@@ -80,7 +81,7 @@ async function request(path, body) {
 
 async function command(action, extra = {}) {
   try {
-    if (['play','pause','seek','restart','next','select','lead','pitch','ready','buffering'].includes(action) ||
+    if (['play','pause','seek','restart','next','lead','pitch','ready','buffering'].includes(action) ||
         (action === 'remove' && extra.entry_id === state.current_id)) {
       if (['ready','buffering'].includes(action) && !tabs.owns()) return null;
       if (extra.revision !== undefined && extra.revision !== state.revision) return null;
@@ -124,6 +125,7 @@ function restoreView(saved) {
   $('song-input').value = saved.query || '';
   $('title-input').value = saved.title || '';
   filter = [...document.querySelectorAll('[data-filter]')].some(button => button.dataset.filter === saved.filter) ? saved.filter : 'ready';
+  libraryPage = saved.libraryPage || 1;
   videoSource = saved.videoSource || 'songs';
   searchOrder = saved.searchOrder || 'relevance';
   queueTab = saved.queueTab === 'history' ? 'history' : 'upcoming';
@@ -145,6 +147,8 @@ function renderLibrary() {
   $('submit-song').innerHTML = `${isURL ? '点歌' : '搜索'} ${icon('arrow')}`;
   const search = isURL ? '' : query.toLocaleLowerCase();
   const songs = librarySongs(library, search ? 'all' : filter, search);
+  const page = paginateSongs(songs, libraryPage);
+  if (receivedRoom) libraryPage = page.page;
   const preparedView = filter === 'ready' && !search;
   $('library-count').textContent = `${songs.length} 首`;
   $('library-heading').textContent = search ? '曲库里的歌' : preparedView ? '现在就能唱' : '曲库';
@@ -156,12 +160,21 @@ function renderLibrary() {
   });
   $('local-library').hidden = Boolean(searchQuery || (search && !songs.length));
   document.querySelector('#local-library .filters').hidden = Boolean(search);
-  const signature = JSON.stringify([songs.map(({stage_progress, active_stages, ...song}) => song), filter, query]);
+  document.querySelectorAll('.library-pagination').forEach(nav => {
+    nav.hidden = page.pages < 2;
+    const select = nav.querySelector('select');
+    if (select.options.length !== page.pages)
+      select.innerHTML = Array.from({length:page.pages}, (_, i) => `<option value="${i+1}">${i+1} / ${page.pages}</option>`).join('');
+    select.value = String(page.page);
+    nav.querySelector('[data-library-step="-1"]').disabled = page.page === 1;
+    nav.querySelector('[data-library-step="1"]').disabled = page.page === page.pages;
+  });
+  const signature = JSON.stringify([page.songs.map(({stage_progress, active_stages, ...song}) => song), page.page, filter, query]);
   if (signature !== librarySignature) {
     librarySignature = signature;
-    $('song-grid').innerHTML = songs.map((song, index) => songRow({...song, provider:'local', thumbnail:song.poster, uploader:song.artist}, index, {inLibrary:true, local:true})).join('');
+    $('song-grid').innerHTML = page.songs.map((song, index) => songRow({...song, provider:'local', thumbnail:song.poster, uploader:song.artist}, page.offset+index, {inLibrary:true, local:true})).join('');
   } else {
-    updatePreparationSlots($('song-grid'), songs);
+    updatePreparationSlots($('song-grid'), page.songs);
   }
   $('search-empty').hidden = songs.length > 0;
   $('search-empty').querySelector('h3').textContent = preparedView ? '还没有可以直接唱的歌' : '这里还没有歌曲';
@@ -357,13 +370,11 @@ function updateAddButtons() {
     if (!song) return;
     if (form && !/^https?:\/\//i.test(song.url)) { button.disabled = false; button.classList.remove('is-queued'); button.removeAttribute('aria-label'); return; }
     const position = queuePosition(song, state.entries), adding = addingVideos.has(queueKey(song));
-    const entry = state.entries[position-1];
-    const label = position ? entry.status === 'completed' ? '开始唱' : '查看进度' : adding ? '点歌中…' : song.available === false ? '暂不可用' : '点歌';
-    button.disabled = Boolean(adding || song.available === false);
+    const label = position ? '已点' : adding ? '点歌中…' : song.available === false ? '暂不可用' : '点歌';
+    button.disabled = Boolean(position || adding || song.available === false);
     button.classList.toggle('is-queued', position > 0);
-    button.classList.toggle('can-sing', entry?.status === 'completed');
-    button.setAttribute('aria-label', `${label}：${song.title || song.url}`);
-    const markup = `${position ? '' : icon('plus')}<span>${label}${position ? `<small>已点 · 第${position}首</small>` : ''}</span>`;
+    button.setAttribute('aria-label', `${label}${position ? `，第${position}首` : ''}：${song.title || song.url}`);
+    const markup = `${position ? '' : icon('plus')}<span>${label}${position ? `<small>第${position}首</small>` : ''}</span>`;
     if (button.innerHTML !== markup) button.innerHTML = markup;
   });
 }
@@ -397,6 +408,7 @@ function searchVideos(force = false) {
 }
 
 function editSearch() {
+  libraryPage = 1;
   if (['artist','album'].includes(videoSource)) { videoSource = catalogueSelection?.returnMode || 'songs'; catalogueSelection = null; }
   clearVideoSearch();
   renderLibrary();
@@ -407,7 +419,7 @@ function editSearch() {
 async function addVideo(song, {title, repeat = false} = {}) {
   if (!song || addingVideos.has(queueKey(song)) || song.available === false) return;
   const queued = !repeat && state.entries[queuePosition(song, state.entries)-1];
-  if (queued) return openQueuedSong(queued.id);
+  if (queued) return;
   const key = queueKey(song);
   addingVideos.add(key); updateAddButtons();
   $('preview-error').hidden = true;
@@ -428,20 +440,12 @@ async function addVideo(song, {title, repeat = false} = {}) {
   } finally { addingVideos.delete(key); updateAddButtons(); }
 }
 
-async function openQueuedSong(id) {
-  const entry = state.entries.find(song => song.id === id);
-  if (!entry) return;
+function showQueuedSong(id) {
+  if (!state.entries.some(song => song.id === id)) return;
   $('toast').hidden = true;
   if ($('video-preview').open) $('video-preview').close();
-  if (entry.status !== 'completed') {
-    queueTab = 'upcoming'; renderQueue(); switchView('queue');
-    document.querySelector(`[data-entry="${CSS.escape(id)}"]`)?.scrollIntoView({block:'nearest'});
-    return;
-  }
-  if (!(await activate())) return;
-  if (state.current_id !== id) await command('select', {entry_id:id});
-  else if (!state.playing) await command('play');
-  switchView('player');
+  queueTab = 'upcoming'; renderQueue(); switchView('queue');
+  document.querySelector(`[data-entry="${CSS.escape(id)}"]`)?.scrollIntoView({block:'nearest'});
 }
 
 let closeCachedPreview = null;
@@ -550,7 +554,7 @@ function renderQueue() {
     return `<article class="queue-entry ${active ? 'current' : ''}" data-entry="${escape(entry.id)}"><span class="entry-number">${active && state.playing ? '♫' : String(i+1).padStart(2,'0')}</span>
       <button class="entry-cover" data-action="preview" aria-label="${active ? '查看播放' : '预览'}：${escape(entry.title)}">${entry.poster ? `<img class="entry-art" src="${escape(entry.poster)}" alt="">` : `<span class="entry-art">♪</span>`}</button>
       <div class="entry-info"><h3 class="entry-title"><button data-action="preview">${escape(entry.title)}</button></h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || 'YouTube 视频')}</p>${entry.status === 'failed' ? '' : preparationElapsedHTML(entry) || status}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : entry.status === 'failed' ? `<p class="entry-error">${escape(statusText(entry))}</p>` : ''}</div>
-      <div class="entry-tools">${entry.status === 'completed' ? `<button class="queue-sing" data-action="sing" aria-label="${active && state.playing ? '回到播放' : '开始唱'}：${escape(entry.title)}">${icon('play')}${active && state.playing ? '回到播放' : '开始唱'}</button>` : ''}${retry ? `<button data-action="${retry.action}" aria-label="${retry.label}：${escape(entry.title)}">${icon('restart')}${retry.label}</button>` : ''}<button data-action="top" aria-label="置顶：${escape(entry.title)}" ${queueToTop(state.entries, entry.id, state.playing ? state.current_id : null) ? '' : 'disabled'}>${icon('up')}置顶</button><button data-action="remove" aria-label="移除：${escape(entry.title)}">${icon('trash')}移除</button></div></article>`;
+      <div class="entry-tools">${retry ? `<button data-action="${retry.action}" aria-label="${retry.label}：${escape(entry.title)}">${icon('restart')}${retry.label}</button>` : ''}<button data-action="top" aria-label="置顶：${escape(entry.title)}" ${queueToTop(state.entries, entry.id, state.playing ? state.current_id : null) ? '' : 'disabled'}>${icon('up')}置顶</button><button data-action="remove" aria-label="移除：${escape(entry.title)}">${icon('trash')}移除</button></div></article>`;
   }).join('');
 }
 
@@ -748,16 +752,28 @@ document.querySelector('.brand').onclick = event => {
   event.preventDefault();
   navigation.push();
   $('song-input').value = ''; $('title-input').value = '';
-  filter = 'ready'; videoSource = 'songs'; searchOrder = 'relevance'; catalogueSelection = null;
+  filter = 'ready'; libraryPage = 1; videoSource = 'songs'; searchOrder = 'relevance'; catalogueSelection = null;
   clearVideoSearch(); renderLibrary(); switchView('library');
   $('song-input').focus({preventScroll:true});
 };
 document.querySelectorAll('[data-filter]').forEach(button => button.onclick = () => {
   filter = button.dataset.filter;
+  libraryPage = 1;
   document.querySelectorAll('[data-filter]').forEach(b => b.classList.toggle('selected', b === button));
   renderLibrary();
   navigation.save();
 });
+function changeLibraryPage(page) {
+  navigation.push();
+  libraryPage = page;
+  renderLibrary();
+  window.scrollTo(0, 0);
+  navigation.save();
+}
+document.querySelectorAll('[data-library-step]').forEach(button => button.onclick = () =>
+  changeLibraryPage(libraryPage + Number(button.dataset.libraryStep)));
+document.querySelectorAll('.library-pagination select').forEach(select => select.onchange = () =>
+  changeLibraryPage(Number(select.value)));
 $('song-input').oninput = () => { if (view !== 'library') switchView('library'); editSearch(); };
 document.querySelectorAll('[data-video-source]').forEach(button => button.onclick = () => changeSearchMode(button.dataset.videoSource));
 $('search-order').onchange = () => { searchOrder = $('search-order').value; if (searchSnapshot) renderVideoResults(searchSnapshot); };
@@ -850,7 +866,6 @@ $('queue-list').onclick = async event => {
   const id = button.closest('[data-entry]').dataset.entry;
   const action = button.dataset.action;
   if (action === 'retry' || action === 'reprepare') return retryPreparation(id, action);
-  if (action === 'sing') return openQueuedSong(id);
   if (action === 'preview') return previewVideo(state.entries.find(entry => entry.id === id));
   if (action === 'top') {
     const order = queueToTop(state.entries, id, state.playing ? state.current_id : null);

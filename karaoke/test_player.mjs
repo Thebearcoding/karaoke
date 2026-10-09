@@ -196,6 +196,29 @@ test('queue to top inserts after the playing song without changing either device
   assert.ok(computer.state.playing && phone.state.playing);
 });
 
+test('idle playback follows queue order while an active performance keeps its song and position', () => {
+  const entries = ['one','two','three'].map(id => ({...song,id,status:'completed'}));
+  const idle = new LocalPlayback({entry:entries[0],position:12,pitch_semitones:2,levels:{lead_vocals:.35}});
+  idle.reconcile({entries});
+  assert.equal(idle.state.position,12); // Ordinary progress pushes preserve pause.
+  const singing = new LocalPlayback(idle.save());
+  singing.command('play',{},entries); singing.command('ready',{},entries);
+  const before = singing.save();
+  const reordered = queueToTop(entries,'three').map(id => entries.find(e => e.id === id));
+  idle.reconcile({entries:reordered}); singing.reconcile({entries:reordered});
+  assert.equal(idle.entry.id,'three'); assert.equal(idle.state.position,0);
+  assert.equal(idle.state.playing,false); assert.equal(idle.state.pitch_semitones,0);
+  assert.equal(idle.state.levels.lead_vocals,.35);
+  assert.deepEqual(singing.save(),before);
+  const restored = new LocalPlayback({entry:entries[1],position:99});
+  restored.reconcile({entries:reordered});
+  assert.equal(restored.entry.id,'three'); assert.equal(restored.state.position,0);
+  idle.command('play',{},reordered); idle.command('ready',{},reordered);
+  assert.equal(idle.entry.id,'three');
+  idle.command('next',{},reordered); idle.reconcile({entries:reordered});
+  assert.equal(idle.entry.id,'one');
+});
+
 test('manual preparation actions cover failures and backoff without interrupting an older performance', () => {
   assert.deepEqual(preparationRetry({status:'failed'}),{action:'retry',label:'重试'});
   assert.deepEqual(preparationRetry({status:'queued',next_retry_at:123}),{action:'retry',label:'重试'});
@@ -230,7 +253,7 @@ test('a browser waiting to sing starts the first ready song without arming anoth
   room.entries[0]={...pending,status:'completed'};
   local.reconcile(room);
   assert.equal(local.state.playing,false);
-  assert.equal(local.entry.id,'ready');
+  assert.equal(local.entry.id,pending.id);
 });
 
 test('browser refresh restores only its own playback intent, with no clock before audio is ready', t => {
@@ -581,6 +604,29 @@ test('seek and pause stop all previous sources; end notification fires once', as
   p.video.seeking=false;
   await p.apply({...state,position:19},clockOffset());p.context.currentTime+=2;
   frame();frame();assert.deepEqual(ended,['one']);assert.equal(p.sources.length,0);
+});
+
+test('an idle mobile audio context resumes between songs without a second play gesture', async () => {
+  const ended = [], p = setup(id => ended.push(id));
+  try {
+    await p.unlock(); await p.load(song);
+    await p.apply({...state,position:19},clockOffset());
+    p.context.currentTime += 2; frame();
+    assert.deepEqual(ended,['one']); assert.equal(p.unlocked,true);
+    p.context.state = 'suspended'; p.context.onstatechange();
+    let resumed = 0;
+    p.context.resume = async () => {resumed++; p.context.state='running';};
+    const next = {...song,id:'two',job_id:'two'};
+    await p.load(next);
+    await p.apply({...state,current_id:'two',position:0},clockOffset());
+    assert.equal(resumed,1); assert.equal(p.unlocked,true);
+    assert.notEqual(p.anchor,null); assert.equal(p.sources.length,3);
+    p.context.currentTime += 1; frame();
+    assert.equal(p.video.paused,false);
+    await p.apply({...state,current_id:'two',playing:false,started_at:null},clockOffset());
+    assert.equal(p.anchor,null); assert.equal(p.sources.length,0);
+    assert.equal(resumed,1);
+  } finally {p.clear();}
 });
 
 test('a late download from the previous selection cannot replace current audio', async () => {

@@ -185,6 +185,13 @@ export function librarySongs(library, filter = 'ready', query = '') {
      song.language === filter));
 }
 
+export function paginateSongs(songs, requestedPage = 1) {
+  const size = 12, pages = Math.max(1, Math.ceil(songs.length / size));
+  const page = Math.max(1, Math.min(pages, Number.isInteger(requestedPage) ? requestedPage : 1));
+  const offset = (page - 1) * size;
+  return {songs:songs.slice(offset, offset + size), page, pages, offset};
+}
+
 // Match the source, not its title: translated titles and URL aliases share a queue entry.
 export function queueKey(song) {
   try {

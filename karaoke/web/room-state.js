@@ -60,13 +60,16 @@ export class LocalPlayback {
   }
 
   reconcile(room) {
-    if (!this.entry) this.select(room.entries.find(entry => !this.finished.has(entry.id)) || null, this.state.playing);
+    const first = room.entries.find(entry => !this.finished.has(entry.id)) || null;
+    // Queue order chooses the next performance. Reordering while paused must
+    // update the player too, without interrupting an active performance.
+    if (!this.entry || (!this.state.playing && this.entry.id !== first?.id)) this.select(first, this.state.playing);
     else {
       const queued = room.entries.find(entry => entry.id === this.entry.id);
       const watched = room.playback_entry?.job_id === this.entry.job_id ? room.playback_entry : null;
       const updated = queued || watched || room.library?.find(entry => entry.job_id === this.entry.job_id);
       if (!queued && (!this.state.playing || this.state.started_at === null))
-        this.select(room.entries.find(entry => !this.finished.has(entry.id)) || null, this.state.playing);
+        this.select(first, this.state.playing);
       else if (updated) this.entry = {...updated, id:this.entry.id};
     }
     if (this.state.playing && this.entry?.status !== 'completed') {

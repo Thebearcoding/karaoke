@@ -166,6 +166,10 @@ export class Player {
       // direct seek/resume callers before scheduling any audio.
       await this.prepareVideo(pending.position, pending.abort.signal);
       if (this.pendingStart !== pending) return;
+      // Mobile browsers may suspend an idle context while the next song loads.
+      // Reuse the user's existing play permission before scheduling that song.
+      if (this.unlocked && this.context.state !== 'running') await this.context.resume();
+      if (this.pendingStart !== pending) return;
       if (this.context.state !== 'running') throw new Error('声音尚未启动，请点播放重试');
       this.pendingStart = null;
       this.videoRun = pending;

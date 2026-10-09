@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, filterSongs, visibleResults, playCount, orderResults, queueKey, queuePosition, historySuggestions} from './web/search.js';
+import {createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, paginateSongs, filterSongs, visibleResults, playCount, orderResults, queueKey, queuePosition, historySuggestions} from './web/search.js';
 
 function setup() {
   const requests = [], snapshots = [];
@@ -9,6 +9,19 @@ function setup() {
   return {search, requests, snapshots};
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
+
+test('library pages keep every song in order and clamp after the filtered library shrinks', () => {
+  const songs = Array.from({length:29}, (_, id) => ({id}));
+  const pages = [1,2,3].map(page => paginateSongs(songs, page));
+  assert.deepEqual(pages.flatMap(page => page.songs), songs);
+  assert.deepEqual(pages.map(page => [page.offset,page.songs.length]), [[0,12],[12,12],[24,5]]);
+  assert.deepEqual(paginateSongs(songs,99),pages[2]);
+  assert.equal(paginateSongs([...songs,{id:29}],2).page,2);
+  assert.deepEqual(paginateSongs(songs.slice(0,4),3).songs,songs.slice(0,4));
+  assert.equal(paginateSongs(songs.slice(0,4),3).page,1);
+  assert.deepEqual(paginateSongs([],3),{songs:[],page:1,pages:1,offset:0});
+  assert.equal(paginateSongs(songs,NaN).page,1);
+});
 
 test('ready library contains only playable songs; unfinished songs remain in all songs and language filters', () => {
   const songs = ['completed','video_evicted','audio_ready','source_ready','running','queued','failed'].map((status,index) =>
@@ -277,8 +290,8 @@ test('each tab restores its own search and navigation after another tab changes 
     local.navigation = createViewHistory(history,()=>local.value,next=>{local.value=next;});
     return local;
   }
-  const alice = tab({query:'Lemon',videoSource:'songs',searchOrder:'popular',scroll:340,queueTab:'upcoming'});
-  const bob = tab({query:'周杰伦',videoSource:'artists',searchOrder:'relevance',scroll:90,queueTab:'history'});
+  const alice = tab({query:'Lemon',videoSource:'songs',searchOrder:'popular',scroll:340,queueTab:'upcoming',libraryPage:3});
+  const bob = tab({query:'周杰伦',videoSource:'artists',searchOrder:'relevance',scroll:90,queueTab:'history',libraryPage:1});
   alice.navigation.save(); bob.navigation.save();
   alice.value.query='First Love'; alice.value.scroll=700; alice.navigation.save();
   for (const local of [alice,bob]) {
@@ -286,8 +299,8 @@ test('each tab restores its own search and navigation after another tab changes 
     const reloaded=createViewHistory(local.history,()=>local.value,next=>{local.value=next;});
     assert.equal(reloaded.restore(),true);
   }
-  assert.deepEqual(alice.value,{query:'First Love',videoSource:'songs',searchOrder:'popular',scroll:700,queueTab:'upcoming'});
-  assert.deepEqual(bob.value,{query:'周杰伦',videoSource:'artists',searchOrder:'relevance',scroll:90,queueTab:'history'});
+  assert.deepEqual(alice.value,{query:'First Love',videoSource:'songs',searchOrder:'popular',scroll:700,queueTab:'upcoming',libraryPage:3});
+  assert.deepEqual(bob.value,{query:'周杰伦',videoSource:'artists',searchOrder:'relevance',scroll:90,queueTab:'history',libraryPage:1});
 });
 
 test('default puts songs before albums and lowers live songs without removing results or changing other sorts', () => {
