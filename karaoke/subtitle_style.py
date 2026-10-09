@@ -10,7 +10,7 @@ import subprocess
 import time
 import unicodedata
 
-from fontTools.ttLib import TTFont
+from fontTools.ttLib import TTFont, TTLibError
 from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFilter, ImageFont
 
 
@@ -238,17 +238,23 @@ def script_for(text, language='auto'):
 
 @lru_cache(maxsize=32)
 def coverage(path, index):
-    with TTFont(str(path), fontNumber=index, lazy=True) as font:
-        if font['head'].flags & (1 << 14):  # OpenType: generic last-resort symbols, not glyph support.
-            return set()
-        return set(font.getBestCmap())
+    try:
+        with TTFont(str(path), fontNumber=index, lazy=True) as font:
+            if font['head'].flags & (1 << 14):  # OpenType: generic last-resort symbols, not glyph support.
+                return set()
+            return set(font.getBestCmap())
+    except TTLibError:
+        # Fontconfig can return Type 1 fonts, which have no OpenType cmap.
+        return set()
 
 
 def resolve_font(text, style=DEFAULT_STYLE, language='auto', font_file=None):
     font_file = font_file or os.getenv('KARAOKE_FONT_FILE')
     script = script_for(text, language)
     name, index = STYLES[style]['fonts'][script]
-    required = {ord(c) for c in text if not c.isspace()}
+    # Formatting controls (e.g. BOM / zero-width joiner) have no visible glyph.
+    # Keep the source string and its timing indices intact.
+    required = {ord(c) for c in text if not c.isspace() and unicodedata.category(c) != 'Cf'}
     candidates = [(Path(font_file), 0)] if font_file else []
     if not font_file:
         try:

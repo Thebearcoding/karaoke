@@ -73,6 +73,9 @@ the existing Blue Bird entry, history, settings, credentials, and source files.
   these tails without rewriting acoustic times, retaining invalid interval and
   reversed-start rejection. The real render and negative cases are revalidated.
 
+- Live100 found an invisible U+FEFF in Lucky Color lyrics. Font coverage treated it as a visible glyph, exhausted valid CJK fonts, then crashed on a Type1 fallback. Ignore format controls only for glyph selection and skip unsupported font formats; keep source text and timing indices unchanged.
+- Pagination and queue controls are deployed at `2dfcfa5`; 79 JavaScript tests pass. Real browser testing covered page boundaries, refresh, filters, paused queue reorder, noninterrupting reorder, next-song playback, and natural completion with independent audio/video. Mobile idle-context resumption is simulated; physical iPad confirmation is pending.
+
 ## Work and Invariants
 
 `karaoke/web/room-state.js` owns current selection and saved transport. Expired

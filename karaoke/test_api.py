@@ -5887,6 +5887,25 @@ def test_playback_fallback_prefers_existing_word_times_to_coarse_lines(tmp_path,
     assert next(e for e in events if e['code']=='alignment_localized_with_asr')['windows'] == 1
 
 
+def test_font_selection_ignores_invisible_format_controls_but_still_requires_visible_glyphs(tmp_path, monkeypatch):
+    from karaoke import subtitle_style as style
+    font, _, _ = style.resolve_font('夜空の歌', language='Japanese')
+    # Unsupported font candidates must not prevent trying the usable fallback.
+    bad = tmp_path/'type1.pfb'
+    bad.write_bytes(b'%!PS-AdobeFont-1.0: Unsupported Type 1')
+    monkeypatch.setenv('KARAOKE_FONT_FILE', str(bad))
+    monkeypatch.setattr(style.subprocess, 'check_output', lambda *a, **k: f'{font}\t0\n')
+    text = '\ufeff夜空\u200dの歌'
+    selected, _, _ = style.resolve_font(text, language='Japanese')
+    assert selected == font
+    layout = {}
+    image = style.caption_image(text, language='Japanese', layout_out=layout)
+    assert image.getbbox() is not None
+    assert ''.join(c['character'] for c in layout['characters']) == text
+    with pytest.raises(ValueError, match='No installed font covers'):
+        style.resolve_font(text+'\U0010ffff', language='Japanese')
+
+
 @pytest.mark.parametrize('long_credits', [False, True])
 def test_intro_fits_long_metadata_without_truncating_lyrics(monkeypatch, long_credits):
     from karaoke import subtitle_style as style
