@@ -29,7 +29,7 @@ def normalized(text):
 
 
 def highlight_spans(text, language):
-    """Display atoms: Latin words and Chinese characters, in source offsets.
+    """Display atoms: Unicode words and Chinese characters, in source offsets.
 
     Japanese reading groups are chosen by the pronunciation model, not here.
     Apostrophes and hyphens inside a Latin word do not create another onset.
@@ -37,6 +37,10 @@ def highlight_spans(text, language):
     text = latin_word_text(text)
     def latin(char):
         return unicodedata.name(char, '').startswith('LATIN ') or char.isdecimal()
+
+    def word_letter(char):
+        return char.isalpha() and not unicodedata.name(char, '').startswith(
+            ('CJK ', 'HIRAGANA ', 'KATAKANA ', 'HALFWIDTH KATAKANA '))
 
     index = 0
     while index < len(text):
@@ -55,6 +59,16 @@ def highlight_spans(text, language):
             yield first, index
         elif language == 'Chinese' and unicodedata.name(char, '').startswith(
                 ('CJK UNIFIED IDEOGRAPH', 'CJK COMPATIBILITY IDEOGRAPH')):
+            yield first, index
+        elif language not in ('Chinese', 'Japanese', 'English', 'Latin') and word_letter(char):
+            while index < len(text):
+                char = text[index]
+                if word_letter(char) or char.isdecimal() or unicodedata.category(char).startswith('M'):
+                    index += 1
+                elif char in "'’‐-" and index+1 < len(text) and text[index+1].isalpha():
+                    index += 1
+                else:
+                    break
             yield first, index
 
 
@@ -85,7 +99,14 @@ def highlight_coverage_errors(cues, language):
 
 def collapsed_phrase(cue, language):
     """Detect gross phrase compression, not normal variation in singing speed."""
-    atoms = list(highlight_spans(cue['text'], language))
+    text, atoms = latin_word_text(cue['text']), []
+    for first, stop in highlight_spans(text, language):
+        # Keep the existing non-Latin spelling measure when a whole word
+        # becomes one highlight; changing its display must not hide collapse.
+        if any(c.isalpha() and not unicodedata.name(c, '').startswith('LATIN ') for c in text[first:stop]):
+            atoms.extend((i,i+1) for i in range(first,stop) if text[i].isalnum())
+        else:
+            atoms.append((first,stop))
     # Display tokenization intentionally leaves Japanese reading groups to
     # the acoustic model. Compression still has to cover those scripts,
     # including a failed group that swallowed a complete sentence.

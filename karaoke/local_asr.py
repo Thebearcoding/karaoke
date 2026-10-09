@@ -13,10 +13,21 @@ import tempfile
 
 if __package__:
     from .stage_cache import StageCache, digest
-    from .job_schema import song_language
+    from .job_schema import language_code, song_language
 else:
     from stage_cache import StageCache, digest
-    from job_schema import song_language
+    from job_schema import language_code, song_language
+
+
+def whisper_language(value):
+    """Resolve against the installed model's vocabulary, never default to English."""
+    from whisper.tokenizer import LANGUAGES, TO_LANGUAGE_CODE
+    for name in (language_code(value), value, song_language(value)):
+        key = str(name or '').lower()
+        code = key if key in LANGUAGES else TO_LANGUAGE_CODE.get(key)
+        if code in LANGUAGES:
+            return code
+    raise ValueError(f'当前 Whisper 模型不支持语言：{value}')
 
 
 def offline():
@@ -50,7 +61,7 @@ def transcribe(model, samples, language, batch_size):
         language, detection = detect_audio_language(samples,
             lambda clip: model.detect_language(audio=clip, vad_filter=False)[:2])
     else:
-        language = {'Chinese': 'zh', 'Japanese': 'ja', 'English': 'en'}[song_language(language)]
+        language = whisper_language(language)
     # Do not let a speech VAD remove quiet singing. Every sample belongs to a
     # window, including the final partial window. These are ASR bounds, not cues.
     windows = [dict(start=start/16000, end=min(start+window, len(samples))/16000)

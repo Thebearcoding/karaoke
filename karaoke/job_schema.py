@@ -1,6 +1,7 @@
 """Public job inputs, safe provider errors and single-video platform URLs."""
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from functools import lru_cache
 import fcntl
 import json
 import math
@@ -144,10 +145,26 @@ def provider_error(value):
     return None
 
 
+@lru_cache(maxsize=256)
+def _language_code(value):
+    """Resolve language names and legacy/region tags with the shared registry."""
+    from langcodes import Language, LanguageTagError, find, standardize_tag
+    try:
+        tag = Language.get(value) if re.fullmatch(r'[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]+)*', value) else find(value)
+        code = standardize_tag(tag.language or 'und', macro=True)
+        return code if code != 'und' and Language.get(code).is_valid() else None
+    except (LookupError, LanguageTagError):
+        return None
+
+
+def language_code(value):
+    return _language_code(value.strip()) if isinstance(value, str) and value.strip() else None
+
+
 def song_language(value):
-    key = str(value or '').lower().replace('_', '-').split('-')[0]
-    return {'zh': 'Chinese', 'chinese': 'Chinese', 'ja': 'Japanese', 'japanese': 'Japanese',
-            'en': 'English', 'english': 'English'}.get(key)
+    from langcodes import Language
+    code = language_code(value)
+    return Language.get(code).display_name('en') if code else None
 
 
 def thumbnail_url(value):
@@ -200,7 +217,7 @@ class JobRequest(BaseModel):
     lyrics: list[str] | None = Field(default=None, max_length=1000)
     title: str | None = Field(default=None, max_length=200)
     artist: str | None = Field(default=None, max_length=200)
-    language: Literal['Chinese', 'Japanese', 'English'] | None = None
+    language: str | None = Field(default=None, max_length=80)
     mv_audio: Literal['instrumental_backing', 'instrumental'] = 'instrumental_backing'
     force: bool = False
 
@@ -226,4 +243,9 @@ class JobRequest(BaseModel):
     @field_validator('language', mode='before')
     @classmethod
     def language_alias(cls, value):
-        return song_language(value) or value
+        if value is None:
+            return None
+        language = song_language(value)
+        if language is None:
+            raise ValueError('请使用有效的语言名称或 ISO 语言代码')
+        return language

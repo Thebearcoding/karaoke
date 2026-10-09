@@ -7,6 +7,7 @@ import subprocess
 from openai import OpenAI
 
 from job_schema import song_language
+from local_asr import whisper_language
 from transcribe_lyrics import needs_recovery
 import local_asr
 
@@ -74,7 +75,7 @@ def recover_anchor_words(client, audio, lines, words, language, output, cache, m
                         client = client or OpenAI(timeout=60, max_retries=0)
                         with clip.open('rb') as stream:
                             data = client.audio.transcriptions.create(file=stream, model='whisper-1',
-                                language={'Chinese':'zh', 'Japanese':'ja', 'English':'en'}[language],
+                                language=whisper_language(language),
                                 temperature=0, response_format='verbose_json',
                                 timestamp_granularities=['word', 'segment']).model_dump()
                     response_path.write_text(json.dumps(data, ensure_ascii=False)+'\n')

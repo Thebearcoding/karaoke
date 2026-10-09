@@ -82,7 +82,7 @@ def map_words(cue, words, offset, language):
     # Whisper tokens may split a Latin word (e.g. "Moder" + "ato"). Keep
     # its measured first onset and last end as one displayed word. A token
     # spanning multiple words cannot be split without new acoustic evidence.
-    for first, stop in highlight_spans(cue['text'], 'English'):
+    for first, stop in highlight_spans(cue['text'], language):
         indexes = [i for i, u in enumerate(units) if u['first'] < stop and u['stop'] > first]
         if len(indexes) > 1:
             left, right = indexes[0], indexes[-1]
@@ -152,7 +152,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cues', required=True, type=Path)
     parser.add_argument('--raw', required=True, type=Path)
-    parser.add_argument('--language', required=True, choices=['Chinese', 'Japanese', 'Latin'])
+    parser.add_argument('--language', required=True)
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
     if args.output.exists():

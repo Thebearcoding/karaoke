@@ -17,7 +17,7 @@ from opencc import OpenCC
 from rapidfuzz.distance import Levenshtein
 
 from .anchors_from_asr import text_units
-from .job_schema import provider_error, retry_after_seconds, retry_fields
+from .job_schema import provider_error, retry_after_seconds, retry_fields, song_language
 from .song_sources import (SongText, extract_song_metadata, find_verified_lyrics,
                            join_punctuation_lines, video_song_info)
 from .source_captions import read_document
@@ -108,15 +108,16 @@ def names(value, *, title=False):
                        r'(?:official\s+)?lyrics?\s+video)(?:\s+(?:hd|4k))?[\])]\s*$', '', value, flags=re.I)
         if clean and clean != value:
             return result + names(clean, title=True)
-    # Music metadata often appends an English translation to a Chinese name.
+    # Platforms publish original names together with Latin-script aliases.
     # Version labels are not translations: never strip "Live", "Remix", etc.
-    native = r'[\u3040-\u30ff\u3400-\u9fff]+(?:[ ·][\u3040-\u30ff\u3400-\u9fff]+)*'
+    native = r'[^\W\d_\x00-\x7f]+(?:[ ·][^\W\d_\x00-\x7f]+)*'
     latin = r'[A-Za-z][\x20-\x7e]*?'
     match = re.fullmatch(rf'({native})(?:\s+(?:[-–—]\s+)?({latin})|\s*\(({latin})\))', value)
-    reverse = re.fullmatch(rf'({latin})\s+({native})', value)
+    reverse = re.fullmatch(rf'({latin})(?:\s+({native})|\s*\(({native})\))', value)
     if match or reverse:
-        local, english = (match[1], match[2] or match[3]) if match else (reverse[2], reverse[1])
-        if not re.search(r'\b(live|remix|acoustic|instrumental|karaoke|remaster\w*)\b', english, re.I):
+        local, english = (match[1], match[2] or match[3]) if match else (reverse[2] or reverse[3], reverse[1])
+        if any(c.isalpha() and 'LATIN' not in unicodedata.name(c, '') for c in local) and not re.search(r'\b(live|remix|acoustic|instrumental|karaoke|remaster\w*)\b', english, re.I) and not re.search(
+                r'라이브|리믹스|어쿠스틱|인스트루멘탈|버전', local):
             result.extend((english, local))
     return result
 
@@ -245,13 +246,17 @@ def unpadded_duration(audio_path, duration):
                 leading_zero_seconds=first/rate, trailing_zero_seconds=(frames-last)/rate)
 
 
+@lru_cache(maxsize=128)
 def text_language(text):
+    if re.search(r'[\u1100-\u11ff\u3130-\u318f\uac00-\ud7a3]', text):
+        return 'Korean'
     if re.search(r'[\u3040-\u30ff]', text):
         return 'Japanese'
     if re.search(r'[\u3400-\u9fff]', text):
         return 'Chinese'
-    if any(c.isalpha() for c in text) and all(not c.isalpha() or 'LATIN' in unicodedata.name(c, '') for c in text):
-        return 'English'
+    if any(c.isalpha() for c in text):
+        import langid
+        return song_language(langid.classify(text)[0])
     return None
 
 
@@ -608,13 +613,22 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 if request.get(key):
                     continue
                 before = dict(song)
-                description_text = read_description([key], retry=True)
-                if parsed is None and metadata_failure and not metadata_retries:
+                recording = next((r.get('recording_identity') or {} for r in
+                    report.get('crosscheck', {}).get('unavailable_sources', [])
+                    if r.get('provider') == 'youtube_music' and
+                    (r.get('recording_identity') or {}).get('video_id') == metadata.get('id')), {})
+                confirmed_alias = recording.get(key)
+                if confirmed_alias and not identity(confirmed_alias, title=key == 'title') & identity(song.get(key), title=key == 'title'):
+                    song[key] = confirmed_alias
+                    description_text = None
+                else:
                     description_text = read_description([key], retry=True)
+                    if parsed is None and metadata_failure and not metadata_retries:
+                        description_text = read_description([key], retry=True)
                 if song == before:
                     continue
                 blocked = {r['provider']: (None, r) for r in report.get('crosscheck', {}).get('unavailable_sources', [])
-                           if r.get('error') and r.get('provider')}
+                           if r.get('provider') and (r.get('error') or r['provider'] == 'youtube_music')}
                 lines, report = fetch_lyric_consensus(song, metadata, duration, cache, description_text, True,
                                                       prefetched=blocked)
                 attempts.append(dict(identity={key: song.get(key) for key in original}, lookup=report))

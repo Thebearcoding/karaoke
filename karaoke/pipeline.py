@@ -231,7 +231,7 @@ class Pipeline:
     def stage_spec(self, name, command):
         """Explicit inputs/outputs prevent a downstream fix from discarding upstream work."""
         common = ['subtitles.py', 'lyric_progress.py', 'stage_progress.py']
-        whisper = ['align_lyrics_whisper.py', 'anchors_from_asr.py', 'stage_cache.py', 'local_asr.py']
+        whisper = ['align_lyrics_whisper.py', 'anchors_from_asr.py', 'stage_cache.py', 'local_asr.py', 'job_schema.py']
         phonemes = ['align_lyric_phonemes.py', 'phoneme_progress.py']
         english_code = [*whisper, 'align_english_onsets.py', 'onset_consensus.py', 'word_onset_metrics.py']
         english = str(ROOT/'align_english_onsets.py') in [str(a) for a in command]
@@ -274,6 +274,9 @@ class Pipeline:
         config = dict(command=[str(a) for a in command], compute_concurrency=self.compute_concurrency)
         if name == 'validate_timing':
             from .timing_validation import acoustic_model_files
+            if json.loads((self.output/'lyrics.json').read_text())['language'] not in ('Chinese', 'Japanese', 'English'):
+                code = code+[ROOT/p for p in ('align_lyrics_whisper.py', 'local_asr.py',
+                                             'job_schema.py', 'requirements-subtitles.txt')]
             if '--lead' in command:
                 inputs = [*inputs, command[command.index('--lead')+1]]
             for evidence in ('timing-constraints.json', 'alignment/raw.json'):
@@ -285,7 +288,7 @@ class Pipeline:
                     'timing-checked/cues.json', 'timing-checked/report.json'))]
                 if (self.output/'stems/lead.wav').is_file():
                     inputs = [*inputs, 'stems/lead.wav']
-            weights = acoustic_model_files(ROOT)
+            weights = acoustic_model_files(ROOT, json.loads((self.output/'lyrics.json').read_text())['language'])
             config['weights'] = [(str(p), p.stat().st_size, p.stat().st_mtime_ns)
                                  for p in weights if p.is_file()]
         if name in ('separate_music', 'separate_lead'):
@@ -913,7 +916,7 @@ class Pipeline:
             self.run('align_context', [sys.executable, ROOT/'experiments/cjk-onsets-v003/run.py',
                 '--jobs', output/'context-jobs.json', '--output', output/'context', '--device', self.device])
             cues = json.loads((output/'context/song/cues.json').read_text())
-        else:
+        elif language == 'English':
             from onset_consensus import blend_cues, context_scope_violations
             locations = phrase_locations(lyrics['lines'], raw)
             write_json(output/'english-anchors.json', [locations.get(i, cue) for i, cue in enumerate(words)])
@@ -932,6 +935,10 @@ class Pipeline:
                 raise StageFailure('align_words', '英文词起点落在已定位的唱句上下文之外，需重新对齐')
             cues = [dict(c, status='candidate') for c in cues]
             cues, _ = presentation_cues(cues, duration, lead=0, tail=0, bridge_gap=0)
+        else:
+            # Languages without dedicated singing weights retain the measured
+            # multilingual word alignment and still undergo acoustic review.
+            cues = words
         self.aligned_cues = cues
         units = [u for c in cues for u in c['units']]
         if not units or [c['text'] for c in cues] != lyrics['lines']:

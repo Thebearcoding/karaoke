@@ -337,7 +337,7 @@ def compose_timing_bounds(cues, index, row, measured, constraints, wave, protoco
             return True
         return any(u['first']==first and u['start']==time and
             u.get('independent_evidence')=='ctc_label_localization' and
-            u.get('timing_evidence') in ('ctc_event','phonetic_span') and
+            u.get('timing_evidence') in ('ctc_event','phonetic_span','attention_span') and
             label_events_support(time, u.get('first_event_end', u.get('emission_end')
                 if u['timing_evidence']=='ctc_event' else u.get('acoustic_end',u['end'])),
                 secondary, protocol['maximum_change_seconds']) for u in measured)
@@ -439,7 +439,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             if cue['aligned_end']-cue['aligned_start'] > 60:
                 raise ValueError('Acoustic localization context exceeds 60 seconds')
             letters = [c for c in latin_word_text(cue['text']) if c.isalpha()]
-            review_language = 'English' if letters and all(c.isascii() for c in letters) else language
+            review_language = 'English' if language in ('Chinese', 'Japanese') and letters and all(c.isascii() for c in letters) else language
             observation, offset = cue, None
             # Joint localization initializes occurrence identity. Later passes
             # already selected a new crop or recorded observations: rebuilding
@@ -521,8 +521,9 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                     if group in suspects:
                         report.setdefault('unconfirmed', []).append(dict(first=group['first'],reason=reason))
                     continue
-                replacement = dict(replacement[0], timing_source='cross_model_ctc' if
-                    replacement[0].get('timing_evidence')=='ctc_event' else 'cross_model_phonemes',
+                replacement = dict(replacement[0], timing_source={
+                    'ctc_event': 'cross_model_ctc', 'attention_span': 'cross_model_attention'}.get(
+                    replacement[0].get('timing_evidence'), 'cross_model_phonemes'),
                     acoustic_end=acoustic_end(replacement[0]))
                 confirmed[group['first']] = replacement
                 if group not in suspects:
@@ -855,7 +856,8 @@ def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, proto
             return None, None
         guard = [dict(u, end=min(u['end'],limit), acoustic_end=acoustic_end(u),
                       timing_source='linear_fallback' if u.get('bounds_source')=='cross_model_onset_prior_acoustic_end' else
-                      'cross_model_ctc' if u.get('timing_evidence')=='ctc_event' else 'cross_model_phonemes')
+                      {'ctc_event':'cross_model_ctc','attention_span':'cross_model_attention'}.get(
+                          u.get('timing_evidence'),'cross_model_phonemes'))
                  for u in guard]
         suffix, source = guard+units[hi+1:], 'cross_model_onsets'
     else:
@@ -927,11 +929,13 @@ def validate_timeline(cues, lines, duration, constraints=(), language='English')
         raise ValueError('Final timing reuses contradicted acoustic onsets')
 
 
-def acoustic_model_files(root):
+def acoustic_model_files(root, language=None):
     files=[root/'models/alignment/mms/model.pt',
            root/'research/word-onset-2026-09-18/labelmakr/models/g2p_model.py']
     files.extend(p for p in (root/'models/alignment/sofa').rglob('*')
                  if p.suffix in ('.ckpt','.ptsd','.yaml') or p.name=='dict.txt')
+    if language and language not in ('Chinese','Japanese','English'):
+        files.append(root/'models/alignment/whisper/large-v3-turbo.pt')
     return sorted(p for p in files if p.is_file())
 
 
@@ -1001,6 +1005,9 @@ class AcousticReview:
                     if language=='English':
                         from align_english_sofa import EnglishSofaAligner
                         self.models[language]=EnglishSofaAligner(self.device)
+                    elif language not in ('Chinese','Japanese'):
+                        from align_lyrics_whisper import load_aligner
+                        self.models[language]=load_aligner('large-v3-turbo',self.device)
                     else:
                         from align_lyric_phonemes import SingingAligner
                         self.models[language]=SingingAligner(language,self.device)
@@ -1017,6 +1024,24 @@ class AcousticReview:
                         result.append([dict(first=s,stop=e,text=u['text'],start=a+u['start'],end=a+u['end'],
                                             timing_evidence='phonetic_span')
                                        for (s,e),u in zip(spans,predicted)])
+                    elif language not in ('Chinese','Japanese'):
+                        from scipy.signal import resample_poly
+                        from lyric_progress import map_words
+                        from local_asr import whisper_language
+                        aligned=model.align(resample_poly(audio,160,441).astype('float32'),
+                            cue['text'],language=whisper_language(language),original_split=True,regroup=False,token_step=80,
+                            max_word_dur=None,word_dur_factor=None,gap_padding=None,
+                            dynamic_heads=True,verbose=None)
+                        if aligned is None:
+                            raise ValueError('Multilingual acoustic review returned no word times')
+                        words=[w for s in aligned.to_dict()['segments'] for w in s['words']]
+                        units=map_words(dict(cue,start=a,end=b,aligned_start=a,aligned_end=b),words,a,language)
+                        spans=list(highlight_spans(cue['text'],language))
+                        if len(units)!=len(spans) or any(normalized(u['text'])!=normalized(cue['text'][s:e])
+                                for u,(s,e) in zip(units,spans)):
+                            raise ValueError('Multilingual acoustic review omitted or merged words')
+                        result.append([dict(u,first=s,stop=e,text=cue['text'][s:e],timing_evidence='attention_span')
+                                       for u,(s,e) in zip(units,spans)])
                     else:
                         parsed=spoken_units(cue['text'],language)
                         result.append(model.infer(audio,a,parsed,
@@ -1069,7 +1094,10 @@ def main():
     ledger=read(ledger_file) if ledger_file.is_file() else {}
     paths=[code_root/name for name in ('timing_validation.py','cjk_recovery.py','align_lyric_phonemes.py',
         'phoneme_progress.py','align_english_sofa.py','align_english_onsets.py','subtitles.py')]
-    models=acoustic_model_files(ROOT)
+    if lyrics['language'] not in ('Chinese','Japanese','English'):
+        paths.extend(code_root/name for name in ('align_lyrics_whisper.py','lyric_progress.py',
+                                                'local_asr.py','job_schema.py','requirements-subtitles.txt'))
+    models=acoustic_model_files(ROOT, lyrics['language'])
     identity=dict(source=source,protocol=protocol,code={str(p):sha(p) for p in paths},
                   models={str(p):sha(p) for p in models if p.is_file()})
     lead_sha256 = sha(args.lead) if args.lead is not None else None
@@ -1106,7 +1134,7 @@ def main():
     started=time.perf_counter()
     def observations():
         yield 'vocals_ctc', wave, review.observe, review.predict(wave)
-        if lyrics['language'] != 'English':
+        if lyrics['language'] in ('Chinese','Japanese'):
             yield 'vocals_phonemes', wave, review.observe, review.predict(wave,decoder='phonemes')
         if args.lead is not None:
             lead, lead_rate=sf.read(args.lead,dtype='float64',always_2d=True)
@@ -1119,7 +1147,7 @@ def main():
             lead_review=AcousticReview(args.original,args.device,out.parent/'timing-cache',
                 dict(identity,lead_sha256=sha(args.lead)),protocol)
             yield 'lead_ctc', lead, lead_review.observe, lead_review.predict(lead)
-            if lyrics['language'] != 'English':
+            if lyrics['language'] in ('Chinese','Japanese'):
                 yield 'lead_phonemes', lead, lead_review.observe, lead_review.predict(lead,decoder='phonemes')
     previous = ledger.get('observations', []) if same_evidence else []
     if args.lead is None or ledger.get('lead_sha256') != lead_sha256:

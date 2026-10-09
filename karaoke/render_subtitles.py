@@ -23,7 +23,7 @@ def main():
     parser.add_argument('--font', type=Path, help='Font covering the lyric language')
     parser.add_argument('--style', choices=STYLES, default=DEFAULT_STYLE)
     parser.add_argument('--tone', choices=['light', 'dark'], default='light')
-    parser.add_argument('--language', choices=['auto', 'Japanese', 'Chinese', 'Latin'], default='auto')
+    parser.add_argument('--language', default='auto')
     parser.add_argument('--animate', action='store_true', help='Apply the style fade at cue boundaries')
     parser.add_argument('--bottom-margin', type=int, default=TOKENS['bottom_margin'],
                         help='Caption strip offset in output pixels; adjust for existing picture titles')

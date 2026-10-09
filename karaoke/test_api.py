@@ -1313,6 +1313,80 @@ def test_unmatched_lyrics_retry_cached_native_identity_once_without_repeating_bl
         assert not report.get('identity_recovery',{}).get('recovered',False)
 
 
+@pytest.mark.parametrize('same_recording,explicit', [(True,False),(False,False),(True,True)])
+def test_lyric_identity_reuses_platform_native_alias_without_model(tmp_path, monkeypatch, same_recording, explicit):
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    from openai import OpenAIError
+    body = ['우리 함께 노래해', '밤하늘 별을 바라보며 함께 걸어가']
+    calls = []
+    def extract(*args):
+        raise OpenAIError('metadata model unavailable')
+    def additional(provider, song, *args, **kwargs):
+        calls.append((provider,song['artist']))
+        if provider == 'youtube_music':
+            return None,dict(provider=provider,status='unavailable',recording_identity=dict(
+                title='Evening Wind',artist='별빛',video_id='aaaaaaaaaaa' if same_recording else 'bbbbbbbbbbb'))
+        return (body if song['artist']=='별빛' else None),dict(provider=provider,language='Korean')
+    monkeypatch.setattr(lyric_lookup,'extract_song_metadata',extract)
+    monkeypatch.setattr(lyric_lookup,'fetch_lyrics',lambda *a:dict(status='no_supported_recording'))
+    monkeypatch.setattr(lyric_lookup,'fetch_published_lyrics',lambda *a,**k:(None,dict(provider='line_music')))
+    monkeypatch.setattr(lyric_consensus,'fetch_additional_lyrics',additional)
+    request=dict(url=URL)
+    if explicit: request['artist']='Starlight'
+    result=lyric_lookup.prepare_online_lyrics(request,
+        dict(id='aaaaaaaaaaa',track='Evening Wind (밤바람)',artist='Starlight',description='Album credits'),
+        30,StageCache(tmp_path),'unused',None)
+    assert bool(result)==(same_recording and not explicit)
+    assert sum(provider=='youtube_music' for provider,_ in calls)==1
+    if result:
+        assert result['artist']=='별빛' and result['lines']==body and result['language']=='Korean'
+        assert result['provenance']['lyric_lookup']['identity_recovery']['recovered']
+
+
+@pytest.mark.parametrize('tag,canonical,model_code', [('ko-KR','Korean','ko'),
+    ('iw','Hebrew','he'),('jw','Javanese','jw'),('cmn','Chinese','zh')])
+def test_model_language_aliases_survive_metadata_and_request_round_trip(tag, canonical, model_code):
+    from karaoke.job_schema import song_language
+    from karaoke.local_asr import whisper_language
+    request=JobRequest(url=URL,language=tag)
+    assert request.language==canonical==song_language(model_code)
+    assert whisper_language(request.language)==model_code
+
+
+@pytest.mark.parametrize('code,name,text', [
+    ('ko-KR','Korean','우리 함께 노래해 밤하늘 별을 바라보며 함께 걸어가'),
+    ('fr','French','Nous marchons ensemble dans la lumière et nous chantons cette chanson pour nos amis'),
+    ('ru','Russian','Мы идём вместе по дороге и поём эту песню для наших друзей')])
+def test_new_language_uses_native_metadata_and_multilingual_alignment(tmp_path, monkeypatch, code, name, text):
+    from karaoke.job_schema import song_language
+    from karaoke.lyric_lookup import text_language
+    from karaoke.subtitles import highlight_spans
+    from karaoke.subtitles import lyric_cues
+    from karaoke.local_asr import whisper_language
+    request=JobRequest(url=URL,language=code)
+    assert request.language==name==song_language(code)==text_language(text)
+    assert whisper_language(name)==code.split('-')[0]
+    pipeline=Pipeline(request.model_dump(),tmp_path,device='cpu')
+    lyrics=dict(language=name,lines=[text],provenance=dict(route='lyrics_first'))
+    words=[dict(word=text[a:b],start=1.+i*.5,end=1.3+i*.5)
+           for i,(a,b) in enumerate(highlight_spans(text,name))]
+    calls=[]
+    def run(stage, command):
+        calls.append(stage)
+        assert stage=='align_words'
+        out=tmp_path/'alignment';out.mkdir()
+        (out/'raw.json').write_text(json.dumps([dict(range=[0,1],context=[0,1],source_range=[0,30],
+            result=dict(segments=[dict(text=text,words=words)]))]))
+        cues=lyric_cues([text],[dict(text=w['word'],start=w['start'],end=w['end']) for w in words],30)
+        (out/'cues.json').write_text(json.dumps(cues))
+    monkeypatch.setattr(pipeline,'run',run)
+    pipeline.align(lyrics,30)
+    result=json.loads((tmp_path/'cues.json').read_text())
+    assert calls==['align_words'] and [c['text'] for c in result]==[text]
+    assert [u['start'] for u in result[0]['units']]==[w['start'] for w in words]
+
+
 @pytest.mark.parametrize('corroborated', [True, False])
 def test_isolated_lyric_source_reuses_native_metadata_but_requires_corroboration(tmp_path, monkeypatch, corroborated):
     from karaoke import lyric_lookup, lyric_consensus
@@ -2169,17 +2243,26 @@ def test_published_lyrics_reject_wrong_credits_versions_and_empty_text(change):
     assert published_candidate([dict(row, **change)], song, 'Official Music Video')[0] is None
 
 
+@pytest.mark.parametrize('script', ['Chinese', 'Korean', 'Russian'])
 @pytest.mark.parametrize('title,artist', [
     ('晚風 Evening Wind', '林林 Lin Lin'), ('Evening Wind 晚風', 'Lin Lin 林林'),
-    ('晚風(Evening Wind)', '林林 Lin Lin')])
-def test_published_lyrics_match_both_languages_of_bilingual_credits(title, artist):
+    ('晚風(Evening Wind)', '林林 Lin Lin'), ('Evening Wind (晚風)', 'Lin Lin (林林)')])
+def test_published_lyrics_match_both_languages_of_bilingual_credits(title, artist, script):
     from karaoke.lyric_lookup import published_candidate
+    native_title, native_artist, body = {
+        'Chinese': ('晚風', '林林', '微風裡慢慢歌唱'),
+        'Korean': ('밤바람', '별빛', '우리 함께 노래해'),
+        'Russian': ('Ветер', 'Звезда', 'Мы идём вместе по дороге и поём эту песню для наших друзей'),
+    }[script]
+    title, artist = title.replace('晚風', native_title), artist.replace('林林', native_artist)
     row = dict(trackId=123, trackTitle=title, artists=[dict(artistName=artist)],
-               album=dict(albumTitle='春天'), lyrics='微風裡慢慢歌唱')
-    for title, artist in [('Evening Wind', 'Lin Lin'), ('晚風', '林林')]:
+               album=dict(albumTitle='春天'), lyrics=body)
+    for title, artist in [('Evening Wind', 'Lin Lin'), (native_title, native_artist)]:
         lines, report = published_candidate([row], dict(title=title, artist=artist), 'Official Music Video')
         assert lines == [row['lyrics']] and report['url'].endswith('/123')
-    for change in (dict(trackTitle='晚風 Live'), dict(artists=[dict(artistName='林林 Remix')])):
+        assert report['language'] == script
+    for change in (dict(trackTitle=native_title+' Live'), dict(trackTitle='Evening Wind (라이브)'),
+                   dict(artists=[dict(artistName=native_artist+' Remix')])):
         assert published_candidate([dict(row, **change)], dict(title='Evening Wind', artist='Lin Lin'), '')[0] is None
 
 
@@ -4378,7 +4461,7 @@ def test_download_publishes_metadata_before_separation(tmp_path, monkeypatch, ca
     (dict(language='ja', acodec='opus'), None, 'Japanese', 'auto'),
     (dict(requested_formats=[dict(acodec='none', language='ja'),
                              dict(acodec='opus', language='en-US')]), None, 'English', 'auto'),
-    (dict(language='fr'), None, None, 'auto'),
+    (dict(language='fr'), None, 'French', 'auto'),
     (dict(language='ja'), 'Chinese', 'Japanese', 'Chinese'),
     (dict(language='en'), None, 'English', 'auto'),
 ])
@@ -8074,7 +8157,7 @@ def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, f
             data = dict(language='japanese', segments=[dict(start=1,end=5,text='一緒に歌うこの歌の続きを')],
                         words=[dict(start=1,end=1,word=c) for c in '一緒に歌うこの歌の続きを'])
         elif initial_kind == 'unsupported_language' and (name == str(audio) or bad_chunk):
-            data = dict(language='russian', segments=[dict(start=1,end=2,text='пример слов')],
+            data = dict(language='unknown', segments=[dict(start=1,end=2,text='пример слов')],
                         words=[dict(start=1,end=2,word='пример слов')])
         elif initial_kind in ('backward_segments', 'backward_words', 'invalid_range') and (
                 name == str(audio) or bad_chunk):
@@ -8489,7 +8572,7 @@ def test_unusable_vocal_asr_rechecks_recording_tracks_before_whole_song_retry(tm
     elif problem == 'outside_audio':
         candidate['words'][-1]['end'] = 4.
     elif problem == 'unsupported_language':
-        candidate['language'] = 'ru'
+        candidate['language'] = 'unknown'
     preserved, calls = deepcopy(candidate), []
     language = 'zh' if problem == 'wrong_language' else 'auto'
 

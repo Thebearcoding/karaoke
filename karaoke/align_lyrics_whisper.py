@@ -22,6 +22,7 @@ from lyric_progress import map_words
 from subtitles import lyric_cues, normalized, presentation_cues, write_captions
 from stage_progress import progress_items, report_progress
 from local_asr import detect_whisper_language
+from local_asr import whisper_language
 
 
 def sha(path):
@@ -1209,6 +1210,18 @@ def refine_chinese_onsets(cues, raw_blocks, audio, language):
     return changes
 
 
+def load_aligner(name, device):
+    if device == 'mps':
+        whisper_timing.dtw = lambda matrix: dtw_cpu(matrix.detach().cpu().double().numpy())
+    model = stable_whisper.load_model(name, device='cpu',
+        download_root=str(Path(__file__).resolve().parent/'models/alignment/whisper'))
+    # Sparse attention-head indices must stay on the host, including on MPS.
+    heads = model._buffers.pop('alignment_heads')
+    model.to(device)
+    model.register_buffer('alignment_heads', heads, persistent=False)
+    return model
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--jobs', type=Path, required=True)
@@ -1218,19 +1231,12 @@ def main():
     args = parser.parse_args()
     torch.set_num_threads(4)
     torch.manual_seed(42)
-    # Whisper's CPU DTW promotes to float64; transfer before promotion on MPS.
-    if args.device == 'mps':
-        whisper_timing.dtw = lambda matrix: dtw_cpu(matrix.detach().cpu().double().numpy())
     jobs = json.loads(args.jobs.read_text())
     model_root = Path(__file__).resolve().parent/'models/alignment/whisper'
     loading_start = time.perf_counter()
     report_progress(detail='加载模型')
-    model = stable_whisper.load_model(args.model, device='cpu', download_root=str(model_root))
+    model = load_aligner(args.model, args.device)
     model_hash = sha(model_root/f'{args.model}.pt')
-    # The sparse head-selection buffer is indexed on the host; MPS cannot move it.
-    heads = model._buffers.pop('alignment_heads')
-    model.to(args.device)
-    model.register_buffer('alignment_heads', heads, persistent=False)
     recognition_config = None
     loading = time.perf_counter()-loading_start
     print(json.dumps({'model_loaded_seconds': loading, 'model': args.model}), flush=True)
@@ -1245,7 +1251,7 @@ def main():
         if audio_info.samplerate != 16000 or audio_info.channels != 1:
             raise ValueError('Whisper alignment requires 16000 Hz mono audio')
         audio, _ = sf.read(job['audio'], dtype='float32')
-        language = {'Japanese': 'ja', 'Chinese': 'zh', 'English': 'en'}[lyrics['language']]
+        language = whisper_language(lyrics['language'])
         blocks = [(0, len(lyrics['lines']), 0, len(lyrics['lines']), 0., duration)]
         anchors = None
         if job.get('anchors'):

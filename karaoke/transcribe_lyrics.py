@@ -16,6 +16,7 @@ import time
 
 from openai import OpenAI
 from job_schema import song_language
+from local_asr import whisper_language
 from stage_progress import progress_items, report_progress
 from stage_cache import StageCache, digest
 import local_asr
@@ -75,7 +76,7 @@ def cached_local_recognition(audio, language, output, *, weights=None):
             if language == 'auto':
                 code, detection = recording_language(model, audio)
             else:
-                code = {'Chinese': 'zh', 'Japanese': 'ja', 'English': 'en'}[song_language(language)]
+                code = whisper_language(language)
             data = (whisper.transcribe(model, str(audio), language=code, fp16=False,
                 temperature=0, condition_on_previous_text=False, word_timestamps=True, verbose=False)
                 if code is not None else dict(language=None, text='', segments=[]))
@@ -544,7 +545,7 @@ def main():
         raise FileExistsError(args.output)
     started = time.perf_counter()
     client = None if local_asr.offline() else OpenAI(timeout=240., max_retries=1)
-    language = {'Chinese': 'zh', 'Japanese': 'ja', 'English': 'en'}.get(args.language, args.language)
+    language = 'auto' if args.language == 'auto' else whisper_language(args.language)
     args.output.mkdir(parents=True)
     try:
         data, recovery = transcribe(client, args.audio, language, args.hint, args.output,

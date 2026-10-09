@@ -664,6 +664,46 @@ class SubtitleIntegrity(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'bounded distinct contexts'):
                     review.predict(wave)(cues[0],[old,old],[0.,length+3],'Chinese')
 
+    def test_multilingual_review_reuses_measured_words_without_english_phonetics(self):
+        from copy import deepcopy
+        from types import SimpleNamespace
+        from timing_validation import AcousticReview
+        from subtitles import highlight_spans
+        from local_asr import whisper_language
+        for language, text in [('Korean', '우리 함께 노래해'), ('Russian', 'Привет мой друг'),
+                               ('French', 'Chantons avec joie')]:
+            with self.subTest(language=language), tempfile.TemporaryDirectory() as directory:
+                calls = []
+                spans = list(highlight_spans(text, language))
+                measured = [dict(first=a, stop=b, text=text[a:b], start=4.+i*.5, end=4.3+i*.5)
+                            for i, (a,b) in enumerate(spans)]
+                def align(audio, supplied, **options):
+                    self.assertEqual(supplied, text)
+                    self.assertEqual(options['language'], whisper_language(language))
+                    calls.append(options)
+                    # Model output already contains the token boundaries; the
+                    # renderer must not invent times by splitting these words.
+                    return SimpleNamespace(to_dict=lambda: dict(segments=[dict(words=[
+                        dict(word=u['text'],start=.2+i*.5,end=.4+i*.5)
+                        for i,u in enumerate(measured)])]))
+                review = object.__new__(AcousticReview)
+                review.protocol = dict(context_padding_seconds=[.2,.4,.6])
+                review.cache, review.identity = Path(directory), 'test-source'
+                review.models = {language: SimpleNamespace(align=align)}
+                cue = dict(text=text,units=deepcopy(measured),aligned_start=4.,aligned_end=6.)
+                views = [deepcopy(measured),deepcopy(measured)]
+                before = deepcopy((cue,views))
+                predict = review.predict(np.ones(12*44100,dtype='float32'))
+                result = predict(cue,views,[0.,12.],language)
+                self.assertEqual(len(result),3)
+                for row in result:
+                    self.assertEqual([(u['first'],u['stop']) for u in row],spans)
+                    self.assertTrue(all(u['timing_evidence']=='attention_span' for u in row))
+                    self.assertTrue(all(abs(b['start']-a['start']-.5)<.001 for a,b in zip(row,row[1:])))
+                self.assertEqual(predict(cue,views,[0.,12.],language),result)
+                self.assertEqual(len(calls),3)
+                self.assertEqual((cue,views),before)
+
     def test_mixed_chinese_english_review_keeps_source_spans_and_uses_each_phonetic_model(self):
         from copy import deepcopy
         from types import SimpleNamespace
@@ -1941,6 +1981,16 @@ class SubtitleIntegrity(unittest.TestCase):
                         views = witness(dict(cue, text=text), voice, language='English')
                         self.assertEqual(tokens, [['*', *expected, '*']]*2)
                         self.assertEqual([u['text'] for u in views[0]], text.split())
+                for language, text, expected in [
+                        ('Korean', '함께 노래해', ['hamgge', 'noraehae']),
+                        ('Russian', 'Привет друг', ['privet', 'drug']),
+                        ('French', 'chante avec moi', ['chante', 'avec', 'moi'])]:
+                    with self.subTest(language=language):
+                        tokens.clear()
+                        views = witness(dict(cue, text=text), voice, language=language)
+                        self.assertEqual(tokens, [['*', *expected, '*']]*2)
+                        self.assertEqual([u['text'] for u in views[0]], text.split())
+                        self.assertEqual([u['text'] for u in views[1]], text.split())
                 # Changing SOFA to the spoken /o/ must not change MMS's wo label.
                 self.assertEqual(spoken_units('私を', 'Japanese')[-1]['phones'], ['o'])
                 for duration in (.000001, .024):
@@ -2318,6 +2368,9 @@ class SubtitleIntegrity(unittest.TestCase):
             ('English', ["'café' ", "don't ", 'Ooh-ooh']),
             ('English', ['Cafe\u0301—', 'world']),
             ('Japanese', ['東京', 'で', 'Hello']),
+            ('Korean', ['우리 ', '함께 ', 'sing ', '노래해']),
+            ('Russian', ['Привет ', 'мой ', 'друг']),
+            ('French', ['Chantons ', 'encore']),
         ]:
             with self.subTest(language=language, parts=parts):
                 units, cursor = [], 0

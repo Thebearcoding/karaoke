@@ -225,8 +225,10 @@ def system_font(name):
 
 
 def script_for(text, language='auto'):
-    if language != 'auto':
+    if language in ('Chinese', 'Japanese', 'Korean', 'Latin'):
         return language
+    if re.search('[\u1100-\u11ff\u3130-\u318f\uac00-\ud7a3]', text):
+        return 'Korean'
     if re.search('[\u3040-\u30ff]', text):
         return 'Japanese'
     if re.search('[\u3400-\u9fff]', text):
@@ -237,6 +239,8 @@ def script_for(text, language='auto'):
 @lru_cache(maxsize=32)
 def coverage(path, index):
     with TTFont(str(path), fontNumber=index, lazy=True) as font:
+        if font['head'].flags & (1 << 14):  # OpenType: generic last-resort symbols, not glyph support.
+            return set()
         return set(font.getBestCmap())
 
 
@@ -244,13 +248,29 @@ def resolve_font(text, style=DEFAULT_STYLE, language='auto', font_file=None):
     font_file = font_file or os.getenv('KARAOKE_FONT_FILE')
     script = script_for(text, language)
     name, index = STYLES[style]['fonts'][script]
-    path = Path(font_file) if font_file else system_font(name)
-    if font_file:
-        index = 0
-    missing = {c for c in text if not c.isspace() and ord(c) not in coverage(path, index)}
-    if missing:
-        raise ValueError(f'Font {path.name} lacks glyphs: {"".join(sorted(missing))}')
-    return path, index, script
+    required = {ord(c) for c in text if not c.isspace()}
+    candidates = [(Path(font_file), 0)] if font_file else []
+    if not font_file:
+        try:
+            candidates.append((system_font(name), index))
+        except FileNotFoundError:
+            pass
+    for path, index in candidates:
+        if required <= coverage(path, index):
+            return path, index, script
+    # Select by actual glyph coverage, independently of the song's language.
+    try:
+        fonts = subprocess.check_output(['fc-match', '-s', '--format', '%{file}\t%{index}\n',
+            ':charset='+' '.join(f'{c:x}' for c in sorted(required))], text=True, timeout=5)
+        candidates.extend((Path(path), int(index)) for path, index in
+                          (line.rsplit('\t', 1) for line in fonts.splitlines()))
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+    candidates.append((Path('/Library/Fonts/Arial Unicode.ttf'), 0))
+    for path, index in candidates:
+        if path.is_file() and required <= coverage(path, index):
+            return path, index, script
+    raise ValueError('No installed font covers all lyric characters: '+''.join(map(chr, sorted(required))))
 
 
 def line_width(text, font, tracking):

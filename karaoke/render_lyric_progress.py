@@ -167,7 +167,7 @@ def main():
     parser.add_argument('--duration', type=float, required=True)
     parser.add_argument('--mode', choices=['word', 'underline', 'static'], default='word')
     parser.add_argument('--style', choices=STYLES, default='cinema_focus')
-    parser.add_argument('--language', choices=['Chinese', 'Japanese', 'Latin'], required=True)
+    parser.add_argument('--language', required=True)
     parser.add_argument('--bottom-margin', type=int, default=64)
     parser.add_argument('--next-line', action=argparse.BooleanOptionalAction, default=True,
                         help='Always show the next lyric line in white; advance at its first sung word')

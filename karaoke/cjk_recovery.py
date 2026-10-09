@@ -16,6 +16,7 @@ class AcousticWitness:
     def __init__(self, original_audio, device):
         self.original_audio, self.device = original_audio, device
         self.bundle = self.model = None
+        self.romanizer = None
 
     def __call__(self, cue, wave, *, language='Chinese'):
         import torch
@@ -54,7 +55,12 @@ class AcousticWitness:
             tokens = [re.sub("[^a-z']", '', unicodedata.normalize('NFKD',
                       text[a:b].lower().replace('’', "'"))) for a, b in spans]
         else:
-            raise ValueError('Unsupported independent pronunciation language')
+            from uroman import Uroman
+            if self.romanizer is None:
+                self.romanizer = Uroman()
+            spans = list(highlight_spans(cue['text'], language))
+            tokens = [re.sub("[^a-z']", '', self.romanizer.romanize_string(
+                      cue['text'][a:b]).lower()) for a, b in spans]
         if not tokens or not all(tokens):
             raise ValueError('Unsupported independent pronunciation')
         left, right = cue.get('audio_bounds', (0., len(wave)/44100))
