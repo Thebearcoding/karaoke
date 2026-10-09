@@ -88,8 +88,10 @@ def protect_line_order(cues, prior):
         if any(not c.get('units') for c in lines):
             raise ValueError('A lyric line has no timing units')
         units = [(i, u) for i, c in enumerate(lines) for u in c['units']]
+        # This guard checks order, not the confidence of acoustic predictions.
+        # Valid close onsets must survive optional, even no-op refinements.
         return {i for (a, left), (b, right) in zip(units, units[1:])
-                if right['start']-left['start'] < .015-1e-9 for i in (a, b)}
+                if right['start'] <= left['start'] for i in (a, b)}
 
     if conflicts(prior):
         raise ValueError('Coarse lyric onsets are not ordered; the recording/lyrics need review')

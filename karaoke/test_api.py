@@ -5972,7 +5972,8 @@ def test_invalid_download_metadata_is_rebuilt_without_reusing_wrong_source(tmp_p
     assert json.loads((tmp_path/'download-cache-error.json').read_text())['error'] == 'JSONDecodeError'
 
 
-def test_context_refinement_keeps_tightly_spaced_but_ordered_baseline(tmp_path, monkeypatch):
+@pytest.mark.parametrize('with_original,late_failure', [(False,False), (True,False), (True,True)])
+def test_context_refinement_keeps_tightly_spaced_but_ordered_baseline(tmp_path, monkeypatch, with_original, late_failure):
     import importlib.util
     from pathlib import Path
     import soundfile as sf
@@ -5986,8 +5987,19 @@ def test_context_refinement_keeps_tightly_spaced_but_ordered_baseline(tmp_path, 
     protocol=json.loads((Path(__file__).parent/'experiments/cjk-onsets-v003/protocol.json').read_text())
     def unavailable(*args,**kwargs):raise ValueError('Optional refinement unavailable')
     monkeypatch.setattr(module,'fixed_units',unavailable)
-    module.process(dict(song='audit',cues=str(tmp_path/'cues.json'),audio=str(tmp_path/'audio.wav'),
-        output=str(tmp_path/'result'),duration=1.,language='Japanese'),SimpleNamespace(checkpoint='test'),protocol)
+    monkeypatch.setattr('cjk_recovery.AcousticWitness', lambda *a: SimpleNamespace(device='cpu'))
+    job = dict(song='audit',cues=str(tmp_path/'cues.json'),audio=str(tmp_path/'audio.wav'),
+        output=str(tmp_path/'result'),duration=1.,language='Japanese',
+        **({'original_audio':str(tmp_path/'audio.wav')} if with_original else {}))
+    if late_failure:
+        monkeypatch.setattr('cjk_recovery.recover_latin_groups', unavailable)
+        with pytest.raises(ValueError, match='Optional refinement unavailable'):
+            module.process(job,SimpleNamespace(checkpoint='test',device='cpu'),protocol)
+        assert json.loads((tmp_path/'result/raw.json').read_text())
+        assert len(json.loads((tmp_path/'result/decisions.json').read_text())) == 2
+        assert not (tmp_path/'result/cues.json').exists()
+        return
+    module.process(job,SimpleNamespace(checkpoint='test',device='cpu'),protocol)
     actual=json.loads((tmp_path/'result/cues.json').read_text())
     validate_timeline(actual,['あい'],1.,language='Japanese')
     assert [u['start'] for u in actual[0]['units']] == [.1,.11]
@@ -7261,23 +7273,25 @@ def test_preview_group_keeps_format_failures_and_bounds_clipping_retries(tmp_pat
         assert encode.call_count == 3
 
 
-def test_cross_line_refinement_falls_back_without_inventing_times():
+@pytest.mark.parametrize('conflicting_start', [.98, 1.])
+def test_cross_line_refinement_falls_back_without_inventing_times(conflicting_start):
     prior = [dict(text=text, units=[dict(text=text, start=start, end=start+.3)])
              for text, start in [('first',1.), ('second',1.5), ('third',3.)]]
     refined = json.loads(json.dumps(prior))
-    refined[1]['units'][0]['start'] = .98
+    refined[1]['units'][0]['start'] = conflicting_start
     refined[2]['units'][0]['start'] = 2.95
     fixed, lines = protect_line_order(refined, prior)
     assert lines == [1,2]
     assert [c['units'][0]['start'] for c in fixed] == [1.,1.5,2.95]
-    assert refined[1]['units'][0]['start'] == .98
-    prior[1]['units'][0]['start'] = .98
+    assert refined[1]['units'][0]['start'] == conflicting_start
+    prior[1]['units'][0]['start'] = conflicting_start
     with pytest.raises(ValueError, match='Coarse lyric onsets'):
         protect_line_order(refined, prior)
 
 
-def test_exact_fifteen_milliseconds_is_not_a_floating_point_conflict():
-    cues = [dict(text=str(t), units=[dict(start=t,end=t+.01)]) for t in [1.,1.015]]
+@pytest.mark.parametrize('gap', [.001, .01, .015])
+def test_positive_onset_gaps_are_not_order_conflicts(gap):
+    cues = [dict(text=str(t), units=[dict(start=t,end=t+gap)]) for t in [1.,1.+gap]]
     assert protect_line_order(cues,cues)[1] == []
 
 

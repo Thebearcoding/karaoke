@@ -178,6 +178,7 @@ def process(job, model, protocol):
             decisions.append(decision)
         if line % 15 == 0:
             print(job['song'], line, len(cues), flush=True)
+    write(output/'raw.json', raw)
     old_units = [u for c in baseline for u in c['units']]
     all_units = [u for c in cues for u in c['units']]
     while True:
@@ -198,6 +199,7 @@ def process(job, model, protocol):
         if unit['end'] <= unit['start']:
             raise ValueError('Non-positive voiced interval')
         decisions[i]['final'] = unit['start']
+    write(output/'decisions.json', decisions)
     character_repairs = []
     verified_repairs = []
     witness = None
@@ -258,8 +260,6 @@ def process(job, model, protocol):
         checkpoint=str(model.checkpoint), presentation=presentation,
         accuracy=None, accuracy_note='No independent manual onset reference supplied; consistency is not accuracy')
     write(output/'cues.json', cues)
-    write(output/'raw.json', raw)
-    write(output/'decisions.json', decisions)
     write(output/'character-repairs.json', character_repairs)
     write(output/'verified-repairs.json', verified_repairs)
     write(output/'latin-repairs.json', latin_repairs)
