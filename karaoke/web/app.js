@@ -1,5 +1,5 @@
 import { Player } from './player.js';
-import { isStaleRoomSnapshot, LocalPlayback, queueToTop } from './room-state.js';
+import { isStaleRoomSnapshot, LocalPlayback, queueToTop, preparationRetry } from './room-state.js';
 import { createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
 
 const $ = id => document.getElementById(id);
@@ -535,11 +535,12 @@ function renderQueue() {
   queueSignature = signature;
   $('queue-list').innerHTML = state.entries.map((entry, i) => {
     const active = entry.id === state.current_id;
+    const retry = preparationRetry(entry);
     const status = entry.status === 'running' || !statusText(entry) ? '' : `<span class="entry-status ${entry.status === 'queued' ? 'preparing' : ''}">${escape(statusText(entry))}</span>`;
     return `<article class="queue-entry ${active ? 'current' : ''}" data-entry="${escape(entry.id)}"><span class="entry-number">${active && state.playing ? '♫' : String(i+1).padStart(2,'0')}</span>
       <button class="entry-cover" data-action="preview" aria-label="${active ? '查看播放' : '预览'}：${escape(entry.title)}">${entry.poster ? `<img class="entry-art" src="${escape(entry.poster)}" alt="">` : `<span class="entry-art">♪</span>`}</button>
-      <div class="entry-info"><h3 class="entry-title"><button data-action="preview">${escape(entry.title)}</button></h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || 'YouTube 视频')}</p>${entry.status === 'failed' ? '' : preparationElapsedHTML(entry) || status}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : entry.status === 'failed' ? `<p class="entry-error">${escape(statusText(entry))} <button data-action="retry">重试</button></p>` : ''}</div>
-      <div class="entry-tools">${entry.status === 'completed' ? `<button class="queue-sing" data-action="sing" aria-label="${active && state.playing ? '回到播放' : '开始唱'}：${escape(entry.title)}">${icon('play')}${active && state.playing ? '回到播放' : '开始唱'}</button>` : ''}<button data-action="top" aria-label="置顶：${escape(entry.title)}" ${queueToTop(state.entries, entry.id, state.playing ? state.current_id : null) ? '' : 'disabled'}>${icon('up')}置顶</button><button data-action="remove" aria-label="移除：${escape(entry.title)}">${icon('trash')}移除</button></div></article>`;
+      <div class="entry-info"><h3 class="entry-title"><button data-action="preview">${escape(entry.title)}</button></h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || 'YouTube 视频')}</p>${entry.status === 'failed' ? '' : preparationElapsedHTML(entry) || status}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : entry.status === 'failed' ? `<p class="entry-error">${escape(statusText(entry))}</p>` : ''}</div>
+      <div class="entry-tools">${entry.status === 'completed' ? `<button class="queue-sing" data-action="sing" aria-label="${active && state.playing ? '回到播放' : '开始唱'}：${escape(entry.title)}">${icon('play')}${active && state.playing ? '回到播放' : '开始唱'}</button>` : ''}${retry ? `<button data-action="${retry.action}" aria-label="${retry.label}：${escape(entry.title)}">${icon('restart')}${retry.label}</button>` : ''}<button data-action="top" aria-label="置顶：${escape(entry.title)}" ${queueToTop(state.entries, entry.id, state.playing ? state.current_id : null) ? '' : 'disabled'}>${icon('up')}置顶</button><button data-action="remove" aria-label="移除：${escape(entry.title)}">${icon('trash')}移除</button></div></article>`;
   }).join('');
 }
 
@@ -565,16 +566,17 @@ function renderHistory() {
 
 function updateTransport() {
   const song = current();
-  $('now-title').textContent = song?.title || '未播放';
+  const idleTitle = state.playing ? '等待下一首' : '未播放';
+  $('now-title').textContent = song?.title || idleTitle;
   $('now-artist').textContent = song?.artist || '';
   $('now-art').style.backgroundImage = song?.poster ? `url("${song.poster}")` : '';
   $('now-art').querySelector('span').hidden = Boolean(song?.poster);
-  $('player-title').textContent = song?.title || '未播放';
+  $('player-title').textContent = song?.title || idleTitle;
   $('player-artist').textContent = song?.artist || '';
   $('player-elapsed').innerHTML = preparationElapsedHTML(song);
   $('play-icon').setAttribute('href', state.playing && player.unlocked ? '#i-pause' : '#i-play');
   $('play-toggle').setAttribute('aria-label', state.playing && player.unlocked ? '暂停' : '播放');
-  $('play-toggle').disabled = !song;
+  $('play-toggle').disabled = !song && !state.playing;
   document.querySelectorAll('[data-next]').forEach(button => button.disabled = skipping || !state.current_id);
   $('transport-restart').disabled = !song;
   $('seek').disabled = !song || song.status !== 'completed';
@@ -596,10 +598,12 @@ function updateCover() {
   if (player.anchor === null || player.entry?.id !== song?.id)
     $('opening-countdown').setAttribute('hidden', '');
   $('screen-cover').hidden = Boolean(song?.status === 'completed' && !loading && !startingVideo && !loadError && player.unlocked && player.ready);
-  $('screen-status').textContent = loadError || (!song ? '请先点歌' : song.status !== 'completed' ? statusText(song) : startingVideo ? '加载画面…' : loading ? '加载音轨…' : '');
+  $('screen-status').textContent = loadError || (!song ? state.playing ? '准备好后自动接唱' : '请先点歌' : song.status !== 'completed' ? statusText(song) : startingVideo ? '加载画面…' : loading ? '加载音轨…' : '');
   $('screen-status').hidden = !$('screen-status').textContent || song?.status === 'running';
   $('screen-start').hidden = !song || song.status !== 'completed' || loading || startingVideo;
   $('screen-start').firstChild.textContent = loadError ? '重试加载 ' : '开始唱 ';
+  const retry = preparationRetry(song);
+  $('screen-retry').hidden = !retry || retry.action !== 'retry' || !state.entries.some(e => e.id === song.id);
 }
 
 function updateTime(position) {
@@ -694,6 +698,7 @@ function acceptState(updated) {
 }
 
 function renderState() {
+  const wasReady = current()?.status === 'completed';
   state = {...playback.reconcile(roomState), revision:++viewRevision};
   connectEvents();
   library = roomState.library || [];
@@ -702,6 +707,7 @@ function renderState() {
   $('screen-preparation').innerHTML = preparationHTML(current());
   renderQueue(); updateTransport(); renderStorage();
   updateAddButtons();
+  if (!wasReady && state.playing && current()?.status === 'completed') switchView('player');
   if (!player.anchor) updateTime(state.position);
   syncPlayback();
 }
@@ -823,6 +829,7 @@ $('queue-list').onclick = async event => {
   if (!button || button.disabled) return;
   const id = button.closest('[data-entry]').dataset.entry;
   const action = button.dataset.action;
+  if (action === 'retry' || action === 'reprepare') return retryPreparation(id, action);
   if (action === 'sing') return openQueuedSong(id);
   if (action === 'preview') return previewVideo(state.entries.find(entry => entry.id === id));
   if (action === 'top') {
@@ -863,6 +870,25 @@ for (const [id, step] of [['pitch-down', -1], ['pitch-up', 1]]) {
   };
 }
 $('screen-start').onclick = async () => { if (await activate()) { if (!state.playing) await command('play'); else await syncPlayback(); } };
+$('screen-retry').onclick = () => retryPreparation(state.current_id, 'retry');
+const preparationRequests = new Set();
+async function retryPreparation(id, action) {
+  if (preparationRequests.has(id)) return;
+  preparationRequests.add(id);
+  document.querySelectorAll(`[data-entry="${CSS.escape(id)}"] [data-action="${action}"]`).forEach(b => b.disabled = true);
+  $('screen-retry').disabled = true;
+  try {
+    const updated = await command(action, {entry_id:id});
+    if (updated) {
+      toast(action === 'reprepare' ? '已提交重新准备' : '已提交重试');
+      if (action === 'reprepare') switchView('queue');
+    }
+  } finally {
+    preparationRequests.delete(id);
+    $('screen-retry').disabled = false;
+    queueSignature = ''; renderQueue();
+  }
+}
 async function nextSong() {
   if (skipping || !state.current_id) return;
   const entry_id = state.current_id;
@@ -944,3 +970,6 @@ window.addEventListener('pageshow', event => { if (event.persisted) { events = n
 connectEvents();
 updateTransport();
 if (!navigation.restore()) navigation.save();
+// A refresh can retain playback intent, but the browser still owns permission
+// to produce audio. Until unlock succeeds, no ready event starts the clock.
+if (playback.state.playing) player.unlock().then(() => renderState()).catch(() => updateTransport());

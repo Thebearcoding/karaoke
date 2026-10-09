@@ -601,6 +601,56 @@ def test_library_keeps_one_card_across_failed_jobs_and_retries(tmp_path):
     assert songs[0]['job_id'] != job['id']
 
 
+def test_manual_retry_resumes_waiting_job_but_preserves_provider_backoff(tmp_path):
+    from karaoke.job_schema import download_backoff
+    app = create_app(tmp_path, version='test')
+    store, room = app.state.store, app.state.room
+    job, _ = store.create(JobRequest(url=URL), 'test')
+    entry = room.add(AddSong(job_id=job['id']))['entries'][0]
+    retry = dict(count=2, next_retry_at=time.time()+60, history=[dict(error='temporary')])
+    store.update(job['id'], download_retry=retry, error=dict(code='download_failed'))
+    download_backoff(URL, tmp_path/'stage-locks', until=time.time()+40)
+    with pytest.raises(HTTPException) as error:
+        room.command(RoomCommand(action='retry', entry_id=entry['id']))
+    assert error.value.status_code == 429
+    assert store.read(job['id'])['download_retry'] == retry
+    for p in (tmp_path/'stage-locks').glob('*.retry.json'): p.unlink()
+    snapshot = room.command(RoomCommand(action='retry', entry_id=entry['id']))
+    assert snapshot['entries'][0]['job_id'] == job['id']
+    assert snapshot['entries'][0]['next_retry_at'] is None
+    assert store.read(job['id'])['download_retry']['history'] == retry['history']
+    with pytest.raises(HTTPException):
+        room.command(RoomCommand(action='retry', entry_id=entry['id']))
+    assert len(store.list(-1)) == 1
+
+
+def test_reprepare_keeps_old_media_and_retired_finish_cannot_remove_new_attempt(tmp_path):
+    app = create_app(tmp_path, version='test')
+    store, room = app.state.store, app.state.room
+    old = ready_job(store)
+    folder = tmp_path/old['id']
+    (folder/'download').mkdir()
+    (folder/'download/source.mkv').write_bytes(b'original source')
+    (folder/'source.json').write_text(json.dumps(dict(sha256=hashlib.sha256(b'original source').hexdigest())))
+    (folder/'download/source.info.json').write_text('{}')
+    entry = room.add(AddSong(job_id=old['id']))['entries'][0]
+    store.cache.acquire(old['id'])
+    try:
+        snapshot = room.command(RoomCommand(action='reprepare', entry_id=entry['id']))
+        fresh = snapshot['entries'][0]
+        assert fresh['id'] != entry['id'] and fresh['job_id'] != old['id']
+        assert fresh['status'] == 'queued'
+        assert store.read(old['id'])['status'] == 'completed'
+        assert (folder/'mv').read_bytes() == b'media'
+        assert (tmp_path/fresh['job_id']/'download/source.mkv').read_bytes() == b'original source'
+        assert room.command(RoomCommand(action='finish', entry_id=entry['id']))['entries'] == snapshot['entries']
+        with pytest.raises(HTTPException):
+            room.command(RoomCommand(action='reprepare', entry_id=entry['id']))
+        assert len(store.list(-1)) == 2
+    finally:
+        store.cache.release(old['id'])
+
+
 @pytest.mark.parametrize('new_status', ['failed', 'source_ready', 'audio_ready', 'queued', 'running'])
 @pytest.mark.parametrize('video_evicted', [False, True])
 def test_library_keeps_existing_media_after_playlist_removal_and_new_attempt(tmp_path, new_status, video_evicted):

@@ -1,7 +1,7 @@
 import test, {beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import {Player} from './web/player.js';
-import {isStaleRoomSnapshot, LocalPlayback, queueToTop} from './web/room-state.js';
+import {isStaleRoomSnapshot, LocalPlayback, queueToTop, preparationRetry} from './web/room-state.js';
 
 test('late HTTP replies cannot undo a newer room command or same-revision progress update', () => {
   const current = {revision:4,server_time:100,entries:[{status:'completed'}]};
@@ -100,7 +100,7 @@ test('finishing on one device does not interrupt the other or resurrect a remove
   phone.reconcile(room); // HTTP finish acknowledgement has not arrived yet.
   assert.equal(phone.entry,null);
   room.entries.push({...song,id:'three'}); phone.reconcile(room);
-  assert.equal(phone.entry.id,'three'); assert.equal(phone.state.playing,false);
+  assert.equal(phone.entry.id,'three'); assert.equal(phone.state.playing,true);
 });
 
 test('queue to top inserts after the playing song without changing either device transport', () => {
@@ -123,7 +123,43 @@ test('queue to top inserts after the playing song without changing either device
   assert.ok(computer.state.playing && phone.state.playing);
 });
 
-test('browser refresh restores only its own song, position and mix, paused until a gesture', t => {
+test('manual preparation actions cover failures and backoff without interrupting an older performance', () => {
+  assert.deepEqual(preparationRetry({status:'failed'}),{action:'retry',label:'重试'});
+  assert.deepEqual(preparationRetry({status:'queued',next_retry_at:123}),{action:'retry',label:'重试'});
+  assert.deepEqual(preparationRetry({status:'completed'}),{action:'reprepare',label:'重新准备'});
+  for (const status of ['queued','running','unprepared']) assert.equal(preparationRetry({status}),null);
+  const original={...song,status:'completed'}, local=new LocalPlayback();
+  local.select(original,true);
+  const before=local.save();
+  const replacement={...song,id:'new-entry',job_id:'new-job',status:'queued',artifacts:{}};
+  local.reconcile({entries:[replacement],library:[original]});
+  assert.deepEqual(local.save(),before);
+  assert.equal(local.command('next',{},[replacement]).finished.entry_id,original.id);
+  assert.equal(local.entry.id,replacement.id);
+});
+
+test('a browser waiting to sing starts the first ready song without arming another browser or overriding pause', () => {
+  const pending={...song,status:'queued'}, ready={...song,id:'ready',status:'completed'};
+  const local=new LocalPlayback(), other=new LocalPlayback();
+  const room={entries:[pending]};
+  local.reconcile(room); other.reconcile(room);
+  local.command('play',{},room.entries);
+  assert.equal(local.state.playing,true);
+  assert.equal(local.state.started_at,null);
+  room.entries.push(ready);
+  local.reconcile(room); other.reconcile(room);
+  assert.equal(local.entry.id,'ready'); assert.equal(local.state.playing,true);
+  assert.equal(other.state.playing,false);
+  assert.equal(other.entry.id,pending.id);
+  assert.equal(local.entry.id,'ready');
+  local.command('pause',{},room.entries);
+  room.entries[0]={...pending,status:'completed'};
+  local.reconcile(room);
+  assert.equal(local.state.playing,false);
+  assert.equal(local.entry.id,'ready');
+});
+
+test('browser refresh restores only its own playback intent, with no clock before audio is ready', t => {
   let now=100; t.mock.method(Date,'now',()=>now*1000);
   const room={entries:[{...song,status:'completed'},{...song,id:'two',status:'completed'}]};
   const computer=new LocalPlayback(); computer.reconcile(room);
@@ -134,10 +170,33 @@ test('browser refresh restores only its own song, position and mix, paused until
   restored.reconcile({...room,playing:true,position:99,current_id:'one'});
   assert.equal(restored.entry.id,'two'); assert.equal(restored.position(),7);
   assert.deepEqual(restored.state.levels,{instrumental:1,backing_vocals:1,lead_vocals:1}); assert.equal(restored.state.pitch_semitones,2);
-  assert.equal(restored.state.playing,false); assert.equal(restored.state.started_at,null);
+  assert.equal(restored.state.playing,true); assert.equal(restored.state.started_at,null);
   assert.equal(restored.command('next',{entry_id:'two'},room.entries).finished.playback_started_at,100);
   const other=new LocalPlayback(); other.reconcile(room);
   assert.equal(other.entry.id,'one'); assert.equal(other.position(),0); assert.equal(other.state.levels.lead_vocals,0);
+  computer.command('pause',{},room.entries);
+  assert.equal(new LocalPlayback(computer.save()).state.playing,false);
+});
+
+test('an empty playback queue keeps waiting for a ready song until this browser pauses', () => {
+  const local=new LocalPlayback(), other=new LocalPlayback();
+  const room={entries:[{...song,status:'completed'}]};
+  local.reconcile(room); local.command('play',{},room.entries);
+  local.command('next',{entry_id:song.id},room.entries);
+  room.entries=[]; local.reconcile(room);
+  assert.equal(local.entry,null); assert.equal(local.state.playing,true);
+  assert.equal(local.state.started_at,null); assert.equal(local.position(),0);
+  const pending={...song,id:'new-song',status:'queued'};
+  room.entries.push(pending); local.reconcile(room); other.reconcile(room);
+  assert.equal(local.entry.id,pending.id); assert.equal(local.state.started_at,null);
+  room.entries[0]={...pending,status:'completed'};
+  local.reconcile(room); other.reconcile(room);
+  assert.equal(local.state.playing,true); assert.equal(other.state.playing,false);
+  local.command('next',{entry_id:pending.id},room.entries);
+  room.entries=[]; local.reconcile(room); local.command('pause',{},room.entries);
+  room.entries.push({...pending,id:'after-pause',status:'completed'}); local.reconcile(room);
+  assert.equal(local.state.playing,false);
+  assert.equal(new LocalPlayback(local.save()).state.playing,false);
 });
 
 test('lead percentage preserves the mix and playback through adjustment, refresh and song changes', async () => {

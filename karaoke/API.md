@@ -27,7 +27,7 @@ API 的依赖文件只安装服务依赖。新检出请按[安装说明](../SETU
 | `GET /v1/library` | 列出已知歌曲，实际文件完整时才标记为已准备 |
 | `GET /v1/room` | 待唱 `entries`、倒序演唱记录 `history`、准备状态和兼容旧客户端的播放字段 |
 | `POST /v1/room/entries` | 传入 `{ "url": "..." }` 点新歌，或 `{ "job_id": "..." }` 复用已准备歌曲 |
-| `POST /v1/room/commands` | 网页共享操作：`finish`、`remove`、`reorder`、`retry`；另保留旧客户端播放命令 |
+| `POST /v1/room/commands` | 网页共享操作：`finish`、`remove`、`reorder`、`retry`、`reprepare`；另保留旧客户端播放命令 |
 | `GET /v1/room/events` | 推送 `event: room`；空闲时只发连接保活注释 |
 | `GET /v1/storage` | 缓存使用量、上限、受保护与可回收容量、准备空间是否足够 |
 | `POST /v1/storage` | `{ "limit_gib": 10 }` 修改并持久化上限；`null` 取消应用配额，仍保护实际磁盘余量，返回新的房间快照 |

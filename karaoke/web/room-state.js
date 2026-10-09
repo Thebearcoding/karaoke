@@ -12,6 +12,12 @@ export function queueToTop(entries, id, playingId = null) {
   return order.some((item, index) => item !== ids[index]) ? order : null;
 }
 
+export function preparationRetry(entry) {
+  if (entry?.status === 'failed' || (entry?.status === 'queued' && entry.next_retry_at))
+    return {action:'retry', label:'重试'};
+  return entry?.status === 'completed' ? {action:'reprepare', label:'重新准备'} : null;
+}
+
 const bounded = (value, min, max, fallback) => Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
 
 // Only the playlist and preparation results belong to the room. Transport is
@@ -19,7 +25,7 @@ const bounded = (value, min, max, fallback) => Number.isFinite(value) ? Math.max
 export class LocalPlayback {
   constructor(saved = {}) {
     this.entry = saved?.entry?.id && saved.entry.job_id ? saved.entry : null;
-    this.state = {playing:false, position:bounded(saved?.position, 0, Infinity, 0), started_at:null,
+    this.state = {playing:saved?.playing === true, position:bounded(saved?.position, 0, Infinity, 0), started_at:null,
       levels:{instrumental:1, backing_vocals:1, lead_vocals:bounded(saved?.levels?.lead_vocals, 0, 1, 0)},
       pitch_semitones:Math.round(bounded(saved?.pitch_semitones, -6, 6, 0))};
     this.playedAt = saved?.played_at || null;
@@ -27,19 +33,25 @@ export class LocalPlayback {
   }
 
   reconcile(room) {
-    if (!this.entry) this.select(room.entries.find(entry => !this.finished.has(entry.id)) || null, false);
+    if (!this.entry) this.select(room.entries.find(entry => !this.finished.has(entry.id)) || null, this.state.playing);
     else {
       const queued = room.entries.find(entry => entry.id === this.entry.id);
       const watched = room.playback_entry?.job_id === this.entry.job_id ? room.playback_entry : null;
       const updated = queued || watched || room.library?.find(entry => entry.job_id === this.entry.job_id);
       if (updated) this.entry = {...updated, id:this.entry.id};
     }
+    if (this.state.playing && this.entry?.status !== 'completed') {
+      const ready = room.entries.find(entry => entry.status === 'completed' && !this.finished.has(entry.id));
+      if (ready) this.select(ready, true);
+    }
     return {...room, ...this.state, current_id:this.entry?.id || null};
   }
 
   select(entry, playing) {
     this.entry = entry;
-    Object.assign(this.state, {position:0, playing:playing && Boolean(entry), started_at:null});
+    // Playing is this browser's intent. An empty queue waits without a clock;
+    // finishing the last song must not discard the request to keep singing.
+    Object.assign(this.state, {position:0, playing, started_at:null});
     this.playedAt = null;
   }
 
@@ -68,10 +80,10 @@ export class LocalPlayback {
       state.levels.lead_vocals = bounded(extra.level, 0, 1, state.levels.lead_vocals);
     } else if (action === 'pitch') {
       state.pitch_semitones = extra.pitch_semitones;
-    } else if (this.entry) {
-      if (action === 'play') state.playing = true;
-      else if (action === 'pause') Object.assign(state, {position:this.position(), playing:false, started_at:null});
-      else if (action === 'seek') Object.assign(state, {position:bounded(extra.position, 0, Math.max(0, (this.entry.duration || 0)-.05), 0), started_at:null});
+    } else if (action === 'play') state.playing = true;
+    else if (action === 'pause') Object.assign(state, {position:this.position(), playing:false, started_at:null});
+    else if (this.entry) {
+      if (action === 'seek') Object.assign(state, {position:bounded(extra.position, 0, Math.max(0, (this.entry.duration || 0)-.05), 0), started_at:null});
       else if (action === 'ready' && state.playing && state.started_at === null && this.entry.status === 'completed') {
         const delay = state.position === 0 ? Math.max(0, -(this.entry.opening_countdown?.start || 0)) : 0;
         state.started_at = Date.now()/1000 + delay;
@@ -84,7 +96,7 @@ export class LocalPlayback {
 
   save(position = this.position()) {
     this.markPlayed();
-    return {entry:this.entry, position:Math.max(0, position), levels:this.state.levels,
+    return {entry:this.entry, playing:this.state.playing, position:Math.max(0, position), levels:this.state.levels,
       pitch_semitones:this.state.pitch_semitones, played_at:this.playedAt, finished_ids:[...this.finished]};
   }
 }

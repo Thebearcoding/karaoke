@@ -10,7 +10,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from .job_schema import JobRequest, thumbnail_url
+from .job_schema import JobRequest, thumbnail_url, download_backoff
 from .cache import can_restore_video
 
 PRESETS = {
@@ -34,7 +34,7 @@ class StemLevels(BaseModel):
 
 class RoomCommand(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    action: Literal['play', 'pause', 'seek', 'next', 'select', 'remove', 'finish', 'reorder', 'mix', 'levels', 'pitch', 'ready', 'buffering', 'retry']
+    action: Literal['play', 'pause', 'seek', 'next', 'select', 'remove', 'finish', 'reorder', 'mix', 'levels', 'pitch', 'ready', 'buffering', 'retry', 'reprepare']
     entry_id: str | None = None
     position: float = Field(default=0, ge=0, allow_inf_nan=False)
     order: list[str] | None = None
@@ -300,7 +300,7 @@ class Room:
             return self.snapshot()  # Another browser already finished this entry.
         if action in ('pause', 'seek', 'ready', 'buffering', 'next') and command.entry_id != state['current_id']:
             raise HTTPException(409, '已经切换到另一首歌')
-        if action in ('select', 'remove', 'retry') and entry is None:
+        if action in ('select', 'remove', 'retry', 'reprepare') and entry is None:
             raise HTTPException(404, '歌曲已从歌单移除')
         self.mark_played(state)
         if action == 'play':
@@ -375,11 +375,29 @@ class Room:
             if command.pitch_semitones is None:
                 raise HTTPException(422, '请提供升降调半音数')
             state['pitch_semitones'] = command.pitch_semitones
-        elif action == 'retry':
+        elif action in ('retry', 'reprepare'):
             old = self.store.read(entry['job_id'])
-            if old['status'] != 'failed':
-                raise HTTPException(409, '只有准备失败的歌曲需要重试')
-            job, cached = self.store.create(JobRequest(**{**old['input'], 'force': False}), self.version)
+            waiting = old['status'] == 'queued' and (old.get('download_retry') or {}).get('next_retry_at')
+            if (action == 'reprepare' and old['status'] != 'completed') or (
+                    action == 'retry' and old['status'] != 'failed' and not waiting):
+                raise HTTPException(409, '歌曲状态已改变，请查看最新进度')
+            until = download_backoff(old['input']['url'], self.store.root/'stage-locks')
+            if until > time.time():
+                raise HTTPException(429, f'视频站点仍在限流，约 {max(1, round(until-time.time()))} 秒后可重试')
+            if waiting:
+                job = self.store.update(old['id'], error=None,
+                    download_retry={**old['download_retry'], 'next_retry_at': None, 'count': 0})
+                cached = False
+            else:
+                job, cached = self.store.create(JobRequest(**{**old['input'], 'force': action == 'reprepare'}), self.version)
+            if action == 'reprepare':
+                self.store.cache.reuse_download(self.store.root/job['id'], old['input']['url'])
+                # A new queue identity lets browsers already singing keep their
+                # old media; their later finish event cannot remove this attempt.
+                replacement = dict(id=str(uuid4()), job_id=job['id'])
+                state['entries'][state['entries'].index(entry)] = replacement
+                if state['current_id'] == entry['id']:
+                    state.update(current_id=None, playing=False, position=0, started_at=None)
             entry['job_id'] = job['id']
             if not cached:
                 self.worker.queue.put_nowait(job['id'])
@@ -388,6 +406,6 @@ class Room:
             if selected:
                 self.store.touch(selected['job_id'])
         self.save(state)
-        if action in ('next', 'remove', 'finish', 'select', 'retry'):
+        if action in ('next', 'remove', 'finish', 'select', 'retry', 'reprepare'):
             self.store.cache.enforce()
         return self.snapshot()
