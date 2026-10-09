@@ -659,6 +659,7 @@ def test_soak_preserves_failed_stage_diagnostics_after_cache_eviction(tmp_path):
         'result.json': dict(duration_seconds=4., artifacts={'mv': {'path': 'mv.mp4'}}),
         'lyric-coverage-validation.json': dict(status='incomplete', uncovered_passages=[dict(start=0., end=2.)]),
         'localization-validation.json': [dict(context=[0,1],conflicts=[dict(line=1,observed_range=[10.,12.])])],
+        'timing-recovery.json': dict(cues=[dict(text='before repair')], report=dict(constraints=[])),
     }
     for name, value in final_validation.items():
         (folder/name).write_text(json.dumps(value))
@@ -4864,7 +4865,7 @@ def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success
     def run(*args):
         calls.append(args[1])
         assert ('--playback-fallback' in args[1]) is not strict_audio
-        assert ('--defer-constraints' in args[1]) is (lead is not None and len(calls)==1)
+        assert ('--defer-constraints' in args[1]) is (not strict_audio or lead is not None and len(calls)==1)
         assert ('--lead' in args[1]) is (len(calls)==2)
         if lead is not None and len(calls)==1:
             lead.result.assert_not_called()
@@ -4902,6 +4903,53 @@ def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success
     assert len(calls) == (2 if need_lead else 1)
     if lead is not None:
         assert lead.result.call_count == int(need_lead)
+
+
+@pytest.mark.parametrize('alternative', ['valid', 'contradicted', 'fails_final_review'])
+def test_publication_reselects_measured_candidates_under_acoustic_constraints(tmp_path, monkeypatch, alternative):
+    from karaoke.timing_validation import timing_violations
+    pipeline = Pipeline(dict(url=URL), tmp_path, device='cpu')
+    lyrics = dict(lines=['hello', 'world'], language='English', provenance={})
+    def cue(text, start):
+        return dict(text=text, start=start, end=start+.5, status='candidate',
+                    units=[dict(text=text, first=0, stop=len(text), start=start, end=start+.5)])
+    original = [cue('hello', 1.), cue('world', 6.)]
+    original[1].update(aligned_start=6.0002, aligned_end=6.5002)
+    original[1]['units'][0].update(start=6.0002, end=6.5002)
+    coarse = [cue('hello', 1.2 if alternative=='contradicted' else 3.9), cue('world', 7.)]
+    for name, value in [('lyrics.json', lyrics), ('cues.json', original),
+                        ('word-cues.json', coarse), ('quality.json', dict(lyric_source_fallback={'kept': True}))]:
+        (tmp_path/name).write_text(json.dumps(value))
+    pipeline.alignment_outputs.add(tmp_path/'word-cues.json')
+    proof = dict(line=1, text='hello', first=0, stop=5, start_min=3.6, start_max=4.4, onset=4.)
+    calls = []
+    def run(stage, command):
+        current = json.loads((tmp_path/'timing-input.json').read_text())
+        calls.append(current)
+        assert ('--defer-constraints' in command) is (len(calls)==1)
+        if len(calls)==2:
+            assert current == [coarse[0], original[1]]
+            assert not timing_violations(current, [proof])
+            if alternative=='fails_final_review':
+                raise StageFailure('validate_timing', 'new acoustic conflict')
+        output = tmp_path/'timing-checked'; output.mkdir(exist_ok=True)
+        (output/'cues.json').write_text(json.dumps(current))
+        (output/'report.json').write_text(json.dumps(dict(lines=[], constraints=[proof],
+            unresolved=timing_violations(current, [proof]))))
+    monkeypatch.setattr(pipeline, 'run', run)
+    if alternative=='valid':
+        pipeline.validate_alignment(lyrics, 8.)
+        result = json.loads((tmp_path/'cues.json').read_text())
+        assert result == [coarse[0], original[1]]
+        quality = json.loads((tmp_path/'quality.json').read_text())
+        assert quality['lyric_source_fallback'] == {'kept': True}
+        assert quality['timing_candidate_recovery']['lines'] == [1]
+    else:
+        with pytest.raises(StageFailure, match='未能定位' if alternative=='contradicted' else 'new acoustic conflict'):
+            pipeline.validate_alignment(lyrics, 8.)
+    assert len(calls) == (1 if alternative=='contradicted' else 2)
+    evidence = json.loads((tmp_path/'timing-recovery.json').read_text())
+    assert evidence['cues'] == original and evidence['report']['constraints'] == [proof]
 
 
 @pytest.mark.parametrize('displaced', [False, True])
@@ -8534,6 +8582,8 @@ def test_compaction_keeps_outputs_and_bounded_logs_without_following_symlinks(tm
     source_failure.write_text('{"lines":["Original rejected text"]}')
     render_report = dict(song_intro=dict(status='omitted', reason='Missing title glyph'))
     (folder/'captioned-picture.render.json').write_text(json.dumps(render_report))
+    timing_recovery = dict(cues=[dict(text='before repair')], report=dict(constraints=[]))
+    (folder/'timing-recovery.json').write_text(json.dumps(timing_recovery))
     outside = tmp_path/'precious.wav'
     outside.write_bytes(b'keep me')
     (folder/'raw/link').symlink_to(outside)
@@ -8544,6 +8594,7 @@ def test_compaction_keeps_outputs_and_bounded_logs_without_following_symlinks(tm
     assert json.loads((folder/'lyric-crosscheck.json').read_text()) == crosscheck
     assert json.loads(source_failure.read_text())['lines'] == ['Original rejected text']
     assert json.loads((folder/'captioned-picture.render.json').read_text()) == render_report
+    assert json.loads((folder/'timing-recovery.json').read_text()) == timing_recovery
     store.update(job['id'], status='failed', result=None, error=dict(code='cache_full'))
     (folder/'asr').mkdir()
     (folder/'asr/transcription.json').write_text('{"words": []}')

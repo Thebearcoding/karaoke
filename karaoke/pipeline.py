@@ -1227,7 +1227,7 @@ class Pipeline:
         return observations
 
     def validate_alignment(self, lyrics, duration, lead=None):
-        from .timing_validation import validate_timeline
+        from .timing_validation import timing_violations, validate_timeline
         cues = json.loads((self.output/'cues.json').read_text())
         write_json(self.output/'timing-input.json', cues)
         command = [sys.executable, ROOT/'timing_validation.py',
@@ -1238,13 +1238,33 @@ class Pipeline:
         # Start while packaging is still running. Only unresolved local evidence
         # waits for the delivered lead master, including its native-rate conversion.
         # Review the sound the user receives, not an intermediate model output.
-        self.run('validate_timing', command+(['--defer-constraints'] if lead is not None else []))
+        deferred = ['--defer-constraints'] if not self.strict_audio else []
+        self.run('validate_timing', command+(['--defer-constraints'] if lead is not None else deferred))
         report = json.loads((self.output/'timing-checked/report.json').read_text())
+        lead_view = []
         if lead is not None and (report.get('pending_review_lines') or report['unresolved']):
             lead.result()
-            self.run('validate_timing', command+['--lead', self.output/'stems/lead.wav'])
+            lead_view = ['--lead', self.output/'stems/lead.wav']
+            self.run('validate_timing', command+lead_view+deferred)
         checked = json.loads((self.output/'timing-checked/cues.json').read_text())
         report = json.loads((self.output/'timing-checked/report.json').read_text())
+        if not self.strict_audio and report['unresolved'] and timing_violations(checked, report['constraints']):
+            # Reconsider existing measured candidates under the new evidence.
+            # Keep every constraint and run the same review once on the result.
+            write_json(self.output/'timing-recovery.json', dict(cues=checked, report=report))
+            quality = json.loads((self.output/'quality.json').read_text())
+            self.aligned_cues = checked
+            self.playback_fallback(lyrics, duration, StageFailure('validate_timing',
+                '已有声学证据否定部分时间；正在检查保留的对齐候选'), constraints=report['constraints'])
+            quality.update(json.loads((self.output/'quality.json').read_text()))
+            quality['timing_candidate_recovery'] = dict(
+                lines=sorted({v['proof']['line'] for v in report['unresolved']}),
+                diagnostic_sha256=file_hash(self.output/'timing-recovery.json'))
+            write_json(self.output/'quality.json', quality)
+            write_json(self.output/'timing-input.json', json.loads((self.output/'cues.json').read_text()))
+            self.run('validate_timing', command+lead_view)
+            checked = json.loads((self.output/'timing-checked/cues.json').read_text())
+            report = json.loads((self.output/'timing-checked/report.json').read_text())
         try:
             validate_timeline(checked, lyrics['lines'], duration, report['constraints'], lyrics['language'])
         except ValueError as error:
@@ -1273,9 +1293,10 @@ class Pipeline:
         write_json(self.output/'cues.json', checked)
         write_json(self.output/'quality.json', quality)
 
-    def playback_fallback(self, metadata, duration, error):
+    def playback_fallback(self, metadata, duration, error, *, constraints=()):
         """Keep singing available without presenting unverified word times as valid."""
         from subtitles import playback_units, presentation_cues
+        from .timing_validation import timing_violations, validate_timeline
         lyrics_path = self.output/'lyrics.json'
         lyrics = dict(
             title=self.request.get('title') or metadata.get('track') or metadata.get('title') or 'Untitled',
@@ -1323,6 +1344,7 @@ class Pipeline:
             options.append([])
             if line+1 in recovery.get('unresolved_localization_lines', []):
                 continue
+            proofs = [dict(p, line=1) for p in constraints if p['line']==line+1]
             for name, candidate in candidates:
                 cue = candidate[line]
                 try:
@@ -1330,13 +1352,21 @@ class Pipeline:
                             not all(isinstance(cue[k], (int, float)) and math.isfinite(cue[k]) for k in ('start', 'end')) or
                             not 0 <= cue['start'] < cue['end'] <= duration+.001):
                         continue
-                    units = playback_units(cue, lyrics['language'])
+                    if constraints and name == 'final_alignment':
+                        # These units have already completed acoustic review;
+                        # don't quantize them through rounded display bounds.
+                        validate_timeline([cue], [text], duration, language=lyrics['language'])
+                        units = cue['units']
+                    else:
+                        units = playback_units(cue, lyrics['language'])
+                    if timing_violations([dict(cue, units=units)], proofs):
+                        continue
                 except (AttributeError, KeyError, TypeError, ValueError):
                     continue
                 options[-1].append((name, dict(cue, units=units)))
             located = next((c for name in ('word-cues.json', 'alignment/raw.json', 'alignment/cues.json', 'anchors.json')
                             for n,c in options[-1] if n==name), None)
-            if located is not None:
+            if located is not None and not constraints:
                 # A failed refinement may remain ordered while drifting into
                 # the following gap. Prefer the located phrase, retaining the
                 # other candidate only if it is needed for a complete path.
