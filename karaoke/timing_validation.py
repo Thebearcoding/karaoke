@@ -794,6 +794,27 @@ class AcousticReview:
         def run(cue, views, bounds, language):
             from phoneme_progress import spoken_units
             from subtitles import highlight_spans
+            if language == 'Chinese':
+                # Keep source offsets while giving each phonetic model only
+                # its language. The caller still corroborates every onset.
+                parts = []
+                for unit in views[0]:
+                    letters = [c for c in unit['text'] if c.isalpha()]
+                    local_language = 'English' if letters and all(c.isascii() for c in letters) else language
+                    if parts and parts[-1][0] == local_language:
+                        parts[-1][2] = unit['stop']
+                    else:
+                        parts.append([local_language, unit['first'], unit['stop']])
+                if any(part[0] == 'English' for part in parts):
+                    result = [[], [], []]
+                    for local_language, first, stop in parts:
+                        local_views = [[dict(u, first=u['first']-first, stop=u['stop']-first)
+                                        for u in view if first <= u['first'] and u['stop'] <= stop]
+                                       for view in views]
+                        local_cue = dict(cue, text=cue['text'][first:stop], units=[])
+                        for combined, predicted in zip(result, run(local_cue, local_views, bounds, local_language)):
+                            combined.extend(dict(u, first=u['first']+first, stop=u['stop']+first) for u in predicted)
+                    return result
             start=min(v[0]['start'] for v in views)
             end=max(v[-1]['end'] for v in views)
             windows=[(max(bounds[0],start-pad),min(bounds[1],end+pad))

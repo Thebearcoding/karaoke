@@ -488,6 +488,59 @@ class SubtitleIntegrity(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'bounded distinct contexts'):
                     review.predict(wave)(cues[0],[old,old],[0.,length+3],'Chinese')
 
+    def test_mixed_chinese_english_review_keeps_source_spans_and_uses_each_phonetic_model(self):
+        from copy import deepcopy
+        from types import SimpleNamespace
+        from timing_validation import AcousticReview
+        from subtitles import highlight_spans
+        protocol = dict(context_padding_seconds=[.2, .4, .6])
+        wave = np.arange(12*44100, dtype=np.float32)/44100
+        for text in ('甲乙 go now 丙丁', 'go 甲乙', '甲乙 now', '甲乙', 'go now'):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
+                spans = list(highlight_spans(text, 'Chinese'))
+                measured = [dict(first=a, stop=b, text=text[a:b], start=4.+i*.5, end=4.3+i*.5)
+                            for i, (a,b) in enumerate(spans)]
+                positions = {u['text']:u['start'] for u in measured}
+                calls = []
+                def chinese(audio, begin, units, cue, *, decoder, use_word_priors):
+                    self.assertFalse(use_word_priors)
+                    self.assertTrue(all(not c.isascii() for c in cue['text'] if c.isalpha()))
+                    calls.append(('Chinese', decoder, cue['text']))
+                    return dict(units=[dict(u, start=positions[u['text']], end=positions[u['text']]+.3)
+                                       for u in units])
+                def english(audio, words):
+                    self.assertTrue(all(w.isascii() for w in words))
+                    calls.append(('English', 'phonemes', words))
+                    return ([dict(text=w, start=positions[w]-float(audio[0]),
+                                  end=positions[w]+.3-float(audio[0])) for w in words], None, None)
+                review = object.__new__(AcousticReview)
+                review.protocol, review.cache, review.identity = protocol, Path(directory), 'test-source'
+                review.models = {'Chinese':SimpleNamespace(infer=chinese),
+                                 'English':SimpleNamespace(align=english)}
+                cue = dict(text=text, units=deepcopy(measured), aligned_start=4., aligned_end=8.)
+                views = [deepcopy(measured), deepcopy(measured)]
+                before = deepcopy((cue, views))
+                result = review.predict(wave)(cue, views, [0.,12.], 'Chinese')
+                self.assertEqual(len(result), 3)
+                for predicted in result:
+                    self.assertEqual([(u['first'],u['stop'],u['text']) for u in predicted],
+                                     [(u['first'],u['stop'],u['text']) for u in measured])
+                    np.testing.assert_allclose([u['start'] for u in predicted],
+                                               [u['start'] for u in measured], atol=1e-6)
+                self.assertEqual((cue,views), before)
+                count = len(calls)
+                self.assertEqual(review.predict(wave)(cue, views, [0.,12.], 'Chinese'), result)
+                self.assertEqual(len(calls), count)
+                # A failed language model must still leave the whole input untouched.
+                if 'English' in {c[0] for c in calls}:
+                    def unavailable(*args):
+                        raise RuntimeError('English model unavailable')
+                    review.models['English'].align = unavailable
+                    review.identity = 'uncached-source'
+                    with self.assertRaisesRegex(RuntimeError, 'English model unavailable'):
+                        review.predict(wave)(cue, views, [0.,12.], 'Chinese')
+                    self.assertEqual((cue,views), before)
+
     def test_relocalized_phrase_needs_fresh_acoustic_proof_to_supersede_a_bad_crop(self):
         from copy import deepcopy
         from timing_validation import reconcile_timing, localized_constraints, timing_violations
