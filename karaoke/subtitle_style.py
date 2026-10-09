@@ -115,43 +115,19 @@ def japanese_readings(text):
     """Dictionary readings of whole words, anchored to the unchanged lyric text."""
     if not re.search(KANJI, text):
         return (), ()
-    # Retain original offsets even when the tokenizer normalizes width or dakuten.
-    normalized, positions = '', []
-    for cluster in re.finditer(r'.[\u0300-\u036f\u3099\u309a\uff9e\uff9f]*', text, re.S):
-        value = unicodedata.normalize('NFKC', cluster[0])
-        normalized += value
-        positions.extend([(cluster.start(), cluster.end())]*len(value))
-
     def hira(value):
         return ''.join(chr(ord(c)-0x60) if 'ァ' <= c <= 'ヶ' else c
                        for c in unicodedata.normalize('NFKC', value))
 
     try:
-        import pyopenjtalk
-        from num2words import num2words
-
-        def number_spelling(match):
-            value = match[0]
-            # Preserve codes and digit strings whose leading zero carries meaning.
-            return num2words(int(value), lang='ja') if len(value) < 16 and (value == '0' or not value.startswith('0')) else value
-
-        # Open JTalk rewrites counters, e.g. １人 -> 一人. Give both sides the
-        # same spelling, while every expanded digit still points to the original.
-        pieces, mapped, cursor = [], [], 0
-        for match in re.finditer(r'[0-9]+', normalized):
-            pieces.extend([normalized[cursor:match.start()], number_spelling(match)])
-            mapped.extend(positions[cursor:match.start()])
-            mapped.extend([(positions[match.start()][0], positions[match.end()-1][1])]*len(pieces[-1]))
-            cursor = match.end()
-        pieces.append(normalized[cursor:]);mapped.extend(positions[cursor:])
-        normalized, positions = ''.join(pieces), mapped
-        words = pyopenjtalk.run_frontend(normalized)
+        from lyric_progress import japanese_tokenization
+        normalized, positions, words = japanese_tokenization(text)
     except Exception as error:
         # A missing optional reading must never discard valid, timed lyrics.
         return (), (f'{type(error).__name__}: {error}',)
     spans, cursor = [], 0
     for word in words:
-        written = re.sub(r'[0-9]+', number_spelling, unicodedata.normalize('NFKC', word['string']))
+        written = word['string']
         first = normalized.find(written, cursor)
         if first < 0 or not written:
             continue

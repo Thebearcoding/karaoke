@@ -22,6 +22,35 @@ def canonical_positions(text, language):
     return ''.join(chars), positions
 
 
+def japanese_tokenization(text):
+    """Keep original spans when Open JTalk rewrites width, marks or numbers."""
+    import re
+    import pyopenjtalk
+    from num2words import num2words
+
+    def number_spelling(match):
+        value = match[0]
+        return num2words(int(value), lang='ja') if len(value) < 16 and (value == '0' or not value.startswith('0')) else value
+
+    normalized, positions = '', []
+    for cluster in re.finditer(r'.[\u0300-\u036f\u3099\u309a\uff9e\uff9f]*', text, re.S):
+        value = unicodedata.normalize('NFKC', cluster[0])
+        normalized += value
+        positions.extend([(cluster.start(), cluster.end())]*len(value))
+    pieces, mapped, cursor = [], [], 0
+    for match in re.finditer(r'[0-9]+', normalized):
+        pieces.extend([normalized[cursor:match.start()], number_spelling(match)])
+        mapped.extend(positions[cursor:match.start()])
+        mapped.extend([(positions[match.start()][0], positions[match.end()-1][1])]*len(pieces[-1]))
+        cursor = match.end()
+    pieces.append(normalized[cursor:]); mapped.extend(positions[cursor:])
+    normalized = ''.join(pieces)
+    words = [dict(word, string=re.sub(r'[0-9]+', number_spelling,
+                  unicodedata.normalize('NFKC', word['string'])))
+             for word in pyopenjtalk.run_frontend(normalized)]
+    return normalized, mapped, words
+
+
 def map_words(cue, words, offset, language):
     target, positions = canonical_positions(cue['text'], language)
     normalized = [canonical_positions(word['word'], language)[0] for word in words]

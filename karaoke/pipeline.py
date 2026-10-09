@@ -1397,7 +1397,7 @@ class Pipeline:
                 outputs=[picture, picture.with_suffix('.render.json')],
                 config={**{key: result[key] for key in ('title', 'artist', 'language', 'duration_seconds')},
                         'implementation': inspect.getsource(type(self).render_picture)},
-                code=[ROOT/p for p in ('render_lyric_progress.py', 'render_subtitles.py', 'subtitles.py',
+                code=[ROOT/p for p in ('render_lyric_progress.py', 'render_subtitles.py', 'subtitles.py', 'lyric_progress.py',
                                       'subtitle_style.py', 'subtitle-styles.json')]) as reused:
             if not reused:
                 write_json(self.output/'song-info.json', dict(title=result['title'], artist=result['artist']))
@@ -1416,7 +1416,7 @@ class Pipeline:
                 config={**{key: result[key] for key in ('title', 'artist', 'language', 'mv_audio',
                     'duration_seconds', 'shared_preview_gain')},
                     'implementation': inspect.getsource(type(self).render_uncached)},
-                code=[ROOT/p for p in ('render_lyric_progress.py', 'render_subtitles.py', 'subtitles.py',
+                code=[ROOT/p for p in ('render_lyric_progress.py', 'render_subtitles.py', 'subtitles.py', 'lyric_progress.py',
                                       'subtitle_style.py', 'subtitle-styles.json')]) as reused:
             if not reused:
                 self.render_uncached(result)

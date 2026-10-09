@@ -149,6 +149,24 @@ class SubtitleIntegrity(unittest.TestCase):
             self.assertEqual(''.join(u['text'] for u in units), '明日晴れる')
             self.assertEqual(next(u['first'] for u in units if u['text'].startswith('晴')), 3)
 
+    def test_japanese_tokenizer_width_normalization_preserves_display_spans(self):
+        from unittest.mock import patch
+        from phoneme_progress import spoken_units
+        readings = []
+        for text in ('2つが重なる 12人', '２つが重なる １２人'):
+            units = spoken_units(text, 'Japanese')
+            self.assertEqual(''.join(u['text'] for u in units), text.replace(' ', ''))
+            self.assertTrue(all(u['text'] == text[u['first']:u['stop']] for u in units))
+            readings.append([u['phones'] for u in units])
+        self.assertEqual(*readings)
+        for text in ('ｶﾞﾗｽの向こう', 'ガラスの向こう'):
+            units = spoken_units(text, 'Japanese')
+            self.assertEqual(''.join(u['text'] for u in units), text)
+            self.assertTrue(all(u['text'] == text[u['first']:u['stop']] for u in units))
+        with patch('pyopenjtalk.run_frontend', return_value=[dict(string='２つ', pron='フタツ')]):
+            with self.assertRaisesRegex(ValueError, 'changed display text'):
+                spoken_units('3つ', 'Japanese')
+
     def test_repeat_recovery_requires_an_exact_stable_reference(self):
         def cue(text, failed):
             return {'text': text, 'units': [{'text': text, 'timing_source':
@@ -375,6 +393,47 @@ class SubtitleIntegrity(unittest.TestCase):
                 else:
                     self.assertEqual([u['start'] for u in result[0]['units']],[u['start'] for u in old])
                     self.assertFalse(report['constraints'])
+
+    def test_long_coarse_phrase_can_be_localized_before_short_phonetic_review(self):
+        from copy import deepcopy
+        from timing_validation import AcousticReview, reconcile_timing
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4,
+                        minimum_relative_rms=.03, context_padding_seconds=[1.,1.5,2.])
+        for length, uncertain_start in ((36., False), (36., True), (65., False)):
+            with self.subTest(length=length, uncertain_start=uncertain_start):
+                old = [dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
+                       for i,(c,t) in enumerate(zip('甲乙',[1.,length]))]
+                cues = [dict(text='甲乙',start=1.,end=length+.2,units=old)]
+                measured = [dict(u,start=t,end=t+.2) for u,t in zip(old,[length-1.,length])]
+                calls = []
+                def witness(cue, *args, **kwargs):
+                    calls.append('locate')
+                    views = [deepcopy(measured),deepcopy(measured)]
+                    if uncertain_start and cue['aligned_start'] < 30.:
+                        views[0][0].update(start=length-1.7,end=length-1.5)
+                    return views
+                def predict(cue, views, *args):
+                    calls.append('refine')
+                    self.assertLess(views[0][-1]['end']-views[0][0]['start'], 30.)
+                    return [deepcopy(measured) for _ in range(3)]
+                wave = np.full(round((length+3)*44100), .1)
+                result, report = reconcile_timing(cues,wave,witness,predict,protocol,'Chinese')
+                self.assertEqual(cues[0]['units'],old)
+                if length == 36.:
+                    self.assertIn('refine',calls)
+                    self.assertEqual(result[0]['units'][0]['start'],length-1.)
+                    self.assertFalse(report['unresolved'])
+                    if uncertain_start:
+                        self.assertGreaterEqual(calls.count('locate'),2)
+                else:
+                    self.assertFalse(calls)
+                    self.assertEqual([(u['start'],u['end']) for u in result[0]['units']],
+                                     [(u['start'],u['end']) for u in old])
+                # A genuinely long fine-alignment context still cannot run.
+                review = object.__new__(AcousticReview)
+                review.protocol = protocol
+                with self.assertRaisesRegex(ValueError, 'bounded distinct contexts'):
+                    review.predict(wave)(cues[0],[old,old],[0.,length+3],'Chinese')
 
     def test_relocalized_phrase_needs_fresh_acoustic_proof_to_supersede_a_bad_crop(self):
         from copy import deepcopy

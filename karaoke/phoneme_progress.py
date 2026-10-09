@@ -8,7 +8,7 @@ from pypinyin import lazy_pinyin
 import pykakasi
 from opencc import OpenCC
 
-from lyric_progress import canonical_positions
+from lyric_progress import canonical_positions, japanese_tokenization
 
 ROOT = Path(__file__).resolve().parent
 KAKASI = pykakasi.kakasi()
@@ -84,12 +84,13 @@ def japanese_phone_groups(kana, previous_vowel=None):
 
 def japanese_units(text, isolated=False):
     import pyopenjtalk
+    normalized, positions, words = japanese_tokenization(text)
     output, cursor, previous_vowel = [], 0, None
-    for word in pyopenjtalk.run_frontend(text):
+    for word in words:
         written = word['string']
         if not any(c.isalnum() for c in written):
             continue
-        first = text.find(written,cursor)
+        first = normalized.find(written,cursor)
         if first < 0:
             raise ValueError(f'Japanese tokenizer changed display text: {written}')
         cursor = first+len(written)
@@ -109,7 +110,15 @@ def japanese_units(text, isolated=False):
             offset += count
             if not phones:
                 raise ValueError(f'Empty phoneme sequence for {written[a:b]}')
-            output.append(dict(first=first+a,stop=first+b,text=written[a:b],reading=spoken,phones=phones))
+            begin, end = positions[first+a][0], positions[first+b-1][1]
+            if output and begin < output[-1]['stop']:
+                # A number such as 12 may yield separate 十/二 tokens. It is
+                # still one original span, not two overlapping highlights.
+                previous = output.pop()
+                begin = previous['first']
+                phones = previous['phones']+phones
+                spoken = previous['reading']+spoken
+            output.append(dict(first=begin,stop=end,text=text[begin:end],reading=spoken,phones=phones))
     return output
 
 

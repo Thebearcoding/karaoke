@@ -107,9 +107,11 @@ def displaced_units(cue, views, tolerance):
         return []
     return [a['first'] for a, b in zip(*views) if a['first'] in old
             and (a['first'], a['stop'], a['text']) == (b['first'], b['stop'], b['text'])
-            and abs(a['start']-b['start']) <= tolerance
-            and (old[a['first']]['start'] < min(a['start'], b['start'])-tolerance
-                 or old[a['first']]['start'] > max(a['start'], b['start'])+tolerance)]
+            # A coarse disagreement is uncertainty, not permission to keep a
+            # far-away old onset. Reobserve when both views exclude it by
+            # more than their own disagreement; adoption remains unchanged.
+            and (old[a['first']]['start'] < min(a['start'], b['start'])-max(tolerance,abs(a['start']-b['start']))
+                 or old[a['first']]['start'] > max(a['start'], b['start'])+max(tolerance,abs(a['start']-b['start'])))]
 
 
 def pending_review_lines(cues, report, protocol):
@@ -295,8 +297,11 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
         report = dict(line=index+1, screened_units=selected, status='unverified', repairs=[])
         reports.append(report)
         try:
-            if cue['aligned_end']-cue['aligned_start'] > 30:
-                raise ValueError('Acoustic review context exceeds 30 seconds')
+            # A stale first word can stretch the coarse search across an
+            # interlude. Locate the phrase before applying the short phonetic
+            # window budget; predict() still requires three contexts <= 32 s.
+            if cue['aligned_end']-cue['aligned_start'] > 60:
+                raise ValueError('Acoustic localization context exceeds 60 seconds')
             letters = [c for c in cue['text'] if c.isalpha()]
             review_language = 'English' if letters and all(c.isascii() for c in letters) else language
             views = witness(cue, wave, language=review_language)
