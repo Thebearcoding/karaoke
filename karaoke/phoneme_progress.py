@@ -107,6 +107,11 @@ def japanese_units(text, isolated=False):
         if isolated and re.search(KANJI,written):
             pronunciation = ''.join(w['pron'] for w in pyopenjtalk.run_frontend(written))
         phone_groups = japanese_phone_groups(pronunciation,previous_vowel)
+        # MMS consumes romanized letters, not SOFA's phoneme alphabet. Keep
+        # both tied to the selected phrase reading (including particles).
+        roman_groups = [group if mora in ('ん', 'っ', 'ー') else
+                        [''.join(p['hepburn'] for p in KAKASI.convert(mora))]
+                        for (_, _, mora), group in zip(moras(pronunciation.replace('’','').replace("'",'')), phone_groups)]
         previous_vowel = next((p for g in reversed(phone_groups) for p in reversed(g) if p in 'aiueo'),previous_vowel)
         parts = reading_parts(written,kana)
         if sum(len(moras(k)) for _,_,k in parts) != len(phone_groups):
@@ -115,6 +120,7 @@ def japanese_units(text, isolated=False):
         for a,b,spoken in parts:
             count = len(moras(spoken)) if len(parts)>1 else len(phone_groups)
             phones = [p for group in phone_groups[offset:offset+count] for p in group]
+            roman = [p for group in roman_groups[offset:offset+count] for p in group]
             offset += count
             if not phones:
                 raise ValueError(f'Empty phoneme sequence for {written[a:b]}')
@@ -125,8 +131,10 @@ def japanese_units(text, isolated=False):
                 previous = output.pop()
                 begin = previous['first']
                 phones = previous['phones']+phones
+                roman = previous['romanization']+roman
                 spoken = previous['reading']+spoken
-            output.append(dict(first=begin,stop=end,text=text[begin:end],reading=spoken,phones=phones))
+            output.append(dict(first=begin,stop=end,text=text[begin:end],reading=spoken,phones=phones,
+                               romanization=roman))
     return output
 
 

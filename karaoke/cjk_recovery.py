@@ -33,12 +33,12 @@ class AcousticWitness:
             spans = [(u['first'], u['stop']) for u in units]
             # Use the phrase pronunciation, not isolated kanji readings. The
             # acoustic model remains independent of SOFA's timing prediction.
-            phones = [p for u in units for p in u['phones']]
-            roman = [(phones[i+1][0] if p == 'cl' and i+1 < len(phones) else p).lower()
-                     for i, p in enumerate(phones)]
+            letters = [p for u in units for p in u['romanization']]
+            roman = [(letters[i+1][0] if p == 'cl' and i+1 < len(letters) else p).lower()
+                     for i, p in enumerate(letters)]
             tokens, offset = [], 0
             for unit in units:
-                stop = offset+len(unit['phones'])
+                stop = offset+len(unit['romanization'])
                 tokens.append(''.join(roman[offset:stop]))
                 offset = stop
         elif language == 'Chinese':
