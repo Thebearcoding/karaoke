@@ -40,7 +40,10 @@ def localized_constraints(report, blocks):
     # The selected candidate can itself belong to the wrong repetition. Use
     # independent phrase identity to choose the applicable proof, then let
     # final validation reject/reselect the candidate under that proof.
-    proposals = [p for row in report['lines'] for p in row.get('proposed_constraints', [])]
+    # Established constraints are same-source/model evidence too; a later
+    # review need not measure their already settled words again.
+    proposals = [*report['constraints'],
+                 *(p for row in report['lines'] for p in row.get('proposed_constraints', []))]
     observations = [o for block in blocks for o in block.get('asr_localizations', [])]
     for proof in report['constraints']:
         replacement = None
@@ -73,6 +76,23 @@ def localized_constraints(report, blocks):
             if replacement['replacement'] not in active:
                 active.append(replacement['replacement'])
     return active, superseded
+
+
+def retain_consistent_input(original, revised, constraints, duration, language):
+    """Reject a contradicted revision when its already reviewed input still fits."""
+    failed = {v['proof']['line']-1 for v in timing_violations(revised, constraints)}
+    retained = {i for i in failed if not timing_violations(original,
+                [p for p in constraints if p['line']==i+1])}
+    if not retained:
+        return revised, []
+    candidate = [original[i] if i in retained else cue for i,cue in enumerate(revised)]
+    try:
+        # Retaining input must not break neighbouring revisions or the text.
+        # Other unresolved constraints still go through the final hard gate.
+        validate_timeline(candidate, [c['text'] for c in original], duration, language=language)
+    except ValueError:
+        return revised, []
+    return candidate, [i+1 for i in sorted(retained)]
 
 
 def screened_units(cue, wave, protocol, *, floor=None):
@@ -893,6 +913,10 @@ def main():
     localization=out.parent/'alignment/raw.json'
     active,superseded=localized_constraints(report,read(localization) if localization.is_file() else [])
     superseded=(ledger.get('superseded',[]) if same_evidence else [])+superseded
+    revised=repaired
+    repaired,retained=retain_consistent_input(cues,revised,active,duration,lyrics['language'])
+    report['retained_input_lines']=retained
+    report['discarded_revisions']=[dict(line=i,cue=revised[i-1]) for i in retained]
     report.update(constraints=active,unresolved=timing_violations(repaired,active),superseded_constraints=superseded)
     report['pending_review_lines']=[i+1 for i in sorted(pending_review_lines(repaired,report,protocol))]
     if args.lead is not None:

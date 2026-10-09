@@ -496,7 +496,8 @@ class SubtitleIntegrity(unittest.TestCase):
                for i,(c,t) in enumerate(zip('甲乙',[10.,10.5]))]
         cues=[dict(text='甲乙',start=10.,end=10.7,units=units)]
         proof=dict(line=1,text='甲乙',first=0,stop=1,onset=1.,start_min=.6,start_max=1.4)
-        for mode in ('complete','overlapping_old_phrase','wrong_candidate','no_new_proof','unaccepted','wrong_text','nearby'):
+        for mode in ('complete','overlapping_old_phrase','wrong_candidate','cached_proof',
+                     'no_new_proof','unaccepted','wrong_text','nearby'):
             with self.subTest(mode=mode):
                 predictions=[] if mode=='no_new_proof' else [deepcopy(units) for _ in range(3)]
                 result,report=reconcile_timing(cues,np.ones(12*44100)*.1,lambda *a,**k:[units,units],
@@ -507,19 +508,54 @@ class SubtitleIntegrity(unittest.TestCase):
                     accepted_lines=[] if mode=='unaccepted' else [1],
                     contradicted_lines=[] if mode=='overlapping_old_phrase' else [1])
                 valid=deepcopy(result)
-                if mode=='wrong_candidate':
+                if mode in ('wrong_candidate','cached_proof'):
                     # A later crop can select another repetition. It must not
                     # veto independent evidence for the intended occurrence.
                     result[0]['units'][0]['start']=proof['onset']
+                if mode=='cached_proof':
+                    report['constraints'].append(report['lines'][0]['proposed_constraints'][0])
+                    report['lines']=[]
                 active,retired=localized_constraints(report,[dict(asr_localizations=[observed])])
                 self.assertEqual(proof['onset'],1.)
-                self.assertEqual(bool(retired),mode in ('complete','overlapping_old_phrase','wrong_candidate'))
+                self.assertEqual(bool(retired),mode in ('complete','overlapping_old_phrase','wrong_candidate','cached_proof'))
                 self.assertEqual(bool(timing_violations(result,active)),mode not in ('complete','overlapping_old_phrase'))
                 if retired:
                     self.assertEqual(retired[0]['proof'],proof)
                     self.assertEqual(retired[0]['replacement']['onset'],10.)
                     self.assertEqual(active,[retired[0]['replacement']])
                     self.assertFalse(timing_violations(valid,active))
+
+    def test_contradicted_revision_retains_valid_input_without_losing_other_repairs(self):
+        from copy import deepcopy
+        from timing_validation import retain_consistent_input, timing_violations, validate_timeline
+        def cue(text, start):
+            return dict(text=text,start=start,end=start+.4,status='candidate',units=[
+                dict(text=text,first=0,stop=len(text),start=start,end=start+.4)])
+        def proof(line, text, start):
+            return dict(line=line,text=text,first=0,stop=len(text),onset=start,
+                        start_min=start-.1,start_max=start+.1)
+        for mode in ('repaired','input_also_wrong','neighbour_conflict','other_unresolved'):
+            with self.subTest(mode=mode):
+                original=[cue('hello',3. if mode=='input_also_wrong' else 1.),cue('world',4.),cue('again',7.)]
+                revised=[cue('hello',.1 if mode=='neighbour_conflict' else 2.),
+                         cue('world',.8 if mode=='neighbour_conflict' else 5.),cue('again',8.)]
+                constraints=[proof(1,'hello',1.),proof(2,'world',revised[1]['start']),
+                             proof(3,'again',9. if mode=='other_unresolved' else 8.)]
+                before=deepcopy((original,revised))
+                result,retained=retain_consistent_input(original,revised,constraints,10.,'English')
+                self.assertEqual((original,revised),before)
+                if mode in ('repaired','other_unresolved'):
+                    self.assertEqual(retained,[1])
+                    self.assertEqual(result,[original[0],*revised[1:]])
+                else:
+                    self.assertEqual(retained,[])
+                    self.assertEqual(result,revised)
+                if mode=='repaired':
+                    validate_timeline(result,['hello','world','again'],10.,constraints)
+                else:
+                    self.assertTrue(timing_violations(result,constraints))
+                    with self.assertRaises(ValueError):
+                        validate_timeline(result,['hello','world','again'],10.,constraints)
 
     def test_isolated_matching_syllable_does_not_establish_a_conflicting_phrase(self):
         from copy import deepcopy
