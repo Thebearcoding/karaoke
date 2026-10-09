@@ -285,9 +285,15 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
     if len(block['result']['segments']) != stop-first:
         return block
     for i in range(*block['range']):
-        words = [w for w in block['result']['segments'][i-first]['words'] if normalized(w['word'])]
-        if len(words) >= 4 and sum(w['end']-w['start'] < .015 for w in words) > len(words)/2:
-            bad.add(i)  # A tiny surviving token must not hide a collapsed phrase.
+        # Merging a zero-duration word makes a drawable fallback, not evidence
+        # that the sentence is in the right passage. Check the raw alignment
+        # before that merge can hide a partial collapse into spoken dialogue.
+        segment = block['result']['segments'][i-first]
+        words = [w for w in segment['words'] if normalized(w['word'])]
+        compressed = len(words) >= 4 and sum(w['end']-w['start'] < .015 for w in words) > len(words)/2
+        if compressed or not valid_recovery(dict(segments=[segment]), [lines[i]],
+                                            block['source_range'][1]-block['source_range'][0]):
+            bad.add(i)
         if i > block['range'][0] and all(cues[j]['status'] == 'candidate' for j in (i-1, i)):
             try:
                 presentation_cues(cues[i-1:i+1], duration, lead=0, tail=0, bridge_gap=0)
