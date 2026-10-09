@@ -626,10 +626,45 @@ test('small video drift uses playback rate without seeking or changing audio', a
   p.context.currentTime+=2; p.video.currentTime=p.context.currentTime-p.anchor-.12;
   const before=p.video.currentTime, sources=[...p.sources];
   frame(); assert.equal(p.video.currentTime,before); assert.ok(p.video.playbackRate>1 && p.video.playbackRate<=1.1);
+  p.context.currentTime+=1;
   p.video.currentTime=p.context.currentTime-p.anchor+.12; frame(); assert.ok(p.video.playbackRate<1);
+  p.context.currentTime+=1;
   p.video.currentTime=p.context.currentTime-p.anchor; frame(); assert.equal(p.video.playbackRate,1);
   assert.deepEqual(p.sources,sources);
   p.clear(); assert.equal(p.video.playbackRate,1);
+});
+
+test('video frames keep advancing when a rate change briefly stalls the decoder', async () => {
+  const p=setup(); await p.unlock(); await p.load(song); await p.apply(state,clockOffset());
+  p.context.currentTime=p.audibleWhen; frame();
+  const sources=[...p.sources];
+  let position=p.video.currentTime-.12, last=p.context.currentTime, rate=1, blockedUntil=last;
+  const advance=()=>{
+    const now=p.context.currentTime;
+    if (!p.video.paused) position+=(now-last)*rate;
+    last=now;
+  };
+  Object.defineProperty(p.video,'currentTime',{configurable:true,
+    get(){advance();return position;},set(value){advance();position=value;}});
+  Object.defineProperty(p.video,'playbackRate',{configurable:true,
+    get(){return rate;},set(value){
+      advance();
+      if (value!==rate) blockedUntil=p.context.currentTime+.25;
+      rate=value;
+    }});
+  let lastFrame=last, longestFreeze=0;
+  try {
+    for (let i=0;i<720;i++) {
+      p.context.currentTime+=1/60;
+      frame();
+      if (p.context.currentTime>=blockedUntil) lastFrame=p.context.currentTime;
+      longestFreeze=Math.max(longestFreeze,p.context.currentTime-lastFrame);
+    }
+    assert.ok(longestFreeze<.35,`video froze for ${longestFreeze.toFixed(2)} seconds`);
+    assert.ok(Math.abs(p.video.currentTime-(p.outputTime()-p.anchor))<.05);
+    assert.ok(sources.every(source=>!source.stopped));
+    assert.deepEqual(p.sources,sources);
+  } finally { p.clear(); }
 });
 
 test('an unopened playback tab does not seek through another device\'s playing clock', async () => {

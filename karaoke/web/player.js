@@ -112,7 +112,17 @@ export class Player {
     if (Math.abs(drift) > 1) {
       this.waitForMedia(position);
     } else {
-      video.playbackRate = Math.abs(drift) < .04 ? 1 : 1 + Math.max(-.1, Math.min(.1, drift));
+      // WebKit may briefly stall decoded frames after a rate change. Hold a
+      // correction long enough to take effect instead of retuning every frame.
+      // Separate enter/exit thresholds also avoid oscillating at the boundary.
+      const correcting = (video.playbackRate - 1) * drift > 0;
+      const settled = Math.abs(drift) < (correcting ? .01 : .04);
+      const rate = settled ? 1 : drift > 0 ? 1.1 : .9;
+      if (rate !== video.playbackRate &&
+          this.context.currentTime - (this.videoRateChangedAt ?? -Infinity) >= 1) {
+        video.playbackRate = rate;
+        this.videoRateChangedAt = this.context.currentTime;
+      }
     }
   }
 
@@ -265,7 +275,8 @@ export class Player {
     this.pendingStart = null;
     this.videoRun = null;
     this.videoPending = false;
-    this.video.playbackRate = 1;
+    if (this.video.playbackRate !== 1) this.video.playbackRate = 1;
+    this.videoRateChangedAt = null;
     if (wasPlaying) this.pitchChain?.stop();
     this.video.pause();
   }
