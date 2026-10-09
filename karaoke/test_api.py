@@ -6435,7 +6435,8 @@ def test_focused_probe_obeys_shared_budget_and_preserves_checkpoints(tmp_path, o
 
 
 @pytest.mark.parametrize('evict', [False, True])
-def test_audio_ready_job_releases_queue_protection_and_resumes_its_checkpoints(tmp_path,evict):
+@pytest.mark.parametrize('status', ['audio_ready', 'source_ready'])
+def test_audio_ready_job_releases_queue_protection_and_resumes_its_checkpoints(tmp_path,evict,status):
     from karaoke.stage_cache import StageCache
     hold=tmp_path/'preparation.pause'
     hold.write_text('test')
@@ -6449,7 +6450,7 @@ def test_audio_ready_job_releases_queue_protection_and_resumes_its_checkpoints(t
         entry=room['entries'][0];folder=tmp_path/entry['job_id']; output=folder/'audio.wav'
         with StageCache(folder).stage('separate',inputs=[folder/'request.json'],outputs=[output]):
             output.write_bytes(b'computed audio')
-        app.state.store.update(entry['job_id'],status='audio_ready')
+        app.state.store.update(entry['job_id'],status=status)
         room=client.post('/v1/room/commands',json={'action':'remove','entry_id':entry['id']}).json()
         assert client.get('/v1/library').json()['songs'][0]['status']=='unprepared'
         assert client.get('/health').json()['queued']==0
@@ -6465,10 +6466,10 @@ def test_audio_ready_job_releases_queue_protection_and_resumes_its_checkpoints(t
         while client.get('/health').json()['queued'] and time.monotonic()<deadline:
             time.sleep(.02)
         assert calls==[]
-        resumed=client.post('/v1/jobs',json={'url':URL}).json()
-        assert (resumed['id']==entry['job_id']) is not evict
-        assert finished(client,resumed['id'])['status']=='completed'
-        assert calls==[resumed['id']]
+        resumed=client.post('/v1/room/entries',json={'job_id':entry['job_id']}).json()['entries'][0]['job_id']
+        assert (resumed==entry['job_id']) is not evict
+        assert finished(client,resumed)['status']=='completed'
+        assert calls==[resumed]
 
 
 def test_complete_audio_ready_releases_intermediates_and_queues_video_only(tmp_path):

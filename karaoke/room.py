@@ -256,7 +256,7 @@ class Room:
                     break
         if request.job_id:
             job = self.store.read(request.job_id)
-            if job and (request.force or job['status'] in ('evicted', 'video_evicted', 'cancelled', 'audio_ready') or job.get('restore_video') or
+            if job and (request.force or job['status'] in ('evicted', 'video_evicted', 'cancelled', 'audio_ready', 'source_ready') or job.get('restore_video') or
                         (not replay and job['status'] == 'completed' and job.get('pipeline_version') != self.version)):
                 version = job['pipeline_version'] if replay and job.get('restore_video') else self.version
                 job, cached = self.store.create(JobRequest(**{**job['input'], 'force': request.force}), version)
