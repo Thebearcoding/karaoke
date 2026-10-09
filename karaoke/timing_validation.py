@@ -458,12 +458,14 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                                 first=unit['first'], stop=unit['stop'], start=unit['start'], end=unit['end']))
                     if any(not bounds[0] <= u['start'] < bounds[1] for u in members):
                         reason='local replacement crosses neighbouring lyrics'
+                        localized=False
                 attempt=dict(first=units[lo]['first'],stop=units[hi-1]['stop'],accepted=reason is None,reason=reason)
                 report['repairs'].append(attempt)
                 # An isolated matching syllable is not a durable constraint
                 # when the surrounding replacement maps to different words
-                # in the two recordings. Keep that proposal for a bounded
-                # group retry; only a coherent local span establishes it.
+                # in the two recordings or crosses the lyric occurrence.
+                # Keep that proposal for a bounded group retry; only a
+                # coherent local span establishes it.
                 if localized and proposals[first] not in ledger:
                     ledger.append(proposals[first])
                 if reason is not None:continue

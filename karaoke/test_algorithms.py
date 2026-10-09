@@ -454,6 +454,18 @@ class SubtitleIntegrity(unittest.TestCase):
                 validate_timeline(result, [c['text'] for c in cues], 5., language='Chinese')
                 if mode in ('right_context', 'left_context'):
                     self.assertFalse(report['unresolved'])
+                if mode in ('outside_left_edit', 'outside_right_edit'):
+                    self.assertTrue(report['lines'][0]['proposed_constraints'])
+                    self.assertFalse(report['constraints'])
+                    self.assertFalse(report['unresolved'])
+                    # An ambiguous new proposal cannot erase a previously
+                    # established onset, even when this observation cannot fit.
+                    proof = report['lines'][0]['proposed_constraints'][0]
+                    _, retained = reconcile_timing(cues, wave, lambda *a, **k: views,
+                        predict, protocol, 'Chinese', [proof],
+                        _retry_context=False, _review_lines={1})
+                    self.assertIn(proof, retained['constraints'])
+                    self.assertTrue(retained['unresolved'])
 
     def test_timing_contract_relocates_the_minimum_span_and_never_resurrects_old_times(self):
         from copy import deepcopy
