@@ -552,16 +552,173 @@ def test_restored_playlist_priority_is_applied_before_starting_worker(tmp_path):
 
 def test_removed_pending_song_does_not_create_a_new_job(tmp_path):
     app = create_app(tmp_path, worker_command=fake_worker, version='test')
+    pause = tmp_path/'preparation.pause'
+    pause.touch()
     with TestClient(app) as client:
         assert client.post('/v1/room/entries',json={'url':'http://127.0.0.1/secret'}).status_code == 422
         assert client.post('/v1/room/entries',json={'job_id':'missing'}).status_code == 404
         data = client.post('/v1/room/entries',json={'url':URL}).json()
         entry = data['entries'][0]
+        standalone = client.post('/v1/jobs', json={'url': 'https://youtu.be/2Vv-BfVoq4g'}).json()['id']
         client.post('/v1/room/commands',json={'action':'remove','entry_id':entry['id']})
-        assert finished(client,entry['job_id'])['status'] == 'completed'
+        assert app.state.store.read(entry['job_id'])['status'] == 'cancelled'
+        assert app.state.store.read(standalone)['status'] == 'queued'
+        assert app.state.worker.queue.qsize() == 1
         assert client.get('/v1/room').json()['entries'] == []
         assert client.get('/').status_code == 200
         assert client.get('/assets/app.js').status_code == 200
+    # Cancellation survives a restart. Re-adding explicitly resumes this job.
+    with TestClient(create_app(tmp_path, worker_command=fake_worker, version='test')) as client:
+        assert client.get('/health').json()['queued'] == 1
+        resumed = client.post('/v1/room/entries', json={'url': URL}).json()['entries'][0]
+        assert resumed['job_id'] == entry['job_id'] and resumed['status'] == 'queued'
+        pause.unlink()
+        assert finished(client, entry['job_id'])['status'] == 'completed'
+        client.post('/v1/room/commands', json={'action': 'remove', 'entry_id': resumed['id']})
+        cached = client.post('/v1/room/entries', json={'url': URL}).json()['entries'][0]
+        assert cached['job_id'] == entry['job_id'] and cached['status'] == 'completed'
+
+
+@pytest.mark.parametrize('spawned_first', [False, True])
+def test_removing_during_process_creation_waits_for_cleanup(tmp_path, monkeypatch, spawned_first):
+    import httpx
+
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+        spawned = []
+        original = asyncio.create_subprocess_exec
+        async def delayed_spawn(*args, **kwargs):
+            if spawned_first:
+                spawned.append(await original(*args, **kwargs))
+            entered.set()
+            await release.wait()
+            if not spawned_first:
+                spawned.append(await original(*args, **kwargs))
+            return spawned[-1]
+        monkeypatch.setattr(asyncio, 'create_subprocess_exec', delayed_spawn)
+        app = create_app(tmp_path, version='test',
+            worker_command=lambda _: [sys.executable, '-c', 'import time; time.sleep(30)'])
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                entry = (await client.post('/v1/room/entries', json={'url': URL})).json()['entries'][0]
+                await asyncio.wait_for(entered.wait(), 5)
+                removing = asyncio.create_task(client.post('/v1/room/commands',
+                    json={'action': 'remove', 'entry_id': entry['id']}))
+                try:
+                    for _ in range(100):
+                        if app.state.worker.cancelled:
+                            break
+                        await asyncio.sleep(.01)
+                    assert app.state.worker.cancelled and not removing.done()
+                finally:
+                    release.set()
+                assert (await removing).status_code == 200
+                assert len(spawned) == 1 and spawned[0].returncode is not None
+                assert app.state.store.read(entry['job_id'])['status'] == 'cancelled'
+                assert not app.state.worker.processes
+                await asyncio.wait_for(app.state.worker.queue.join(), 1)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('readd_during_cancel', [False, True])
+def test_remove_stops_descendants_and_resumes_only_completed_checkpoints(tmp_path, readd_during_cancel):
+    import os
+    import signal
+    import httpx
+
+    # A stubborn grandchild closes stdout, so waiting for the parent alone
+    # cannot prove that all writers have stopped.
+    child = """import pathlib,signal,sys,time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+path=pathlib.Path(sys.argv[1])
+while True:
+    with path.open('a') as stream: stream.write('tick\\n')
+    with pathlib.Path(sys.argv[2]).open('ab') as stream: stream.write(b'x'*1024)
+    time.sleep(.02)
+"""
+    code = """import json,os,pathlib,signal,subprocess,sys,time
+from karaoke.stage_cache import StageCache
+p=pathlib.Path(sys.argv[1]); cache=StageCache(p)
+source=p/'source.bin'; separated=p/'separated.bin'; aligned=p/'alignment.bin'
+with cache.stage('decode',inputs=[p/'request.json'],outputs=[source]) as hit:
+    if not hit: source.write_bytes(b'source')
+with cache.stage('separate',inputs=[source],outputs=[separated]) as hit:
+    if not hit: separated.write_bytes(b'expensive completed stage')
+with cache.stage('align',inputs=[separated],outputs=[aligned]) as hit:
+    if not hit:
+        aligned.write_bytes(b'incomplete')
+        child=subprocess.Popen([sys.executable,'-c',sys.argv[2],str(p.parent/'heartbeat'),str(p/'partial-audio.bin')],
+            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        (p/'started.json').write_text(json.dumps({'parent':os.getpid(),'child':child.pid}))
+        while not (p.parent/'release').exists(): time.sleep(.02)
+        child.kill(); child.wait()
+        aligned.write_bytes(b'complete')
+artifacts={name:{'path':'alignment.bin','bytes':len(aligned.read_bytes())}
+    for name in ['mv','instrumental','backing_vocals','lead_vocals']}
+(p/'result.json').write_text(json.dumps({'artifacts':artifacts,'reused_stages':cache.reused}))
+"""
+
+    async def scenario():
+        app = create_app(tmp_path, worker_command=lambda p: [sys.executable, '-u', '-c', code, str(p), child],
+                         version='test', worker_concurrency=None)
+        worker = app.state.worker
+        entered, release_cancel = asyncio.Event(), asyncio.Event()
+        original = worker.terminate
+        async def terminate(process):
+            entered.set()
+            if readd_during_cancel:
+                await release_cancel.wait()
+            await original(process)
+        worker.terminate = terminate
+        async def until(predicate):
+            deadline = time.monotonic()+8
+            while not predicate():
+                assert time.monotonic() < deadline
+                await asyncio.sleep(.02)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                entry = (await client.post('/v1/room/entries', json={'url': URL})).json()['entries'][0]
+                folder = tmp_path/entry['job_id']
+                await until(lambda: (tmp_path/'heartbeat').exists() and (tmp_path/'heartbeat').stat().st_size > 10)
+                parent = json.loads((folder/'started.json').read_text())['parent']
+                try:
+                    removing = asyncio.create_task(client.post('/v1/room/commands',
+                        json={'action': 'remove', 'entry_id': entry['id']}))
+                    await entered.wait()
+                    if readd_during_cancel:
+                        again = (await client.post('/v1/room/entries', json={'url': URL})).json()['entries'][0]
+                        assert again['job_id'] == entry['job_id']
+                        (tmp_path/'preparation.pause').touch()
+                        release_cancel.set()
+                    assert (await removing).status_code == 200
+                    ticks = (tmp_path/'heartbeat').read_bytes()
+                    await asyncio.sleep(.15)
+                    assert (tmp_path/'heartbeat').read_bytes() == ticks
+                    assert not (folder/'partial-audio.bin').exists()
+                    assert not worker.processes
+                    assert (folder/'separated.bin').read_bytes() == b'expensive completed stage'
+                    assert (folder/'checkpoints/separate.json').is_file()
+                    assert not (folder/'checkpoints/align.json').exists()
+                    assert not (folder/'alignment.bin').exists()
+                    assert app.state.store.read(entry['job_id'])['status'] == ('queued' if readd_during_cancel else 'cancelled')
+                    assert (await client.get(f"/v1/jobs/{entry['job_id']}/artifacts/mv")).status_code == 409
+                    if not readd_during_cancel:
+                        again = (await client.post('/v1/room/entries', json={'job_id': entry['job_id']})).json()['entries'][0]
+                    assert again['job_id'] == entry['job_id']
+                    (tmp_path/'release').touch()
+                    (tmp_path/'preparation.pause').unlink(missing_ok=True)
+                    await until(lambda: app.state.store.read(entry['job_id'])['status'] == 'completed')
+                    result = app.state.store.read(entry['job_id'])['result']
+                    assert result['reused_stages'] == ['decode', 'separate']
+                    assert (folder/'alignment.bin').read_bytes() == b'complete'
+                    assert len(app.state.store.list()) == 1
+                finally:
+                    release_cancel.set()
+                    try:
+                        os.killpg(parent, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+    asyncio.run(scenario())
 
 
 def test_library_lists_queued_and_running_songs_and_reuses_their_jobs(tmp_path):

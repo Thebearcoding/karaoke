@@ -154,7 +154,7 @@ class Room:
         return dict(**entry,
             title=inputs.get('title') or result.get('title') or song_info.get('title') or featured.get('title') or '新点的歌',
             artist=inputs.get('artist') or result.get('artist') or song_info.get('artist') or featured.get('artist', ''),
-            url=inputs['url'], status='unprepared' if job['status'] in ('audio_ready', 'source_ready') else job['status'],
+            url=inputs['url'], status='unprepared' if job['status'] in ('audio_ready', 'source_ready', 'cancelled') else job['status'],
             active_stages=job.get('active_stages', []),
             stage_progress=job.get('stage_progress', {}) if job['status'] == 'running' else {},
             preparation_started_at=job.get('started_at') if job['status'] == 'running' else None,
@@ -258,7 +258,7 @@ class Room:
             raise HTTPException(409, '歌单最多保留 100 首，请先移除一些歌曲')
         if request.job_id:
             job = self.store.read(request.job_id)
-            if job and (request.force or job['status'] in ('evicted', 'video_evicted') or job.get('restore_video') or
+            if job and (request.force or job['status'] in ('evicted', 'video_evicted', 'cancelled') or job.get('restore_video') or
                         (not replay and job['status'] == 'completed' and job.get('pipeline_version') != self.version)):
                 version = job['pipeline_version'] if replay and job.get('restore_video') else self.version
                 job, cached = self.store.create(JobRequest(**{**job['input'], 'force': request.force}), version)

@@ -140,7 +140,7 @@ class SongCache:
             keep.update(p for p in retained_files(folder)
                         if p.startswith(('music-separation/', 'lead-separation/')) or
                         p in ('checkpoints/separate_music.json', 'checkpoints/separate_lead.json'))
-        if (job['status'] in ('failed', 'audio_ready', 'source_ready') or
+        if (job['status'] in ('failed', 'cancelled', 'audio_ready', 'source_ready') or
                 (job['status'] == 'queued' and job.get('download_retry')) or
                 (job.get('result') or {}).get('validation_scope') == 'playback_audio_preview'):
             keep.update(retained_files(folder))
@@ -176,7 +176,7 @@ class SongCache:
         """A retry can reuse a verified local download even if the website is unavailable."""
         for job in reversed(self.store.list(-1)):
             if job['input']['url'] != url or job['status'] not in (
-                    'failed', 'source_ready', 'audio_ready', 'completed', 'video_evicted'):
+                    'failed', 'cancelled', 'source_ready', 'audio_ready', 'completed', 'video_evicted'):
                 continue
             source = self.folder(job['id'])
             try:

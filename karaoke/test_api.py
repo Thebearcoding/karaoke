@@ -339,11 +339,11 @@ def test_removing_last_room_entry_cancels_pending_download_retry(tmp_path):
         assert app.state.store.read(job['id'])['status'] == 'queued'
         client.post('/v1/room/commands', json={'action':'remove','entry_id':duplicate['id']})
         result = app.state.store.read(job['id'])
-        assert result['status'] == 'failed' and result['download_retry']['next_retry_at'] is None
+        assert result['status'] == 'cancelled' and result['download_retry']['next_retry_at'] is None
         assert app.state.worker.queue.empty()
         # Removing while a download is running also prevents a later auto retry.
         app.state.worker.download_failed(result, dict(code='download_failed',message='连接超时'), True)
-        assert app.state.store.read(job['id'])['status'] == 'failed'
+        assert app.state.store.read(job['id'])['status'] == 'cancelled'
         assert app.state.worker.queue.empty()
 
 

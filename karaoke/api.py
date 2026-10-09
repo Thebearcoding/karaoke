@@ -143,7 +143,7 @@ class Store:
                 fields['song_info'] = {**(doc.get('song_info') or {}), **{
                     key: value for key, value in (fields['song_info'] or {}).items()
                     if value is not None and value != ''}}
-            if fields.get('status') in ('completed', 'failed') or (
+            if fields.get('status') in ('completed', 'failed', 'cancelled') or (
                     'song_info' in fields and fields['song_info'] != doc.get('song_info')):
                 # Tiny, content-checked metadata survives media LRU eviction.
                 metadata = {}
@@ -183,7 +183,7 @@ class Store:
                     in_use.update(e['job_id'] for e in state['entries'] if e['id'] == state['current_id'])
                 rows = db.execute("""SELECT doc FROM jobs WHERE
                     (cache_key=? AND status IN ('queued','running','completed'))
-                    OR status IN ('queued','failed','audio_ready','source_ready','completed') OR json_extract(doc, '$.restore_video')=1
+                    OR status IN ('queued','failed','cancelled','audio_ready','source_ready','completed') OR json_extract(doc, '$.restore_video')=1
                     ORDER BY (cache_key=?) DESC, (status='completed') DESC,
                              COALESCE(json_extract(doc, '$.restore_video'), 0) DESC, created_at DESC""", (key, key)).fetchall()
                 for row in rows:
@@ -204,12 +204,13 @@ class Store:
                         # Pending work has not executed the old pipeline yet.
                         doc.update(pipeline_version=version, updated_at=now())
                         db.execute('UPDATE jobs SET cache_key=? WHERE id=?', (key, doc['id']))
-                    if (doc['status'] in ('failed', 'audio_ready', 'source_ready') or
+                    if (doc['status'] in ('failed', 'cancelled', 'audio_ready', 'source_ready') or
                             (refresh and doc['status'] != 'queued')) and not doc.get('restore_video'):
                         folder = self.root/doc['id']
                         source_ready = doc['status'] == 'source_ready' and all((folder/name).is_file()
                             for name in ('source.json', 'download/source.mkv', 'download/source.info.json'))
-                        if not refresh and not source_ready and not any((folder/'checkpoints').glob('*.json')):
+                        if (not refresh and not source_ready and doc['status'] != 'cancelled'
+                                and not any((folder/'checkpoints').glob('*.json'))):
                             continue
                         doc.update(status='queued', active_stages=[], stage_progress={}, timings={},
                                    error=None, updated_at=now(), last_accessed_at=now(), pipeline_version=version,
@@ -282,6 +283,7 @@ class Worker:
             raise ValueError('Preparation concurrency must be positive or None')
         self.concurrency = concurrency
         self.queue, self.processes = asyncio.Queue(), {}
+        self.tasks, self.cancelled = {}, set()
         self.dispatch_errors = {}
 
     @property
@@ -309,11 +311,7 @@ class Worker:
         rank = {job_id: index for index, job_id in reversed(list(enumerate(job_ids)))}
         for job_id in sorted(dict.fromkeys(pending), key=lambda key: rank.get(key, len(rank))):
             job = self.store.read(job_id) or {}
-            retry = job.get('download_retry') or {}
-            if job.get('status') == 'queued' and retry.get('room_managed') and job_id not in rank:
-                self.store.update(job_id, status='failed', download_retry={**retry, 'next_retry_at': None})
-                self.dispatch_errors.pop(job_id, None)
-            elif job.get('status') == 'queued':
+            if job.get('status') == 'queued':
                 self.queue.put_nowait(job_id)
             else:
                 self.dispatch_errors.pop(job_id, None)
@@ -323,8 +321,47 @@ class Worker:
             row = db.execute('SELECT state FROM room WHERE id=1').fetchone()
         return any(e['job_id'] == job_id for e in json.loads(row[0])['entries'])
 
+    def mark_cancelled(self, job_id):
+        job = self.store.read(job_id)
+        retry = {'download_retry': {**job['download_retry'], 'next_retry_at': None}} if job.get('download_retry') else {}
+        self.store.update(job_id, status='cancelled', active_stages=[], stage_progress={},
+                          error=None, cancelled_at=now(), **retry)
+
+    async def cancel_unneeded(self, job_id):
+        """Stop removed work, retaining verified checkpoints and completed media."""
+        job = self.store.read(job_id)
+        if self.in_room(job_id) or not job or job['status'] not in ('queued', 'running'):
+            return
+        if job['status'] == 'running' and job_id not in self.tasks:
+            return  # An independent probe owns this process, not this worker.
+        self.cancelled.add(job_id)
+        try:
+            task = self.tasks.get(job_id)
+            if job_id not in self.processes:
+                # The task may have been dispatched but not entered consume yet.
+                self.mark_cancelled(job_id)
+                self.store.cache.compact(self.store.read(job_id))
+            if task:
+                if not task.cancelling():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            # A second device can re-add the song while its old process exits.
+            # Resume only after that process and cache cleanup have finished.
+            if self.in_room(job_id) and self.store.read(job_id)['status'] == 'cancelled':
+                job, cached = self.store.create(JobRequest(**job['input']), self.version or job['pipeline_version'])
+                if not cached:
+                    self.queue.put_nowait(job['id'])
+            with self.store.connect() as db:
+                state = json.loads(db.execute('SELECT state FROM room WHERE id=1').fetchone()[0])
+            self.prioritize([e['job_id'] for e in sorted(state['entries'], key=lambda e: e['id'] != state['current_id'])])
+            self.store.cache.enforce()
+        finally:
+            self.cancelled.discard(job_id)
+
     def download_failed(self, job, error, room_managed):
         """Persist a bounded retry without occupying a worker during backoff."""
+        if self.store.read(job['id'])['status'] == 'cancelled':
+            return
         folder = self.store.root/job['id']
         log = folder/(error['code'].removesuffix('_failed')+'.log')
         diagnostic = ''
@@ -357,20 +394,20 @@ class Worker:
             self.store.update(job['id'], status='failed', active_stages=[],
                 error=dict(code='interrupted', message='上次服务在处理时退出；可重新提交链接'))
         for job in self.store.list(100000):
-            if job['status'] in ('completed', 'video_evicted', 'failed'):
+            if job['status'] in ('completed', 'video_evicted', 'failed', 'cancelled'):
                 self.store.cache.compact(job)
         self.store.cache.enforce()
         for job in self.store.list(100000, 'queued'):
             self.queue.put_nowait(job['id'])
-        self.tasks = set()
         self.dispatcher = asyncio.create_task(self.dispatch())
 
     async def stop(self):
         self.dispatcher.cancel()
         await asyncio.gather(self.dispatcher, return_exceptions=True)
-        for task in self.tasks:
-            task.cancel()
-        await asyncio.gather(*self.tasks, return_exceptions=True)
+        for task in self.tasks.values():
+            if not task.cancelling():
+                task.cancel()
+        await asyncio.gather(*self.tasks.values(), return_exceptions=True)
 
     async def dispatch(self):
         while True:
@@ -393,7 +430,7 @@ class Worker:
                     self.queue.task_done()
                     continue
                 self.dispatch_errors.pop(job_id, None)
-                if (job or {}).get('status') != 'queued':
+                if (job or {}).get('status') != 'queued' or job_id in self.tasks:
                     self.queue.task_done()
                     continue
                 if deadline > time.time():
@@ -401,28 +438,38 @@ class Worker:
                     self.queue.task_done()
                     continue
                 task = asyncio.create_task(self.consume(job_id))
-                self.tasks.add(task)
-                task.add_done_callback(self.tasks.discard)
+                self.tasks[job_id] = task
+                def finished(task, key=job_id):
+                    if self.tasks.get(key) is task:
+                        self.tasks.pop(key)
+                    self.queue.task_done()
+                task.add_done_callback(finished)
                 break
             else:
                 await asyncio.sleep(.2)
 
     async def terminate(self, process):
-        if process and process.returncode is None:
+        if process:
             try:
                 os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
-                return
+                pass
             try:
                 await asyncio.wait_for(process.wait(), 5)
             except asyncio.TimeoutError:
-                os.killpg(process.pid, signal.SIGKILL)
-                await process.wait()
+                pass
+            finally:
+                # The parent can exit while a descendant ignores SIGTERM or
+                # closes stdout. Never let that orphan keep writing the cache.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            await process.wait()
 
     async def consume(self, job_id):
         job = self.store.read(job_id)
         if (job or {}).get('status') != 'queued':
-            self.queue.task_done()
             return
         process = self.processes[job_id] = None
         folder = self.store.root/job_id
@@ -444,10 +491,15 @@ class Worker:
                 if not self.command:
                     command.append('--restore-video')
             with (folder/'worker.log').open('ab') as log:
-                process = await asyncio.create_subprocess_exec(*command, cwd=ROOT.parent,
+                spawn = asyncio.create_task(asyncio.create_subprocess_exec(*command, cwd=ROOT.parent,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                     env={**os.environ, 'KARAOKE_EVENTS_STDOUT': '1',
-                         'KARAOKE_STAGE_LOCK_DIR': str(self.store.root/'stage-locks')}, start_new_session=True)
+                         'KARAOKE_STAGE_LOCK_DIR': str(self.store.root/'stage-locks')}, start_new_session=True))
+                try:
+                    process = await asyncio.shield(spawn)
+                except asyncio.CancelledError:
+                    process = await spawn
+                    raise
                 self.processes[job_id] = process
                 await self.supervise(log, job_id, process)
             result_path = folder/'result.json'
@@ -479,8 +531,11 @@ class Worker:
                               error=dict(code='cache_full', message=str(error)))
         except asyncio.CancelledError:
             await self.terminate(process)
-            self.store.update(job_id, status='failed', active_stages=[],
-                error=dict(code='interrupted', message='服务关闭，任务已中止；可重新提交链接'))
+            if job_id in self.cancelled:
+                self.mark_cancelled(job_id)
+            else:
+                self.store.update(job_id, status='failed', active_stages=[],
+                    error=dict(code='interrupted', message='服务关闭，任务已中止；可重新提交链接'))
             raise
         except Exception:
             logging.getLogger(__name__).exception('Job %s failed output/worker validation', job_id)
@@ -491,7 +546,6 @@ class Worker:
             self.processes.pop(job_id)
             self.store.cache.compact(self.store.read(job_id))
             self.store.cache.enforce()
-            self.queue.task_done()
 
     async def supervise(self, log, job_id, process):
         async def output():
@@ -672,7 +726,12 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
 
     @app.post('/v1/room/commands')
     async def room_command(payload: RoomCommand):
-        return room.command(payload)
+        before = {e['job_id'] for e in room.read()['entries']}
+        state = room.command(payload)
+        for job_id in before - {e['job_id'] for e in state['entries']}:
+            # Finish cleanup even if the deleting browser disconnects.
+            await asyncio.shield(worker.cancel_unneeded(job_id))
+        return room.snapshot()
 
     @app.get('/v1/room/events')
     async def room_events(job_id: str | None = None):
