@@ -281,6 +281,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
     duration = len(audio)/16000
     cues = partial_alignment_cues(lines, [block], duration, language)
     bad = {i for i in range(*block['range']) if cues[i]['status'] != 'candidate'}
+    unanchored = set(bad)
     first, stop = block['context']
     if len(block['result']['segments']) != stop-first:
         return block
@@ -291,6 +292,8 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         segment = block['result']['segments'][i-first]
         words = [w for w in segment['words'] if normalized(w['word'])]
         compressed = len(words) >= 4 and sum(w['end']-w['start'] < .015 for w in words) > len(words)/2
+        if compressed:
+            unanchored.add(i)
         if compressed or not valid_recovery(dict(segments=[segment]), [lines[i]],
                                             block['source_range'][1]-block['source_range'][0]):
             bad.add(i)
@@ -299,6 +302,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 presentation_cues(cues[i-1:i+1], duration, lead=0, tail=0, bridge_gap=0)
             except ValueError:
                 bad.update((i-1, i))  # Complete words can still occupy the wrong repeated passage.
+                unanchored.update((i-1, i))
     # Attention can place a perfectly complete sentence inside an instrumental
     # gap. Reuse the aligner's own activity map to request localization; silence
     # alone neither invalidates lyrics nor supplies replacement timestamps.
@@ -327,7 +331,10 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         begin = max(0., cues[left]['start']-.6) if cues[left]['status'] == 'candidate' else 0.
         end = min(duration, cues[right-1]['end']+.6) if cues[right-1]['status'] == 'candidate' else duration
         windows.append((left, right, begin, end))
-    global_recovery = force_global or bool(quiet) or len(bad) >= max(4, (stop-first+4)//5) or any(e-b > 45 for _, _, b, e in windows)
+    # Scattered partial word failures do not invalidate the song's anchors.
+    # Keep them local even when many lines contain a missing token.
+    global_recovery = force_global or bool(quiet) or len(unanchored) >= max(4, (stop-first+4)//5) or any(
+        e-b > 45 and unanchored.intersection(range(left,right)) for left,right,b,e in windows)
     untimed = {i for i in bad if cues[i]['status'] == 'unresolved_timing'}
     if global_recovery:
         windows = [(first, stop, block['source_range'][0], block['source_range'][1])]
@@ -345,7 +352,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         if needs_relocation and not untimed.intersection(range(left, right)):
             report['reason'] = 'deferred_until_missing_lines_are_located'
             continue
-        if not 0 <= begin < end <= duration or end-begin > 600:
+        if not 0 <= begin < end <= duration or end-begin > (600 if global_recovery else 45):
             report['reason'] = 'localization_budget_exceeded'
             continue
         try:
@@ -703,7 +710,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                       original_segments={i+1: result['result']['segments'][i-first] for i in replaced})
         result, cues = proposed, fresh
         bad.difference_update(replaced)
-    if bad and (not global_recovery or newly_conflicting) and budget > 0:
+    if bad.intersection(unanchored | newly_conflicting) and (not global_recovery or newly_conflicting) and budget > 0:
         # Apparently valid neighbours can squeeze missing lyrics into a window
         # that never contained them. Broaden once, sharing the remaining budget.
         # A repaired phrase can also expose a new conflict with an old neighbour.

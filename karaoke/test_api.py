@@ -2564,6 +2564,25 @@ def test_partial_word_collapse_localizes_the_whole_phrase_before_merging_fallbac
     assert result['asr_localizations'][0]['accepted_lines'] == [2]
 
 
+def test_scattered_missing_tokens_do_not_trigger_whole_song_recognition():
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines = [f'verse {i} carries a dream' for i in range(12)]
+    segments = [dict(words=[dict(word=w,start=i*6+j*.4,end=i*6+(j+1)*.4)
+                           for j,w in enumerate(text.split())]) for i,text in enumerate(lines)]
+    for i in (1,4,7,10):
+        segments[i]['words'][2]['end'] = segments[i]['words'][2]['start']
+    block = dict(range=[0,12],context=[0,12],source_range=[0.,75.],result=dict(segments=segments))
+    windows=[]
+    def recognize(begin,end):
+        windows.append((begin,end))
+        return dict(segments=[])
+    result = recover_with_local_asr(block,lines,np.zeros(75*16000),'English',recognize,
+                                   lambda *a,**k:pytest.fail('No independent localization'))
+    assert len(windows)==4 and all(end-begin<=45 for begin,end in windows)
+    assert all(not r['global_localization'] for r in result['asr_localizations'])
+    assert result['result']==block['result']
+
+
 def test_missing_recognition_uses_original_audio_before_spending_alignment_retries():
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines, starts = ['alpha', 'bravo', 'charlie'], [1.,4.,8.]

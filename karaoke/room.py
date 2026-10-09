@@ -382,7 +382,8 @@ class Room:
                     action == 'retry' and old['status'] != 'failed' and not waiting):
                 raise HTTPException(409, '歌曲状态已改变，请查看最新进度')
             until = download_backoff(old['input']['url'], self.store.root/'stage-locks')
-            if until > time.time():
+            if until > time.time() and (waiting or (old.get('error') or {}).get('stage') == 'download'
+                    or (old.get('error') or {}).get('code') == 'download_failed'):
                 raise HTTPException(429, f'视频站点仍在限流，约 {max(1, round(until-time.time()))} 秒后可重试')
             if waiting:
                 job = self.store.update(old['id'], error=None,

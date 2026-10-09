@@ -625,6 +625,7 @@ def test_manual_retry_resumes_waiting_job_but_preserves_provider_backoff(tmp_pat
 
 
 def test_reprepare_keeps_old_media_and_retired_finish_cannot_remove_new_attempt(tmp_path):
+    from karaoke.job_schema import download_backoff
     app = create_app(tmp_path, version='test')
     store, room = app.state.store, app.state.room
     old = ready_job(store)
@@ -634,6 +635,7 @@ def test_reprepare_keeps_old_media_and_retired_finish_cannot_remove_new_attempt(
     (folder/'source.json').write_text(json.dumps(dict(sha256=hashlib.sha256(b'original source').hexdigest())))
     (folder/'download/source.info.json').write_text('{}')
     entry = room.add(AddSong(job_id=old['id']))['entries'][0]
+    download_backoff(URL, tmp_path/'stage-locks', until=time.time()+60)
     store.cache.acquire(old['id'])
     try:
         snapshot = room.command(RoomCommand(action='reprepare', entry_id=entry['id']))
