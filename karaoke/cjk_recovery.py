@@ -107,7 +107,7 @@ def same_acoustic_event(a, b, localization_tolerance):
             and max(a['start'], b['start']) < min(ends))
 
 
-def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *, spans=None):
+def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *, spans=None, floor=None):
     """Return measured boundaries only when all views independently agree."""
     expected = spans if spans is not None else [
         (group['first']+a, group['first']+b) for a, b in highlight_spans(group['text'], 'Chinese')]
@@ -117,7 +117,8 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *,
             or any(u['text'] != group['text'][u['first']-group['first']:u['stop']-group['first']]
                    for v in [*predictions, *witnesses] for u in v)):
         return None, 'missing or mismatched character evidence'
-    floor = max(1e-5, protocol['minimum_relative_rms']*float(np.sqrt(np.mean(wave**2))))
+    if floor is None:
+        floor = max(1e-5, protocol['minimum_relative_rms']*float(np.sqrt(np.mean(wave**2))))
     result = []
     for index in range(len(expected)):
         primary = [v[index] for v in predictions]

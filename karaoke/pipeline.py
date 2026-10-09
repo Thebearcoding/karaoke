@@ -259,6 +259,8 @@ class Pipeline:
             from .timing_validation import acoustic_model_files
             if '--lead' in command:
                 inputs = [*inputs, command[command.index('--lead')+1]]
+            if '--resume' in command:
+                inputs = [*inputs, command[command.index('--resume')+1]]
             for evidence in ('timing-constraints.json', 'alignment/raw.json'):
                 if (self.output/evidence).is_file():
                     inputs = [*inputs, evidence]
@@ -507,7 +509,7 @@ class Pipeline:
         finally:
             self.stage_event(name, 'finished', status='completed' if succeeded else 'failed')
             with self.lock:
-                self.timings[name] = round(time.perf_counter()-started, 3)
+                self.timings[name] = round(self.timings.get(name, 0)+time.perf_counter()-started, 3)
             self.phase(name, False)
 
     def inputs(self, audio, name):
@@ -1232,7 +1234,9 @@ class Pipeline:
         report = json.loads((self.output/'timing-checked/report.json').read_text())
         if lead is not None and (report.get('pending_review_lines') or report['unresolved']):
             lead.result()
-            self.run('validate_timing', command+['--lead', self.output/'stems/lead.wav'])
+            preliminary = self.output/'timing-preliminary'
+            shutil.copytree(self.output/'timing-checked', preliminary, dirs_exist_ok=True)
+            self.run('validate_timing', command+['--resume', preliminary, '--lead', self.output/'stems/lead.wav'])
         checked = json.loads((self.output/'timing-checked/cues.json').read_text())
         report = json.loads((self.output/'timing-checked/report.json').read_text())
         try:

@@ -616,6 +616,16 @@ class SubtitleIntegrity(unittest.TestCase):
                     yield 'alternate', wave, witness, prediction('alternate')
                     if mode=='recover':self.fail('Loaded another model after all displaced onsets were resolved')
                 result, report = reconcile_views(cues, observations(), protocol, 'Chinese', playback=True)
+                original_calls = list(calls)
+                calls.clear()
+                initial, saved = reconcile_views(cues,
+                    [('primary',wave,witness,prediction('primary'))],protocol,'Chinese',playback=True)
+                continued, resumed = reconcile_views(initial,
+                    [('alternate',wave,witness,prediction('alternate'))],protocol,'Chinese',
+                    saved['constraints'],playback=True,resume=saved)
+                self.assertEqual(continued,result)
+                self.assertEqual(resumed['constraints'],report['constraints'])
+                self.assertEqual(calls,original_calls)
                 self.assertIn(('alternate', '丙丁'), calls)
                 self.assertNotIn(('alternate', '甲乙'), calls)
                 self.assertEqual(result[0]['units'][0]['start'], 2.)

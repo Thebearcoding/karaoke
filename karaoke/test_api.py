@@ -3999,6 +3999,20 @@ def test_silent_subprocess_still_obeys_timeout(tmp_path):
     assert not pipeline.active and pipeline.timings['render'] < 3
 
 
+def test_repeated_stage_timings_include_failed_and_successful_work(tmp_path):
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    with pytest.raises(StageFailure):
+        pipeline.run('render', [sys.executable, '-c', 'raise SystemExit(1)'])
+    first = pipeline.timings['render']
+    pipeline.run('render', [sys.executable, '-c', 'pass'])
+    timeline = pipeline.timeline['render']
+    attempts = timeline['previous_attempts']+[timeline]
+    assert [a['status'] for a in attempts] == ['failed','completed']
+    assert pipeline.timings['render'] > first
+    assert pipeline.timings['render'] == pytest.approx(
+        sum(a['finished']-a['started'] for a in attempts), abs=.02)
+
+
 def test_frontend_changes_invalidate_browser_cache_including_imports(tmp_path, monkeypatch):
     web = tmp_path/'web'
     web.mkdir()
@@ -4676,6 +4690,7 @@ def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success
         assert ('--playback-fallback' in args[1]) is not strict_audio
         assert ('--defer-constraints' in args[1]) is (lead is not None and len(calls)==1)
         assert ('--lead' in args[1]) is (len(calls)==2)
+        assert ('--resume' in args[1]) is (len(calls)==2)
         if lead is not None and len(calls)==1:
             lead.result.assert_not_called()
             assert not master.exists()
@@ -4792,6 +4807,58 @@ def test_timing_review_accepts_one_sample_of_resampling_but_rejects_different_le
     else:
         module.main()
         assert json.loads((tmp_path/'checked/cues.json').read_text()) == [cue]
+
+
+@pytest.mark.parametrize('changed', [None, 'input', 'audio', 'output', 'missing', 'invalid', 'empty'])
+def test_timing_continuation_reuses_only_matching_preliminary_output(tmp_path, monkeypatch, changed):
+    from copy import deepcopy
+    import shutil
+    import soundfile as sf
+    from karaoke import timing_validation as module
+    cue = dict(text='hello', start=.1, end=.5,
+               units=[dict(text='hello', first=0, stop=5, start=.1, end=.5)])
+    source = tmp_path/'input.json'
+    source.write_text(json.dumps([cue]))
+    (tmp_path/'lyrics.json').write_text(json.dumps(dict(lines=['hello'], language='English')))
+    audio, lead = tmp_path/'audio.wav', tmp_path/'lead.wav'
+    sf.write(audio, np.ones((3*44100,2))*.05, 44100, subtype='FLOAT')
+    sf.write(lead, np.ones((3*44100,2))*.03, 44100, subtype='FLOAT')
+    monkeypatch.setattr(module, 'AcousticReview', Mock())
+    monkeypatch.setattr(module, 'acoustic_model_files', lambda *args: [])
+    seen = []
+    def reconcile(cues, observations, *args, **kwargs):
+        seen.append((deepcopy(cues), [v[0] for v in observations], kwargs.get('resume')))
+        result = deepcopy(cues)
+        result[0]['start'] = result[0]['units'][0]['start'] = .2
+        witness = [dict(cue['units'][0], start=1., end=1.5)]
+        return result, dict(lines=[dict(line=1,status='reviewed',repairs=[],witnesses=[witness,witness])],
+                            constraints=[],unresolved=[])
+    monkeypatch.setattr(module, 'reconcile_views', reconcile)
+    argv = ['timing_validation', '--input', str(source), '--lyrics', str(tmp_path/'lyrics.json'),
+            '--audio', str(audio), '--original', str(audio), '--output', str(tmp_path/'checked'), '--device', 'cpu']
+    monkeypatch.setattr(sys, 'argv', argv)
+    module.main()
+    saved = json.loads((tmp_path/'checked/cues.json').read_text())
+    preliminary = tmp_path/'preliminary'
+    shutil.copytree(tmp_path/'checked', preliminary)
+    shutil.rmtree(tmp_path/'checked')  # StageCache clears the next stage's outputs.
+    if changed=='audio':
+        sf.write(audio, np.ones((3*44100,2))*.08, 44100, subtype='FLOAT')
+    elif changed in ('input','output'):
+        altered = deepcopy(cue)
+        altered['start'] = altered['units'][0]['start'] = .15
+        (source if changed=='input' else preliminary/'cues.json').write_text(json.dumps([altered]))
+    elif changed=='missing':
+        (preliminary/'report.json').unlink()
+    elif changed in ('invalid','empty'):
+        (preliminary/'report.json').write_text('{' if changed=='invalid' else 'null')
+    monkeypatch.setattr(sys, 'argv', [*argv, '--resume', str(preliminary), '--lead', str(lead)])
+    module.main()
+    incoming, views, resume = seen[-1]
+    assert (resume is not None) is (changed is None)
+    assert incoming == (saved if changed is None else json.loads(source.read_text()))
+    assert views == (['lead_ctc'] if changed is None else ['vocals_ctc','lead_ctc'])
+    assert json.loads((tmp_path/'checked/report.json').read_text())['continued_from_preliminary'] is (changed is None)
 
 
 @pytest.mark.parametrize('changed', [None, 'code', 'models', 'protocol', 'legacy', 'lead'])

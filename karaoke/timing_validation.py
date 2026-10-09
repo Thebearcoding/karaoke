@@ -124,13 +124,18 @@ def pending_review_lines(cues, report, protocol):
     return pending | {v['proof']['line']-1 for v in timing_violations(cues, report['constraints'])}
 
 
-def reconcile_views(cues, observations, protocol, language, constraints=(), *, playback=False, previous=()):
+def reconcile_views(cues, observations, protocol, language, constraints=(), *, playback=False, previous=(), resume=None):
     """Spend additional acoustic work only on unresolved local disagreements.
 
     Each observation uses the same acceptance contract and retains all previous
     onset constraints. The iterator may load a different audio view lazily.
     """
-    result, report, pending = cues, dict(lines=[], constraints=list(constraints)), None
+    result = cues
+    report = deepcopy(resume) if resume is not None else dict(lines=[])
+    report['constraints'] = list(constraints)
+    pending = pending_review_lines(cues, report, protocol) if resume is not None else None
+    if resume is not None and not pending:
+        return result, report
     history = []
     for name, wave, witness, predict in observations:
         result, reviewed = reconcile_timing(result, wave, witness, predict, protocol, language,
@@ -343,7 +348,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             for group in views[0]:
                 choose = lambda vs: [[u for u in v if (u['first'],u['stop'])==(group['first'],group['stop'])] for v in vs]
                 replacement, reason = corroborated_group(group, choose(predictions), choose(views), wave,
-                    bounds, protocol, spans=[(group['first'],group['stop'])])
+                    bounds, protocol, spans=[(group['first'],group['stop'])], floor=floor)
                 if replacement is None:
                     if group in suspects:
                         report.setdefault('unconfirmed', []).append(dict(first=group['first'],reason=reason))
@@ -832,6 +837,7 @@ def main():
     parser.add_argument('--playback-fallback',action='store_true')
     parser.add_argument('--defer-constraints',action='store_true',
                         help='Save preliminary evidence; the pipeline must enforce constraints before publication')
+    parser.add_argument('--resume',type=Path,help='Continue this preliminary review on the lead master')
     args=parser.parse_args()
     out=args.output;out.mkdir(parents=True,exist_ok=True)
     read=lambda p:json.loads(p.read_text())
@@ -856,6 +862,17 @@ def main():
     models=acoustic_model_files(ROOT)
     identity=dict(source=source,protocol=protocol,code={str(p):sha(p) for p in paths},
                   models={str(p):sha(p) for p in models if p.is_file()})
+    resume_key=hashlib.sha256(json.dumps([identity,sha(args.input),sha(args.lyrics),args.device,
+                                        args.playback_fallback],sort_keys=True).encode()).hexdigest()
+    resume=None
+    if args.resume and args.lead is not None:
+        try:
+            saved=read(args.resume/'report.json')
+            if (isinstance(saved,dict) and saved.get('resume_key')==resume_key and not saved.get('lead_sha256') and
+                    saved.get('output_sha256')==sha(args.resume/'cues.json')):
+                cues,resume=read(args.resume/'cues.json'),saved
+        except (OSError,ValueError):
+            pass
     lead_sha256 = sha(args.lead) if args.lead is not None else None
     same_evidence = (ledger.get('identity') == identity and
                      (not ledger.get('lead_sha256') or ledger['lead_sha256'] == lead_sha256))
@@ -865,12 +882,13 @@ def main():
         history.mkdir(exist_ok=True)
         write(history/(sha(ledger_file)+'.json'), ledger)
     torch.set_num_threads(4);torch.set_grad_enabled(False)
-    review=AcousticReview(args.original,args.device,out.parent/'timing-cache',identity,protocol)
     started=time.perf_counter()
     def observations():
-        yield 'vocals_ctc', wave, review.observe, review.predict(wave)
-        if lyrics['language'] != 'English':
-            yield 'vocals_phonemes', wave, review.observe, review.predict(wave,decoder='phonemes')
+        if resume is None:
+            review=AcousticReview(args.original,args.device,out.parent/'timing-cache',identity,protocol)
+            yield 'vocals_ctc', wave, review.observe, review.predict(wave)
+            if lyrics['language'] != 'English':
+                yield 'vocals_phonemes', wave, review.observe, review.predict(wave,decoder='phonemes')
         if args.lead is not None:
             lead, lead_rate=sf.read(args.lead,dtype='float64',always_2d=True)
             # Resampling rounds the same endpoint on two sample grids. Use
@@ -887,8 +905,9 @@ def main():
     previous = ledger.get('observations', []) if same_evidence else []
     if args.lead is None or ledger.get('lead_sha256') != lead_sha256:
         previous = [row for row in previous if not row.get('observation', '').startswith('lead_')]
-    repaired,report=reconcile_views(cues,observations(),protocol,lyrics['language'],constraints,
-                                   playback=args.playback_fallback,previous=previous)
+    repaired,report=reconcile_views(cues,observations(),protocol,lyrics['language'],
+                                   resume['constraints'] if resume is not None else constraints,
+                                   playback=args.playback_fallback,previous=previous,resume=resume)
     localization=out.parent/'alignment/raw.json'
     active,superseded=localized_constraints(repaired,report,read(localization) if localization.is_file() else [])
     superseded=(ledger.get('superseded',[]) if same_evidence else [])+superseded
@@ -901,7 +920,9 @@ def main():
                          if row.get('proposed_constraints') and not row.get('reused_measurement')}.values())
     write(ledger_file,dict(source=source,constraints=report['constraints'],superseded=superseded,
         identity=identity, observations=measurements, lead_sha256=report.get('lead_sha256')))
-    write(out/'cues.json',repaired);write(out/'report.json',report)
+    write(out/'cues.json',repaired)
+    report.update(resume_key=resume_key,output_sha256=sha(out/'cues.json'),continued_from_preliminary=resume is not None)
+    write(out/'report.json',report)
     validate_timeline(repaired,lyrics['lines'],duration,
                       () if args.defer_constraints else report['constraints'],lyrics['language'])
     print(json.dumps(dict(lines=len(cues),reviewed_lines=len({r['line'] for r in report['lines']}),
