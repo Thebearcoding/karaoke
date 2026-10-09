@@ -51,7 +51,7 @@ def compare_lyrics(candidates):
 
 def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, reference_lines=()):
     """Read source-bound Music lyrics or an identity-matched NetEase release."""
-    if provider != 'youtube_music' and (not song.get('title') or not song.get('artist')):
+    if provider != 'youtube_music' and not song.get('title'):
         return None, dict(provider=provider, status='missing_identity')
     if provider == 'youtube_music' and not re.fullmatch(r'[A-Za-z0-9_-]{11}', metadata.get('id') or ''):
         return None, dict(provider=provider, status='missing_video_identity')
@@ -71,7 +71,8 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
             recording_identity = {}
             try:
                 if provider == 'netease':
-                    query = ' '.join(lookup.names(song[k], title=k == 'title')[-1] for k in ('title','artist'))
+                    query = ' '.join(lookup.names(song[k], title=k == 'title')[-1]
+                                     for k in ('title','artist') if song.get(k))
                     url = 'https://music.163.com/api/cloudsearch/pc?'+urlencode(dict(s=query, type=1, limit=30, offset=0))
                     packet = lookup.cached_lyric_request(provider, url, cache, lambda: read_document(url, timeout=10))
                     if packet.get('code') != 200:

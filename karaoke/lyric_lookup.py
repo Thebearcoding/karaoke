@@ -179,15 +179,18 @@ def live_performance(value):
 
 def fetch_lyrics(song, metadata_path, cache):
     titles, artists = names(song.get('title'), title=True), names(song.get('artist'))
-    if not titles or not artists or not metadata_path.is_file():
+    if not titles or not metadata_path.is_file():
         return dict(status='missing_identity')
-    queries = [dict(track_name=titles[0], artist_name=artists[0])]
-    native = dict(track_name=titles[-1], artist_name=artists[-1])
+    queries = [dict(track_name=titles[0], **({'artist_name': artists[0]} if artists else {}))]
+    native = dict(track_name=titles[-1], **({'artist_name': artists[-1]} if artists else {}))
     if native != queries[0]:
         queries.append(native)
     simplified = {key: OpenCC('tw2s').convert(value) for key, value in native.items()}
     if simplified not in queries:
         queries.append(simplified)
+    title_only = dict(track_name=titles[-1])
+    if title_only not in queries:
+        queries.append(title_only)
     path, stage = cache.root/'lyric-lookup.json', 'fetch_lyric_text'
     try:
         old = json.loads(path.read_text())
@@ -202,6 +205,10 @@ def fetch_lyrics(song, metadata_path, cache):
             try:
                 for query in queries:
                     if query == simplified and simplified != native and packet['results']:
+                        continue
+                    if query == title_only and any(row.get('plainLyrics') and
+                            identity(row.get('trackName'), title=True) & identity(song['title'], title=True)
+                            for row in packet['results']):
                         break
                     url = 'https://lrclib.net/api/search?'+urlencode(query)
                     response = cached_lyric_request('lrclib', url, cache, lambda: read_document(url), 300)
@@ -368,8 +375,7 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
         album = row['album'].get('albumTitle', '')
         if not isinstance(album, str):
             continue
-        if not artist_credit_matches(song['artist'], artists):
-            continue
+        artist_match = artist_credit_matches(song.get('artist'), artists)
         title_match = bool(identity(song['title'], title=True) & identity(title, title=True))
         if not title_match:
             identity_candidates.append(dict(title=title, track_id=str(row.get('trackId', ''))))
@@ -386,7 +392,7 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
         if mismatch and not allow_recording_mismatch:
             continue
         album_match = bool(identity(song.get('album')) & identity(album))
-        rank = (not title_match, len(mismatch), not album_match, difference)
+        rank = (not title_match, not artist_match, len(mismatch), not album_match, difference)
         candidates.append((rank, mismatch, row, title, artists, album, seconds, title_match))
     # A title can have different release edits. Use known recording metadata
     # before provider order, while retaining complete text from other releases.
@@ -438,6 +444,7 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
             url='https://music-tw.line.me/track/'+track_id, track=title, artists=artists, album=album,
             text_sha256=hashlib.sha256(text.encode()).hexdigest(), excluded_credit_lines=excluded,
             recording_mismatches=mismatch, duration_seconds=seconds,
+            artist_credit_match=artist_credit_matches(song.get('artist'), artists),
             title_match='title' if title_match else 'corroborated_lyric_text', identity_support=identity_support,
             rejected_candidates=rejected,
             text_transform='html_entities_decoded_credit_header_footer_removed_then_whitespace_only',
@@ -447,11 +454,12 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
 
 
 def fetch_published_lyrics(song, source_title, cache, duration=None, *, reference_lines=()):
-    if not song.get('title') or not song.get('artist'):
+    if not song.get('title'):
         return None, dict(status='missing_identity', provider='line_music')
     path, stage = cache.root/'published-lyrics.json', 'fetch_published_lyrics'
     title = names(song['title'], title=True)[-1]
-    queries = list(dict.fromkeys([' '.join((title, names(song['artist'])[-1])), title]))
+    artists = names(song.get('artist'))
+    queries = list(dict.fromkeys([' '.join((title, artists[-1])) if artists else title, title]))
     try:
         old = json.loads(path.read_text())
         if lyric_retry_due(dict(old.get('report') or {}, retry_at=old.get('retry_at')), 'line_music', cache):
@@ -558,7 +566,7 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
         metadata_retries = []
         def read_description(resolve_identity=(), *, retry=False):
             nonlocal metadata_error, metadata_read, parsed, metadata_failure
-            if not resolve_identity and not description.strip():
+            if not description.strip() and 'title' not in resolve_identity:
                 return None
             if retry and metadata_failure and not metadata_retries:
                 error, failed_at = metadata_failure
@@ -665,6 +673,8 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
         if not lines:
             return None
         song['language'] = report['language']
+        if not song.get('artist'):
+            song['artist'] = report.get('artist') or ' · '.join(report.get('artists') or [])
         provenance = dict(kind='online_lyric_text', lyric_lookup=report,
                           text_transform=report.get('text_transform', 'whitespace_only'))
     language = song.get('language') or text_language(''.join(lines))
@@ -706,10 +716,10 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
     candidates, padding, padding_checked = [], None, False
     report['rejected_candidates'] = []
     for row in packet['results']:
-        # A text search can return covers, live cuts and unrelated recordings.
-        # Identity and duration must agree before using any audio-text score.
+        # Artist spelling is a ranking hint, not proof of a different song:
+        # catalogues use aliases, translations and different performer credits.
         if (not identity(song['title'], title=True) & identity(row.get('trackName'), title=True) or
-                not artist_credit_matches(song['artist'], [row.get('artistName')]) or row.get('instrumental') is not False):
+                row.get('instrumental') is not False):
             continue
         mismatch = (recording_mismatches(song, source_title, row.get('trackName'), row.get('albumName'))
                     if allow_recording_mismatch else ['live_performance'] if performance and performance not in
@@ -766,9 +776,10 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
             audio_word_coverage=coverage if transcription is not None else None,
             duration_basis=basis or dict(kind='recording', recording_duration=duration),
             recording_mismatches=mismatch,
+            artist_credit_match=artist_credit_matches(song.get('artist'), [row.get('artistName')]),
             excluded_credit_lines=excluded, provider_timestamps_used=False,
             text_sha256=hashlib.sha256(raw_text.encode()).hexdigest())))
     if not candidates:
         return None, dict(report, status='no_supported_recording')
-    best = max(candidates, key=lambda c: c[:3])
+    best = max(candidates, key=lambda c: (c[0], c[1], c[4]['artist_credit_match'], c[2]))
     return best[3], dict(report, status='accepted' if transcription is not None else 'candidate', provider='lrclib', **best[4])

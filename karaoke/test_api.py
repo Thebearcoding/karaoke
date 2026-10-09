@@ -992,13 +992,12 @@ def test_online_lyrics_correct_asr_text_without_using_provider_times(tmp_path, m
 
 
 @pytest.mark.parametrize('change', [
-    dict(artistName='另一個歌手'), dict(trackName='別的歌'), dict(trackName='晚風 Live'),
+    dict(trackName='別的歌'), dict(trackName='晚風 Live'),
     dict(trackName='晚風 (Live)（電影《遠山》主題曲）'),
     dict(trackName='晚風（電影《遠山》主題曲）Live'),
     dict(trackName='晚風（現場演唱《遠山》主題曲）'),
     dict(trackName='晚風（電影《遠山》主題曲混音版）'),
     dict(trackName='晚風（鋼琴版）'), dict(trackName='別的歌（電影《遠山》主題曲）'),
-    dict(artistName='林林（電影《遠山》主題曲）'),
     dict(duration=309), dict(duration=float('nan')), dict(instrumental=True),
     dict(plainLyrics='毫不相干的文字'), dict(plainLyrics='[Music]'),
     dict(trackName=['malformed']), dict(plainLyrics=None),
@@ -2010,17 +2009,66 @@ def test_lyric_result_pages_keep_valid_rows_beyond_expected_page_size(tmp_path, 
         assert result['status'] == 'ok' and len(result['results']) == 105
 
 
-@pytest.mark.parametrize('change', [dict(trackTitle='別的歌'), dict(artists=[dict(artistName='別人')]),
+@pytest.mark.parametrize('change', [dict(trackTitle='別的歌'),
     dict(album=dict(albumTitle='Live')), dict(album=dict(albumTitle='Remix')), dict(artists=None),
     dict(lyrics=None), dict(lyrics='歌名：晚風'), dict(lyrics='專輯：春天\n歌曲：晚風\n作詞：林林'),
     dict(trackId='../other')])
-def test_published_lyrics_reject_wrong_credits_versions_and_empty_text(change):
+def test_published_lyrics_reject_wrong_songs_versions_and_empty_text(change):
     from karaoke.lyric_lookup import published_candidate
     row = dict(trackId=123, trackTitle='晚風', artists=[dict(artistName='林林')],
                album=dict(albumTitle='春天'), lyrics='微風裡慢慢歌唱')
     song = dict(title='晚風', artist='林林')
     assert published_candidate([row], song, 'Official Music Video')[0]
     assert published_candidate([dict(row, **change)], song, 'Official Music Video')[0] is None
+
+
+@pytest.mark.parametrize('provider', ['line_music', 'lrclib'])
+@pytest.mark.parametrize('artist', ['Haru', '', 'はる'])
+def test_lyric_candidates_rank_artist_credits_without_rejecting_aliases(provider, artist):
+    from karaoke.lyric_lookup import published_candidate, lyric_candidate
+    body = ['星空に色を重ねて', '夜の向こうで歌っている']
+    song = dict(title='夜の色', artist=artist)
+    def select(credits):
+        if provider == 'line_music':
+            rows = [dict(trackId=i, trackTitle='夜の色', artists=[dict(artistName=name)],
+                         album={}, lyrics='\n'.join(body)) for i, name in enumerate(credits, 1)]
+            return published_candidate(rows, song, '', duration=30)
+        rows = [dict(id=i, trackName='夜の色', artistName=name, duration=30,
+                     instrumental=False, plainLyrics='\n'.join(body)) for i, name in enumerate(credits, 1)]
+        return lyric_candidate(dict(status='ok', results=rows), song, None, 30)
+    lines, report = select(['はる'])
+    assert lines == body and report['artist_credit_match'] == (artist == 'はる')
+    if artist:
+        lines, report = select(['Other credit', artist])
+        assert lines == body and report['artist_credit_match']
+        assert report['url'].endswith('/2')
+
+
+@pytest.mark.parametrize('artist', ['Haru', ''])
+def test_translated_artist_empty_search_retries_title_and_uses_published_text(tmp_path, monkeypatch, artist):
+    from urllib.parse import urlsplit, parse_qs
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    (tmp_path/'download').mkdir()
+    (tmp_path/'download/source.info.json').write_text('{}')
+    calls = []
+    body = ['星空に色を重ねて', '夜の向こうで歌っている']
+    def search(url):
+        query = parse_qs(urlsplit(url).query)
+        calls.append(query)
+        return [] if 'artist_name' in query else [dict(id=123, trackName='夜の色', artistName='はる',
+            duration=30, instrumental=False, plainLyrics='\n'.join(body))]
+    monkeypatch.setattr(lyric_lookup, 'read_document', search)
+    monkeypatch.setattr(lyric_lookup, 'fetch_published_lyrics', lambda *a: (None, dict(status='unavailable')))
+    monkeypatch.setattr(lyric_consensus, 'fetch_additional_lyrics', lambda *a: (None, dict(status='unavailable')))
+    monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', lambda *a: pytest.fail('No model needed'))
+    for _ in range(2):
+        result = lyric_lookup.prepare_online_lyrics(dict(url=URL), dict(track='夜の色', artist=artist),
+            30, StageCache(tmp_path), 'unused', None)
+    assert result['lines'] == body
+    assert result['artist'] == (artist or 'はる')
+    assert calls == ([dict(track_name=['夜の色'], artist_name=[artist])] if artist else []) + [dict(track_name=['夜の色'])]
+    assert result['provenance']['lyric_lookup']['artist_credit_match'] is False
 
 
 @pytest.mark.parametrize('title,artist', [
@@ -2033,8 +2081,7 @@ def test_published_lyrics_match_both_languages_of_bilingual_credits(title, artis
     for title, artist in [('Evening Wind', 'Lin Lin'), ('晚風', '林林')]:
         lines, report = published_candidate([row], dict(title=title, artist=artist), 'Official Music Video')
         assert lines == [row['lyrics']] and report['url'].endswith('/123')
-    for change in (dict(trackTitle='晚風 Live'), dict(artists=[dict(artistName='林林 Remix')])):
-        assert published_candidate([dict(row, **change)], dict(title='Evening Wind', artist='Lin Lin'), '')[0] is None
+    assert published_candidate([dict(row, trackTitle='晚風 Live')], dict(title='Evening Wind', artist='Lin Lin'), '')[0] is None
 
 
 @pytest.mark.parametrize('problem', [None, 'artist', 'text', 'short', 'repetitive', 'version'])
@@ -2053,8 +2100,8 @@ def test_alternate_titles_require_independent_lyric_body_support(problem):
     if problem == 'version':row['album'] = dict(albumTitle='Remix')
     assert published_candidate([row], song, '')[0] is None
     lines, report = published_candidate([row], song, '', reference_lines=reference)
-    assert bool(lines) == (problem is None)
-    if problem is None:
+    assert bool(lines) == (problem in (None, 'artist'))
+    if problem in (None, 'artist'):
         assert ''.join(lines) == ''.join(body) and report['title_match'] == 'corroborated_lyric_text'
         assert report['identity_support']['matched_units'] == sum(map(len, body))
         exact = dict(row, trackId=124, trackTitle=song['title'])
@@ -2108,17 +2155,22 @@ def test_published_text_prefers_same_performance_before_studio_fallback():
     assert report['url'].endswith('/124') and not report['recording_mismatches']
 
 
-def test_published_lyrics_match_joined_artist_scripts_without_matching_collaborators():
+def test_published_lyrics_rank_joined_artist_scripts_without_discarding_other_credits():
     from karaoke.lyric_lookup import published_candidate
     song = dict(title='晚風', artist='林林 Lin Lin')
     row = dict(trackId=123, trackTitle='晚風', album=dict(albumTitle='春天'), lyrics='微風裡慢慢歌唱')
     for name in ('ALPHA林林', 'ALPHA林林 Lin Lin'):
-        assert published_candidate([dict(row, artists=[dict(artistName=name)])], song, '')[0]
+        lines, report = published_candidate([dict(row, artists=[dict(artistName=name)])], song, '')
+        assert lines and report['artist_credit_match']
     for name in ('ALPHA林楠', 'ALPHA & 林林', 'LIVE林林', '林林 Remix'):
-        assert published_candidate([dict(row, artists=[dict(artistName=name)])], song, '')[0] is None
+        other = dict(row, artists=[dict(artistName=name)])
+        lines, report = published_candidate([other], song, '')
+        assert lines and not report['artist_credit_match']
+        matched = dict(row, trackId=124, artists=[dict(artistName='ALPHA林林')])
+        assert published_candidate([other, matched], song, '')[1]['url'].endswith('/124')
 
 
-@pytest.mark.parametrize('credit,artists,accepted', [
+@pytest.mark.parametrize('credit,artists,matched', [
     (None, ['林林', '苏雨'], False),
     ('林林 蘇雨', ['苏雨', '林林'], True),
     ('蘇雨 & 林林', ['林林', '苏雨'], True),
@@ -2131,16 +2183,18 @@ def test_published_lyrics_match_joined_artist_scripts_without_matching_collabora
     ('North River & Evening Star', ['North River'], False),
     ('Anna & Ann', ['Ann', 'Anna'], True),
 ])
-def test_published_lyrics_match_complete_collaboration_credits(credit, artists, accepted):
+def test_published_lyrics_rank_complete_collaboration_credits(credit, artists, matched):
     from karaoke.lyric_lookup import published_candidate, lyric_candidate
     body = 'Stars above the quiet shore'
     song = dict(title='Evening', artist=credit)
     row = dict(trackId=123, trackTitle='Evening', artists=[dict(artistName=a) for a in artists],
                album={}, lyrics=body)
-    assert bool(published_candidate([row], song, '')[0]) is accepted
+    lines, report = published_candidate([row], song, '')
+    assert lines == [body] and report['artist_credit_match'] is matched
     flat = dict(id=123, trackName='Evening', artistName=' / '.join(artists),
                 albumName='', duration=30, instrumental=False, plainLyrics=body)
-    assert bool(lyric_candidate(dict(status='ok', results=[flat]), song, None, 30)[0]) is accepted
+    lines, report = lyric_candidate(dict(status='ok', results=[flat]), song, None, 30)
+    assert lines == [body] and report['artist_credit_match'] is matched
 
 
 def test_netease_reads_duet_lyrics_after_matching_reordered_credit(tmp_path, monkeypatch):
