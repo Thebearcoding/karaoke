@@ -81,6 +81,8 @@ the existing Blue Bird entry, history, settings, credentials, and source files.
 
 - Follow-up: the lead label becomes a one-click on/off control. Off sets gain to zero; on restores the last nonzero level (100% without history). Existing +/-5% remains, and remembered gain follows the same browser session across tabs and refresh. Real mobile UI verified 35% -> 0% -> 35%.
 
+- Touch-layout follow-up: the fullscreen timeline previously spanned directly below the lead controls with zero row gap. It now stays in the playback column on tablets; narrow screens separate timeline, playback, and sound rows with 12px gaps. Main touch targets remain at least 44px. Verified the production CSS in standalone fullscreen geometry at 1024x768, 768x1024 and 390x844, plus the real mobile page. The automation browser refused native fullscreen, so these are layout checks, not a physical iPad fullscreen claim.
+
 ## Work and Invariants
 
 `karaoke/web/room-state.js` owns current selection and saved transport. Expired
