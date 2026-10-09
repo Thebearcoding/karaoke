@@ -61,6 +61,15 @@ def reading_parts(text, kana):
     return output
 
 
+@lru_cache(maxsize=512)
+def japanese_mora_phones(mora):
+    import pyopenjtalk
+    # This is an already selected pronunciation, not a written particle.
+    # Katakana keeps isolated は/へ from being reinterpreted as wa/e.
+    katakana = ''.join(chr(ord(c)+0x60) if 'ぁ' <= c <= 'ゖ' else c for c in mora)
+    return tuple(pyopenjtalk.g2p(katakana).split())
+
+
 def japanese_phone_groups(kana, previous_vowel=None):
     groups, vowel = [], previous_vowel
     for _,_,mora in moras(kana.replace('’','').replace("'",'')):
@@ -73,11 +82,10 @@ def japanese_phone_groups(kana, previous_vowel=None):
                 raise ValueError('Long vowel without a preceding vowel')
             phones = [vowel]
         else:
-            roman = ''.join(p['hepburn'] for p in KAKASI.convert(mora))
-            if not re.fullmatch('[a-z]*[aiueo]',roman):
+            phones = list(japanese_mora_phones(mora))
+            if not phones or phones[-1] not in ('a', 'i', 'u', 'e', 'o'):
                 raise ValueError(f'Unsupported Japanese mora: {mora}')
-            consonant, vowel = roman[:-1], roman[-1]
-            phones = ([consonant] if consonant else [])+[vowel]
+            vowel = phones[-1]
         groups.append(phones)
     return groups
 

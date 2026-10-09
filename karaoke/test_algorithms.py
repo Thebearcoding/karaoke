@@ -1832,6 +1832,19 @@ class SubtitleIntegrity(unittest.TestCase):
     def test_pronunciation_mapping_preserves_written_glyphs(self):
         self.assertEqual(reading_parts('感じ', 'かんじ'), [(0,1,'かん'),(1,2,'じ')])
         self.assertEqual(japanese_phone_groups('ー', previous_vowel='o'), [['o']])
+        for text, expected in [('とぅ', ['t','u']), ('ドゥ', ['d','u']), ('てぃ', ['t','i']),
+                               ('ディ', ['d','i']), ('ウィ', ['w','i']), ('キェ', ['ky','e']),
+                               ('スィ', ['s','i']), ('を', ['o']), ('は', ['h','a']),
+                               ('へ', ['h','e']), ('し', ['sh','i']), ('ち', ['ch','i'])]:
+            with self.subTest(text=text):
+                self.assertEqual(japanese_phone_groups(text), [expected])
+        self.assertEqual(japanese_phone_groups('とぅー'), [['t','u'],['u']])
+        mutated = japanese_phone_groups('とぅ')
+        mutated[0][0] = 'changed'
+        self.assertEqual(japanese_phone_groups('とぅ'), [['t','u']])
+        japanese = spoken_units('とぅる', 'Japanese')
+        self.assertEqual(''.join(u['text'] for u in japanese), 'とぅる')
+        self.assertEqual([p for u in japanese for p in u['phones']], ['t','u','r','u'])
         units = spoken_units('妳還好嗎', 'Chinese')
         self.assertEqual(''.join(u['text'] for u in units), '妳還好嗎')
         self.assertEqual(units[1]['reading'], 'hai')
