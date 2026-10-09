@@ -404,7 +404,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                 raise ValueError('Acoustic localization context exceeds 60 seconds')
             letters = [c for c in cue['text'] if c.isalpha()]
             review_language = 'English' if letters and all(c.isascii() for c in letters) else language
-            observation, offset, predictions = cue, None, None
+            observation, offset = cue, None
             if index in repeated:
                 first, stop, text, start_char = repeated[index]
                 begin = result[first-1]['units'][-1]['start']+.015 if first else 0.
@@ -424,16 +424,15 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                 if any(normalized(''.join(u['text'] for u in view)) != normalized(observation['text']) or
                        any(a['start']>=b['start'] for a,b in zip(view,view[1:])) for view in [*views,*joint]):
                     raise ValueError('Incomplete repeated phrase context')
-                predictions = [[dict(u, first=u['first']-offset, stop=u['stop']-offset)
-                                for u in view if offset<=u['first']<u['stop']<=offset+len(cue['text'])]
-                               for view in joint]
-                if len(predictions)!=3 or not all(predictions):
+                locations = [[dict(u, first=u['first']-offset, stop=u['stop']-offset)
+                              for u in view if offset<=u['first']<u['stop']<=offset+len(cue['text'])]
+                             for view in joint]
+                if len(locations)!=3 or not all(locations):
                     raise ValueError('Incomplete repeated phrase predictions')
-                # Keep occurrence identity through fine alignment as well.
-                # Use its measured phrase envelope only to reobserve both
-                # audio views; the normal cross-model checks still adopt times.
-                observation = dict(cue, aligned_start=min(v[0]['start'] for v in predictions),
-                    aligned_end=max(v[-1]['end'] for v in predictions), audio_bounds=[begin,end])
+                # The joint pass proposes occurrence ranges, not final word
+                # times. Reobserve each range, then refine in short contexts.
+                observation = dict(cue, aligned_start=min(v[0]['start'] for v in locations),
+                    aligned_end=max(v[-1]['end'] for v in locations), audio_bounds=[begin,end])
                 views = witness(observation, wave, language=review_language)
             report['witnesses'] = views
             signature = lambda v: [(u['first'], u['stop'], u['text']) for u in v]
@@ -472,8 +471,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             if not suspects:
                 report['status'] = 'no_corroborated_displacement'
                 continue
-            if predictions is None:
-                predictions = predict(cue, views, bounds, review_language)
+            predictions = predict(cue, views, bounds, review_language)
             report['predictions'] = predictions
             confirmed, proposals = {}, {}
             for group in views[0]:

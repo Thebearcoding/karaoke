@@ -862,7 +862,8 @@ class SubtitleIntegrity(unittest.TestCase):
             dict(text='one', first=0, stop=3, start=t, end=t+.4, timing_source='prior_word_fallback'),
             dict(text='two', first=4, stop=7, start=t+.5, end=t+1., timing_source='prior_word_fallback')])
             for t in (3., 7.)]
-        for mode in ('complete', 'different_coarse_occurrences', 'missing_occurrence', 'unordered', 'unstable_fine'):
+        for mode in ('complete', 'different_coarse_occurrences', 'coarse_joint',
+                     'missing_occurrence', 'unordered', 'unstable_fine'):
             with self.subTest(mode=mode):
                 calls = []
                 def witness(cue, wave, **kwargs):
@@ -886,10 +887,14 @@ class SubtitleIntegrity(unittest.TestCase):
                     if mode=='unstable_fine':
                         for word in predictions[-1]:
                             word.update(start=word['start']+.2,end=word['end']+.2)
+                    if mode=='coarse_joint' and '\n' in cue['text']:
+                        for view in predictions:
+                            for word in view:
+                                word.update(start=word['start']+.15,end=word['end']+.15)
                     return predictions
                 result, report = reconcile_timing(cues, np.ones(10*44100)*.1, witness, predict,
                                                   protocol, 'English', _retry_context=False)
-                complete = mode in ('complete','different_coarse_occurrences')
+                complete = mode in ('complete','different_coarse_occurrences','coarse_joint')
                 self.assertEqual([c['start'] for c in result], [.5, 5.5] if complete else [3.,7.])
                 self.assertEqual(calls, ['one two\none two']*2 if mode in ('missing_occurrence','unordered')
                                  else ['one two\none two','one two']*2)
