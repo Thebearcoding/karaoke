@@ -351,9 +351,13 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                     report['context_hint'] = [begin,end]
             challenged = {v['proof']['first'] for v in timing_violations(result, ledger)
                           if v['proof']['line']==index+1}
+            # A coarse fallback has not earned the fine result's displacement
+            # threshold. Review it even when the label is less than 0.4 s away;
+            # adoption still requires the same independent acoustic evidence.
             suspects = [a for a,b in zip(*views) if a['first'] in old
                         and same_acoustic_event(a, b, protocol['maximum_change_seconds'])
                         and (a['first'] in challenged or
+                             old[a['first']].get('timing_source') in ('prior_word_fallback', 'linear_fallback') or
                              abs(old[a['first']]['start']-a['start']) > protocol['maximum_change_seconds'])]
             if not suspects:
                 report['status'] = 'no_corroborated_displacement'

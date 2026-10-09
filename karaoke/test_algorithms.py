@@ -386,6 +386,35 @@ class SubtitleIntegrity(unittest.TestCase):
             units, _ = protect_units(cue, candidate, 'Chinese')
             self.assertEqual(units[0]['start'], onset)
 
+    def test_coarse_word_refinement_does_not_require_a_large_offset(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        for source in ('prior_word_fallback', 'linear_fallback', 'singing_phonemes'):
+            for evidence in ('agrees', 'disagrees', 'silent'):
+                with self.subTest(source=source, evidence=evidence):
+                    units = [dict(first=0, stop=1, text='甲', start=1., end=1.5, timing_source=source),
+                             dict(first=1, stop=2, text='乙', start=3.5, end=4., timing_source='singing_phonemes')]
+                    cue = dict(text='甲乙', start=1., end=4., aligned_start=1., aligned_end=4., units=units)
+                    measured = [dict(units[0], start=1.25, end=1.5), dict(units[1])]
+                    predictions = [deepcopy(measured) for _ in range(3)]
+                    if evidence == 'disagrees':
+                        predictions[0][0]['start'] = 1.4
+                    calls = []
+                    def predict(*args):
+                        calls.append(True)
+                        return predictions
+                    wave = np.full(44100*5, 0. if evidence == 'silent' else .1)
+                    result, report = reconcile_timing([cue], wave,
+                        lambda *args, **kwargs: [deepcopy(measured), deepcopy(measured)],
+                        predict, protocol, 'Chinese')
+                    expected = 1.25 if source != 'singing_phonemes' and evidence == 'agrees' else 1.
+                    self.assertEqual(result[0]['units'][0]['start'], expected)
+                    self.assertEqual(result[0]['units'][1]['start'], 3.5)
+                    self.assertEqual(units[0]['start'], 1.)
+                    self.assertEqual(bool(calls), source != 'singing_phonemes')
+                    self.assertFalse(report['unresolved'])
+
     def test_timing_contract_relocates_the_minimum_span_and_never_resurrects_old_times(self):
         from copy import deepcopy
         from timing_validation import reconcile_timing, timing_violations, validate_timeline
