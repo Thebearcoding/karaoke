@@ -171,7 +171,7 @@ def alignment_recovery_summary(raw):
 
 
 def phrase_locations(lines, blocks):
-    """Keep accepted independent locations, not a timing candidate's own bounds."""
+    """Keep independent phrase evidence even when word alignment failed."""
     locations = {}
     for block in blocks:
         first, stop = block['range']
@@ -180,12 +180,13 @@ def phrase_locations(lines, blocks):
                 continue
             anchors = observed.get('anchors', [])
             offset = observed['context'][0]
-            for line in observed['accepted_lines']:
-                index, local = line-1, line-1-offset
-                if not first <= index < min(stop, len(lines)) or not 0 <= local < len(anchors):
+            for local, anchor in enumerate(anchors):
+                index = offset+local
+                if not first <= index < min(stop, len(lines)):
                     continue
-                anchor = anchors[local]
-                if anchor['status'] == 'candidate' and anchor['text'] == lines[index]:
+                located = index+1 in observed.get('accepted_lines', []) or anchor.get('match_basis') in (
+                    'complete_phrase', 'complete_clause')
+                if located and anchor['status'] == 'candidate' and anchor['text'] == lines[index]:
                     locations[index] = anchor
     return locations
 

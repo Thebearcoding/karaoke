@@ -2617,11 +2617,15 @@ class AlignmentIntegrity(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);sf.write(root/'audio.wav',np.zeros(15*16000),16000)
             (root/'lyrics.json').write_text(json.dumps(dict(language='English',lines=lines)))
-            for mode in ('accepted','unaccepted','other_block','wrong_text','no_recognition','no_context'):
+            for mode in ('accepted','unaccepted','complete_phrase','complete_clause',
+                         'other_block','wrong_text','no_recognition','no_context'):
                 with self.subTest(mode=mode):
                     raw=[dict(range=[1,3],asr_localizations=[copy.deepcopy(evidence)])]
                     observed=raw[0]['asr_localizations'][0]
                     if mode=='unaccepted':observed['accepted_lines']=[]
+                    if mode in ('complete_phrase','complete_clause'):
+                        observed['accepted_lines']=[]
+                        observed['anchors'][0]['match_basis']=mode
                     if mode=='other_block':raw[0]['range']=[2,3]
                     if mode=='wrong_text':observed['anchors'][0]['text']='different'
                     if mode=='no_recognition':observed.pop('recognition')
@@ -2640,8 +2644,9 @@ class AlignmentIntegrity(unittest.TestCase):
                     out=root/mode
                     report=align_job(model,dict(audio=str(root/'audio.wav'),lyrics=str(root/'lyrics.json'),
                         anchors=str(root/'anchors.json'),output=str(out)),full_song=True)
-                    self.assertEqual(bool(report['failures']),mode!='accepted')
-                    if mode=='accepted':
+                    supported = mode in ('accepted','complete_phrase','complete_clause')
+                    self.assertEqual(bool(report['failures']),not supported)
+                    if supported:
                         self.assertEqual(model.align.call_count,1)
                         self.assertEqual([c['start'] for c in json.loads((out/'cues.json').read_text())],[1.,8.5,10.])
 
