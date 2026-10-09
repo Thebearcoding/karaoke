@@ -578,7 +578,7 @@ class Pipeline:
             '--progress-template', 'postprocess:KARAOKE_STAGE_PROGRESS {"detail":"合并视频"}',
             '--write-info-json', '--print', 'before_dl:KARAOKE_SOURCE_READY', '--no-simulate',
             '--no-overwrites', '--retries', '2', '--fragment-retries', '2',
-            '--socket-timeout', '25', '--max-filesize', '2G', '--match-filter',
+            '--socket-timeout', '25', '--http-chunk-size', '10M', '--max-filesize', '2G', '--match-filter',
             f'!is_live & duration <= {self.max_duration}', '-f', format_id or (
                 'ba' if self.audio_only else 'ba/b[height<=720]' if self.audio_first else 'bv[height<=720]+ba/b[height<=720]'),
             '--merge-output-format', 'mkv', '--remux-video', 'mkv',
@@ -620,7 +620,7 @@ class Pipeline:
                 folder.mkdir(exist_ok=True)
                 command = [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--js-runtimes', 'node', '--no-playlist',
                     '--write-info-json', '--no-overwrites', '--retries', '2', '--fragment-retries', '2',
-                    '--socket-timeout', '25', '--max-filesize', '2G', '--match-filter',
+                    '--socket-timeout', '25', '--http-chunk-size', '10M', '--max-filesize', '2G', '--match-filter',
                     f'!is_live & duration <= {self.max_duration}', '-f', 'bv[height<=720]/b[height<=720]',
                     '--remux-video', 'mkv', '-o', folder/'source.%(ext)s']
                 if self.cookies_file.is_file():

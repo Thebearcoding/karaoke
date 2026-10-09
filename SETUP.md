@@ -31,11 +31,14 @@ CUDA 机器应选择与驱动兼容的 PyTorch CUDA wheel，保持 torch/torchau
 
 ```sh
 python3.12 -m venv .venv-separator
-.venv-separator/bin/python -m pip install 'audio-separator==0.44.5'
+.venv-separator/bin/python -m pip install 'audio-separator[cpu]==0.44.5' 'librosa==0.11.0'
+.venv-separator/bin/python -c 'from audio_separator.separator import Separator'
 export KARAOKE_SEPARATOR_PYTHON="$PWD/.venv-separator/bin/python"
 ```
 
-该环境也需安装适合硬件的 PyTorch。当前分离开发环境使用 torch 2.13.0。`benchmark_neural.py` 会检查 audio-separator 的版本，并显式设置模型类型、重叠和推理配置；不要只换一份名字相似的权重。
+该环境也需安装适合硬件的 PyTorch。`cpu` extra 补齐导入时必需的 ONNX Runtime；本项目的 Roformer 分离仍通过 PyTorch 使用 CUDA / MPS。固定 librosa 0.11.0 是因为分离器仍直接依赖它旧版携带的 audioread，新版 librosa 不再安装该包。`pip check` 不会发现这些未完整声明的导入依赖，因此安装后也检查实际入口。
+
+已验证的 Linux 组合为 Ubuntu 24.04、RTX 5090、驱动 580.126.09，以及主环境和分离环境的 `torch==2.11.0` / `torchaudio==2.11.0`（CUDA 13.0 wheel）。Mac 分离环境另使用 torch 2.13.0；不要据此假定其他平台也提供对应版本的 torchaudio。`benchmark_neural.py` 会检查 audio-separator 的版本，并显式设置模型类型、重叠和推理配置；不要只换一份名字相似的权重。
 
 ## 3. 对齐器源码
 

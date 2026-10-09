@@ -3900,6 +3900,65 @@ def test_fresh_metadata_downloads_stream_without_reextracting_webpage(tmp_path, 
 
 
 
+@pytest.mark.parametrize('promote', [False, True])
+@pytest.mark.parametrize('requires_range', [False, True])
+def test_download_transport_preserves_bytes_on_range_and_whole_file_servers(tmp_path, monkeypatch,
+                                                                          promote, requires_range):
+    from yt_dlp import YoutubeDL, parse_options
+    from yt_dlp.downloader.http import HttpFD
+    # Take the actual pipeline options, including those used to supplement a video.
+    pipeline = Pipeline(dict(url=URL), tmp_path/'job', audio_only=not promote)
+    commands = []
+    def capture(name, command, **kwargs):
+        commands.append(command)
+        raise RuntimeError('captured')
+    monkeypatch.setattr(pipeline, 'run', capture)
+    if promote:
+        pipeline.source.parent.mkdir(parents=True)
+        pipeline.source.write_bytes(b'cached audio')
+    with pytest.raises(RuntimeError, match='captured'):
+        pipeline.promote_video({}, {}) if promote else pipeline.download(artwork=False)
+    options = parse_options([str(a) for a in commands[0][3:]]).ydl_opts
+    payload = b'preserve the selected source\x00' * 400_000
+    requests = []
+    class Handler(SimpleHTTPRequestHandler):
+        def do_GET(self):
+            value = self.headers.get('Range')
+            requests.append(value)
+            if requires_range and not value:
+                self.send_error(403)
+                return
+            if requires_range:
+                first, last = value.removeprefix('bytes=').split('-')
+                first, last = int(first), min(int(last), len(payload)-1)
+                chunk = payload[first:last+1]
+                self.send_response(206)
+                self.send_header('Content-Range', f'bytes {first}-{last}/{len(payload)}')
+            else:
+                # A server may legitimately ignore Range and send the whole file.
+                chunk = payload
+                self.send_response(200)
+            self.send_header('Content-Length', str(len(chunk)))
+            self.end_headers()
+            self.wfile.write(chunk)
+        def log_message(self, *args):
+            pass
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        output = tmp_path/'download.bin'
+        with YoutubeDL(dict(options, quiet=True, noprogress=True)) as downloader:
+            assert HttpFD(downloader, downloader.params).download(str(output),
+                dict(url=f'http://127.0.0.1:{server.server_port}/stream', ext='bin'))[0]
+        assert output.read_bytes() == payload
+        assert all(requests)
+        assert len(requests) >= (2 if requires_range else 1)
+    finally:
+        server.shutdown()
+        thread.join()
+
+
 @pytest.mark.parametrize('stage,next_stage', [('render', 'render'), ('download', 'download_video')])
 def test_interactive_probe_resumes_new_songs_and_shares_stage_locks(tmp_path, stage, next_stage):
     from concurrent.futures import ThreadPoolExecutor
