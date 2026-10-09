@@ -117,7 +117,9 @@ export class Player {
       // Separate enter/exit thresholds also avoid oscillating at the boundary.
       const correcting = (video.playbackRate - 1) * drift > 0;
       const settled = Math.abs(drift) < (correcting ? .01 : .04);
-      const rate = settled ? 1 : drift > 0 ? 1.1 : .9;
+      // At 3%, one held second corrects 30 ms, so a small error cannot
+      // overshoot both thresholds and trigger alternating speed changes.
+      const rate = settled ? 1 : drift > 0 ? 1.03 : .97;
       if (rate !== video.playbackRate &&
           this.context.currentTime - (this.videoRateChangedAt ?? -Infinity) >= 1) {
         video.playbackRate = rate;
