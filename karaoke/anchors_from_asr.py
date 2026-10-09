@@ -5,7 +5,6 @@ from array import array
 import json
 from pathlib import Path
 import re
-import unicodedata
 
 from Bio.Align import PairwiseAligner
 
@@ -15,18 +14,7 @@ else:
     from subtitles import normalized, write_captions
 
 
-LATIN_LOOKALIKES = str.maketrans('АВЕКМНОРСТХаеорсхуіј', 'ABEKMHOPCTXaeopcxyij')
-
-
 def text_units(text, language):
-    # Normalize only mixed Latin tokens; preserve Cyrillic words and display text.
-    if any(ord(c) in LATIN_LOOKALIKES for c in text):
-        def latin_token(match):
-            token = match[0]
-            candidate = token.translate(LATIN_LOOKALIKES)
-            latin = lambda c: unicodedata.name(c, '').startswith('LATIN ')
-            return candidate if any(map(latin, token)) and all(latin(c) or c in "'’" for c in candidate) else token
-        text = re.sub(r"[^\W\d_]+(?:['’][^\W\d_]+)*", latin_token, text)
     value = normalized(text).lower()
     if language == 'Chinese':
         from pypinyin import lazy_pinyin

@@ -16,7 +16,7 @@ from align_lyrics_whisper import alignment_blocks, sha
 from stage_progress import progress_items
 from word_onset_metrics import canonical
 from onset_consensus import context_scope_violations
-from subtitles import highlight_spans
+from subtitles import highlight_spans, latin_word_text
 
 ROOT = Path(__file__).resolve().parent
 SINGING_ROOT = ROOT / 'research/word-onset-2026-09-18/lyrics-alignment-multilingual'
@@ -88,6 +88,7 @@ class EnglishOnsetAligner:
         self.model.eval().to(device)
 
     def tokenize(self, words):
+        words = [latin_word_text(word) for word in words]
         if self.method == 'wav2vec2':
             sequences = []
             for word in words:

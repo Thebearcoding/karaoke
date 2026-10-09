@@ -1929,6 +1929,12 @@ class SubtitleIntegrity(unittest.TestCase):
                         japanese = witness(dict(cue, text=text), voice, language='Japanese')
                         self.assertEqual(tokens, [['*', *expected, '*']]*2)
                         self.assertEqual(''.join(u['text'] for u in japanese[0]), text)
+                for text, expected in [("I'vе gоne", ["i've", 'gone']), ('hеllo', ['hello'])]:
+                    with self.subTest(mixed_latin=text):
+                        tokens.clear()
+                        views = witness(dict(cue, text=text), voice, language='English')
+                        self.assertEqual(tokens, [['*', *expected, '*']]*2)
+                        self.assertEqual([u['text'] for u in views[0]], text.split())
                 # Changing SOFA to the spoken /o/ must not change MMS's wo label.
                 self.assertEqual(spoken_units('私を', 'Japanese')[-1]['phones'], ['o'])
                 for duration in (.000001, .024):

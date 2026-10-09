@@ -5,14 +5,14 @@ from pathlib import Path
 import unicodedata
 
 from opencc import OpenCC
-from subtitles import highlight_spans
+from subtitles import highlight_spans, latin_word_text
 
 CHINESE = OpenCC('t2s')
 
 
 def canonical_positions(text, language):
     chars, positions = [], []
-    for i, char in enumerate(text):
+    for i, char in enumerate(latin_word_text(text)):
         if language == 'Chinese':
             char = CHINESE.convert(char).replace('妳', '你')
         for value in unicodedata.normalize('NFKC', char).casefold():

@@ -3223,6 +3223,12 @@ def test_latin_lyric_matching_retains_source_with_cyrillic_lookalikes(written,he
     cue=anchors_from_words([written],words,'English')[0]
     assert cue['text']==written and cue['match_basis']=='complete_phrase'
     assert cue['start']==10. and cue['end']==words[-1]['end']
+    from karaoke.lyric_progress import map_words
+    from karaoke.subtitles import highlight_spans
+    assert [written[a:b] for a,b in highlight_spans(written,'English')]==written.split()
+    mapped=map_words(cue,words,0.,'English')
+    assert [u['text'].strip() for u in mapped]==written.split()
+    assert [u['start'] for u in mapped]==[w['start'] for w in words]
     for unrelated in ['нет', 'СЕРВЕР', 'жe', 'θεός']:
         assert text_units(unrelated,'English')==list(unrelated.lower())
 
@@ -6270,7 +6276,8 @@ def test_english_phonetic_normalization_preserves_caller_audio(sliced, word):
 
 @pytest.mark.parametrize('word,key', [
     ('naïve', 'naive'), ('Straße', 'strasse'), ('a\u0300', 'a'), ("I’ve", "i've"),
-    ('re-enter', 're-enter'), ('', None), ('—’', None), ('東京', None),
+    ('re-enter', 're-enter'), ("I'vе", "i've"), ('cаfé', 'cafe'), ('нет', None),
+    ('', None), ('—’', None), ('東京', None),
 ])
 def test_english_pronunciation_normalizes_model_input_before_g2p(word, key):
     from align_english_sofa import EnglishSofaAligner

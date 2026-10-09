@@ -14,6 +14,7 @@ import yaml
 
 from align_english_onsets import ROOT, align_job
 from align_lyrics_whisper import sha
+from subtitles import latin_word_text
 
 ASSETS = ROOT / 'models/alignment/sofa/english/tgm_en_v100'
 
@@ -59,7 +60,7 @@ class EnglishSofaAligner:
 
     @lru_cache(maxsize=4096)
     def pronunciation(self, word):
-        text = unicodedata.normalize('NFKD', word.casefold()).replace('’', "'")
+        text = unicodedata.normalize('NFKD', latin_word_text(word).casefold()).replace('’', "'")
         key = re.sub(r"[^a-z'\-]", '', text).strip("'-")
         phones = self.lexicon.get(key)
         if phones is None:

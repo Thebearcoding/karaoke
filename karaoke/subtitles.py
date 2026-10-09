@@ -3,12 +3,28 @@
 import json
 from bisect import bisect_right
 import math
+import re
 from pathlib import Path
 import unicodedata
 
 
+LATIN_LOOKALIKES = str.maketrans('АВЕКМНОРСТХаеорсхуіј', 'ABEKMHOPCTXaeopcxyij')
+
+
+def latin_word_text(text):
+    """Use Latin lookalikes for mixed words without changing source offsets."""
+    if not text.isascii() and any(ord(c) in LATIN_LOOKALIKES for c in text):
+        def latin_token(match):
+            token = match[0]
+            candidate = token.translate(LATIN_LOOKALIKES)
+            latin = lambda c: unicodedata.name(c, '').startswith('LATIN ')
+            return candidate if any(map(latin, token)) and all(latin(c) or c in "'’" for c in candidate) else token
+        text = re.sub(r"[^\W\d_]+(?:['’][^\W\d_]+)*", latin_token, text)
+    return text
+
+
 def normalized(text):
-    return ''.join(c for c in unicodedata.normalize('NFKC', text)
+    return ''.join(c for c in latin_word_text(unicodedata.normalize('NFKC', text))
                    if unicodedata.category(c)[0] in ('L', 'N') or c == "'")
 
 
@@ -18,6 +34,7 @@ def highlight_spans(text, language):
     Japanese reading groups are chosen by the pronunciation model, not here.
     Apostrophes and hyphens inside a Latin word do not create another onset.
     """
+    text = latin_word_text(text)
     def latin(char):
         return unicodedata.name(char, '').startswith('LATIN ') or char.isdecimal()
 

@@ -8,7 +8,7 @@ from scipy.signal import resample_poly
 
 from align_lyric_phonemes import protect_line_order
 from phoneme_progress import ROOT, chinese_pronunciation_text, spoken_units
-from subtitles import highlight_coverage_errors, highlight_spans
+from subtitles import highlight_coverage_errors, highlight_spans, latin_word_text
 
 
 class AcousticWitness:
@@ -50,8 +50,9 @@ class AcousticWitness:
         elif language == 'English':
             import unicodedata
             spans = list(highlight_spans(cue['text'], language))
+            text = latin_word_text(cue['text'])
             tokens = [re.sub("[^a-z']", '', unicodedata.normalize('NFKD',
-                      cue['text'][a:b].lower().replace('’', "'"))) for a, b in spans]
+                      text[a:b].lower().replace('’', "'"))) for a, b in spans]
         else:
             raise ValueError('Unsupported independent pronunciation language')
         if not tokens or not all(tokens):
