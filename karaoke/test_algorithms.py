@@ -2705,6 +2705,52 @@ class AlignmentIntegrity(unittest.TestCase):
                         expected = [5.1,5.4,5.7,6.] if mode=='failed' else [5.2,6.6,8.5,10.5]
                         np.testing.assert_allclose([u['start'] for u in cues[1]['units']], expected)
 
+    def test_independently_located_phrase_rechecks_words_spilling_outside_it(self):
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        from align_english_onsets import align_job
+
+        lines = ['opening', 'river runs through town', 'ending']
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sf.write(root/'audio.wav', np.zeros(24*16000), 16000)
+            (root/'lyrics.json').write_text(json.dumps(dict(language='English', lines=lines)))
+            for side in ('early', 'late', 'held_tail'):
+                for basis in (None, 'complete_phrase', 'complete_clause'):
+                    for recovered in (False, True):
+                        with self.subTest(side=side, basis=basis, recovered=recovered):
+                            anchors = [dict(text=t, start=a, end=b, status='candidate')
+                                       for t,a,b in zip(lines, [1.,8.,20.], [2.,14.,21.])]
+                            if basis:
+                                anchors[1]['match_basis'] = basis
+                            (root/'anchors.json').write_text(json.dumps(anchors))
+                            middle = ([3.3,10.,12.,13.5] if side=='early' else
+                                      [8.1,10.,12.,16.3] if side=='late' else [8.1,10.,12.,13.5])
+                            original = [1.1,*middle,20.1]
+                            def align(audio, words):
+                                starts = original if len(audio)==24*16000 else (
+                                    [.7,7.8,9.8,11.8,13.1,19.7] if recovered else [s-.4 for s in original])
+                                return [dict(text=w, start=s, end=17.3 if side=='held_tail' and w=='town' else s+.2, confidence=.8)
+                                        for w,s in zip(words,starts)], None, .02
+                            model = SimpleNamespace(method='singing', device='cpu', onset_ratio=.02,
+                                                    model_identity={}, align=Mock(side_effect=align))
+                            out = root/f'{side}-{basis}-{recovered}'
+                            with patch('align_english_onsets.context_blocks', return_value=[(0,3,0,3,0.,24.)]):
+                                report = align_job(model, dict(audio=str(root/'audio.wav'), lyrics=str(root/'lyrics.json'),
+                                    anchors=str(root/'anchors.json'), output=str(out)), full_song=True)
+                            cues = json.loads((out/'cues.json').read_text())
+                            self.assertFalse(report['failures'])
+                            retried = basis and side != 'held_tail'
+                            self.assertEqual(model.align.call_count, 2 if retried else 1)
+                            self.assertEqual([cues[0]['start'],cues[2]['start']], [1.1,20.1])
+                            if retried:
+                                self.assertEqual(report['phrase_retries'][0]['accepted'], recovered)
+                            expected = [8.2,10.2,12.2,13.5] if retried and recovered else middle
+                            np.testing.assert_allclose([u['start'] for u in cues[1]['units']], expected)
+                            if side == 'held_tail':
+                                self.assertEqual(cues[1]['end'], 17.3)
+
     def test_late_coarse_boundary_does_not_cut_off_a_sustained_syllable(self):
         import json
         from types import SimpleNamespace

@@ -308,7 +308,12 @@ def align_job(aligner, job, full_song=False):
         # A one-word held note may have a long coarse tail but one short CTC
         # event; that alone is not compressed word timing.
         return displaced(i) or len(c['units']) > 1 and a['status'] == 'candidate' and (
-            c['start'] > a['start']+2 or c['end']+2 < a['end'])
+            c['start'] > a['start']+2 or c['end']+2 < a['end'] or
+            # Independent phrase locations also expose words stretched into
+            # neighbouring audio. A held final word may legitimately end later;
+            # only its onset requests this retry, not its duration.
+            a.get('match_basis') in ('complete_phrase', 'complete_clause') and (
+                c['start']+2 < a['start'] or c['units'][-1]['start'] > a['end']+2))
     if scope_blocks and not failures and not order_conflicts():
         for i in range(len(cues)):
             if not needs_phrase_retry(i):
