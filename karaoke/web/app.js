@@ -35,7 +35,8 @@ const current = () => playback.entry;
 
 function renderRange(input) {
   const span = Number(input.max) - Number(input.min);
-  input.style.setProperty('--range-fill', `${span > 0 ? 100 * (Number(input.value) - Number(input.min)) / span : 0}%`);
+  const fill = `${span > 0 ? 100 * (Number(input.value) - Number(input.min)) / span : 0}%`;
+  if (input.style.getPropertyValue('--range-fill') !== fill) input.style.setProperty('--range-fill', fill);
 }
 
 function renderMixer() {
@@ -652,21 +653,29 @@ function updateCover() {
   const song = current();
   const startingVideo = Boolean(player.pendingStart || player.videoPreparation);
   if (player.anchor === null || player.entry?.id !== song?.id)
-    $('opening-countdown').setAttribute('hidden', '');
-  $('screen-cover').hidden = Boolean(song?.status === 'completed' && !loading && !startingVideo && !loadError && player.unlocked && player.ready);
-  $('screen-status').textContent = loadError || (!song ? state.playing ? '准备好后自动接唱' : '请先点歌' : song.status !== 'completed' ? statusText(song) : startingVideo ? '加载画面…' : loading ? '加载音轨…' : '');
-  $('screen-status').hidden = !$('screen-status').textContent || song?.status === 'running';
-  $('screen-start').hidden = !song || song.status !== 'completed' || loading || startingVideo;
-  $('screen-start').firstChild.textContent = loadError ? '重试加载 ' : '开始唱 ';
+    $('opening-countdown').toggleAttribute('hidden', true);
+  $('screen-cover').toggleAttribute('hidden', Boolean(song?.status === 'completed' && !loading && !startingVideo && !loadError && player.unlocked && player.ready));
+  const status = loadError || (!song ? state.playing ? '准备好后自动接唱' : '请先点歌' : song.status !== 'completed' ? statusText(song) : startingVideo ? '加载画面…' : loading ? '加载音轨…' : '');
+  if ($('screen-status').textContent !== status) $('screen-status').textContent = status;
+  $('screen-status').toggleAttribute('hidden', !status || song?.status === 'running');
+  $('screen-start').toggleAttribute('hidden', !song || song.status !== 'completed' || loading || startingVideo);
+  const label = loadError ? '重试加载 ' : '开始唱 ';
+  if ($('screen-start').firstChild.textContent !== label) $('screen-start').firstChild.textContent = label;
   const retry = preparationRetry(song);
-  $('screen-retry').hidden = !retry || retry.action !== 'retry' || !state.entries.some(e => e.id === song.id);
+  $('screen-retry').toggleAttribute('hidden', !retry || retry.action !== 'retry' || !state.entries.some(e => e.id === song.id));
 }
 
+let countdownFrame = '';
 function updateTime(position) {
   if (Date.now() - lastPlaybackSave > 1000) savePlayback(position);
-  if (!seeking) $('seek').value = Math.max(0, position);
-  renderRange($('seek'));
-  $('current-time').textContent = time(Math.max(0, position));
+  const seek = $('seek');
+  const value = Math.min(Number(seek.max), Math.round(Math.max(0, position) * 10) / 10);
+  // The slider already displays tenths and the label displays seconds. Keep
+  // their DOM unchanged between visible updates; audio keeps its precise clock.
+  if (!seeking && Number(seek.value) !== value) seek.value = value;
+  renderRange(seek);
+  const label = time(Math.max(0, position));
+  if ($('current-time').textContent !== label) $('current-time').textContent = label;
   const opening = current()?.opening_countdown;
   const overlay = $('opening-countdown');
   const visible = position < 0 && opening && state.playing && player.anchor !== null;
@@ -674,16 +683,20 @@ function updateTime(position) {
   if (visible) {
     const remaining = Math.max(0, Math.min(opening.dots,
       Math.ceil((opening.onset-opening.settle_seconds-position)/opening.step_seconds-1e-9)));
-    overlay.setAttribute('viewBox', `0 0 ${opening.width} ${opening.height}`);
-    // Match the frozen first frame's rendered dots; the video takes over at t=0.
-    overlay.replaceChildren(...Array.from({length:opening.dots}, (_, i) => {
-      const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-      for (const [name, value] of Object.entries({cx:opening.width/2+(i-(opening.dots-1)/2)*opening.spacing,
-        cy:opening.y, r:opening.radius, fill:i >= opening.dots-remaining ? opening.color : 'transparent',
-        stroke:i >= opening.dots-remaining ? opening.color : '#f6f4eca0', 'stroke-width':2})) dot.setAttribute(name, value);
-      return dot;
-    }));
-  }
+    const signature = JSON.stringify([opening, remaining]);
+    if (signature !== countdownFrame) {
+      countdownFrame = signature;
+      overlay.setAttribute('viewBox', `0 0 ${opening.width} ${opening.height}`);
+      // Match the frozen first frame's rendered dots; the video takes over at t=0.
+      overlay.replaceChildren(...Array.from({length:opening.dots}, (_, i) => {
+        const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        for (const [name, value] of Object.entries({cx:opening.width/2+(i-(opening.dots-1)/2)*opening.spacing,
+          cy:opening.y, r:opening.radius, fill:i >= opening.dots-remaining ? opening.color : 'transparent',
+          stroke:i >= opening.dots-remaining ? opening.color : '#f6f4eca0', 'stroke-width':2})) dot.setAttribute(name, value);
+        return dot;
+      }));
+    }
+  } else countdownFrame = '';
   updateCover();
 }
 
