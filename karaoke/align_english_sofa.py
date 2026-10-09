@@ -74,7 +74,7 @@ class EnglishSofaAligner:
         waveform = torch.from_numpy(np.ascontiguousarray(audio)).float().unsqueeze(0)
         if self.sample_rate != c['sample_rate']:
             waveform = torchaudio.functional.resample(waveform, self.sample_rate, c['sample_rate'])
-        waveform *= min(1., .97/max(float(waveform.abs().max()), 1e-10))
+        waveform = waveform * min(1., .97/max(float(waveform.abs().max()), 1e-10))
         mel = self.extract(waveform)
         mel = (mel-mel.mean())/mel.std().clamp_min(1e-6)
         mel = mel.repeat_interleave(c['scale_factor'], dim=-1).to(self.device)

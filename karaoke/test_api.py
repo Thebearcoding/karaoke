@@ -5972,6 +5972,33 @@ def test_invalid_download_metadata_is_rebuilt_without_reusing_wrong_source(tmp_p
     assert json.loads((tmp_path/'download-cache-error.json').read_text())['error'] == 'JSONDecodeError'
 
 
+@pytest.mark.parametrize('sliced', [False, True])
+def test_english_phonetic_normalization_preserves_caller_audio(sliced):
+    from align_english_sofa import EnglishSofaAligner
+    model = object.__new__(EnglishSofaAligner)
+    model.device = 'cpu'
+    model.pronunciation = lambda word: ['AA']
+    normalized = []
+    def extract(wave):
+        normalized.append(wave.numpy().copy())
+        return wave.unsqueeze(1)
+    model.extract = extract
+    model.model = SimpleNamespace(
+        melspec_config=dict(sample_rate=44100, scale_factor=1, hop_length=441),
+        _infer_once=lambda mel, duration, phones, ids, owners:
+            (None, None, ids, np.array([[0., .01]]), 1., None, None))
+    buffer = np.linspace(-2., 2., 1024, dtype=np.float32)
+    original = buffer.copy()
+    audio = buffer[128:-128] if sliced else buffer
+    expected = audio*.97/float(np.max(np.abs(audio)))
+    for _ in range(2):
+        result, _, _ = model.align(audio, ['word'])
+        assert result[0]['text'] == 'word'
+        np.testing.assert_array_equal(buffer, original)
+        np.testing.assert_allclose(normalized[-1][0], expected, atol=1e-7)
+    np.testing.assert_array_equal(normalized[0], normalized[1])
+
+
 @pytest.mark.parametrize('with_original,late_failure', [(False,False), (True,False), (True,True)])
 def test_context_refinement_keeps_tightly_spaced_but_ordered_baseline(tmp_path, monkeypatch, with_original, late_failure):
     import importlib.util

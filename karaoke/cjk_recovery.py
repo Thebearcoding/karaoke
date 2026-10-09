@@ -107,7 +107,11 @@ def same_acoustic_event(a, b, localization_tolerance):
             and max(a['start'], b['start']) < min(ends))
 
 
-def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *, spans=None):
+def audio_floor(wave, protocol):
+    return max(1e-5, protocol['minimum_relative_rms']*float(np.sqrt(np.mean(wave**2))))
+
+
+def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *, spans=None, floor=None):
     """Return measured boundaries only when all views independently agree."""
     expected = spans if spans is not None else [
         (group['first']+a, group['first']+b) for a, b in highlight_spans(group['text'], 'Chinese')]
@@ -117,7 +121,8 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *,
             or any(u['text'] != group['text'][u['first']-group['first']:u['stop']-group['first']]
                    for v in [*predictions, *witnesses] for u in v)):
         return None, 'missing or mismatched character evidence'
-    floor = max(1e-5, protocol['minimum_relative_rms']*float(np.sqrt(np.mean(wave**2))))
+    if floor is None:
+        floor = audio_floor(wave, protocol)
     result = []
     for index in range(len(expected)):
         primary = [v[index] for v in predictions]
@@ -218,6 +223,7 @@ def latin_recovery_groups(cue):
 def recover_latin_groups(cues, wave, witness, protocol, model=None):
     """Use English acoustics for bounded English phrases in CJK songs."""
     result, reports = deepcopy(cues), []
+    floor = None
     for line, cue in enumerate(cues):
         foreign = [i for i, c in enumerate(cue['text']) if c.isalnum() and not c.isascii()]
         contexts, replacements = {}, []
@@ -273,8 +279,10 @@ def recover_latin_groups(cues, wave, witness, protocol, model=None):
                     def select(views):
                         return [[u for u in view if group['first'] <= u['first'] and u['stop'] <= group['stop']]
                                 for view in views]
+                    if floor is None:
+                        floor = audio_floor(wave, protocol)
                     replacement, reason = corroborated_group(group, select(predictions), select(independent),
-                                                             wave, bounds, protocol)
+                                                             wave, bounds, protocol, floor=floor)
                     report['groups'].append(dict(first=group['first'], stop=group['stop'], bounds=bounds,
                         accepted=replacement is not None, reason=reason))
                     if replacement is not None:
@@ -316,6 +324,7 @@ def neighboring_context(cues, line, group, radius=1):
 def recover_context_groups(cues, wave, model, witness, protocol):
     """Recheck neighbors too when a stale word boundary blocks a real onset."""
     result, reports = deepcopy(cues), []
+    floor = None
     for line, cue in enumerate(cues):
         for group in cue['units']:
             if (len(list(highlight_spans(group['text'], 'Chinese'))) < 2 or
@@ -370,8 +379,10 @@ def recover_context_groups(cues, wave, model, witness, protocol):
                                          if first+offset <= u['first'] and u['stop'] <= stop+offset] for view in views]
 
                             primary, secondary = select(predictions), select(independent)
+                            if floor is None:
+                                floor = audio_floor(wave, protocol)
                             replacement, reason = corroborated_group(dict(first=first, stop=stop, text=text),
-                                primary, secondary, wave, bounds, protocol)
+                                primary, secondary, wave, bounds, protocol, floor=floor)
                             report['attempts'].append(dict(decoder=decoder, context_radius=radius, first=first, stop=stop, reason=reason,
                                 predictions=primary, witnesses=secondary, bounds=bounds, source_windows=windows))
                             if replacement is not None:
@@ -505,6 +516,7 @@ def recover_repeated_groups(cues, wave, witness, protocol):
 def recover_groups(cues, wave, model, witness, protocol):
     """Keep foreign words intact while retrying adjacent Chinese compounds."""
     result, reports = deepcopy(cues), []
+    floor = None
     for line, cue in enumerate(cues):
         independent = None
         for index, group in enumerate(cue['units']):
@@ -544,7 +556,9 @@ def recover_groups(cues, wave, model, witness, protocol):
                     if independent is None:
                         independent = witness(cue, wave)
                     observed = [[u for u in view if group['first'] <= u['first'] < group['stop']] for view in independent]
-                    replacement, reason = corroborated_group(group, predictions, observed, wave, bounds, protocol)
+                    if floor is None:
+                        floor = audio_floor(wave, protocol)
+                    replacement, reason = corroborated_group(group, predictions, observed, wave, bounds, protocol, floor=floor)
                     attempt = dict(decoder=decoder, reason=reason, predictions=predictions,
                                    witnesses=observed, source_windows=windows, bounds=bounds)
                     report['attempts'].append(attempt)

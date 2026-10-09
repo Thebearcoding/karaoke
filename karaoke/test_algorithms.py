@@ -1287,7 +1287,7 @@ class SubtitleIntegrity(unittest.TestCase):
     def test_cross_model_recovery_preserves_foreign_words_and_rejects_unverified_changes(self):
         import copy
         from unittest.mock import patch
-        from cjk_recovery import recover_groups
+        from cjk_recovery import audio_floor, recover_groups
         protocol = dict(maximum_spread_seconds=.08, minimum_relative_rms=.03)
         original = [dict(text='go', aligned_start=.1, aligned_end=.4,
                          units=[dict(text='go', first=0, stop=2, start=.1, end=.4)]),
@@ -1335,8 +1335,10 @@ class SubtitleIntegrity(unittest.TestCase):
                     self.assertEqual(text, '甲乙 ')
                     return [dict(first=i, stop=i+1, text=c, phones=['a']) for i, c in enumerate('甲乙')]
 
-                with patch('cjk_recovery.spoken_units', side_effect=parsed):
+                with patch('cjk_recovery.spoken_units', side_effect=parsed), \
+                        patch('cjk_recovery.audio_floor', wraps=audio_floor) as level:
                     actual, report = recover_groups(before, wave, Model(), witness, protocol)
+                self.assertEqual(level.call_count, 1)
                 self.assertEqual(len(set(calls)), 3)
                 self.assertEqual(actual[0], before[0])
                 self.assertEqual(actual[1]['units'][-1], before[1]['units'][-1])
@@ -1517,7 +1519,8 @@ class SubtitleIntegrity(unittest.TestCase):
                         witness(cue, voice)
 
     def test_joint_recovery_rechecks_stale_neighbor_without_moving_foreign_words(self):
-        from cjk_recovery import recover_context_groups
+        from unittest.mock import patch
+        from cjk_recovery import audio_floor, recover_context_groups
         from phoneme_progress import spoken_units
         original = [dict(text='go', aligned_start=.1, aligned_end=.4,
                          units=[dict(text='go', first=0, stop=2, start=.1, end=.4)]),
@@ -1551,7 +1554,9 @@ class SubtitleIntegrity(unittest.TestCase):
                     return values
 
                 wave = np.full(44100*6, 0. if mode == 'silent' else .1)
-                result, report = recover_context_groups(original, wave, Model(), witness, protocol)
+                with patch('cjk_recovery.audio_floor', wraps=audio_floor) as level:
+                    result, report = recover_context_groups(original, wave, Model(), witness, protocol)
+                self.assertEqual(level.call_count, 1)
                 self.assertEqual(len(set(calls)), 3)
                 self.assertTrue(all(begin >= .4 for begin, _ in calls))
                 self.assertEqual(result[0], original[0])

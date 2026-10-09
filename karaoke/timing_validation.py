@@ -364,7 +364,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             for group in views[0]:
                 choose = lambda vs: [[u for u in v if (u['first'],u['stop'])==(group['first'],group['stop'])] for v in vs]
                 replacement, reason = corroborated_group(group, choose(predictions), choose(views), wave,
-                    bounds, protocol, spans=[(group['first'],group['stop'])])
+                    bounds, protocol, spans=[(group['first'],group['stop'])], floor=floor)
                 if replacement is None:
                     if group in suspects:
                         report.setdefault('unconfirmed', []).append(dict(first=group['first'],reason=reason))
@@ -538,7 +538,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                     continue
                 proof = dict(line=index+1,text=result[index]['text'],first=first)
                 candidate, repair = grouped_timing_fallback(result[index], row, proof, ledger,
-                    wave, bounds, protocol, language)
+                    wave, bounds, protocol, language, floor=floor)
                 if candidate is None:
                     continue
                 anchor = next((u for u in candidate['units'] if u['first']==first), None)
@@ -566,7 +566,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                     if not timing_violations(result, [proof]):
                         continue
                     candidate, repair = grouped_timing_fallback(result[index], row, proof, ledger,
-                        wave, bounds, protocol, language)
+                        wave, bounds, protocol, language, floor=floor)
                     if candidate is not None:
                         result[index] = candidate
                         row['repairs'].append(repair)
@@ -578,14 +578,16 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                        accuracy=None)
 
 
-def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, protocol, language):
+def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, protocol, language, *, floor=None):
     """Sweep an uncertain interior only within corroborated acoustic bounds.
 
     This is a playback group, never a replacement word-accuracy measurement.
     The first corroborated following source unit closes the smallest group.
     A source unit may already contain several words from an earlier fallback.
     """
-    from cjk_recovery import corroborated_group
+    from cjk_recovery import audio_floor, corroborated_group
+    if floor is None:
+        floor = audio_floor(wave, protocol)
     units, views = cue['units'], report['witnesses']
     positions = {u['first']:i for i,u in enumerate(units)}
     first = proof['first']
@@ -610,11 +612,10 @@ def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, proto
                                  if v[0].get('timing_evidence')=='ctc_event' else v[0]['end'])]
             primary, selected = [joined(v) for v in primary], [joined(v) for v in selected]
         found, _ = corroborated_group(group, primary, selected,
-            wave, bounds, protocol, spans=[(u['first'],u['stop']) for u in selected[0]])
+            wave, bounds, protocol, spans=[(u['first'],u['stop']) for u in selected[0]], floor=floor)
         if found and boundary:
             start = found[0]['start']
             piece = wave[round(start*44100):round((start+.035)*44100)]
-            floor = max(1e-5,protocol['minimum_relative_rms']*float(np.sqrt(np.mean(wave**2))))
             if not len(piece) or not np.isfinite(piece).all() or float(np.sqrt(np.mean(piece**2)))<=floor:
                 return None
         return found
