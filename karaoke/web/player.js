@@ -1,4 +1,4 @@
-// Schedule all stems on the render clock; visuals follow the device output clock.
+// Use one AudioContext clock for all stems and latency-adjusted visuals.
 import {createPitchShift} from './pitch-shift.js';
 import {StemStream} from './stem-stream.js';
 
@@ -84,11 +84,10 @@ export class Player {
   }
 
   outputTime() {
-    const context = this.context, stamp = context.getOutputTimestamp?.();
-    if (Number.isFinite(stamp?.contextTime) && Number.isFinite(stamp?.performanceTime) && stamp.performanceTime > 0) {
-      return Math.max(0, Math.min(context.currentTime,
-        stamp.contextTime + (performance.now() - stamp.performanceTime) / 1000));
-    }
+    // Keep visuals on the clock that actually schedules audio. Some WebKit
+    // devices report a fresh getOutputTimestamp() with a nearly frozen time,
+    // which would leave the video waiting forever while audio keeps playing.
+    const context = this.context;
     return Math.max(0, context.currentTime - (context.baseLatency || 0) - (context.outputLatency || 0));
   }
 

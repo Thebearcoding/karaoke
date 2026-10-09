@@ -582,6 +582,34 @@ test('video, progress and song end follow device output rather than the ahead-of
   }
 });
 
+test('an output timestamp that barely advances cannot hold video behind playing audio', async t => {
+  const p=setup(), ticks=[], waiting=[];
+  p.onTick=position=>ticks.push(position);
+  p.onBuffering=(...args)=>waiting.push(args);
+  await p.unlock(); await p.load(song);
+  // Actual iPad trace: render time 5.83 -> 19.83 s, timestamp .00983 -> .01015 s.
+  p.context.currentTime=5.831111111111111;
+  p.context.baseLatency=.0029024943310657597;
+  const initial=p.context.currentTime;
+  t.mock.method(performance,'now',()=>8089+(p.context.currentTime-initial)*1000);
+  p.context.getOutputTimestamp=()=>({
+    contextTime:.009834585383662157+(p.context.currentTime-initial)/44100,
+    performanceTime:performance.now()-2,
+  });
+  try {
+    await p.apply(state,clockOffset());
+    const sources=[...p.sources], start=p.audibleWhen+p.context.baseLatency;
+    p.context.currentTime=start; frame();
+    assert.equal(p.video.paused,false);
+    for (let i=1;i<=840;i++) { p.context.currentTime=start+i/60; frame(); }
+    assert.ok(Math.abs(ticks.at(-1)-17)<1e-8);
+    assert.ok(Math.abs(p.video.currentTime-17)<1e-8);
+    assert.deepEqual(waiting,[]);
+    assert.deepEqual(p.sources,sources);
+    assert.ok(sources.every(source=>!source.stopped));
+  } finally { p.clear(); }
+});
+
 test('a brief video readyState drop does not interrupt already scheduled audio', async () => {
   const p=setup(), waiting=[];
   p.onBuffering=(...args)=>waiting.push(args);
