@@ -7,7 +7,8 @@ import subprocess
 import time
 
 from PIL import Image, ImageDraw, ImageFont
-from subtitle_style import TOKENS, STYLES, DEFAULT_STYLE, caption_image, resolve_font, with_opacity, cue_opacity
+from subtitle_style import (TOKENS, STYLES, DEFAULT_STYLE, caption_height, caption_image,
+                            japanese_readings, resolve_font, script_for, with_opacity, cue_opacity)
 
 
 def main():
@@ -36,7 +37,8 @@ def main():
     folder = args.output.parent/(args.output.stem+'-caption-images')
     folder.mkdir(parents=True)
     blank = folder/'blank.png'
-    styling = dict(font_file=args.font, style=args.style, tone=args.tone, language=args.language)
+    height = max(caption_height(script_for(cue['text'], args.language)) for cue in cues) if cues else TOKENS['strip_height']
+    styling = dict(font_file=args.font, style=args.style, tone=args.tone, language=args.language, height=height)
     caption_image('', **styling).save(blank)
     entries = []
     cursor = 0.
@@ -47,7 +49,8 @@ def main():
         if start > cursor:
             entries.append((blank, start-cursor))
         path = folder/f'{i:04d}.png'
-        picture = caption_image(cue['text'], **styling)
+        readings = japanese_readings(cue['text'])[0] if script_for(cue['text'], args.language) == 'Japanese' else ()
+        picture = caption_image(cue['text'], **styling, readings=readings)
         picture.save(path)
         duration = end-start
         if args.animate:

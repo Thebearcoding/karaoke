@@ -4961,6 +4961,87 @@ def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatc
     assert overlapping.frame(4., 'word').getpixel((12, 5)) == white
 
 
+@pytest.mark.parametrize('text,expected', [
+    ('今日、空を見上げる', [('今日', 'きょう'), ('空', 'そら'), ('見上', 'みあ')]),
+    ('大人になって明日を待つ', [('大人', 'おとな'), ('明日', 'あした'), ('待', 'ま')]),
+    ('ｶﾞﾗｽの向こう、君と君', [('向', 'む'), ('君', 'きみ'), ('君', 'きみ')]),
+])
+def test_furigana_preserves_compound_readings_okurigana_and_source_offsets(text, expected):
+    from karaoke.subtitle_style import japanese_readings
+    from karaoke.render_lyric_progress import Caption
+    spans, warnings = japanese_readings(text)
+    assert [(text[a:b], reading) for a,b,reading in spans] == expected
+    assert warnings == ()
+    assert Caption(dict(text='今日的天空', units=[]), 'cinema_focus', 'Chinese').readings == ()
+    assert japanese_readings('ひらがな カタカナ English')[0] == ()
+
+
+def test_furigana_layout_preserves_timing_and_keeps_readings_out_of_sweep():
+    import copy
+    from PIL import ImageChops
+    from karaoke.render_lyric_progress import Caption
+    text = '貴方から承った物語を今日も思い出す\n明日は君と同じ空を見上げたい'
+    cue = dict(text=text, units=[dict(first=i, stop=i+1, start=i+1., end=i+1.8)
+                                for i,c in enumerate(text) if not c.isspace()])
+    before = copy.deepcopy(cue)
+    caption = Caption(cue, 'cinema_focus', 'Japanese')
+    assert cue == before and not caption.pages
+    assert len(caption.layout['lines']) == 2
+    assert caption.frame(.5, 'word').tobytes() == caption.base.tobytes()
+    swept = caption.frame(len(text)+1, 'word')
+    assert ImageChops.difference(swept, caption.base).getbbox() is not None
+    boxes = caption.layout['ruby']
+    assert len(boxes) == len(caption.readings) > 6
+    for ruby in boxes:
+        l,t,r,b = ruby['bounds']
+        assert 0 <= l < r <= caption.base.width and 0 <= t < b <= caption.base.height
+        chars = [c for c in caption.layout['characters'] if ruby['first'] <= c['index'] < ruby['stop']]
+        assert len({c['line'] for c in chars}) == 1
+        assert abs((l+r)/2-(min(c['left'] for c in chars)+max(c['right'] for c in chars))/2) < 1
+        assert b < min(c['top'] for c in chars)
+        bounds = (int(l), int(t), int(r)+1, int(b)+1)
+        assert swept.crop(bounds).tobytes() == caption.base.crop(bounds).tobytes()
+    for a,b in zip(boxes, boxes[1:]):
+        assert a['line'] != b['line'] or a['bounds'][2] < b['bounds'][0]
+    assert caption.countdown_geometry['y']+caption.countdown_geometry['radius'] < min(r['bounds'][1] for r in boxes)
+
+
+def test_furigana_dictionary_failure_does_not_lose_valid_subtitles(monkeypatch):
+    import pyopenjtalk
+    from karaoke.render_lyric_progress import Caption
+    from subtitle_style import japanese_readings
+    def unavailable(*args):
+        raise RuntimeError('Dictionary unavailable')
+    monkeypatch.setattr(pyopenjtalk, 'run_frontend', unavailable)
+    japanese_readings.cache_clear()
+    try:
+        caption = Caption(dict(text='今日の空', units=[]), 'cinema_focus', 'Japanese')
+        assert caption.readings == () and caption.base.getbbox() is not None
+        assert 'Dictionary unavailable' in caption.reading_warnings[0]
+        assert ''.join(c['character'] for c in caption.layout['characters']) == '今日の空'
+    finally:
+        japanese_readings.cache_clear()
+
+
+def test_furigana_pages_keep_full_sentence_readings_and_preview_can_shorten():
+    from karaoke.render_lyric_progress import Caption
+    from karaoke.subtitle_style import compact_caption_image
+    text = '今日も君と空を見上げる。'*12
+    cue = dict(text=text, units=[dict(first=i, stop=i+1, start=i+1., end=i+1.8) for i in range(len(text))])
+    caption = Caption(cue, 'cinema_focus', 'Japanese')
+    assert len(caption.pages) > 1
+    assert ''.join(p.cue['text'] for p in caption.pages) == text
+    assert [u['start'] for p in caption.pages for u in p.cue['units']] == [u['start'] for u in cue['units']]
+    assert [k for page in caption.pages for _,_,k in page.readings] == [k for _,_,k in caption.readings]
+    # A large title-like preview still fits; truncated readings must not attach to the ellipsis.
+    layout = {}
+    preview = compact_caption_image(text, height=80, language='Japanese', readings=caption.readings,
+        layout_out=layout, style_overrides=dict(size=34, minimum_size=26, single_line_floor=34,
+            maximum_lines=1, balanced_wrap=False, baseline_inset=22))
+    assert preview.getbbox() is not None and layout['lines'][0].endswith('…')
+    assert all(r['stop'] < len(layout['lines'][0]) for r in layout['ruby'])
+
+
 @pytest.mark.parametrize('spaced', [False, True])
 def test_long_lyric_pages_preserve_all_text_and_only_switch_at_measured_onsets(spaced):
     import copy

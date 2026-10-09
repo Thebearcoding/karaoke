@@ -8,31 +8,46 @@ import time
 
 from PIL import Image, ImageChops, ImageColor, ImageDraw
 
-from subtitle_style import TOKENS, STYLES, CaptionOverflow, caption_image, compact_caption_image, song_intro_image
+from subtitle_style import (TOKENS, STYLES, CaptionOverflow, caption_height, caption_image,
+                            compact_caption_image, japanese_readings, song_intro_image)
 from subtitles import countdown_events, countdown_state, normalized, read_ahead_state
 from stage_progress import progress_items, report_progress
 
 
 class Caption:
-    def __init__(self, cue, style, language):
+    def __init__(self, cue, style, language, readings=None):
         self.cue = cue
+        self.readings, self.reading_warnings = (readings if readings is not None else
+            japanese_readings(cue['text']) if language == 'Japanese' else ((), ()))
         self.layout = {}
         self.color = ImageColor.getrgb(STYLES[style].get('progress_color', '#efd29a'))
         self.pages = []
-        try:
-            self.base = caption_image(cue['text'], style=style, language=language, layout_out=self.layout)
-        except CaptionOverflow:
-            self.pages = self.paginate(style, language)
-            self.base = self.pages[0].base
-            self.starts = [page.cue['units'][0]['start'] for page in self.pages]
-            self.countdown_geometry = self.pages[0].countdown_geometry
-            return
+        while True:
+            try:
+                self.base = caption_image(cue['text'], style=style, language=language, layout_out=self.layout,
+                                          height=caption_height(language), readings=self.readings)
+            except CaptionOverflow:
+                try:
+                    self.pages = self.paginate(style, language)
+                except CaptionOverflow:
+                    if not self.readings:
+                        raise
+                    # Optional annotations cannot make an otherwise readable cue fatal.
+                    self.reading_warnings += ('Reading groups exceed the available display space',)
+                    self.readings = ()
+                    continue
+                self.base = self.pages[0].base
+                self.starts = [page.cue['units'][0]['start'] for page in self.pages]
+                self.countdown_geometry = self.pages[0].countdown_geometry
+                return
+            break
         self.starts = [u['start'] for u in cue.get('units', [])]
         self.cache = {}
         spec = TOKENS['countdown']
         self.countdown_geometry = dict(radius=spec['radius'], spacing=spec['spacing'],
             color=STYLES[style].get('progress_color', '#efd29a'),
-            y=max(spec['radius']+3, min(c['top'] for c in self.layout['characters'])-spec['above_text']))
+            y=max(spec['radius']+3, self.layout.get('content_top', min(
+                c['top'] for c in self.layout['characters']))-spec['above_text']))
 
     def paginate(self, style, language):
         """Change only the display pages, at existing measured unit boundaries."""
@@ -43,23 +58,29 @@ class Caption:
             raise CaptionOverflow('Long captions require complete, ordered timing units')
         pages, first = [], 0
         while first < len(units):
-            low, high, fit = first+1, len(units), None
             begin = units[first]['first'] if first else 0
+            ends = [i for i in range(first+1, len(units)+1) if not any(
+                a < (units[i]['first'] if i < len(units) else len(text)) < b for a,b,_ in self.readings)]
+            low, high, fit = 0, len(ends)-1, None
             while low <= high:
-                stop = (low+high)//2
+                middle = (low+high)//2
+                stop = ends[middle]
                 end = units[stop]['first'] if stop < len(units) else len(text)
+                readings = tuple((a-begin,b-begin,kana) for a,b,kana in self.readings if begin <= a and b <= end)
                 try:
-                    caption_image(text[begin:end], style=style, language=language)
+                    caption_image(text[begin:end], style=style, language=language,
+                                  height=caption_height(language), readings=readings)
                 except CaptionOverflow:
-                    high = stop-1
+                    high = middle-1
                 else:
-                    fit, low = stop, stop+1
+                    fit, low = stop, middle+1
             if fit is None:
                 raise CaptionOverflow('One timing unit exceeds a readable page; finer acoustic units are needed')
             end = units[fit]['first'] if fit < len(units) else len(text)
             page = dict(self.cue, text=text[begin:end], units=[
                 dict(unit, first=unit['first']-begin, stop=unit['stop']-begin) for unit in units[first:fit]])
-            pages.append(Caption(page, style, language))
+            readings = tuple((a-begin,b-begin,kana) for a,b,kana in self.readings if begin <= a and b <= end)
+            pages.append(Caption(page, style, language, (readings, self.reading_warnings)))
             first = fit
         return pages
 
@@ -161,8 +182,9 @@ def main():
     if any(c['end'] <= c['start'] for c in cues) or any(a['end'] > b['start']+1e-5 for a, b in zip(cues, cues[1:])):
         raise ValueError('Invalid display intervals')
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    main_height = TOKENS['strip_height']
-    preview_height = 64 if args.next_line else 0
+    main_height = caption_height(args.language)
+    preview_height = (64+(TOKENS['furigana']['preview_extra_height'] if args.language == 'Japanese' else 0)
+                      if args.next_line else 0)
     args.bottom_margin = max(args.bottom_margin, preview_height)
     width, height, fps = 1280, main_height+preview_height, 30
     intro = None
@@ -216,7 +238,7 @@ def main():
         settle_seconds=TOKENS['countdown']['settle_seconds']) if args.countdown else []
     previous, caption = None, None
     preview_previous, preview_image = None, None
-    shown, pagination = set(), {}
+    shown, pagination, readings_report = set(), {}, {}
     log = args.output.with_suffix('.ffmpeg.log')
     with log.open('w') as errors:
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=errors)
@@ -241,6 +263,8 @@ def main():
                         caption = Caption(cues[index], args.style, args.language)
                         if caption.pages:
                             pagination[index+1] = [dict(text=p.cue['text'], start=p.starts[0]) for p in caption.pages]
+                        if args.language == 'Japanese':
+                            readings_report[index+1] = dict(spans=caption.readings, warnings=caption.reading_warnings)
                         previous = index
                     current = caption.frame(instant, args.mode, page_at=entry['onset'] if entry is not None else None)
                     if preview_height:
@@ -255,7 +279,9 @@ def main():
                 if preview is not None:
                     if preview_previous != preview:
                         preview_image = compact_caption_image(cues[preview]['text'], height=preview_height,
-                            style=args.style, language=args.language, style_overrides={
+                            style=args.style, language=args.language,
+                            readings=japanese_readings(cues[preview]['text'])[0] if args.language == 'Japanese' else (),
+                            style_overrides={
                                 'size': 34, 'minimum_size': 26, 'single_line_floor': 34,
                                 'maximum_lines': 1, 'balanced_wrap': False, 'baseline_inset': 22})
                         preview_previous = preview
@@ -287,6 +313,7 @@ def main():
         'font': 'Bold Songti / Hiragino Mincho W6; source glyphs verified',
         'shown_lines': sorted(i+1 for i in shown),
         'display_pages': pagination,
+        'furigana': readings_report,
         'decode_check': 'pending_final_mux' if args.video_only else 'passed', 'probe': probe,
         'motion': 'Fixed text positions; hard line cuts; linear left-to-right fill within each existing timing unit',
         'next_line_enabled': args.next_line,

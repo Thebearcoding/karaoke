@@ -1,11 +1,18 @@
 {
-  "version": 9,
+  "version": 10,
   "default_style": "cinema_focus",
   "reference_width": 1280,
   "strip_height": 200,
   "bottom_margin": 40,
   "safe_x": 0.08,
   "minimum_font_size": 34,
+  "furigana": {
+    "size_em": 0.5,
+    "gap": 3,
+    "line_gap": 4,
+    "extra_height": 56,
+    "preview_extra_height": 20
+  },
   "intro": {
     "maximum_seconds": 6,
     "minimum_seconds": 2,
