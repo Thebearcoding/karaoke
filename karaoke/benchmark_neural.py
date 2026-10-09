@@ -50,13 +50,19 @@ def demix_batched(instance, mix, batch_size):
     # Preserve the pinned runner's final repeated window and addition order.
     starts = [min(i, audio.shape[-1]-chunk) for i in range(0, audio.shape[-1], step)]
     device = next(instance.model_run.parameters()).device
+    previous, outputs = None, None
     for first in progress_items(range(0, len(starts), batch_size)):
         positions = starts[first:first+batch_size]
-        inputs = torch.stack([audio[:, i:i+chunk] for i in positions]).to(device)
-        with torch.inference_mode():
-            outputs = instance.model_run(inputs).cpu()
-        if outputs.shape != inputs.shape:
-            raise ValueError('Unexpected single-target RoFormer output shape')
+        # The final window can repeat. Reuse its prediction, but retain every
+        # original overlap-add operation and its order. Larger batches retain
+        # their existing numerical behavior, including partially filled tails.
+        if batch_size != 1 or positions != previous:
+            inputs = torch.stack([audio[:, i:i+chunk] for i in positions]).to(device)
+            with torch.inference_mode():
+                outputs = instance.model_run(inputs).cpu()
+            if outputs.shape != inputs.shape:
+                raise ValueError('Unexpected single-target RoFormer output shape')
+        previous = positions
         for i, output in zip(positions, outputs):
             result[:, i:i+chunk] += output * window
             counter[:, i:i+chunk] += window
@@ -189,8 +195,8 @@ def main():
         padded = np.pad((x*gain).T, ((0, 0), (pad, pad)), mode='reflect')
         with torch.inference_mode():
             samples = np.ascontiguousarray(padded)
-            stems = (instance.demix(samples) if args.batch_size == 1 else
-                     demix_batched(instance, samples, args.batch_size))
+            stems = (demix_batched(instance, samples, args.batch_size)
+                     if args.batch_size > 1 or cfg.training.target_instrument else instance.demix(samples))
         report_progress(detail='整理音轨')
         vocals = np.asarray(stems[args.target_stem], dtype='float32').T[pad:pad+len(x)]/gain
         if args.export_stem:

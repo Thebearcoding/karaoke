@@ -5180,12 +5180,15 @@ def test_static_background_shading_composes_with_intro_and_audio(tmp_path, monke
 
 @pytest.mark.parametrize('timing_source', [None, 'cross_model_phonemes', 'linear_fallback'])
 def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatch, timing_source):
-    from PIL import Image
+    from PIL import Image, ImageDraw
     import karaoke.render_lyric_progress as renderer
     def caption(text, *, layout_out, **kwargs):
         # The middle span crosses two display rows. All glyphs are visible white
         # squares so exact pixels distinguish gradual fill from a whole-word jump.
-        layout_out.update(mask=Image.new('L', (60, 50), 255), characters=[
+        mask = Image.new('L', (60, 50))
+        ImageDraw.Draw(mask).rectangle((3, 3, 33, 38), fill=255)
+        mask.putpixel((6, 5), 128)
+        layout_out.update(mask=mask, characters=[
             dict(index=i, left=3+20*(i%2), right=13+20*(i%2), top=3+25*(i//2),
                  baseline=13+25*(i//2), line=i//2, character=x) for i, x in enumerate(text)])
         return Image.new('RGBA', (60, 50), (255, 255, 255, 255))
@@ -5200,6 +5203,8 @@ def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatc
     assert caption.frame(.9, 'word').getpixel((5, 5)) == white
     assert caption.frame(1., 'word').getpixel((5, 5)) == white
     partial = caption.frame(1.5, 'word')
+    assert partial.getpixel((0, 0)) == white and partial.getpixel((59, 49)) == white
+    assert partial.getpixel((6, 5)) == tuple((255*127+c*128+127)//255 for c in caption.color)+(255,)
     assert partial.getpixel((5, 5)) == amber and partial.getpixel((12, 5)) == white
     assert caption.frame(1.99, 'word').getpixel((12, 5)) == amber
     assert caption.frame(2., 'word').getpixel((25, 5)) == white
@@ -5850,7 +5855,8 @@ else: print(json.dumps(dict(rejected=False)))
     assert json.loads(result.stdout)['rejected']
 
 
-def test_roformer_batches_preserve_window_boundaries_and_partial_tail():
+@pytest.mark.parametrize('frames', [16, 17, 61, 64])
+def test_roformer_batches_preserve_window_boundaries_and_partial_tail(frames):
     import torch
     from karaoke.benchmark_neural import demix_batched
     class Model(torch.nn.Module):
@@ -5867,11 +5873,12 @@ def test_roformer_batches_preserve_window_boundaries_and_partial_tail():
         audio=SimpleNamespace(sample_rate=8))
     instance = SimpleNamespace(model_data_cfgdict=cfg, model_run=Model(),
         is_roformer=True, pitch_shift=0, overlap=1, secondary_stem_name='other')
-    audio = np.random.default_rng(7).normal(size=(2, 61)).astype('float32')
+    audio = np.random.default_rng(7).normal(size=(2, frames)).astype('float32')
     expected = demix_batched(instance, audio, 1)
+    single_predictions = sum(instance.model_run.batches)
     instance.model_run.batches.clear()
     actual = demix_batched(instance, audio, 3)
-    assert instance.model_run.batches == [3, 3, 2]
+    assert single_predictions < sum(instance.model_run.batches)
     for stem in expected:
         np.testing.assert_array_equal(actual[stem], expected[stem])
     np.testing.assert_allclose(actual['vocals']+actual['other'], audio, atol=2e-7)
@@ -7016,24 +7023,28 @@ def test_preview_clipping_reports_measured_peak(tmp_path):
     assert error.value.peak == 1.02
 
 
-def test_preview_group_reencodes_every_track_with_the_same_gain(tmp_path):
+@pytest.mark.parametrize('names', [('vocals', 'backing'), ('lead', 'backing', 'instrumental')])
+def test_preview_group_reencodes_every_track_with_the_same_gain(tmp_path, names):
+    from threading import Barrier
     from karaoke.exact_stems import encode_previews, PreviewClippingError
 
     calls = []
+    started = Barrier(len(names), timeout=5)
     def encode(source, output, gain, frames, channels):
+        started.wait()
         peak = gain * (1.4 if source.name == 'backing.wav' else .5)
         calls.append((source.name, gain))
         if peak >= 1:
             raise PreviewClippingError(output, peak)
         return dict(decoded_peak=peak, encoded_gain=gain)
 
-    sources = {name: tmp_path/f'{name}.wav' for name in ('vocals', 'backing')}
+    sources = {name: tmp_path/f'{name}.wav' for name in names}
     with patch('karaoke.exact_stems.encode_preview', side_effect=encode):
         gain, previews = encode_previews(sources, tmp_path, .9, 10000, 2)
     assert gain < .9 and set(previews) == set(sources)
     assert all(p['encoded_gain'] == gain and p['decoded_peak'] < 1 for p in previews.values())
-    assert {name for name, used_gain in calls if used_gain == gain} == {'vocals.wav', 'backing.wav'}
-    assert ('vocals.wav', .9) in calls
+    assert {name for name, used_gain in calls if used_gain == gain} == {f'{name}.wav' for name in names}
+    assert (f'{names[0]}.wav', .9) in calls
 
 
 def test_preview_group_keeps_format_failures_and_bounds_clipping_retries(tmp_path):

@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import time
 
-from PIL import Image, ImageChops, ImageColor, ImageDraw
+from PIL import Image, ImageColor, ImageDraw
 
 from subtitle_style import (TOKENS, STYLES, CaptionOverflow, caption_height, caption_image,
                             compact_caption_image, japanese_readings, song_intro_image, static_video_scrim)
@@ -43,6 +43,10 @@ class Caption:
             break
         self.starts = [u['start'] for u in cue.get('units', [])]
         self.cache = {}
+        tint = Image.new('RGBA', self.base.size, self.color+(0,))
+        tint.putalpha(self.layout['mask'])
+        self.highlight_box = self.layout['mask'].getbbox()
+        self.highlighted = Image.alpha_composite(self.base, tint).crop(self.highlight_box)
         spec = TOKENS['countdown']
         self.countdown_geometry = dict(radius=spec['radius'], spacing=spec['spacing'],
             color=STYLES[style].get('progress_color', '#efd29a'),
@@ -118,10 +122,9 @@ class Caption:
         cacheable = not sweeping
         if cacheable and key in self.cache:
             return self.cache[key]
-        result = self.base.copy()
         chars = self.layout['characters']
         if mode == 'word':
-            area = Image.new('L', result.size)
+            area = Image.new('L', self.base.size)
             draw = ImageDraw.Draw(area)
             right_edges = {}
             for active in sweeping:
@@ -136,10 +139,13 @@ class Caption:
                 right = right_edges.get(char['index'], char['right']+2)
                 if char['index'] < unit['stop'] and right > char['left']-2:
                     draw.rectangle((char['left']-2, char['top']-2, right, char['baseline']+8), fill=255)
-            tint = Image.new('RGBA', result.size, self.color+(0,))
-            tint.putalpha(ImageChops.multiply(area, self.layout['mask']))
-            result.alpha_composite(tint)
+            # The sweep mask contains only 0/255: select the already-composited
+            # pixels without redoing glyph tinting and alpha blending per frame.
+            result = self.base.copy()
+            if self.highlight_box:
+                result.paste(self.highlighted, self.highlight_box[:2], area.crop(self.highlight_box))
         elif mode == 'underline':
+            result = self.base.copy()
             selected = [c for c in chars if unit['first'] <= c['index'] < unit['stop'] and not c['character'].isspace()]
             draw = ImageDraw.Draw(result)
             for line in sorted({c['line'] for c in selected}):
@@ -248,7 +254,8 @@ def main():
         dots=TOKENS['countdown']['dots'], step_seconds=TOKENS['countdown']['step_seconds'],
         settle_seconds=TOKENS['countdown']['settle_seconds']) if args.countdown else []
     previous, caption = None, None
-    preview_previous, preview_image = None, None
+    preview_previous = None
+    preview_background = blank
     shown, pagination, readings_report = set(), {}, {}
     log = args.output.with_suffix('.ffmpeg.log')
     with log.open('w') as errors:
@@ -268,7 +275,19 @@ def main():
                     # The previous singing has ended; prepare the next lyric without highlighting it early.
                     index = entry['line']
                     preview = index+1 if args.next_line and index+1 < len(cues) else None
-                picture = blank.copy() if preview_height else blank
+                if preview is not None and preview_previous != preview:
+                    preview_image = compact_caption_image(cues[preview]['text'], height=preview_height,
+                        style=args.style, language=args.language,
+                        readings=japanese_readings(cues[preview]['text'])[0] if args.language == 'Japanese' else (),
+                        style_overrides={
+                            'size': 34, 'minimum_size': 26, 'single_line_floor': 34,
+                            'maximum_lines': 1, 'balanced_wrap': False, 'baseline_inset': 22})
+                    preview_background = blank.copy()
+                    preview_background.alpha_composite(preview_image, (0, main_height))
+                    preview_previous = preview
+                picture = preview_background if preview is not None else blank
+                if preview_height:
+                    picture = picture.copy()
                 if index is not None:
                     if previous != index:
                         caption = Caption(cues[index], args.style, args.language)
@@ -287,16 +306,6 @@ def main():
                         picture = picture.copy()
                         picture.alpha_composite(caption.countdown(remaining, entry['dots']))
                     shown.add(index)
-                if preview is not None:
-                    if preview_previous != preview:
-                        preview_image = compact_caption_image(cues[preview]['text'], height=preview_height,
-                            style=args.style, language=args.language,
-                            readings=japanese_readings(cues[preview]['text'])[0] if args.language == 'Japanese' else (),
-                            style_overrides={
-                                'size': 34, 'minimum_size': 26, 'single_line_floor': 34,
-                                'maximum_lines': 1, 'balanced_wrap': False, 'baseline_inset': 22})
-                        preview_previous = preview
-                    picture.alpha_composite(preview_image, (0, main_height))
                 process.stdin.write(picture.tobytes())
             process.stdin.close()
             report_progress(detail='封装视频')
