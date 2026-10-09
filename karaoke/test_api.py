@@ -3213,6 +3213,20 @@ def test_located_failed_alignment_reuses_bounded_acoustic_fallback(fallback,budg
         assert result['result']['segments']==segments
 
 
+@pytest.mark.parametrize('written,heard', [
+    ("I'vе found thе light", "I've found the light"),
+    ('Сlear blue skу', 'Clear blue sky'),
+    ('CAFЕ soir', 'CAFE soir')])
+def test_latin_lyric_matching_retains_source_with_cyrillic_lookalikes(written,heard):
+    from karaoke.anchors_from_asr import anchors_from_words, text_units
+    words=[dict(word=word,start=10.+i,end=10.8+i) for i,word in enumerate(heard.split())]
+    cue=anchors_from_words([written],words,'English')[0]
+    assert cue['text']==written and cue['match_basis']=='complete_phrase'
+    assert cue['start']==10. and cue['end']==words[-1]['end']
+    for unrelated in ['нет', 'СЕРВЕР', 'жe', 'θεός']:
+        assert text_units(unrelated,'English')==list(unrelated.lower())
+
+
 def test_recognition_windows_keep_language_switches_and_boundary_words():
     from karaoke.align_lyrics_whisper import recognize_in_windows
     calls=[]
