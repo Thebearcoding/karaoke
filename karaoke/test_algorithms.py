@@ -3016,12 +3016,15 @@ class AlignmentIntegrity(unittest.TestCase):
             sf.write(root/'audio.wav', np.zeros(24*16000), 16000)
             (root/'lyrics.json').write_text(json.dumps(dict(language='English', lines=lines)))
             for side in ('early', 'late', 'held_tail'):
-                for basis in (None, 'complete_phrase', 'complete_clause'):
+                for basis in (None, 'complete_phrase', 'complete_clause', 'aligned_words'):
                     for recovered in (False, True):
                         with self.subTest(side=side, basis=basis, recovered=recovered):
                             anchors = [dict(text=t, start=a, end=b, status='candidate')
                                        for t,a,b in zip(lines, [1.,8.,20.], [2.,14.,21.])]
-                            if basis:
+                            if basis == 'aligned_words':
+                                anchors[1]['units'] = [dict(text=w, start=t, end=t+.3)
+                                    for w,t in zip(lines[1].split(), [8.,10.,12.,13.5])]
+                            elif basis:
                                 anchors[1]['match_basis'] = basis
                             if basis == 'complete_clause':
                                 # Hearing one complete clause does not locate
@@ -3043,8 +3046,10 @@ class AlignmentIntegrity(unittest.TestCase):
                                 report = align_job(model, dict(audio=str(root/'audio.wav'), lyrics=str(root/'lyrics.json'),
                                     anchors=str(root/'anchors.json'), output=str(out)), full_song=True)
                             cues = json.loads((out/'cues.json').read_text())
-                            self.assertFalse(report['failures'])
-                            retried = basis == 'complete_phrase' and side != 'held_tail'
+                            retried = basis in ('complete_phrase','aligned_words') and side != 'held_tail'
+                            self.assertEqual(bool(report['failures']), retried and not recovered)
+                            self.assertEqual(cues[1]['status'],
+                                             'unresolved_timing' if retried and not recovered else 'candidate')
                             self.assertEqual(model.align.call_count, 2 if retried else 1)
                             self.assertEqual([cues[0]['start'],cues[2]['start']], [1.1,20.1])
                             if retried:

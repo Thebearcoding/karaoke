@@ -309,7 +309,12 @@ def align_job(aligner, job, full_song=False):
     # neighbouring text for context; never clamp words to the rough anchor.
     def displaced(i):
         a, c = anchors[i], cues[i]
-        return a['status'] == 'candidate' and (c['end']+2 < a['start'] or c['start']-2 > a['end'])
+        return a['status'] == 'candidate' and (
+            c['end']+2 < a['start'] or c['start']-2 > a['end'] or
+            # Complete audio-aligned words also locate the whole phrase.
+            # A partial ASR clause does not bound its unheard remainder.
+            len(c['units']) > 1 and (a.get('units') or a.get('match_basis') == 'complete_phrase') and (
+                c['start']+2 < a['start'] or c['units'][-1]['start'] > a['end']+2))
     def needs_phrase_retry(i):
         a, c = anchors[i], cues[i]
         # Mere overlap can hide a compressed prefix or suffix. The coarse
@@ -317,12 +322,7 @@ def align_job(aligner, job, full_song=False):
         # A one-word held note may have a long coarse tail but one short CTC
         # event; that alone is not compressed word timing.
         return displaced(i) or len(c['units']) > 1 and a['status'] == 'candidate' and (
-            c['start'] > a['start']+2 or c['end']+2 < a['end'] or
-            # Independent phrase locations also expose words stretched into
-            # neighbouring audio. A held final word may legitimately end later;
-            # only its onset requests this retry, not its duration.
-            a.get('match_basis') == 'complete_phrase' and (
-                c['start']+2 < a['start'] or c['units'][-1]['start'] > a['end']+2))
+            c['start'] > a['start']+2 or c['end']+2 < a['end'])
     if scope_blocks and not failures and not order_conflicts():
         for i in range(len(cues)):
             if not needs_phrase_retry(i):
