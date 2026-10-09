@@ -3173,6 +3173,46 @@ def test_local_recognition_broadens_once_when_old_neighbours_miss_the_verse():
     assert [s['words'][0]['start'] for s in result['result']['segments']]==starts
 
 
+@pytest.mark.parametrize('fallback,budget,recovers', [
+    ('measured',3,True), ('measured',2,False), ('wrong_text',3,False),
+    ('outside',3,False), ('error',3,False), ('primary_passes',3,True)])
+def test_located_failed_alignment_reuses_bounded_acoustic_fallback(fallback,budget,recovers):
+    from copy import deepcopy
+    from karaoke.align_lyrics_whisper import recover_with_local_asr
+    lines=['opening phrase','dancing in moonlight','gentle evening','closing words']
+    starts=[1.,4.,7.,10.]
+    def segment(i,begin=0.,collapse=False,shift=0.):
+        start=starts[i]+shift-begin
+        return dict(words=[dict(word=lines[i],start=start,end=start+(0 if collapse else .8))])
+    segments=[segment(i,collapse=i in (1,2)) for i in range(4)]
+    block=dict(range=[0,4],context=[0,4],source_range=[0.,12.],result=dict(segments=segments))
+    original=deepcopy(block);calls=[]
+    def recognize(begin,end):
+        return dict(segments=[segment(i,begin) for i in range(4)])
+    def align(begin,end,text,**options):
+        return dict(segments=[segment(i,begin,shift=.2) for i in range(4)]) if fallback=='primary_passes' else None
+    def localize(begin,end,text):
+        calls.append((begin,end,text))
+        assert 0<begin<starts[0] and starts[-1]<end<=12.
+        assert text=='\n'.join(lines)
+        if fallback=='error':raise ValueError('No acoustic evidence')
+        view=[];offset=0
+        for i,line in enumerate(lines):
+            view.append(dict(text=line if fallback!='wrong_text' else 'other',first=offset,stop=offset+len(line),
+                start=starts[i]+.2 if fallback!='outside' else end+1,end=starts[i]+1.))
+            offset+=len(line)+1
+        return dict(views=[view,deepcopy(view)])
+    result=recover_with_local_asr(block,lines,np.zeros(12*16000),'English',recognize,align,
+        force_global=True,max_alignment_attempts=budget,localize=localize)
+    assert block==original
+    assert result['result']['segments'][0]==segments[0] and result['result']['segments'][-1]==segments[-1]
+    assert bool(calls)==(budget>=3 and fallback!='primary_passes')
+    if recovers:
+        assert [result['result']['segments'][i]['words'][0]['start'] for i in (1,2)]==[4.2,7.2]
+    else:
+        assert result['result']['segments']==segments
+
+
 def test_recognition_windows_keep_language_switches_and_boundary_words():
     from karaoke.align_lyrics_whisper import recognize_in_windows
     calls=[]

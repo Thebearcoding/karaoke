@@ -532,6 +532,24 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                         candidate = alternate
                 except ValueError as error:
                     attempt['original_mix_alignment'] = dict(error=str(error), accepted=False)
+            if (localize is not None and budget >= 2 and
+                    all(anchors[i]['status'] == 'candidate' for i in range(start, stop_line)) and
+                    not valid_recovery(candidate, lines[cf+left:cs+left], ae-ab)):
+                # Recognition already located this passage. A second acoustic
+                # decoder can recover collapsed attention without rediscovering
+                # the lyrics or searching through another repetition.
+                budget -= 2
+                try:
+                    evidence = localize(ab, ae, '\n'.join(lines[cf+left:cs+left]))
+                    attempt['acoustic_fallback'] = evidence
+                    for view_index in reversed(range(len(evidence['views']))):
+                        alternate = acoustic_segments(lines[cf+left:cs+left], evidence['views'][view_index], ab, ae)
+                        if alternate is not None:
+                            candidate = alternate
+                            attempt['acoustic_selected_view'] = view_index
+                            break
+                except ValueError as error:
+                    attempt['acoustic_error'] = str(error)
             if (budget >= cost+1 and
                     region not in relocalized and
                     all(anchors[i]['status'] != 'candidate' for i in range(start, stop_line)) and
@@ -1418,7 +1436,7 @@ def main():
         elapsed = time.perf_counter()-started
         refinements = refine_chinese_onsets(cues, raw_blocks, audio, language)
         for cue in cues:
-            cue['source'] = 'stable-ts forced alignment of supplied lyrics to audio'
+            cue['source'] = 'forced alignment of supplied lyrics to audio'
         summary = write_captions(cues, output)
         summary['zero_duration_units'] = sum(unit['end'] <= unit['start'] for unit in units)
         summary['unit_count'] = len(units)
