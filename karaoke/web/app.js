@@ -74,7 +74,7 @@ async function request(path, body) {
 
 async function command(action, extra = {}) {
   try {
-    if (['play','pause','seek','next','select','lead','pitch','ready','buffering'].includes(action) ||
+    if (['play','pause','seek','restart','next','select','lead','pitch','ready','buffering'].includes(action) ||
         (action === 'remove' && extra.entry_id === state.current_id)) {
       if (extra.revision !== undefined && extra.revision !== state.revision) return null;
       const {finished} = playback.command(action === 'remove' ? 'next' : action, extra, state.entries);
@@ -898,7 +898,7 @@ async function nextSong() {
 }
 document.querySelectorAll('[data-next]').forEach(button => button.onclick = nextSong);
 $('now-song').onclick = () => switchView('player');
-$('transport-restart').onclick = () => command('seek', {position:0});
+$('transport-restart').onclick = () => command('restart');
 for (const [id, step] of [['lead-down', -5], ['lead-up', 5]]) {
   $(id).onclick = () => command('lead', {level:(Math.round(state.levels.lead_vocals * 100) + step) / 100});
 }

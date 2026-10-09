@@ -51,7 +51,7 @@ export class LocalPlayback {
     this.entry = entry;
     // Playing is this browser's intent. An empty queue waits without a clock;
     // finishing the last song must not discard the request to keep singing.
-    Object.assign(this.state, {position:0, playing, started_at:null});
+    Object.assign(this.state, {position:0, playing, started_at:null, pitch_semitones:0});
     this.playedAt = null;
   }
 
@@ -83,7 +83,8 @@ export class LocalPlayback {
     } else if (action === 'play') state.playing = true;
     else if (action === 'pause') Object.assign(state, {position:this.position(), playing:false, started_at:null});
     else if (this.entry) {
-      if (action === 'seek') Object.assign(state, {position:bounded(extra.position, 0, Math.max(0, (this.entry.duration || 0)-.05), 0), started_at:null});
+      if (action === 'restart') Object.assign(state, {position:0, started_at:null, pitch_semitones:0});
+      else if (action === 'seek') Object.assign(state, {position:bounded(extra.position, 0, Math.max(0, (this.entry.duration || 0)-.05), 0), started_at:null});
       else if (action === 'ready' && state.playing && state.started_at === null && this.entry.status === 'completed') {
         const delay = state.position === 0 ? Math.max(0, -(this.entry.opening_countdown?.start || 0)) : 0;
         state.started_at = Date.now()/1000 + delay;
