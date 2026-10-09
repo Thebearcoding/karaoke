@@ -142,7 +142,7 @@ def lyric_coverage(cues, words, language, duration, *, other_words=(), speech_in
 def missing_repetitions(reference, cues, words, language, duration):
     """Find supplied lyric passages recognized in gaps of the current timeline."""
     from .anchors_from_asr import anchors_from_words, text_units
-    from rapidfuzz.fuzz import ratio
+    from rapidfuzz.fuzz import partial_ratio, ratio
     from .subtitles import normalized
 
     keys = [text_units(line, language) for line in reference]
@@ -195,7 +195,7 @@ def missing_repetitions(reference, cues, words, language, duration):
             observed = [u for w in gap for u in text_units(w['word'], language)]
             if len(observed) < 24:
                 continue
-            scores = []
+            scores, partials = [], []
             for first in range(len(keys)):
                 text = []
                 for stop in range(first+1, len(keys)+1):
@@ -206,18 +206,43 @@ def missing_repetitions(reference, cues, words, language, duration):
                         continue
                     score = ratio(text, observed)/100
                     if score >= .9:
-                        scores.append((score, first, stop))
-            best, identity = None, None
-            for score, first, stop in sorted(scores, key=lambda x: -x[0]):
-                if best and score < best['similarity']-1e-9:
-                    break
+                        scores.append((score, first, stop, gap))
+                    elif len(text) <= len(observed) and partial_ratio(text, observed, score_cutoff=90) >= 90:
+                        partials.append((first, stop))
+            # A boundary word can belong to the neighbouring caption.
+            # Partial matching only selects a source block to inspect;
+            # its observed boundaries and full-text score still must pass.
+            for first, stop in partials:
                 anchors = anchors_from_words(reference[first:stop], gap, language, allow_missing=True)
                 if any(a['status'] != 'candidate' or a['matched_fraction'] < .8
                        for a in (anchors[0], anchors[-1])):
                     continue
+                lo, hi = anchors[0]['start'], anchors[-1]['end']
+                clip = [w for w in gap if lo-.001 <= w['start'] and w['end'] <= hi+.001]
+                selected = [u for w in clip for u in text_units(w['word'], language)]
+                score = ratio(sum(keys[first:stop], []), selected)/100
+                if len(selected) >= 24 and score >= .9:
+                    scores.append((score, first, stop, clip))
+            verified = []
+            for score, first, stop, clip in scores:
+                anchors = anchors_from_words(reference[first:stop], clip, language, allow_missing=True)
+                if all(a['status'] == 'candidate' and a['matched_fraction'] >= .8
+                       for a in (anchors[0], anchors[-1])):
+                    verified.append((score, first, stop, clip, anchors))
+            # Prefer the complete supported passage over its own interior,
+            # which can have a higher percentage simply by being shorter.
+            scores = [item for item in verified if not any(
+                other[1] <= item[1] < item[2] <= other[2] and other[1:3] != item[1:3]
+                and other[4][0]['start'] <= item[4][0]['start'] and item[4][-1]['end'] <= other[4][-1]['end']
+                for other in verified)]
+            best, identity, complete_passage = None, None, False
+            for score, first, stop, clip, anchors in sorted(scores, key=lambda x: -x[0]):
+                if best and score < best['similarity']-1e-9:
+                    break
                 text = ''.join(normalized(s).lower() for s in reference[first:stop])
                 if best is None:
                     identity = text
+                    complete_passage = clip is gap
                     best = dict(insertion_index=after, source_range=[first, stop], gap=[begin, end],
                                 similarity=score, boundary_anchors=[anchors[0], anchors[-1]], ambiguous=False)
                 elif text != identity:
@@ -228,9 +253,15 @@ def missing_repetitions(reference, cues, words, language, duration):
                            prior['boundary_anchors'][0]['start'] <= lo and
                            hi <= prior['boundary_anchors'][-1]['end'] for prior in found):
                     found.append(best)
-                if part == 0:
+                if part == 0 and complete_passage:
                     break  # The complete passage already covers its pieces.
-    return found
+    return [f for f in found if not any(
+        other is not f and other['insertion_index'] == f['insertion_index']
+        and other['source_range'][0] <= f['source_range'][0] < f['source_range'][1] <= other['source_range'][1]
+        and other['source_range'] != f['source_range']
+        and other['boundary_anchors'][0]['start'] <= f['boundary_anchors'][0]['start']
+        and f['boundary_anchors'][-1]['end'] <= other['boundary_anchors'][-1]['end']
+        for other in found)]
 
 
 def restore_repetitions(reference, anchors, words, language, duration, *, allow_expansion):

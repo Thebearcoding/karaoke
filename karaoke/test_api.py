@@ -7091,6 +7091,31 @@ def test_repeated_passage_detection_ignores_layout_and_unrelated_padding(split_l
     assert found[0]['boundary_anchors'][-1]['end']==11.8
 
 
+@pytest.mark.parametrize('missing', [None, 'middle', 'left_edge'])
+def test_repeated_passage_keeps_supported_edges_with_trailing_words(missing):
+    from karaoke.song_sources import missing_repetitions
+    # Synthetic phonetic tokens: repeated edges surround a distinct verse.
+    # A similar line after the gap must not make a shorter interior win merely
+    # because one more trailing token falls inside the current caption gap.
+    lines = ['cbmaba', 'cbmaba', 'njopdqd', 'ordid', 'sgeeteo', 'eurd',
+             'lm'*7+'fa', 'lm'*7+'fa', 'lm'*5+'xyz']
+    cues = [dict(text=t, start=s, end=s+.2, status='candidate')
+            for t,s in zip(lines, [1.,2.,3.,4.,5.,6.,7.,8.,36.5])]
+    words = [dict(word='ttvwedrkxyhz73d015862j4rd', start=10., end=15.)]
+    if missing != 'left_edge':
+        words += [dict(word='cbma', start=20.+i, end=20.6+i) for i in range(3)]
+    body = 'njopdqdordidsgeeteerd' if missing != 'middle' else 'x'*20
+    words += [dict(word=c, start=23.+i*.3, end=23.3+i*.3) for i,c in enumerate(body)]
+    words += [dict(word='lm', start=30.+i*.4, end=30.4+i*.4) for i in range(17)]
+    found = missing_repetitions(lines, cues, words, 'English', 40.)
+    complete = [f for f in found if f['source_range']==[0,8]]
+    assert bool(complete) is (missing is None)
+    if complete:
+        assert len(found)==1 and complete[0]['similarity']>=.9
+        assert complete[0]['boundary_anchors'][0]['start']==20.
+        assert complete[0]['boundary_anchors'][-1]['end']==36.
+
+
 @pytest.mark.parametrize('same_text', [True, False])
 def test_reused_asr_text_keeps_silence_boundaries_but_uses_recovered_word_times(tmp_path, same_text):
     import soundfile as sf
