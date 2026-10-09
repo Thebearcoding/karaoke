@@ -276,7 +276,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                           force_global=False, max_alignment_attempts=24, recovery_contexts=None, localize=None,
                           align_original=None, recognize_original=None, _revisited_conflicts=()):
     """Use recognition only to locate failed lyrics, never as replacement text."""
-    from anchors_from_asr import anchors_from_words, observed_context, combine_anchor_views
+    from anchors_from_asr import anchors_from_words, observed_context, combine_anchor_views, phrase_conflict
     from lyric_progress import partial_alignment_cues
     duration = len(audio)/16000
     cues = partial_alignment_cues(lines, [block], duration, language)
@@ -416,9 +416,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         # elsewhere in that same crop. Partial/ambiguous text is not evidence
         # against it, and recognition never supplies the replacement timing.
         mislocalized = {i+left for i, a in enumerate(anchors)
-            if a.get('match_basis') in ('complete_phrase', 'complete_clause') and a['status'] == 'candidate'
-            and cues[i+left]['status'] == 'candidate' and (
-                cues[i+left]['end']+2 < a['start'] or cues[i+left]['start']-2 > a['end'])}
+            if cues[i+left]['status'] == 'candidate' and phrase_conflict(cues[i+left], a, fragments=not global_recovery)}
         if global_recovery:
             # Only independently matched phrases can contradict existing
             # timing, directly or through their neighbours. An ambiguous
@@ -640,7 +638,8 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 if cue['status'] != 'candidate':
                     continue
                 if anchor['status'] == 'candidate':
-                    if cue['end'] < anchor['start']-2 or cue['start'] > anchor['end']+2:
+                    if (phrase_conflict(cue, anchor, fragments=not global_recovery) or cue['end'] < anchor['start']-2
+                            or cue['start'] > anchor['end']+2):
                         continue
                 else:
                     before = [a for a in anchors[cf:i-left] if a['status'] == 'candidate']

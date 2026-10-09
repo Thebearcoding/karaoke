@@ -2577,6 +2577,59 @@ class SubtitleIntegrity(unittest.TestCase):
         self.assertEqual(cue['matched_density'],1.)
         self.assertEqual((cue['start'],cue['end']),(1.,30.))
 
+    def test_partly_heard_phrase_does_not_match_scattered_dialogue(self):
+        from anchors_from_asr import timeline_support
+        lines = ['Let the silver river carry us home', 'Hold my open hand beneath the sky',
+                 'All our distant memories turn to light']
+        heard = [(lines[0], 10.), ('we should go outside and discuss tomorrow', 30.),
+                 (lines[0], 50.), ('Hold my open hand below the sky', 55.),
+                 ('All our distant memories fade to light', 60.)]
+        words = [dict(word=word, start=start+i*.3, end=start+(i+1)*.3)
+                 for text,start in heard for i,word in enumerate(text.split())]
+        anchors = anchors_from_words(lines, words, 'English')
+        self.assertEqual([a['start'] for a in anchors], [50.,55.,60.])
+        self.assertEqual([a.get('match_basis') for a in anchors[1:]], ['exact_fragment']*2)
+        self.assertEqual([a['text'] for a in anchors], lines)
+        cues = [dict(text=text, start=start, end=start+2.4) for text,start in zip(lines,[10.,20.,60.])]
+        support = timeline_support(cues,words,'English')
+        self.assertEqual([c['line'] for c in support['conflicts']], [2])
+        # A shared fragment cannot identify one of several refrains.
+        ambiguous = anchors_from_words([lines[1], lines[1]], words, 'English', allow_missing=True)
+        self.assertFalse(any(a.get('match_basis') for a in ambiguous))
+
+    def test_partial_recognition_cannot_expand_context_into_another_refrain(self):
+        from anchors_from_asr import observed_context, phrase_conflict
+        lines = ['Crystal rivers through my valley guide me home', 'Unrelated verse',
+                 'Crystal rivers through the valley guide me home']
+        words = [dict(word=w,start=10.+i*.3,end=10.+(i+1)*.3)
+                 for i,w in enumerate('Quiet waters through the valley guide me home'.split())]
+        anchors = anchors_from_words(lines,words,'English',allow_missing=True)
+        self.assertEqual(anchors[-1]['match_basis'],'exact_fragment')
+        self.assertEqual(observed_context(lines,words,'English',0,1),(0,1))
+        later = dict(text=lines[-1],start=100.,end=104.)
+        self.assertFalse(phrase_conflict(later,anchors[-1],fragments=False))
+
+    def test_phrase_overlap_does_not_hide_an_early_first_word(self):
+        from anchors_from_asr import timeline_support
+        text = 'All our distant memories turn to light'
+        words = [dict(word=w,start=60.+i*.3,end=60.+(i+1)*.3)
+                 for i,w in enumerate('All our distant memories fade to light'.split())]
+        cue = dict(text=text,start=30.,end=63.,units=[
+            dict(text='All ',start=30.,end=30.3),
+            dict(text=text[4:],start=60.3,end=63.)])
+        support = timeline_support([cue],words,'English')
+        self.assertEqual([c['line'] for c in support['conflicts']],[1])
+        self.assertEqual(support['supported_lines'],[])
+        # A real held first syllable can overlap the heard phrase; its early
+        # onset alone is not evidence of a wrong occurrence.
+        cue['units'][0]['end'] = 60.3
+        self.assertEqual(timeline_support([cue],words,'English')['conflicts'],[])
+        # An unheard prefix cannot acquire the following fragment's timing.
+        cue['text'] = 'Here '+text
+        cue['units'][0].update(text='Here ', end=30.3)
+        cue['units'][1]['text'] = text
+        self.assertEqual(timeline_support([cue],words,'English')['conflicts'],[])
+
     def test_missing_phrase_cannot_consume_a_later_observed_phrase(self):
         words = [dict(word='blue river', start=20., end=24.),
                  dict(word='the weather today is cloudy and windy', start=26., end=35.)]

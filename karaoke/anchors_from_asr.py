@@ -2,6 +2,7 @@
 
 import argparse
 from array import array
+from difflib import SequenceMatcher
 import json
 from pathlib import Path
 import re
@@ -9,9 +10,9 @@ import re
 from Bio.Align import PairwiseAligner
 
 if __package__:
-    from .subtitles import normalized, write_captions
+    from .subtitles import highlight_spans, normalized, write_captions
 else:
-    from subtitles import normalized, write_captions
+    from subtitles import highlight_spans, normalized, write_captions
 
 
 def text_units(text, language):
@@ -32,11 +33,14 @@ def _match_words(lines, words, units):
         owners.extend([i]*len(value))
     correspondence, boundaries = {}, []
     if expected and observed:
+        observed_words = [tuple(units(word['word'][a:b])) for word in words
+                          for a,b in highlight_spans(word['word'])]
+        fragment_matcher = SequenceMatcher(None, [], observed_words, autojunk=False)
         # An omitted verse must not consume words belonging to a later,
         # completely observed phrase. Establish those phrase boundaries before
         # asking edit distance to match the incomplete material between them.
         # A repeated phrase is only unambiguous when every occurrence was heard.
-        positions, clause_positions, offset = {}, {}, 0
+        positions, clause_positions, fragments, offset = {}, {}, set(), 0
         for line, key in zip(lines, keys):
             if key:
                 positions.setdefault(tuple(key), []).append(offset)
@@ -51,6 +55,23 @@ def _match_words(lines, words, units):
                     clause = tuple(key[begin:end])
                     if clause and clause != tuple(key):
                         clause_positions.setdefault(clause, []).append(offset+begin)
+            # A misheard word must not let scattered dialogue consume an
+            # otherwise heard phrase. Keep exact runs of whole words as
+            # boundaries, subject to the same occurrence/order checks below.
+            spans = list(highlight_spans(line))
+            tokens = [tuple(units(line[a:b])) for a,b in spans]
+            fragment_matcher.set_seq1(tokens)
+            for block in fragment_matcher.get_matching_blocks():
+                if block.size < 3:
+                    continue
+                begin = len(units(line[:spans[block.a][0]]))
+                end = len(units(line[:spans[block.a+block.size-1][1]]))
+                clause = tuple(key[begin:end])
+                if max(12, len(key)/2) <= len(clause) < len(key):
+                    starts = clause_positions.setdefault(clause, [])
+                    if offset+begin not in starts:
+                        starts.append(offset+begin)
+                        fragments.add((offset+begin, offset+end))
             offset += len(key)
         candidates = []
         # A refrain occurring both as a whole line and inside another voice's
@@ -148,12 +169,15 @@ def _match_words(lines, words, units):
         if any(a == position and b == position+len(key) for a, b, _, _ in boundaries):
             cues[-1]['match_basis'] = 'complete_phrase'
         else:
-            clauses = [(c,d) for a,b,c,d in boundaries
+            clauses = [(a,b,c,d) for a,b,c,d in boundaries
                        if position <= a < b <= position+len(key) and b-a >= len(key)/2]
             if clauses:
-                cues[-1].update(match_basis='complete_clause', observed_range=[
-                    min(words[owners[c]]['start'] for c,d in clauses),
-                    max(words[owners[d-1]]['end'] for c,d in clauses)])
+                cues[-1].update(match_basis='complete_clause' if any((a,b) not in fragments
+                    for a,b,c,d in clauses) else 'exact_fragment', observed_range=[
+                    min(words[owners[c]]['start'] for a,b,c,d in clauses),
+                    max(words[owners[d-1]]['end'] for a,b,c,d in clauses)],
+                    matched_prefix=any(a == position for a,b,c,d in clauses),
+                    matched_suffix=any(b == position+len(key) for a,b,c,d in clauses))
         position += len(key)
     return cues
 
@@ -234,6 +258,22 @@ def combine_anchor_views(views):
             for i,anchor in enumerate(views[0])]
 
 
+def phrase_conflict(cue, anchor, *, fragments=True):
+    """Compare heard text with its caption, including independently heard edges."""
+    basis = anchor.get('match_basis')
+    if (anchor['status'] != 'candidate' or basis not in ('complete_phrase', 'complete_clause', 'exact_fragment')
+            or basis == 'exact_fragment' and not fragments):
+        return False
+    units = [u for u in cue.get('units', []) if normalized(u['text'])]
+    intervals = [(min((u['start'] for u in units), default=cue['start']),
+                  max((u.get('acoustic_end') or u['end'] for u in units), default=cue['end']))]
+    for unit, edge in ((units[:1], 'matched_prefix'), (units[-1:], 'matched_suffix')):
+        if unit and (anchor['match_basis'] == 'complete_phrase' or anchor.get(edge)):
+            intervals.append((unit[0]['start'], unit[0].get('acoustic_end') or unit[0]['end']))
+    begin, end = anchor.get('observed_range', [anchor['start'], anchor['end']])
+    return any(stop+2 < begin or start-2 > end for start,stop in intervals)
+
+
 def timeline_support(cues, words, language, *, other_word_views=()):
     """Check coarse phrase location against already observed audio text.
 
@@ -255,12 +295,13 @@ def timeline_support(cues, words, language, *, other_word_views=()):
         # Rough recognition can truncate a held tail or stretch a first word.
         # A two-second separation still establishes a different passage.
         observed_begin, observed_end = anchor.get('observed_range', [anchor['start'], anchor['end']])
-        if not (end+2 < observed_begin or begin-2 > observed_end):
+        conflict = phrase_conflict(cue, anchor)
+        if not (conflict or end+2 < observed_begin or begin-2 > observed_end):
             supported.append(i)
-        if anchor.get('match_basis') not in ('complete_phrase', 'complete_clause'):
+        if anchor.get('match_basis') not in ('complete_phrase', 'complete_clause', 'exact_fragment'):
             continue
         checked.append(i)
-        if end+2 < observed_begin or begin-2 > observed_end:
+        if conflict:
             conflicts.append(dict(line=i, caption_range=[begin, end],
                                   observed_range=[observed_begin, observed_end]))
     return dict(checked_lines=checked, conflicts=conflicts, supported_lines=supported)
