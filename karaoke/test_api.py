@@ -5922,6 +5922,9 @@ def test_auxiliary_intro_and_long_preview_cannot_abort_valid_lyric_video(tmp_pat
     cues = [dict(text=text, start=i*.2, end=(i+1)*.2,
                  units=[dict(first=0, stop=len(text), start=i*.2, end=(i+1)*.2)])
             for i, text in enumerate(['Hello', '星'*42])]
+    # A measured tail overlaps the next entrance; the display still advances
+    # at that next onset without shortening the acoustic evidence.
+    cues[0]['end'] = cues[0]['units'][0]['end'] = .232
     (tmp_path/'cues.json').write_text(json.dumps(cues))
     import karaoke.render_lyric_progress as renderer
     if info == 'font_failure':
@@ -5938,6 +5941,19 @@ def test_auxiliary_intro_and_long_preview_cannot_abort_valid_lyric_video(tmp_pat
     assert report['song_intro']['status'] == 'omitted' and report['song_intro']['reason']
     assert report['shown_lines'] == [1, 2] and report['decode_check'] == 'passed'
     assert json.loads((tmp_path/'cues.json').read_text()) == cues
+
+
+@pytest.mark.parametrize('second_start,first_end', [(0., .1), (-.1, .1), (.2, 0.)])
+def test_lyric_renderer_rejects_unordered_or_empty_intervals(tmp_path, monkeypatch, second_start, first_end):
+    import karaoke.render_lyric_progress as renderer
+    cues = [dict(text='First', start=0., end=first_end),
+            dict(text='Second', start=second_start, end=.4)]
+    path = tmp_path/'cues.json'
+    path.write_text(json.dumps(cues))
+    monkeypatch.setattr(sys, 'argv', [renderer.__file__, '--video', str(tmp_path/'source.mp4'),
+        '--cues', str(path), '--language', 'Latin', '--duration', '.4', '--output', str(tmp_path/'output.mp4')])
+    with pytest.raises(ValueError, match='Invalid display intervals'):
+        renderer.main()
 
 
 @pytest.mark.parametrize('radius', [1, 3, 6])

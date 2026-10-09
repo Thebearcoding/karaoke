@@ -185,7 +185,9 @@ def main():
     readings = [resolve_readings(cue['text'], annotations[i]['spans'] if i < len(annotations)
                 and annotations[i]['text'] == cue['text'] else ())
                 if args.language == 'Japanese' else ((), ()) for i, cue in enumerate(cues)]
-    if any(c['end'] <= c['start'] for c in cues) or any(a['end'] > b['start']+1e-5 for a, b in zip(cues, cues[1:])):
+    # A held tail can overlap the next entrance. Rendering advances by starts;
+    # overlap does not invalidate the measured acoustic intervals.
+    if any(c['end'] <= c['start'] for c in cues) or any(a['start'] >= b['start'] for a, b in zip(cues, cues[1:])):
         raise ValueError('Invalid display intervals')
     args.output.parent.mkdir(parents=True, exist_ok=True)
     main_height = caption_height(args.language)

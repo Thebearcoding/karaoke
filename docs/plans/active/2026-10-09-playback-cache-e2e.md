@@ -13,7 +13,7 @@ the existing Blue Bird entry, history, settings, credentials, and source files.
 - [x] Inspect current code, production state, and the completed r54 evidence.
 - [x] Reproduce stale-tab and audio-ready cleanup failures with behavior tests.
 - [x] Fix the owning state/cache mechanisms and document the behavior.
-- [ ] Run full regression, fresh-directory startup, commit, push, and CI.
+- [x] Run full regression, fresh-directory startup, commit, push, and CI.
 - [x] Inventory and migrate job directories/records with rollback evidence.
 - [x] Deploy, verify real desktop/mobile interactions and aesthetic consistency.
 - [x] Add the fixed100 to the live queue and measure the normal worker E2E path.
@@ -63,6 +63,12 @@ the existing Blue Bird entry, history, settings, credentials, and source files.
   in the normal route, bind new packets to user overrides, and retain them during
   compaction. Explicit force, changed input/implementation and invalid caches
   still refetch; alignment acceptance remains unchanged.
+- CI at `95726a` passed 1547 Python tests, 446 subtests, and 76 JavaScript tests.
+- Normal full-MV preparation exposed a remaining renderer assumption on Haruka:
+  two measured tails overlapped by 32 ms, while the renderer incorrectly required
+  disjoint phrase intervals. Rendering already selects by the next onset; accept
+  these tails without rewriting acoustic times, retaining invalid interval and
+  reversed-start rejection. The real render and negative cases are revalidated.
 
 ## Work and Invariants
 
