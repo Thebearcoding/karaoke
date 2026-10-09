@@ -7465,6 +7465,32 @@ def test_repeated_passage_detection_ignores_layout_and_unrelated_padding(split_l
     assert found[0]['boundary_anchors'][-1]['end']==11.8
 
 
+@pytest.mark.parametrize('observed_repeat', [True, False])
+@pytest.mark.parametrize('split_line', [True, False])
+def test_repeated_refrain_inside_continuous_dialogue_is_not_diluted(observed_repeat, split_line):
+    from karaoke.song_sources import missing_repetitions
+    refrain = 'Let the silver river carry us home'
+    parts = ['Let the silver river', 'carry us home'] if split_line else [refrain]
+    lines = ['Opening', *parts, *parts, 'Different verse',
+             refrain+' (Carry us)', refrain+' (Carry us)']
+    cues = [dict(text=t,start=s,end=s+2,status='candidate')
+            for t,s in zip(lines,[i*3. for i in range(1+2*len(parts))]+[40.,44.,47.])]
+    spoken = ('We are discussing the weather and the roads tomorrow because our friends '
+              'have decided to visit the village together and then return on Friday').split()
+    words = [dict(word=w,start=10.+i*.5,end=10.3+i*.5) for i,w in enumerate(spoken)]
+    text = refrain if observed_repeat else 'Please tell the others to bring a jacket'
+    words += [dict(word=w,start=22.+i*.4,end=22.3+i*.4) for i,w in enumerate(text.split())]
+    words += [dict(word=w,start=26.+i*.5,end=26.3+i*.5) for i,w in enumerate(spoken)]
+    found = missing_repetitions(lines,cues,words,'English',51.)
+    assert len(found)==int(observed_repeat)
+    if found:
+        first,stop=found[0]['source_range']
+        assert lines[first:stop]==parts
+        assert found[0]['insertion_index']==1+2*len(parts)
+        assert found[0]['boundary_anchors'][0]['start']==22.
+        assert found[0]['boundary_anchors'][-1]['end']==24.7
+
+
 @pytest.mark.parametrize('missing', [None, 'middle', 'left_edge'])
 def test_repeated_passage_keeps_supported_edges_with_trailing_words(missing):
     from karaoke.song_sources import missing_repetitions

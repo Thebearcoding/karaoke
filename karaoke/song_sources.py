@@ -171,6 +171,32 @@ def missing_repetitions(reference, cues, words, language, duration):
                 pieces.append([])
             pieces[-1].append(word)
         passages = [gap, *pieces] if len(pieces)>1 else [gap]
+        # Repeated lines (including lines embedded in a second voice) have no
+        # unique occurrence in a full-text alignment. Find complete source
+        # phrases directly inside the gap before unrelated speech dilutes it.
+        observed, owners = [], []
+        for i, word in enumerate(gap):
+            value = text_units(word['word'], language)
+            observed.extend(value)
+            owners.extend([i]*len(value))
+        observed, exact = tuple(observed), []
+        for key in {tuple(key) for key in keys if key}:
+            for first in range(len(observed)-len(key)+1):
+                stop = first+len(key)
+                if (observed[first:stop] == key and
+                        (first == 0 or owners[first-1] != owners[first]) and
+                        (stop == len(owners) or owners[stop-1] != owners[stop])):
+                    exact.append((first,stop))
+        runs = []
+        for first,stop in sorted(set(exact)):
+            if runs and first <= runs[-1][1]:
+                runs[-1] = (runs[-1][0], max(stop,runs[-1][1]))
+            else:
+                runs.append((first,stop))
+        for first,stop in runs:
+            clip = gap[owners[first]:owners[stop-1]+1]
+            if begin-.001 <= clip[0]['start'] and clip[-1]['end'] <= end+.001 and clip not in passages:
+                passages.append(clip)
         # An omitted verse may share a continuous ASR segment with ad-libs or
         # dialogue. Match the observed phrase span, not that unrelated padding.
         anchors = anchors_from_words(reference, gap, language, allow_missing=True)
