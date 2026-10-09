@@ -940,6 +940,47 @@ class SubtitleIntegrity(unittest.TestCase):
                     self.assertEqual(result[0]['units'][0]['start'],1.)
                 self.assertEqual(cue['units'],old)
 
+    def test_timing_group_uses_each_models_own_edges_for_uncertain_interior(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        text = 'あいうえお'
+        old = [dict(first=a, stop=b, text=text[a:b], start=t, end=end, timing_source='prior_word_fallback')
+               for a,b,t,end in [(0,1,.2,.4),(1,3,1.,2.8),(3,4,2.7,3.4),(4,5,4.,4.2)]]
+        cue = dict(text=text, start=.2, end=4.2, units=old)
+        measured = [dict(first=i, stop=i+1, text=c, start=t, end=end,
+                         emission_end=event_end, timing_evidence='ctc_event')
+                    for i,(c,t,end,event_end) in enumerate(zip(text,
+                        [.2,2.,2.65,2.7,4.], [.4,2.65,2.7,3.4,4.2], [.225,2.025,2.675,3.,4.025]))]
+        views = [[dict(u, start=t, end=end, timing_evidence='ctc_label_event')
+                  for u,t,end in zip(measured,starts,[.4,2.12,starts[2]+.02,3.1,4.2])]
+                 for starts in ([.2,2.,2.76,2.9,4.], [.2,2.,2.4,2.76,4.])]
+        for mode in ('playback', 'strict', 'prediction_outside', 'silent_anchor', 'contradicted_interior'):
+            with self.subTest(mode=mode):
+                predictions = [deepcopy(measured) for _ in range(3)]
+                if mode == 'prediction_outside':
+                    for prediction in predictions:
+                        prediction[2].update(start=2.95, end=3.05, emission_end=2.975)
+                wave = np.ones(5*44100)*.1
+                if mode == 'silent_anchor': wave[2*44100:round(2.05*44100)] = 0.
+                constraints = ([dict(line=1, text=text, first=2, stop=3, onset=2.65,
+                                     start_min=2.6, start_max=2.7)] if mode == 'contradicted_interior' else [])
+                result, report = reconcile_timing([cue], wave, lambda *a,**k:views,
+                    lambda *a:predictions, protocol, 'Japanese', constraints,
+                    playback=mode!='strict', _retry_context=False)
+                self.assertEqual(cue['units'], old)
+                if mode == 'playback':
+                    self.assertFalse(report['unresolved'])
+                    self.assertEqual([(u['text'],u['start'],u['end']) for u in result[0]['units']],
+                                     [('あ',.2,.4),('いう',2.,2.7),('え',2.7,3.4),('お',4.,4.2)])
+                    self.assertEqual(result[0]['units'][1]['timing_source'], 'linear_fallback')
+                    self.assertIsNone(report['accuracy'])
+                    self.assertIn('invalid local word order', [r['reason'] for r in report['lines'][0]['repairs']])
+                    self.assertNotIn('unsupported_spans', report['lines'][0])
+                    validate_timeline(result, [text], 5., report['constraints'], 'Japanese')
+                else:
+                    self.assertEqual(result[0]['units'][1]['start'], 1.)
+
     def test_playback_timing_closes_left_conflict_at_confirmed_onsets_without_splitting_guard(self):
         from copy import deepcopy
         from timing_validation import reconcile_timing, validate_timeline

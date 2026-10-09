@@ -413,6 +413,9 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                     limit=units[hi]['start'] if hi<len(units) else bounds[1]
                     for member_index,(unit,following) in enumerate(zip(members,[*members[1:],dict(start=limit)])):
                         unit['end']=min(unit['end'],following['start'])
+                        if unit['end']<=unit['start'] or following['start']-unit['start']<.015:
+                            reason='invalid local word order'
+                            break
                         # Recheck the clipped interval using the same support
                         # contract as corroborated_group. A phonetic word can
                         # begin with a quiet closure before its voiced part.
@@ -420,8 +423,6 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                         if unit['first'] in confirmed and unit.get('timing_evidence')!='ctc_event':
                             support_end=unit['end']
                         piece=wave[round(unit['start']*44100):round(support_end*44100)]
-                        if unit['end']<=unit['start'] or following['start']-unit['start']<.015:
-                            reason='invalid local word order'
                         valid_audio = len(piece) and np.isfinite(piece).all()
                         quiet_closure = (0 < member_index < len(members)-1 and valid_audio and
                                          closure_pronunciation(unit, predictions) and
@@ -703,10 +704,19 @@ def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, proto
     # words that the acoustic witnesses place outside these two boundaries.
     changed_stop = guard[-1]['stop'] if guard is not None else stop
     covered = [p for p in constraints if p['line']==proof['line'] and first<=p['first']<changed_stop]
-    if any(first<p['first']<stop for p in covered) or any(
-            not anchor['start']<u['start']<end
-            for view in views for u in view if first<u['first']<stop):
+    if any(first<p['first']<stop for p in covered):
         return None, None
+    # Phonetic onsets and independent CTC label events have different edges.
+    # The two bounds above are corroborated with that distinction intact;
+    # check each interior against its own view's edges, not another model's
+    # onset. Otherwise an ordered short vowel can appear after the next word.
+    for view in [*report['predictions'], *views]:
+        begin = next((u['start'] for u in view if u['first']==first), None)
+        finish = (next((u['start'] for u in view if u['first']==stop), None)
+                  if guard is not None else view[-1]['end'])
+        if begin is None or finish is None or any(
+                not begin<u['start']<finish for u in view if first<u['first']<stop):
+            return None, None
     group = dict(first=first, stop=stop, text=cue['text'][first:stop],
                  start=anchor['start'], end=end, acoustic_end=None,
                  timing_source='linear_fallback', bounds_source=source)
