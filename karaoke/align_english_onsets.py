@@ -301,9 +301,17 @@ def align_job(aligner, job, full_song=False):
     def displaced(i):
         a, c = anchors[i], cues[i]
         return a['status'] == 'candidate' and (c['end']+2 < a['start'] or c['start']-2 > a['end'])
+    def needs_phrase_retry(i):
+        a, c = anchors[i], cues[i]
+        # Mere overlap can hide a compressed prefix or suffix. The coarse
+        # envelope requests a fresh decode; it never supplies word times.
+        # A one-word held note may have a long coarse tail but one short CTC
+        # event; that alone is not compressed word timing.
+        return displaced(i) or len(c['units']) > 1 and a['status'] == 'candidate' and (
+            c['start'] > a['start']+2 or c['end']+2 < a['end'])
     if scope_blocks and not failures and not order_conflicts():
         for i in range(len(cues)):
-            if not displaced(i):
+            if not needs_phrase_retry(i):
                 continue
             left, right = max(0, i-1), min(len(cues), i+2)
             if any(anchors[j]['status'] != 'candidate' for j in (left, right-1)):
@@ -314,8 +322,11 @@ def align_job(aligner, job, full_song=False):
             previous = cues[i]
             run_blocks([(i, i+1, left, right, begin, end)],
                        start_id=len(blocks)+len(context_retries)+len(boundary_retries)+len(phrase_retries))
+            accepted = not needs_phrase_retry(i) and not context_scope_violations(cues, scope_blocks)
             phrase_retries.append(dict(line=i+1, context=[left,right], source_range=[begin,end],
-                original_cue=previous, candidate_cue=cues[i], accepted=not displaced(i) and not context_scope_violations(cues, scope_blocks)))
+                original_cue=previous, candidate_cue=cues[i], accepted=accepted))
+            if not accepted:
+                cues[i] = previous
         outside = context_scope_violations(cues, scope_blocks)
         if outside:
             failures.append(dict(lines=[b[:2] for b in outside], error='Phrase retry left its acoustic context'))

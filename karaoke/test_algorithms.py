@@ -2572,6 +2572,47 @@ class AlignmentIntegrity(unittest.TestCase):
                     else:
                         self.assertEqual((cues[1]['start'],cues[1]['end']),(4.,8.))
 
+    def test_english_partial_phrase_overlap_rechecks_compressed_words(self):
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from align_english_onsets import align_job
+
+        lines = ['morning', 'river through the evening', 'closing']
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sf.write(root/'audio.wav', np.zeros(16*16000), 16000)
+            (root/'lyrics.json').write_text(json.dumps(dict(language='English', lines=lines)))
+            (root/'anchors.json').write_text(json.dumps([
+                dict(text=t, start=a, end=b, status='candidate')
+                for t,a,b in zip(lines, [1.,5.,13.], [2.,11.,14.])]))
+            for mode in ('tail', 'head', 'failed', 'valid'):
+                with self.subTest(mode=mode):
+                    def align(audio, words):
+                        if len(audio)==16*16000:
+                            middle = ([5.1,5.4,5.7,6.] if mode in ('tail','failed') else
+                                      [8.,8.4,8.8,10.5] if mode=='head' else [5.1,6.7,8.6,10.6])
+                            starts = [1.1,*middle,13.1]
+                        else:
+                            starts = [.7,4.8,5.1,5.4,5.7,12.7] if mode=='failed' else [.7,4.8,6.2,8.1,10.1,12.7]
+                        return [dict(text=w, start=s, end=s+.2, confidence=.8)
+                                for w,s in zip(words,starts)], None, .02
+                    model = SimpleNamespace(method='singing', device='cpu', onset_ratio=.02,
+                                            model_identity={}, align=Mock(side_effect=align))
+                    out = root/mode
+                    report = align_job(model, dict(audio=str(root/'audio.wav'), lyrics=str(root/'lyrics.json'),
+                        anchors=str(root/'anchors.json'), output=str(out)), full_song=True)
+                    cues = json.loads((out/'cues.json').read_text())
+                    self.assertFalse(report['failures'])
+                    self.assertEqual(model.align.call_count, 1 if mode=='valid' else 2)
+                    self.assertEqual([cues[0]['start'],cues[2]['start']], [1.1,13.1])
+                    if mode=='valid':
+                        self.assertEqual(report['phrase_retries'], [])
+                    else:
+                        self.assertEqual(report['phrase_retries'][0]['accepted'], mode!='failed')
+                        expected = [5.1,5.4,5.7,6.] if mode=='failed' else [5.2,6.6,8.5,10.5]
+                        np.testing.assert_allclose([u['start'] for u in cues[1]['units']], expected)
+
     def test_late_coarse_boundary_does_not_cut_off_a_sustained_syllable(self):
         import json
         from types import SimpleNamespace
