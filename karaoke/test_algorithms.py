@@ -825,6 +825,38 @@ class SubtitleIntegrity(unittest.TestCase):
         self.assertEqual(result[0]['units'][1]['timing_source'],'linear_fallback')
         validate_timeline(result,[text],5.,report['constraints'],'Chinese')
 
+    def test_adjacent_repeated_phrases_are_localized_in_one_text_context(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        cues = [dict(text='one two', start=t, end=t+1., units=[
+            dict(text='one', first=0, stop=3, start=t, end=t+.4, timing_source='prior_word_fallback'),
+            dict(text='two', first=4, stop=7, start=t+.5, end=t+1., timing_source='prior_word_fallback')])
+            for t in (3., 7.)]
+        for mode in ('complete', 'missing_occurrence', 'unordered'):
+            with self.subTest(mode=mode):
+                calls = []
+                def witness(cue, wave, **kwargs):
+                    calls.append(cue['text'])
+                    # An isolated phrase can match the wrong occurrence. The
+                    # joint transcript must preserve every repetition in order.
+                    starts = [.5, 1., 5.5, 6.] if cue['text']=='one two\none two' else [5.5, 6.]
+                    words = [dict(text=word, first=(i//2)*8+(i%2)*4, stop=(i//2)*8+(i%2)*4+3,
+                                  start=t, end=t+.3, timing_evidence='ctc_label_event')
+                             for i,(word,t) in enumerate(zip(cue['text'].split(), starts))]
+                    if mode=='missing_occurrence': words=words[:2]
+                    if mode=='unordered': words[-1].update(start=.2,end=.3)
+                    return [deepcopy(words), deepcopy(words)]
+                def predict(cue, views, bounds, language):
+                    return [[dict(u, timing_evidence='phonetic_span') for u in views[0]] for _ in range(3)]
+                result, report = reconcile_timing(cues, np.ones(10*44100)*.1, witness, predict,
+                                                  protocol, 'English', _retry_context=False)
+                self.assertEqual([c['start'] for c in result], [.5, 5.5] if mode=='complete' else [3.,7.])
+                self.assertEqual(calls, ['one two\none two', 'one two\none two'])
+                self.assertFalse(report['unresolved'])
+                if mode!='complete': self.assertFalse(report['constraints'])
+                validate_timeline(result, [c['text'] for c in cues], 10., report['constraints'], 'English')
+
     def test_timing_reuses_measured_evidence_instead_of_assigning_a_constraint_bound(self):
         from copy import deepcopy
         from timing_validation import reconcile_views

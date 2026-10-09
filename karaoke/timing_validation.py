@@ -5,6 +5,7 @@ invalidate an old onset; unavailable evidence never turns a quiet voice into
 silence. Invalidations outlive individual fallback candidates.
 """
 from copy import deepcopy
+from itertools import groupby
 
 import numpy as np
 
@@ -364,6 +365,16 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
     from cjk_recovery import corroborated_group, same_acoustic_event
     result, reports, ledger = deepcopy(cues), [], deepcopy(list(constraints))
     context_hints = {}
+    repeated = {}
+    for _, group in groupby(range(len(result)), key=lambda i: normalized(result[i]['text']).casefold()):
+        indices = list(group)
+        if len(indices) < 2:
+            continue
+        text = '\n'.join(result[i]['text'] for i in indices)
+        offset = 0
+        for i in indices:
+            repeated[i] = (indices[0], indices[-1]+1, text, offset)
+            offset += len(result[i]['text'])+1
     for cue in result:
         cue.setdefault('aligned_start', cue['start'])
         cue.setdefault('aligned_end', cue['end'])
@@ -386,7 +397,26 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                 raise ValueError('Acoustic localization context exceeds 60 seconds')
             letters = [c for c in cue['text'] if c.isalpha()]
             review_language = 'English' if letters and all(c.isascii() for c in letters) else language
-            views = witness(cue, wave, language=review_language)
+            observation, offset = cue, None
+            if index in repeated:
+                first, stop, text, start_char = repeated[index]
+                begin = result[first-1]['units'][-1]['start']+.015 if first else 0.
+                end = result[stop]['units'][0]['start'] if stop<len(result) else len(wave)/44100
+                if 0 < end-begin <= 60:
+                    # Identical neighbouring phrases need occurrence identity:
+                    # align their complete text once in the same audio context.
+                    observation = dict(text=text, aligned_start=begin, aligned_end=end,
+                                       audio_bounds=[begin,end])
+                    offset = start_char
+                    report['occurrence_context'] = dict(lines=[first+1,stop], source_range=[begin,end])
+            views = witness(observation, wave, language=review_language)
+            if offset is not None:
+                if any(normalized(''.join(u['text'] for u in view)) != normalized(observation['text']) or
+                       any(a['start']>=b['start'] for a,b in zip(view,view[1:])) for view in views):
+                    raise ValueError('Incomplete repeated phrase context')
+                views = [[dict(u, first=u['first']-offset, stop=u['stop']-offset)
+                          for u in view if offset<=u['first']<u['stop']<=offset+len(cue['text'])]
+                         for view in views]
             report['witnesses'] = views
             signature = lambda v: [(u['first'], u['stop'], u['text']) for u in v]
             if (len(views)!=2 or not views[0] or signature(views[0]) != signature(views[1])
