@@ -621,7 +621,8 @@ def test_removing_during_process_creation_waits_for_cleanup(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize('readd_during_cancel', [False, True])
-def test_remove_stops_descendants_and_resumes_only_completed_checkpoints(tmp_path, readd_during_cancel):
+@pytest.mark.parametrize('force', [False, True])
+def test_remove_stops_descendants_and_resumes_only_completed_checkpoints(tmp_path, readd_during_cancel, force):
     import os
     import signal
     import httpx
@@ -661,6 +662,7 @@ artifacts={name:{'path':'alignment.bin','bytes':len(aligned.read_bytes())}
     async def scenario():
         app = create_app(tmp_path, worker_command=lambda p: [sys.executable, '-u', '-c', code, str(p), child],
                          version='test', worker_concurrency=None)
+        cached = ready_job(app.state.store) if force and readd_during_cancel else None
         worker = app.state.worker
         entered, release_cancel = asyncio.Event(), asyncio.Event()
         original = worker.terminate
@@ -677,7 +679,7 @@ artifacts={name:{'path':'alignment.bin','bytes':len(aligned.read_bytes())}
                 await asyncio.sleep(.02)
         async with app.router.lifespan_context(app):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
-                entry = (await client.post('/v1/room/entries', json={'url': URL})).json()['entries'][0]
+                entry = (await client.post('/v1/room/entries', json={'url': URL, 'force': force})).json()['entries'][0]
                 folder = tmp_path/entry['job_id']
                 await until(lambda: (tmp_path/'heartbeat').exists() and (tmp_path/'heartbeat').stat().st_size > 10)
                 parent = json.loads((folder/'started.json').read_text())['parent']
@@ -686,7 +688,7 @@ artifacts={name:{'path':'alignment.bin','bytes':len(aligned.read_bytes())}
                         json={'action': 'remove', 'entry_id': entry['id']}))
                     await entered.wait()
                     if readd_during_cancel:
-                        again = (await client.post('/v1/room/entries', json={'url': URL})).json()['entries'][0]
+                        again = (await client.post('/v1/room/entries', json={'job_id': entry['job_id']})).json()['entries'][0]
                         assert again['job_id'] == entry['job_id']
                         (tmp_path/'preparation.pause').touch()
                         release_cancel.set()
@@ -711,7 +713,9 @@ artifacts={name:{'path':'alignment.bin','bytes':len(aligned.read_bytes())}
                     result = app.state.store.read(entry['job_id'])['result']
                     assert result['reused_stages'] == ['decode', 'separate']
                     assert (folder/'alignment.bin').read_bytes() == b'complete'
-                    assert len(app.state.store.list()) == 1
+                    assert len(app.state.store.list()) == (2 if cached else 1)
+                    if cached:
+                        assert app.state.store.read(cached['id'])['status'] == 'completed'
                 finally:
                     release_cancel.set()
                     try:

@@ -348,9 +348,10 @@ class Worker:
             # A second device can re-add the song while its old process exits.
             # Resume only after that process and cache cleanup have finished.
             if self.in_room(job_id) and self.store.read(job_id)['status'] == 'cancelled':
-                job, cached = self.store.create(JobRequest(**job['input']), self.version or job['pipeline_version'])
-                if not cached:
-                    self.queue.put_nowait(job['id'])
+                retry = {'download_retry': {**job['download_retry'], 'next_retry_at': None, 'count': 0}} if job.get('download_retry') else {}
+                self.store.update(job_id, status='queued', active_stages=[], stage_progress={}, timings={},
+                                  error=None, attempt_count=job.get('attempt_count', 1)+1, **retry)
+                self.queue.put_nowait(job_id)
             with self.store.connect() as db:
                 state = json.loads(db.execute('SELECT state FROM room WHERE id=1').fetchone()[0])
             self.prioritize([e['job_id'] for e in sorted(state['entries'], key=lambda e: e['id'] != state['current_id'])])
