@@ -789,6 +789,36 @@ class SubtitleIntegrity(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         validate_timeline(result,['hello','world','again'],10.,constraints)
 
+    def test_expanded_lyrics_retain_only_unambiguous_reviewed_occurrences(self):
+        from copy import deepcopy
+        from timing_validation import reuse_expanded_timeline, validate_timeline
+        def cue(text, start):
+            return dict(text=text, start=start, end=start+.4, status='candidate', units=[
+                dict(text=text, first=0, stop=len(text), start=start, end=start+.4)])
+        for mode in ('expanded', 'pending', 'ambiguous', 'changed', 'boundary', 'contradicted'):
+            with self.subTest(mode=mode):
+                old = [cue('opening', 1.), cue('refrain', 4.), cue('closing', 9.)]
+                new = [cue('opening', .5), cue('refrain', 2.), cue('inserted', 6.), cue('closing', 9.5)]
+                proof = dict(line=2, text='refrain', first=0, stop=7, onset=4., start_min=3.9, start_max=4.1)
+                report = dict(pending_review_lines=[2] if mode=='pending' else [],
+                              unresolved=[], constraints=[proof])
+                if mode=='ambiguous': new[2] = cue('refrain', 6.)
+                if mode=='changed': new[0] = cue('different', .5)
+                if mode=='boundary': new[2] = cue('inserted', 3.)
+                if mode=='contradicted': proof.update(start_min=5., start_max=5.2)
+                before = deepcopy((old, new, report))
+                result, constraints, retained = reuse_expanded_timeline(old, new, report, 12., 'English')
+                self.assertEqual((old, new, report), before)
+                if mode=='expanded':
+                    self.assertEqual(result, [old[0], old[1], new[2], old[2]])
+                    self.assertEqual(constraints, [proof])
+                    self.assertEqual(retained, [(1,1), (2,2), (3,4)])
+                else:
+                    self.assertEqual(result[1], new[1])
+                    self.assertNotIn(proof, constraints)
+                self.assertEqual([c['text'] for c in result], [c['text'] for c in new])
+                validate_timeline(result, [c['text'] for c in new], 12., constraints)
+
     def test_isolated_matching_syllable_does_not_establish_a_conflicting_phrase(self):
         from copy import deepcopy
         from timing_validation import reconcile_views

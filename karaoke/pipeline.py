@@ -279,6 +279,12 @@ class Pipeline:
             for evidence in ('timing-constraints.json', 'alignment/raw.json'):
                 if (self.output/evidence).is_file():
                     inputs = [*inputs, evidence]
+            if '--previous-alignment' in command:
+                prior = Path(command[command.index('--previous-alignment')+1])
+                inputs = [*inputs, *(prior/p for p in ('lyrics.json', 'cues.json', 'timing-constraints.json',
+                    'timing-checked/cues.json', 'timing-checked/report.json'))]
+                if (self.output/'stems/lead.wav').is_file():
+                    inputs = [*inputs, 'stems/lead.wav']
             weights = acoustic_model_files(ROOT)
             config['weights'] = [(str(p), p.stat().st_size, p.stat().st_mtime_ns)
                                  for p in weights if p.is_file()]
@@ -986,7 +992,7 @@ class Pipeline:
                 seen.add(key)
         if not candidates:
             raise StageFailure('lyrics', '未找到可用的歌词正文')
-        attempts = []
+        attempts, previous = [], None
         for index, candidate in enumerate(candidates):
             if index or candidate is not lyrics:
                 self.aligned_cues = None
@@ -1009,7 +1015,7 @@ class Pipeline:
                 # by a held caption. Keep it in the same bounded source-repair
                 # loop; every replacement must pass this review again. Its
                 # localization gate runs after the acoustic repair, not before.
-                self.validate_alignment(candidate, duration, lead)
+                self.validate_alignment(candidate, duration, lead, previous=previous)
                 preferred = observed_source_alternative(candidate, candidates[index+1:], observations,
                     cues=json.loads((self.output/'cues.json').read_text()), duration=duration)
                 if preferred:
@@ -1049,6 +1055,9 @@ class Pipeline:
                         shutil.copy2(source, target)
                 attempts.append(dict(source=candidate['provenance'].get('lyric_lookup'),
                     error=str(failure), diagnostics=str(folder.relative_to(self.output))))
+                if all((folder/p).is_file() for p in ('lyrics.json', 'cues.json', 'timing-constraints.json',
+                        'timing-checked/cues.json', 'timing-checked/report.json')):
+                    previous = folder
                 continue
             if attempts or candidate.get('provenance', {}).get('repetitions'):
                 quality = json.loads((self.output/'quality.json').read_text())
@@ -1250,7 +1259,7 @@ class Pipeline:
             raise StageFailure('subtitles', '字幕与已定位的唱段不一致或遗漏重复唱段；音频位置证据已保留')
         return observations
 
-    def validate_alignment(self, lyrics, duration, lead=None):
+    def validate_alignment(self, lyrics, duration, lead=None, *, previous=None):
         from .timing_validation import timing_violations, validate_timeline
         cues = json.loads((self.output/'cues.json').read_text())
         write_json(self.output/'timing-input.json', cues)
@@ -1258,7 +1267,8 @@ class Pipeline:
             '--input', self.output/'timing-input.json', '--lyrics', self.output/'lyrics.json',
             '--audio', self.vocals, '--original', self.output/'source-44100.wav',
             '--output', self.output/'timing-checked', '--device', self.device,
-            *([] if self.strict_audio else ['--playback-fallback'])]
+            *([] if self.strict_audio else ['--playback-fallback']),
+            *(['--previous-alignment', previous] if previous else [])]
         # Start while packaging is still running. Only unresolved local evidence
         # waits for the delivered lead master, including its native-rate conversion.
         # Review the sound the user receives, not an intermediate model output.

@@ -96,6 +96,40 @@ def retain_consistent_input(original, revised, constraints, duration, language):
     return candidate, [i+1 for i in sorted(retained)]
 
 
+def reuse_expanded_timeline(previous, cues, report, duration, language):
+    """Keep reviewed phrases only where every ordered expansion maps them alike."""
+    old, new = [c['text'] for c in previous], [c['text'] for c in cues]
+    if len(old) >= len(new) or report.get('unresolved') or 'pending_review_lines' not in report:
+        return cues, [], []
+    try:
+        validate_timeline(previous, old, duration, report['constraints'], language)
+    except ValueError:
+        return cues, [], []
+    def locate(lines, positions):
+        return [next((j for j in positions if new[j] == text), None) for text in lines]
+    left = locate(old, iter(range(len(new))))
+    right = locate(reversed(old), iter(range(len(new)-1, -1, -1)))[::-1]
+    if None in left or None in right:
+        return cues, [], []
+    pending = set(report['pending_review_lines'])
+    matches = {a: i for i,(a,b) in enumerate(zip(left,right)) if a == b and i+1 not in pending}
+    result, retained = list(cues), []
+    # Adjacent retained phrases move together; inserted neighbours remain fixed.
+    for _, items in groupby(enumerate(matches), lambda item:item[1]-item[0]):
+        indexes = [j for _,j in items]
+        first, last = indexes[0], indexes[-1]
+        block = [previous[matches[j]] for j in indexes]
+        if ((first and result[first-1]['units'][-1]['start'] >= block[0]['units'][0]['start']) or
+                (last+1 < len(cues) and block[-1]['units'][-1]['start'] >= cues[last+1]['units'][0]['start'])):
+            continue
+        result[first:last+1] = block
+        retained.extend((matches[j]+1, j+1) for j in indexes)
+    mapping = dict(retained)
+    constraints = [dict(p, line=mapping[p['line']]) for p in report['constraints'] if p['line'] in mapping]
+    validate_timeline(result, new, duration, constraints, language)
+    return result, constraints, retained
+
+
 def screened_units(cue, wave, protocol, *, floor=None):
     """Cheap hints select acoustic work; no hint invalidates a timestamp."""
     units = cue['units']
@@ -1010,6 +1044,8 @@ def main():
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--device',choices=['cpu','mps','cuda'],required=True)
     parser.add_argument('--playback-fallback',action='store_true')
+    parser.add_argument('--previous-alignment',type=Path,
+                        help='Same-run reviewed candidate before a lyric-source retry')
     parser.add_argument('--defer-constraints',action='store_true',
                         help='Save preliminary evidence; the pipeline must enforce constraints before publication')
     args=parser.parse_args()
@@ -1044,6 +1080,27 @@ def main():
         history = out.parent/'timing-history'
         history.mkdir(exist_ok=True)
         write(history/(sha(ledger_file)+'.json'), ledger)
+    reused_source = None
+    if args.previous_alignment is not None:
+        prior = args.previous_alignment
+        proof = read(prior/'timing-constraints.json')
+        prior_identity = deepcopy(proof.get('identity', {}))
+        if 'source' in prior_identity:
+            prior_identity['source']['lyrics'] = lyrics['lines']
+        lead_file = out.parent/'stems/lead.wav'
+        lead_matches = (not proof.get('lead_sha256') or
+                        (lead_file.is_file() and proof['lead_sha256'] == sha(lead_file)))
+        if (prior_identity == identity and lead_matches and
+                read(prior/'lyrics.json')['language'] == lyrics['language']):
+            old = read(prior/'timing-checked/cues.json')
+            old_report = read(prior/'timing-checked/report.json')
+            # The pipeline writes cues only after the full timing contract.
+            # A later text-coverage failure does not invalidate those timings.
+            if (old == read(prior/'cues.json') and old_report.get('source') == proof.get('source') and
+                    [c['text'] for c in old] == proof['source']['lyrics']):
+                cues, carried, retained = reuse_expanded_timeline(old,cues,old_report,duration,lyrics['language'])
+                constraints.extend(p for p in carried if p not in constraints)
+                reused_source = dict(directory=str(prior), cues_sha256=sha(prior/'cues.json'), retained_lines=retained)
     torch.set_num_threads(4);torch.set_grad_enabled(False)
     review=AcousticReview(args.original,args.device,out.parent/'timing-cache',identity,protocol)
     started=time.perf_counter()
@@ -1081,6 +1138,8 @@ def main():
     if args.lead is not None:
         report['lead_sha256']=lead_sha256
     report.update(seconds=time.perf_counter()-started,source=source,input_sha256=sha(args.input))
+    if reused_source is not None:
+        report['reused_source_alignment'] = reused_source
     measurements = list({json.dumps(row, sort_keys=True): row for row in [*previous, *report['lines']]
                          if row.get('proposed_constraints') and not row.get('reused_measurement')}.values())
     write(ledger_file,dict(source=source,constraints=report['constraints'],superseded=superseded,

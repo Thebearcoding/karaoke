@@ -4483,7 +4483,7 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
         fail('align_phonemes')
     monkeypatch.setattr(pipeline, 'align', align)
     validated = []
-    def validate(*args):
+    def validate(*args, **kwargs):
         validated.append(True)
         fail('validate_timing')
     monkeypatch.setattr(pipeline, 'validate_alignment', validate)
@@ -4614,7 +4614,7 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
         (tmp_path/'cues.json').write_text(json.dumps(cues))
         if failing:raise ValueError('Unresolved alignment')
     monkeypatch.setattr(pipeline, 'align', align)
-    monkeypatch.setattr(pipeline, 'validate_alignment', lambda *args: None)
+    monkeypatch.setattr(pipeline, 'validate_alignment', lambda *args, **kwargs: None)
     if mode in ('success', 'other_recording', 'soft', 'missing_language', 'null_language', 'cached_credits', 'primary_credits'):
         selected, error = pipeline.align_candidates(lyrics, {}, 6.)
         assert selected['lines'] == (primary if mode=='soft' else alternative)
@@ -4671,7 +4671,7 @@ def test_observed_missing_refrain_selects_complete_published_source(tmp_path, mo
                 dict(word=t,start=s,end=s+.8) for t,s in zip(complete,heard)])]))])]))
     monkeypatch.setattr(pipeline,'align',align)
     reviewed=[]
-    def validate(candidate,duration,lead):
+    def validate(candidate,duration,lead, **kwargs):
         reviewed.append(candidate['lines'])
         cues=json.loads((tmp_path/'cues.json').read_text())
         if candidate['lines']==short:
@@ -4770,7 +4770,7 @@ def test_extra_source_text_only_displaces_usable_lyrics_for_an_uncovered_passage
                     if spelling_noise and w['word']==extra else w for w in heard]
         raw.write_text(json.dumps([dict(asr_localizations=[dict(context=[0,len(candidate['lines'])],
             source_range=[0.,12.], recognition=dict(segments=[dict(words=observed)]))])]))
-    def validate(candidate, duration, lead):
+    def validate(candidate, duration, lead, **kwargs):
         reviewed.append(candidate['lines'])
         cues=json.loads((tmp_path/'cues.json').read_text())
         if uncovered:
@@ -5201,6 +5201,58 @@ def test_timing_constraints_reuse_only_the_same_evidence_method(tmp_path, monkey
         assert len(archived) == 1 and json.loads(archived[0].read_text()) == old
     else:
         assert not (tmp_path/'timing-history').exists()
+
+
+@pytest.mark.parametrize('changed', [None, 'audio', 'code', 'lead', 'unfinished', 'pending', 'language'])
+def test_source_expansion_reuses_only_completed_same_method_audio_evidence(tmp_path, monkeypatch, changed):
+    import shutil
+    import soundfile as sf
+    from karaoke import timing_validation as module
+    def cue(text, start):
+        return dict(text=text,start=start,end=start+.4,units=[
+            dict(text=text,first=0,stop=len(text),start=start,end=start+.4)])
+    old = [cue('opening',1.),cue('refrain',4.),cue('closing',9.)]
+    new = [cue('opening',.5),cue('refrain',2.),cue('inserted',6.),cue('closing',9.5)]
+    proof = dict(line=2,text='refrain',first=0,stop=7,onset=4.,start_min=3.9,start_max=4.1)
+    audio = tmp_path/'audio.wav'
+    sf.write(audio,np.ones((12*44100,2))*.05,44100,subtype='FLOAT')
+    seen = []
+    def reconcile(cues, observations, protocol, language, constraints, **kwargs):
+        seen.append(cues)
+        return cues,dict(lines=[],constraints=[proof] if len(seen)==1 else constraints,unresolved=[])
+    monkeypatch.setattr(module,'AcousticReview',Mock())
+    monkeypatch.setattr(module,'acoustic_model_files',lambda *args:[])
+    monkeypatch.setattr(module,'reconcile_views',reconcile)
+    args = ['timing_validation','--input',str(tmp_path/'cues.json'),'--lyrics',str(tmp_path/'lyrics.json'),
+            '--audio',str(audio),'--original',str(audio),'--output',str(tmp_path/'checked'),'--device','cpu']
+    for cues in [old,new]:
+        (tmp_path/'cues.json').write_text(json.dumps(cues))
+        (tmp_path/'lyrics.json').write_text(json.dumps(dict(lines=[c['text'] for c in cues],language='English')))
+        monkeypatch.setattr(sys,'argv',args)
+        module.main()
+        if cues is new:
+            break
+        prior = tmp_path/'prior';prior.mkdir()
+        shutil.copy2(tmp_path/'lyrics.json',prior/'lyrics.json')
+        if changed=='language':
+            (prior/'lyrics.json').write_text(json.dumps(dict(language='Chinese',lines=[c['text'] for c in old])))
+        shutil.copy2(tmp_path/'cues.json',prior/'cues.json')
+        shutil.copytree(tmp_path/'checked',prior/'timing-checked')
+        data = json.loads((tmp_path/'timing-constraints.json').read_text())
+        if changed=='code':data['identity']['code'] = {}
+        if changed=='lead':data['lead_sha256'] = 'another_audio'
+        (prior/'timing-constraints.json').write_text(json.dumps(data))
+        if changed=='audio':sf.write(audio,np.ones((12*44100,2))*.08,44100,subtype='FLOAT')
+        if changed=='unfinished':(prior/'cues.json').write_text(json.dumps(new))
+        if changed=='pending':
+            report = json.loads((prior/'timing-checked/report.json').read_text())
+            report['pending_review_lines'] = [2]
+            (prior/'timing-checked/report.json').write_text(json.dumps(report))
+        args += ['--previous-alignment',str(prior)]
+    assert seen[1][1] == (old[1] if changed is None else new[1])
+    assert seen[1][2] == new[2]
+    result = json.loads((tmp_path/'checked/cues.json').read_text())
+    assert result == seen[1]
 
 
 def test_playback_fallback_recovers_each_phrase_from_available_stages(tmp_path):
@@ -5703,7 +5755,7 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
     monkeypatch.setattr(pipeline, 'prepare_text', lambda *args: dict(
         title='Example', artist='', language='English', lines=['Hello']))
     monkeypatch.setattr(pipeline, 'align', lambda *args: stages.append('align'))
-    monkeypatch.setattr(pipeline, 'validate_alignment', lambda *args: stages.append('validate_timing'))
+    monkeypatch.setattr(pipeline, 'validate_alignment', lambda *args, **kwargs: stages.append('validate_timing'))
     monkeypatch.setattr(pipeline, 'render_video', lambda *args: pytest.fail('Audio-only test rendered a video'))
     result=pipeline.execute()
     assert {'separate_music','separate_lead','package_three_stems','align','validate_timing'}<=set(stages)
