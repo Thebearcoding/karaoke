@@ -6346,7 +6346,6 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
     # A recorded timing fallback does not authorize dropping lyric lines.
     result['quality']['playback_fallback'] = dict(subtitle_mode='estimated_word')
     (folder/'audio-result.json').write_text(json.dumps(result))
-    (folder/'prepared-lyrics.json').write_text('{"source":"verified lyric cache"}')
     assert verify_outputs(None, '', tmp_path, {'id':'job'}, audio_only=True,
                           playback_policy=True)['subtitle_lines'] == 1
     (folder/'lyrics.json').write_text(json.dumps(dict(lines=['Hello', 'Missing verse'])))
@@ -6523,6 +6522,7 @@ def test_complete_audio_ready_releases_intermediates_and_queues_video_only(tmp_p
     result['artifacts'].pop('mv')
     (folder/'mv.mp4').unlink()
     (folder/'audio-result.json').write_text(json.dumps(result))
+    (folder/'prepared-lyrics.json').write_text('{"source":"verified lyric cache"}')
     working = folder/'separation.wav'
     with StageCache(folder).stage('separate', inputs=[folder/'request.json'], outputs=[working]):
         working.write_bytes(b'no longer required')
