@@ -792,7 +792,7 @@ def review_uncovered_lyrics(cues, word_views, language, duration, recognize):
 
 
 def recognize_in_windows(recognize, begin, end, chunks):
-    """Keep overlapping recognition context without duplicating its words."""
+    """Keep overlapping recognition context without interleaving its words."""
     words, reports = [], []
     edges = np.linspace(begin, end, chunks+1)
     for left, right in zip(edges, edges[1:]):
@@ -802,11 +802,15 @@ def recognize_in_windows(recognize, begin, end, chunks):
         try:
             response = recognize(start, stop)
             report['recognition'] = response
-            words.extend(w for w in recognized_words(start, response, stop)
-                         if left <= (w['start']+w['end'])/2 < right)
+            # A stretched boundary token from this window must not be sorted
+            # back into the preceding window's already recognized phrase.
+            previous_start = words[-1]['start'] if words else begin-1.
+            observed = sorted(recognized_words(start, response, stop), key=lambda w: (w['start'], w['end']))
+            words.extend(w for w in observed if left <= (w['start']+w['end'])/2 < right
+                         and w['start'] > previous_start)
         except ValueError as error:
             report['error'] = str(error)
-    return sorted(words, key=lambda w: (w['start'], w['end'])), reports
+    return words, reports
 
 
 def acoustic_line_anchors(lines, views, begin, end):

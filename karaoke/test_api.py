@@ -3188,6 +3188,27 @@ def test_recognition_windows_keep_language_switches_and_boundary_words():
     assert [r['recognition']['language'] for r in reports]==['en','fr','fr']
 
 
+@pytest.mark.parametrize('begin', [0., 50.])
+def test_recognition_seam_does_not_interleave_a_stretched_context_word(begin):
+    from karaoke.align_lyrics_whisper import recognize_in_windows
+    from karaoke.anchors_from_asr import anchors_from_words
+    tokens=[('bright',begin+17.,begin+17.5),('blue',begin+18.,begin+18.5),
+            ('sky',begin+19.,begin+19.5),('shine',begin+19.8,begin+27.)]
+    def recognize(start,stop):
+        seen=[dict(word=t,start=a-start,end=min(b,stop)-start)
+              for t,a,b in tokens if start<=a<stop]
+        if start>begin:
+            # Another window's boundary observation is stretched into its core.
+            seen.insert(0,dict(word='yeah',start=begin+18.2-start,end=begin+23.8-start))
+        return dict(segments=[dict(words=seen)])
+    words,reports=recognize_in_windows(recognize,begin,begin+40.,2)
+    assert [w['word'] for w in words]==[t for t,_,_ in tokens]
+    assert words[-1]['end']==begin+27.  # Genuine sustained words stay intact.
+    assert reports[1]['recognition']['segments'][0]['words'][0]['word']=='yeah'
+    anchors=anchors_from_words(['bright blue sky','shine'],words,'English')
+    assert all(a['match_basis']=='complete_phrase' for a in anchors)
+
+
 def test_local_recovery_attempts_later_regions_before_deep_retries():
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines = ['early missing phrase', 'middle missing phrase', 'late missing phrase']
