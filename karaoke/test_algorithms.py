@@ -857,17 +857,33 @@ class SubtitleIntegrity(unittest.TestCase):
                for i,(c,t) in enumerate(zip(text,[1.,1.5,4.1,4.3,4.5,5.5]))]
         cue=dict(text=text,start=1.,end=5.7,units=units)
         heard=[dict(u,start=t,end=t+.2) for u,t in zip(units,[1.,2.,2.5,3.,4.,5.])]
-        proofs=[dict(line=1,text=text,first=i,stop=i+1,onset=t,start_min=t-.4,start_max=t+.4)
+        initial_proofs=[dict(line=1,text=text,first=i,stop=i+1,onset=t,start_min=t-.4,start_max=t+.4)
                 for i,t in [(3,3.),(4,4.)]]
-        for mode in ('complete','outside','wrong_text','disagreed_onset','silent'):
+        for mode in ('complete','outside','wrong_text','disagreed_onset','silent',
+                     'terminal_onset','typed_labels','untyped_labels','outside_event'):
             with self.subTest(mode=mode):
                 row=dict(witnesses=[deepcopy(heard),deepcopy(heard)])
+                proofs=deepcopy(initial_proofs)
+                measured=[heard[0],heard[-1]]
+                if mode in ('terminal_onset','typed_labels','untyped_labels','outside_event'):
+                    proofs.append(dict(line=1,text=text,first=5,stop=6,onset=5.,start_min=4.6,start_max=5.4))
+                if mode in ('typed_labels','untyped_labels','outside_event'):
+                    measured=[dict(heard[i],end=heard[i]['start']+.5,
+                                   timing_evidence='phonetic_span', independent_evidence='ctc_label_localization')
+                              for i in (0,3,4,5)]
+                    for view in row['witnesses']:
+                        for i in (0,3,4,5):
+                            view[i].update(start=heard[i]['start']+(.8 if mode=='outside_event' else .2),
+                                           end=heard[i]['start']+(.9 if mode=='outside_event' else .3),
+                                           timing_evidence='ctc_label_event')
+                    if mode=='untyped_labels':
+                        for unit in measured:unit.pop('independent_evidence')
                 if mode=='outside':row['witnesses'][0][1]['start']=.2
                 if mode=='wrong_text':row['witnesses'][0][0]['text']='錯'
                 if mode=='disagreed_onset':row['witnesses'][0][3]['start']=3.3
                 wave=np.ones(6*44100)*(.0 if mode=='silent' else .1)
-                result=compose_timing_bounds([cue],0,row,[heard[0],heard[-1]],proofs,wave,protocol,'Chinese')
-                if mode=='complete':
+                result=compose_timing_bounds([cue],0,row,measured,proofs,wave,protocol,'Chinese')
+                if mode in ('complete','terminal_onset','typed_labels'):
                     self.assertEqual([(u['text'],u['start']) for u in result['units']],
                                      [('甲乙丙',1.),('丁',3.),('戊',4.),('己',5.)])
                     validate_timeline([result],[text],6.,proofs,'Chinese')

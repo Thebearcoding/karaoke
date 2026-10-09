@@ -284,13 +284,26 @@ def compose_timing_bounds(cues, index, row, measured, constraints, wave, protoco
             return candidate
         return None
     points = {}
+    def supports(first, time):
+        from cjk_recovery import label_events_support
+        if any(first not in view for view in views):
+            return False
+        secondary = [view[first] for view in views]
+        if all(abs(u['start']-time)<=.1 for u in secondary):
+            return True
+        return any(u['first']==first and u['start']==time and
+            u.get('independent_evidence')=='ctc_label_localization' and
+            u.get('timing_evidence') in ('ctc_event','phonetic_span') and
+            label_events_support(time, u.get('first_event_end', u.get('emission_end')
+                if u['timing_evidence']=='ctc_event' else u.get('acoustic_end',u['end'])),
+                secondary, protocol['maximum_change_seconds']) for u in measured)
     for unit in measured:
         first, time = unit['first'], unit['start']
-        if all(first in view and abs(view[first]['start']-time)<=.1 for view in views):
+        if supports(first, time):
             points.setdefault(first, time)
     for proof in proofs:
         first, time = proof['first'], proof['onset']
-        if (not all(first in view and abs(view[first]['start']-time)<=.1 for view in views)
+        if (not supports(first, time)
                 or any(p['first']==first and not p['start_min']<=time<=p['start_max'] for p in proofs)):
             return None
         points[first] = time
@@ -304,7 +317,12 @@ def compose_timing_bounds(cues, index, row, measured, constraints, wave, protoco
         lo = positions[left]
         if points[left] <= (cue['units'][lo-1]['start'] if lo else before)+.015:
             continue
-        for right in sorted(p for p in points if p>last and p in positions):
+        right_bounds = sorted(p for p in points if p>last and p in positions)
+        # A corrected terminal onset can itself close the preceding sweep;
+        # retain its old display end instead of inventing a later word.
+        if last>left and last in points and last in positions:
+            right_bounds.append(last)
+        for right in right_bounds:
             hi = positions[right]
             guard = cue['units'][hi]
             limit = cue['units'][hi+1]['start'] if hi+1<len(cue['units']) else after

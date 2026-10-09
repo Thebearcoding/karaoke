@@ -111,6 +111,23 @@ def audio_floor(wave, protocol):
     return max(1e-5, protocol['minimum_relative_rms']*float(np.sqrt(np.mean(wave**2))))
 
 
+def label_events_support(start, event_end, secondary, localization_tolerance):
+    """Check word-localizing label events against a measured phonetic interval."""
+    if len(secondary) != 2 or any(u.get('timing_evidence') != 'ctc_label_event' for u in secondary):
+        return False
+    ends = [u.get('first_event_end', u['end']) for u in secondary]
+    if (not isinstance(event_end, (int, float)) or not np.isfinite([start, event_end]).all() or
+            event_end <= start or any(not isinstance(end, (int, float)) or
+            not np.isfinite([u['start'], u['end'], end]).all() or
+            not u['start'] < end <= u['end'] for u, end in zip(secondary, ends))):
+        return False
+    supported = all(u['start'] <= event_end+.1 and end >= start-.1 for u, end in zip(secondary, ends))
+    if abs(secondary[0]['start']-secondary[1]['start']) > .1:
+        supported = supported and all(start-.1 <= u['start'] < end <= event_end+.1
+                                     for u, end in zip(secondary, ends))
+    return supported and same_acoustic_event(*secondary, localization_tolerance)
+
+
 def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *, spans=None, floor=None):
     """Return measured boundaries only when all views independently agree."""
     expected = spans if spans is not None else [
@@ -162,15 +179,8 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *,
                    for u,end in zip([*primary,*secondary],[*primary_ends,*secondary_ends])):
                 return None, 'invalid CTC onset event'
             event_end = float(np.median(primary_ends))
-            supported = all(u['start'] <= event_end+.1 and end >= start-.1
-                            for u,end in zip(secondary,secondary_ends))
-            if abs(secondary[0]['start']-secondary[1]['start']) > .1:
-                # An uncertain label onset is only localization evidence. Its
-                # whole event must fit the stable phonetic event, not a long
-                # display hold or the rest of a joined lyric group.
-                supported = supported and all(start-.1 <= u['start'] < end <= event_end+.1
-                    for u,end in zip(secondary,secondary_ends))
-            independent = same_acoustic_event(*secondary, protocol['maximum_change_seconds'])
+            supported = independent = label_events_support(
+                start, event_end, secondary, protocol['maximum_change_seconds'])
         else:
             supported = all(abs(u['start']-start) <= .1 for u in secondary)
             independent = abs(secondary[0]['start']-secondary[1]['start']) <= .1
