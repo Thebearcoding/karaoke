@@ -561,6 +561,30 @@ class SubtitleIntegrity(unittest.TestCase):
                 self.assertFalse(report['unresolved'])
                 validate_timeline(result, ['you know'], 5., report['constraints'], 'English')
 
+    def test_reversed_local_replacement_cannot_establish_a_new_onset_constraint(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        old = [dict(first=0, stop=3, text='one', start=3., end=3.7),
+               dict(first=4, stop=7, text='two', start=4., end=4.4, timing_source='linear_fallback')]
+        cue = dict(text='one two', start=3., end=4.4, units=old)
+        heard = [dict(old[0], start=3.1, end=3.3, timing_evidence='ctc_label_event'),
+                 dict(old[1], start=3.4, end=3.55, timing_evidence='ctc_label_event')]
+        predicted = [dict(old[0], start=2.6, end=2.9, timing_evidence='phonetic_span'),
+                     dict(old[1], start=3., end=3.65, timing_evidence='phonetic_span')]
+        proof = dict(line=1, text='one two', first=4, stop=7, onset=3., start_min=2.6, start_max=3.4)
+        for prior in ([], [proof]):
+            with self.subTest(prior=bool(prior)):
+                result, report = reconcile_timing([cue], np.full(5*44100, .1),
+                    lambda *a, **k: [deepcopy(heard), deepcopy(heard)],
+                    lambda *a: [deepcopy(predicted) for _ in range(3)],
+                    protocol, 'English', prior, _retry_context=False)
+                self.assertEqual([u['start'] for u in result[0]['units']], [3., 4.])
+                self.assertEqual(report['constraints'], prior)
+                self.assertEqual(bool(report['unresolved']), bool(prior))
+                self.assertTrue(report['lines'][0]['proposed_constraints'])
+                self.assertFalse(any(r['accepted'] for r in report['lines'][0]['repairs']))
+
     def test_long_coarse_phrase_can_be_localized_before_short_phonetic_review(self):
         from copy import deepcopy
         from timing_validation import AcousticReview, reconcile_timing
@@ -3028,6 +3052,50 @@ class AlignmentIntegrity(unittest.TestCase):
             report = align_job(aligner, dict(job, output=str(root/'invalid')), full_song=True)
             self.assertIn('alignable text', report['failures'][0]['error'])
             aligner.align.assert_not_called()
+
+    def test_unsupported_english_line_preserves_other_anchored_phrase_timings(self):
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from align_english_onsets import align_job
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sf.write(root/'audio.wav', np.zeros(15*16000), 16000)
+            for unsupported in ('bad е', '…'):
+                for mode in ('anchored', 'outside_scope', 'no_anchors'):
+                    with self.subTest(unsupported=unsupported, mode=mode):
+                        lines = ['opening line', unsupported, 'closing line']
+                        anchors = [dict(text=text, start=t, end=t+1.4, status='candidate')
+                                   for text, t in zip(lines, [1., 5., 10.])]
+                        (root/'lyrics.json').write_text(json.dumps(dict(language='English', lines=lines)))
+                        (root/'anchors.json').write_text(json.dumps(anchors))
+                        def align(audio, words):
+                            self.assertIn(words, [['opening', 'line'], ['closing', 'line']])
+                            starts = [-2., -1.] if mode=='outside_scope' else [.77, 1.27]
+                            return [dict(text=w, start=s, end=s+.2, confidence=.9)
+                                    for w, s in zip(words, starts)], None, .02
+                        model = SimpleNamespace(method='singing', device='cpu', onset_ratio=.02,
+                            model_identity={}, align=Mock(side_effect=align))
+                        output = root/f'{unsupported}-{mode}'
+                        job = dict(audio=str(root/'audio.wav'), lyrics=str(root/'lyrics.json'), output=str(output))
+                        if mode != 'no_anchors':
+                            job['anchors'] = str(root/'anchors.json')
+                        report = align_job(model, job, full_song=True)
+                        cues = json.loads((output/'cues.json').read_text())
+                        self.assertTrue(report['failures'])
+                        self.assertEqual([c['text'] for c in cues], lines)
+                        self.assertEqual(cues[1]['units'], [])
+                        self.assertEqual(model.align.call_count, 0 if mode=='no_anchors' else 2)
+                        if mode == 'anchored':
+                            self.assertEqual([c['status'] for c in cues],
+                                             ['candidate', 'unresolved_timing', 'candidate'])
+                            np.testing.assert_allclose([cues[0]['start'], cues[2]['start']], [1.17, 10.17])
+                            self.assertEqual([report['failures'][0]['lines']], [[1, 2]])
+                        elif mode == 'outside_scope':
+                            self.assertTrue(all(c['status']=='unresolved_timing' for c in cues))
+                        else:
+                            self.assertTrue(all(not c['units'] for c in cues))
 
     def test_punctuation_only_row_cannot_shift_following_line_ownership(self):
         lines = ['first', '”', 'last']

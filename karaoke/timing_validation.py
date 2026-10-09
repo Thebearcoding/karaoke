@@ -486,6 +486,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                         piece=wave[round(unit['start']*44100):round(support_end*44100)]
                         if unit['end']<=unit['start'] or following['start']-unit['start']<.015:
                             reason='invalid local word order'
+                            localized=False
                         valid_audio = len(piece) and np.isfinite(piece).all()
                         quiet_closure = (0 < member_index < len(members)-1 and valid_audio and
                                          closure_pronunciation(unit, predictions) and

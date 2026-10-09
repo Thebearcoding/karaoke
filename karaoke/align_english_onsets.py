@@ -175,13 +175,21 @@ def align_job(aligner, job, full_song=False):
         raise ValueError(f'Expected {expected_rate} Hz audio with a valid mono mix')
     lines = lyrics['lines']
     anchors = json.loads(Path(job['anchors']).read_text()) if job.get('anchors') else None
+    matches = [list(highlight_spans(line, 'English')) for line in lines]
+    unsupported = {i for i, row in enumerate(matches) if not row or
+                   canonical(''.join(lines[i][a:b] for a, b in row)) != canonical(lines[i])}
+    # An unsupported line is a boundary for this model, not a reason to lose
+    # every other line's fine timing. Reuse the normal anchored block builder:
+    # neighbouring supported phrases cannot take this text as their context.
+    context_anchors = [dict(a, status='unsupported_text') if i in unsupported else a
+                       for i, a in enumerate(anchors)] if anchors else None
     if aligner.method == 'sofa':
         if anchors is None or len(anchors) != len(lines):
             raise ValueError('SOFA requires one coarse audio-aligned window per lyric line')
         blocks = [(i, i+1, i, i+1, max(0., c['start']-.8), min(len(audio)/rate, c['end']+.8))
                   for i,c in enumerate(anchors)]
     else:
-        blocks = context_blocks(anchors, audio) if anchors and not full_song else [
+        blocks = context_blocks(context_anchors, audio) if anchors and (not full_song or unsupported) else [
             (0, len(lines), 0, len(lines), 0., len(audio)/rate)]
     cues = [dict(text=s, start=0., end=0., units=[]) for s in lines]
     failures = []
@@ -189,10 +197,10 @@ def align_job(aligner, job, full_song=False):
 
     def run_blocks(blocks, start_id=0):
         for block_id, (first, stop, left, right, begin, end) in enumerate(progress_items(blocks, 'context' if start_id else 'blocks'), start_id):
-            matches = [list(highlight_spans(s, 'English')) for s in lines[left:right]]
-            words = [s[a:b] for s, row in zip(lines[left:right], matches) for a, b in row]
+            block_matches = matches[left:right]
+            words = [s[a:b] for s, row in zip(lines[left:right], block_matches) for a, b in row]
             try:
-                if any(not row for row in matches):
+                if any(not row for row in block_matches):
                     raise ValueError('Lyric lines must contain alignable text')
                 if canonical(''.join(words)) != canonical(''.join(lines[left:right])):
                     raise ValueError('Unsupported text in English lyric alignment')
@@ -206,7 +214,7 @@ def align_job(aligner, job, full_song=False):
             cursor = 0
             for line in range(left, right):
                 units = []
-                for begin_char, end_char in matches[line-left]:
+                for begin_char, end_char in matches[line]:
                     word = aligned[cursor]
                     units.append(dict(text=lines[line][begin_char:end_char], first=begin_char, stop=end_char,
                                       start=word['start']+begin, end=word['end']+begin,
@@ -224,7 +232,7 @@ def align_job(aligner, job, full_song=False):
             print(json.dumps(dict(song=lyrics.get('id'), method=aligner.method, lines=[first+1, stop])), flush=True)
 
     run_blocks(blocks)
-    scope_blocks = context_blocks(anchors, audio) if full_song and anchors and aligner.method != 'sofa' else None
+    scope_blocks = context_blocks(context_anchors, audio) if full_song and anchors and aligner.method != 'sofa' else None
     context_retries = []
     if scope_blocks and not failures:
         retries = []
