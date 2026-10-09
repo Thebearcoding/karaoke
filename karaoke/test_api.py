@@ -4965,6 +4965,10 @@ def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatc
     ('今日、空を見上げる', [('今日', 'きょう'), ('空', 'そら'), ('見上', 'みあ')]),
     ('大人になって明日を待つ', [('大人', 'おとな'), ('明日', 'あした'), ('待', 'ま')]),
     ('ｶﾞﾗｽの向こう、君と君', [('向', 'む'), ('君', 'きみ'), ('君', 'きみ')]),
+    ('１人でいる', [('１人', 'ひとり')]),
+    ('2人で歩く', [('2人', 'ふたり'), ('歩', 'ある')]),
+    ('12人の夢', [('12', 'じゅうに'), ('人', 'にん'), ('夢', 'ゆめ')]),
+    ('10月の空', [('10月', 'じゅうがつ'), ('空', 'そら')]),
 ])
 def test_furigana_preserves_compound_readings_okurigana_and_source_offsets(text, expected):
     from karaoke.subtitle_style import japanese_readings

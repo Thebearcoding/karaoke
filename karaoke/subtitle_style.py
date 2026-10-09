@@ -39,13 +39,30 @@ def japanese_readings(text):
 
     try:
         import pyopenjtalk
+        from num2words import num2words
+
+        def number_spelling(match):
+            value = match[0]
+            # Preserve codes and digit strings whose leading zero carries meaning.
+            return num2words(int(value), lang='ja') if len(value) < 16 and (value == '0' or not value.startswith('0')) else value
+
+        # Open JTalk rewrites counters, e.g. １人 -> 一人. Give both sides the
+        # same spelling, while every expanded digit still points to the original.
+        pieces, mapped, cursor = [], [], 0
+        for match in re.finditer(r'[0-9]+', normalized):
+            pieces.extend([normalized[cursor:match.start()], number_spelling(match)])
+            mapped.extend(positions[cursor:match.start()])
+            mapped.extend([(positions[match.start()][0], positions[match.end()-1][1])]*len(pieces[-1]))
+            cursor = match.end()
+        pieces.append(normalized[cursor:]);mapped.extend(positions[cursor:])
+        normalized, positions = ''.join(pieces), mapped
         words = pyopenjtalk.run_frontend(normalized)
     except Exception as error:
         # A missing optional reading must never discard valid, timed lyrics.
         return (), (f'{type(error).__name__}: {error}',)
     spans, cursor = [], 0
     for word in words:
-        written = unicodedata.normalize('NFKC', word['string'])
+        written = re.sub(r'[0-9]+', number_spelling, unicodedata.normalize('NFKC', word['string']))
         first = normalized.find(written, cursor)
         if first < 0 or not written:
             continue
@@ -63,7 +80,12 @@ def japanese_readings(text):
         for part in parts:
             if re.fullmatch(KANJI, part[0]):
                 a, b = positions[first+part.start()][0], positions[first+part.end()-1][1]
-                spans.append((a, b, next(readings)))
+                reading = next(readings)
+                if spans and a < spans[-1][1]:
+                    previous = spans.pop()
+                    spans.append((previous[0], max(previous[1], b), previous[2]+reading))
+                else:
+                    spans.append((a, b, reading))
     unresolved = tuple(f'No dictionary reading for {m[0]!r} at {m.start()}'
                        for m in re.finditer(KANJI, text)
                        if any(not any(a <= i < b for a, b, _ in spans)
