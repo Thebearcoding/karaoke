@@ -106,9 +106,9 @@ class Room:
         self.worker.prioritize(self.preparation_order(state))
         self.updates.publish()
 
-    def preparation_order(self, state=None):
-        state = self.read() if state is None else state
-        return [e['job_id'] for e in sorted(state['entries'], key=lambda e: e['id'] != state['current_id'])]
+    @staticmethod
+    def preparation_order(state):
+        return [entry['job_id'] for entry in state['entries']]
 
     @staticmethod
     def position(state):

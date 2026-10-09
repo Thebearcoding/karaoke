@@ -25,24 +25,33 @@ const bounded = (value, min, max, fallback) => Number.isFinite(value) ? Math.max
 export class PlaybackTabs {
   constructor(storage, id, fallback = {}) {
     this.storage = storage; this.id = id; this.key = 'karaokeBrowserPlayback';
-    this.record = {revision:0, owner:null, playback:fallback};
+    this.sequence = 0;
+    this.record = {revision:0, change:null, session:null, owner:null, playback:fallback};
     this.read();
   }
   read() {
     try {
       const saved = JSON.parse(this.storage?.getItem(this.key) || 'null');
-      if (saved && Number.isSafeInteger(saved.revision) && saved.revision >= this.record.revision && saved.playback)
-        this.record = saved;
+      // Storage, not a locally incremented number, decides the last writer.
+      // Two tabs can legitimately write the same revision after a concurrent read.
+      if (saved && Number.isSafeInteger(saved.revision) && saved.playback)
+        this.record = {...saved, change:saved.change || `${saved.owner}:${saved.revision}`,
+          session:saved.session || saved.owner};
     } catch { /* Private storage restrictions must not disable local playback. */ }
     return this.record;
   }
-  owns() { return this.read().owner === this.id; }
+  owns(session) {
+    const current = this.read();
+    return current.owner === this.id && (session === undefined || current.session === session);
+  }
   write(playback, {claim = false, release = false} = {}) {
-    const previous = this.record.revision, current = this.read();
-    if (!claim && (current.owner !== this.id || current.revision !== previous)) return false;
-    this.record = {revision:current.revision+1, owner:release ? null : this.id, playback};
+    const previous = this.record.change, current = this.read();
+    if (!claim && (current.owner !== this.id || current.change !== previous)) return false;
+    const change = `${this.id}:${++this.sequence}`;
+    this.record = {revision:current.revision+1, change, session:claim ? change : current.session,
+      owner:release ? null : this.id, playback};
     try { this.storage?.setItem(this.key, JSON.stringify(this.record)); } catch {}
-    return true;
+    return this.read().change === change;
   }
 }
 
@@ -56,14 +65,16 @@ export class LocalPlayback {
       levels:{instrumental:1, backing_vocals:1, lead_vocals:bounded(saved?.levels?.lead_vocals, 0, 1, 0)},
       pitch_semitones:Math.round(bounded(saved?.pitch_semitones, -6, 6, 0))};
     this.playedAt = saved?.played_at || null;
-    this.finished = new Set(saved?.finished_ids || []);
+    this.pendingFinishes = saved?.pending_finishes || (saved?.finished_ids || []).map(entry_id =>
+      ({entry_id, playback_started_at:null}));
   }
 
   reconcile(room) {
-    const first = room.entries.find(entry => !this.finished.has(entry.id)) || null;
-    // Queue order chooses the next performance. Reordering while paused must
-    // update the player too, without interrupting an active performance.
-    if (!this.entry || (!this.state.playing && this.entry.id !== first?.id)) this.select(first, this.state.playing);
+    const first = room.entries.find(entry => !this.isFinished(entry.id)) || null;
+    // An idle preselection follows the queue. Pause, buffering and a saved seek
+    // position do not end an existing performance.
+    const idle = !this.state.playing && this.playedAt === null && this.state.position === 0;
+    if (!this.entry || (idle && this.entry.id !== first?.id)) this.select(first, this.state.playing);
     else {
       const queued = room.entries.find(entry => entry.id === this.entry.id);
       const watched = room.playback_entry?.job_id === this.entry.job_id ? room.playback_entry : null;
@@ -73,7 +84,7 @@ export class LocalPlayback {
       else if (updated) this.entry = {...updated, id:this.entry.id};
     }
     if (this.state.playing && this.entry?.status !== 'completed') {
-      const ready = room.entries.find(entry => entry.status === 'completed' && !this.finished.has(entry.id));
+      const ready = room.entries.find(entry => entry.status === 'completed' && !this.isFinished(entry.id));
       if (ready) this.select(ready, true);
     }
     return {...room, ...this.state, current_id:this.entry?.id || null};
@@ -97,16 +108,34 @@ export class LocalPlayback {
       this.playedAt ||= this.state.started_at;
   }
 
-  command(action, extra, entries) {
+  isFinished(id) { return this.pendingFinishes.some(item => item.entry_id === id); }
+
+  // Entry IDs make finish idempotent on the server. Persist the original command
+  // until acknowledged, including across refresh or an audio-owner handoff.
+  async flushFinishes(send, accept, owns = () => true) {
+    if (this.flushing) return this.flushing;
+    this.flushing = (async () => {
+      while (this.pendingFinishes.length && owns()) {
+        const finished = this.pendingFinishes[0];
+        const updated = await send({action:'finish', ...finished});
+        if (!owns()) return;
+        this.pendingFinishes = this.pendingFinishes.filter(item => item !== finished);
+        accept(updated);
+      }
+    })();
+    try { await this.flushing; } finally { this.flushing = null; }
+  }
+
+  command(action, extra, entries, clockOffset = 0) {
     const state = this.state;
-    if (extra.entry_id && !['select','lead','pitch'].includes(action) && extra.entry_id !== this.entry?.id) return {};
+    if (extra.entry_id && !['lead','pitch'].includes(action) && extra.entry_id !== this.entry?.id) return {};
     this.markPlayed();
     let finished;
-    if (['next','select','remove'].includes(action)) {
-      const target = action === 'select' ? entries.find(entry => entry.id === extra.entry_id) : entries.find(entry => entry.id !== this.entry?.id && !this.finished.has(entry.id));
-      if (action === 'select' && (!target || target.id === this.entry?.id)) return {};
-      if (this.entry && (action !== 'select' || this.playedAt)) finished = {entry_id:this.entry.id, playback_started_at:this.playedAt};
-      if (finished) this.finished.add(finished.entry_id);
+    if (['next','remove'].includes(action)) {
+      const target = entries.find(entry => entry.id !== this.entry?.id && !this.isFinished(entry.id));
+      if (this.entry) finished = {entry_id:this.entry.id,
+        playback_started_at:this.playedAt === null ? null : this.playedAt + clockOffset};
+      if (finished) this.pendingFinishes.push(finished);
       this.select(target || null, action === 'remove' ? state.playing : true);
     } else if (action === 'lead') {
       state.levels.lead_vocals = bounded(extra.level, 0, 1, state.levels.lead_vocals);
@@ -130,6 +159,6 @@ export class LocalPlayback {
   save(position = this.position()) {
     this.markPlayed();
     return {entry:this.entry, playing:this.state.playing, position:Math.max(0, position), levels:this.state.levels,
-      pitch_semitones:this.state.pitch_semitones, played_at:this.playedAt, finished_ids:[...this.finished]};
+      pitch_semitones:this.state.pitch_semitones, played_at:this.playedAt, pending_finishes:this.pendingFinishes};
   }
 }

@@ -17,10 +17,10 @@ the existing Blue Bird entry, history, settings, credentials, and source files.
 - [x] Inventory and migrate job directories/records with rollback evidence.
 - [x] Deploy, verify real desktop/mobile interactions and aesthetic consistency.
 - [x] Add the fixed100 to the live queue and measure the normal worker E2E path.
-- [ ] Retain all failures, repair general causes, and report actual results.
-- [ ] Add the requested local-library pagination, preserving per-tab pages, and inspect desktop/mobile rendering.
-- [ ] Separate enqueue, reorder, and play: disable already-queued add buttons, remove per-row play shortcuts, and keep idle selection at queue head.
-- [ ] Verify continuous playback and resume an already-enabled mobile audio context between songs.
+- [x] Retain all failures, repair general causes, and report actual results.
+- [x] Add the requested local-library pagination, preserving per-tab pages, and inspect desktop/mobile rendering.
+- [x] Separate enqueue, reorder, and play: disable already-queued add buttons, remove per-row play shortcuts, and keep idle selection at queue head.
+- [x] Verify continuous playback and resume an already-enabled mobile audio context between songs; physical iPad follow-up remains user-reported.
 
 ## Findings and Decisions
 
@@ -76,6 +76,9 @@ the existing Blue Bird entry, history, settings, credentials, and source files.
 - Live100 found an invisible U+FEFF in Lucky Color lyrics. Font coverage treated it as a visible glyph, exhausted valid CJK fonts, then crashed on a Type1 fallback. Ignore format controls only for glyph selection and skip unsupported font formats; keep source text and timing indices unchanged.
 - Pagination and queue controls are deployed at `2dfcfa5`; 79 JavaScript tests pass. Real browser testing covered page boundaries, refresh, filters, paused queue reorder, noninterrupting reorder, next-song playback, and natural completion with independent audio/video. Mobile idle-context resumption is simulated; physical iPad confirmation is pending.
 
+- Queue audit reproduced four defects: paused performances followed queue reorder; failed finishes were never acknowledged/retried; simultaneous tab claims could share a revision; legacy server selection overrode preparation order. Preserve actual paused sessions, persist finish commands until idempotent acknowledgement, fence owners by unique session/change tokens, and use queue order in both worker paths. Remove the unused browser select command.
+- Queue regression: 1552 Python tests + 446 subtests, 83 JavaScript tests and empty-data startup passed. In a separate room with real production media, verified pause/reorder/refresh, failed finish requests, lost replies, ownership transfer, automatic next song, seek, lead level and pitch. Desktop and 390x844 screenshots preserve the existing hierarchy and permanent controls.
+
 ## Work and Invariants
 
 `karaoke/web/room-state.js` owns current selection and saved transport. Expired
@@ -121,6 +124,8 @@ Queue population records entry IDs so rerunning it cannot duplicate submissions.
 
 ## Outcomes
 
-Pending. The preceding algorithm checkpoint is `57fdaf6`, r54 is fixed100 with
+The live production queue completed all 100 full-MV cases with zero hard failures. Final evidence is under `service-data/soak-100/lesley-live-queue-20261009`: `report.json`, `final-audit.json`, and `sync-verification.json`. All source hashes survived; 53 existing audio/subtitle results were reused. The resulting corpus uses 16,404,712,257 bytes with zero retained WAVs. All 100 retain soft fallback/quality flags; these are artifact-completion checks, not independent human onset accuracy. This mixed-cache, multi-version run is not a cold latency benchmark.
+
+The preceding algorithm checkpoint is `57fdaf6`, r54 is fixed100 with
 zero hard failures, and its report SHA is
 `297d6faddf0404337b5fcf3978863b437adb71ede61a99039ee700a746f068b2`.

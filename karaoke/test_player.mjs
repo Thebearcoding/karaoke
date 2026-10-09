@@ -36,6 +36,38 @@ test('browser tabs share a single audio owner and reject saves from the previous
   assert.equal(anotherBrowser.owns(),true);
 });
 
+test('interleaved tab claims and delayed writes cannot hide an ownership change behind a revision', () => {
+  const values = new Map();
+  let interleave;
+  const storage = {getItem(key) {
+    const value = values.get(key), action = interleave;
+    interleave = null; action?.();
+    return value;
+  }, setItem:(key,value)=>values.set(key,value)};
+  const first = new PlaybackTabs(storage,'first'), second = new PlaybackTabs(storage,'second');
+  first.write({position:5},{claim:true});
+  let firstSession, firstChange;
+  interleave = () => {
+    assert.equal(first.write({position:10},{claim:true}),true);
+    firstSession = first.record.session; firstChange = first.record.change;
+  };
+  assert.equal(second.write({position:20},{claim:true}),true);
+  assert.equal(first.record.revision,second.record.revision);
+  assert.notEqual(firstChange,second.record.change);
+  assert.equal(first.owns(firstSession),false);
+  assert.equal(first.write({position:99}),false);
+  assert.equal(first.read().playback.position,20);
+  const delayed = values.get(first.key);
+  first.write({position:25},{claim:true});
+  const latestSession = first.record.session;
+  values.set(first.key,delayed); // A previously-started lower-revision write lands last.
+  assert.equal(first.owns(latestSession),false);
+  assert.equal(first.read().owner,'second');
+  first.write({position:30},{claim:true});
+  assert.equal(first.owns(firstSession),false); // A callback from its old session is fenced too.
+  assert.equal(first.owns(),true);
+});
+
 test('restored or paused deleted songs return to the queue head instead of the library copy', () => {
   const old={id:'removed',job_id:'old',status:'completed'}, first={id:'head',job_id:'new',status:'queued'};
   for (const playing of [false,true]) {
@@ -144,7 +176,7 @@ test('two devices play, pause, seek and mix independently across shared queue up
     assert.equal(phone.state.position,9); assert.equal(phone.state.levels.lead_vocals,1);
     assert.ok(desktopSources.every(s=>!s.stopped)); assert.deepEqual(desktop.sources,desktopSources);
     assert.equal(mobile.sources.length,0);
-    command(phone,'select',{entry_id:'two'});
+    command(phone,'next',{entry_id:'one'});
     assert.equal(phone.entry.id,'two'); assert.equal(phone.state.started_at,null);
     assert.equal(computer.entry.id,'one');
     room.entries[1].status='completed'; snapshot(phone); command(phone,'ready');
@@ -196,13 +228,15 @@ test('queue to top inserts after the playing song without changing either device
   assert.ok(computer.state.playing && phone.state.playing);
 });
 
-test('idle playback follows queue order while an active performance keeps its song and position', () => {
+test('only idle preselection follows queue order; pause, refresh and seek preserve a performance', t => {
+  let now=100; t.mock.method(Date,'now',()=>now*1000);
   const entries = ['one','two','three'].map(id => ({...song,id,status:'completed'}));
-  const idle = new LocalPlayback({entry:entries[0],position:12,pitch_semitones:2,levels:{lead_vocals:.35}});
+  const idle = new LocalPlayback({levels:{lead_vocals:.35}});
   idle.reconcile({entries});
-  assert.equal(idle.state.position,12); // Ordinary progress pushes preserve pause.
   const singing = new LocalPlayback(idle.save());
   singing.command('play',{},entries); singing.command('ready',{},entries);
+  singing.command('pitch',{pitch_semitones:2},entries);
+  now+=12;
   const before = singing.save();
   const reordered = queueToTop(entries,'three').map(id => entries.find(e => e.id === id));
   idle.reconcile({entries:reordered}); singing.reconcile({entries:reordered});
@@ -210,13 +244,83 @@ test('idle playback follows queue order while an active performance keeps its so
   assert.equal(idle.state.playing,false); assert.equal(idle.state.pitch_semitones,0);
   assert.equal(idle.state.levels.lead_vocals,.35);
   assert.deepEqual(singing.save(),before);
-  const restored = new LocalPlayback({entry:entries[1],position:99});
-  restored.reconcile({entries:reordered});
-  assert.equal(restored.entry.id,'three'); assert.equal(restored.state.position,0);
+  singing.command('pause',{},reordered);
+  for (const paused of [singing,new LocalPlayback(singing.save())]) {
+    paused.reconcile({entries:reordered});
+    assert.equal(paused.entry.id,'one'); assert.equal(paused.position(),12);
+    assert.equal(paused.state.playing,false); assert.equal(paused.state.pitch_semitones,2);
+    paused.command('play',{},reordered); paused.command('ready',{},reordered);
+    assert.equal(paused.position(),12);
+  }
+  const seeked = new LocalPlayback(); seeked.reconcile({entries});
+  seeked.command('seek',{position:8},entries); seeked.reconcile({entries:reordered});
+  assert.equal(seeked.entry.id,'one'); assert.equal(seeked.position(),8);
   idle.command('play',{},reordered); idle.command('ready',{},reordered);
   assert.equal(idle.entry.id,'three');
   idle.command('next',{},reordered); idle.reconcile({entries:reordered});
   assert.equal(idle.entry.id,'one');
+});
+
+test('a ready song behind a preparing head retains its place when paused and resumed', t => {
+  let now=100; t.mock.method(Date,'now',()=>now*1000);
+  const entries=[{...song,status:'queued'},{...song,id:'ready',status:'completed'}];
+  const local=new LocalPlayback(); local.reconcile({entries});
+  local.command('play',{},entries); local.reconcile({entries}); local.command('ready',{},entries);
+  now+=30;
+  local.command('pause',{},entries); local.reconcile({entries});
+  assert.equal(local.entry.id,'ready'); assert.equal(local.position(),30);
+  local.command('play',{},entries); local.reconcile({entries}); local.command('ready',{},entries);
+  now+=2;
+  assert.equal(local.entry.id,'ready'); assert.equal(local.position(),32);
+});
+
+test('failed finishes survive reload, retry idempotently and do not repeat or skip the next song', async t => {
+  let now=100; t.mock.method(Date,'now',()=>now*1000);
+  const entries=['one','two','three'].map(id=>({...song,id,status:'completed'}));
+  const room={entries:[...entries],history:[]};
+  let local=new LocalPlayback(); local.reconcile(room);
+  local.command('play',{},entries); local.command('ready',{},entries); now+=5;
+  local.command('next',{entry_id:'one'},entries,60);
+  const finish={action:'finish',entry_id:'one',playback_started_at:160};
+  await assert.rejects(local.flushFinishes(async body=>{
+    assert.deepEqual(body,finish); throw new Error('offline');
+  },()=>assert.fail('unconfirmed operation')));
+  local=new LocalPlayback(JSON.parse(JSON.stringify(local.save()))); local.reconcile(room);
+  assert.equal(local.entry.id,'two'); assert.equal(local.pendingFinishes.length,1);
+  const send=async body=>{
+    const entry=room.entries.find(e=>e.id===body.entry_id);
+    if(entry) { room.entries=room.entries.filter(e=>e!==entry); room.history.push(entry.id); }
+    return {...room};
+  };
+  await assert.rejects(local.flushFinishes(async body=>{
+    await send(body); throw new Error('response lost');
+  },()=>assert.fail('lost response')));
+  local.command('ready',{},room.entries); now+=5;
+  local.command('next',{entry_id:'two'},room.entries,60);
+  assert.equal(local.pendingFinishes.length,2);
+  const sent=[];
+  await local.flushFinishes(async body=>{sent.push(body); return send(body);},updated=>local.reconcile(updated));
+  assert.deepEqual(sent,[finish,{action:'finish',entry_id:'two',playback_started_at:165}]);
+  assert.deepEqual(room.history,['one','two']); assert.deepEqual(room.entries.map(e=>e.id),['three']);
+  assert.equal(local.entry.id,'three'); assert.equal(local.state.playing,true);
+  assert.equal(local.pendingFinishes.length,0);
+  assert.equal(new LocalPlayback(local.save()).pendingFinishes.length,0);
+});
+
+test('an in-flight finish transfers with the audio session; the old response cannot overwrite its successor', async () => {
+  const entries=['one','two','three'].map(id=>({...song,id,status:'completed'}));
+  const first=new LocalPlayback(); first.reconcile({entries}); first.command('next',{},entries);
+  let resolve, owns=true, accepted=0;
+  const pending=first.flushFinishes(()=>new Promise(done=>resolve=done),()=>accepted++,()=>owns);
+  const second=new LocalPlayback(JSON.parse(JSON.stringify(first.save())));
+  owns=false;
+  second.command('next',{},entries);
+  resolve({entries:entries.slice(1)}); await pending;
+  assert.equal(accepted,0); assert.equal(first.pendingFinishes.length,1);
+  assert.equal(second.entry.id,'three'); assert.equal(second.pendingFinishes.length,2);
+  const sent=[];
+  await second.flushFinishes(async body=>{sent.push(body.entry_id);return {entries:entries.slice(2)};},()=>{});
+  assert.deepEqual(sent,['one','two']); assert.equal(second.pendingFinishes.length,0);
 });
 
 test('manual preparation actions cover failures and backoff without interrupting an older performance', () => {
@@ -260,7 +364,7 @@ test('browser refresh restores only its own playback intent, with no clock befor
   let now=100; t.mock.method(Date,'now',()=>now*1000);
   const room={entries:[{...song,status:'completed'},{...song,id:'two',status:'completed'}]};
   const computer=new LocalPlayback(); computer.reconcile(room);
-  computer.command('select',{entry_id:'two'},room.entries); computer.command('ready',{},room.entries);
+  computer.command('next',{entry_id:'one'},room.entries); computer.command('ready',{},room.entries);
   computer.command('lead',{level:1},room.entries); computer.command('pitch',{pitch_semitones:2},room.entries);
   now+=7;
   const restored=new LocalPlayback(JSON.parse(JSON.stringify(computer.save())));
@@ -321,11 +425,12 @@ test('each new performance resets pitch while pause, seek, refresh and other dev
   assert.equal(local.state.pitch_semitones,0); assert.equal(local.state.position,0);
   assert.equal(local.state.started_at,null); assert.equal(local.state.playing,true);
   local.command('pitch',{pitch_semitones:2},entries);
-  local.command('select',{entry_id:song.id},entries);
+  local.command('next',{entry_id:'two'},[...entries,{...song,id:'three',status:'completed'}]);
   assert.equal(local.state.pitch_semitones,0);
   local.command('pitch',{pitch_semitones:4},entries);
-  local.select({...song,status:'queued'},true); local.reconcile({entries:[entries[1]]});
-  assert.equal(local.entry.id,'two'); assert.equal(local.state.pitch_semitones,0);
+  local.select({...song,status:'queued'},true);
+  local.reconcile({entries:[{...entries[1],id:'new-request'}]});
+  assert.equal(local.entry.id,'new-request'); assert.equal(local.state.pitch_semitones,0);
   other.reconcile({entries}); assert.equal(other.state.pitch_semitones,3);
 });
 
@@ -349,7 +454,7 @@ test('lead percentage preserves the mix and playback through adjustment, refresh
     local.command('lead',{level},entries);
     assert.equal(local.state.levels.lead_vocals,expected);
   }
-  local.command('select',{entry_id:'two'},[...entries,{...song,id:'two',status:'completed'}]);
+  local.command('next',{entry_id:'one'},[...entries,{...song,id:'two',status:'completed'}]);
   assert.deepEqual(local.state.levels,{instrumental:1,backing_vocals:1,lead_vocals:.35});
   assert.equal(new LocalPlayback(local.save()).state.levels.lead_vocals,.35);
   p.clear();

@@ -559,10 +559,29 @@ def test_restored_playlist_priority_is_applied_before_starting_worker(tmp_path):
     second, _ = app.state.store.create(JobRequest(url='https://youtu.be/2Vv-BfVoq4g'), 'test')
     state = app.state.room.read()
     state['entries'] = [dict(id='second',job_id=second['id']), dict(id='first',job_id=first['id'])]
+    state['current_id'] = 'first'  # Persisted legacy transport cannot override the modern queue.
     app.state.room.save(state)
     with TestClient(app) as client:
         assert client.get('/health').json()['running_job'] == second['id']
         assert app.state.store.read(first['id'])['status'] == 'queued'
+
+
+def test_reorder_and_cancel_recovery_use_queue_order_despite_legacy_transport(tmp_path):
+    app = create_app(tmp_path, version='test')
+    store, worker, room = app.state.store, app.state.worker, app.state.room
+    jobs = [store.create(JobRequest(url=f'https://youtu.be/{i:011d}'), 'test')[0] for i in range(3)]
+    for job in jobs:
+        worker.queue.put_nowait(job['id'])
+    state = room.read()
+    state.update(entries=[dict(id=str(i), job_id=job['id']) for i, job in enumerate(jobs[:2])],
+                 current_id='0', playing=True)
+    room.save(state)
+    room.command(RoomCommand(action='reorder', order=['1', '0']))
+    asyncio.run(worker.cancel_unneeded(jobs[2]['id']))
+    assert store.read(jobs[2]['id'])['status'] == 'cancelled'
+    assert [worker.queue.get_nowait() for _ in range(2)] == [jobs[1]['id'], jobs[0]['id']]
+    assert worker.queue.empty()
+    assert room.read()['current_id'] == '0'  # Preparation changes do not rewrite legacy playback.
 
 
 def test_removed_pending_song_does_not_create_a_new_job(tmp_path):

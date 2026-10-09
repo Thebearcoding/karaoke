@@ -354,7 +354,7 @@ class Worker:
                 self.queue.put_nowait(job_id)
             with self.store.connect() as db:
                 state = json.loads(db.execute('SELECT state FROM room WHERE id=1').fetchone()[0])
-            self.prioritize([e['job_id'] for e in sorted(state['entries'], key=lambda e: e['id'] != state['current_id'])])
+            self.prioritize(Room.preparation_order(state))
             self.store.cache.enforce()
         finally:
             self.cancelled.discard(job_id)
@@ -631,7 +631,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
             except BlockingIOError as error:
                 raise RuntimeError('此任务目录已有服务在运行。每个 GPU 队列只运行一个 API worker。') from error
             await worker.start()
-            worker.prioritize(room.preparation_order())
+            worker.prioritize(room.preparation_order(room.read()))
             try:
                 yield
             finally:

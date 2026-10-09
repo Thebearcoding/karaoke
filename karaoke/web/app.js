@@ -14,7 +14,8 @@ try { tabStorage = localStorage; } catch {}
 const tabs = new PlaybackTabs(tabStorage, `${Date.now()}-${Math.random()}`, savedPlayback);
 let playback = new LocalPlayback(tabs.read().playback);
 if (!tabs.record.owner) tabs.write(playback.save(), {claim:true});
-let tabRevision = tabs.record.revision;
+let tabChange = tabs.record.change;
+let finishRetry, finishSending, finishDelay = 1000, queueSyncError = false, connected = false;
 let roomState = {entries:[], revision:0}, receivedRoom = false, viewRevision = 0, lastPlaybackSave = 0;
 const stages = {download:'下载音频', download_video:'下载视频', verify_video:'校验视频', decode_audio:'提取音频', decode_native:'准备音频母版', separate_music:'分离伴奏', separate_lead:'分离主唱', package_two_stems:'整理音轨', package_three_stems:'整理音轨', resample_vocals:'整理人声', transcribe:'识别歌词', prepare_lyrics:'整理歌词', align_words:'对齐歌词', align_phonemes:'对齐起唱时间', align_repeats:'检查重复段落', align_context:'校准字幕', validate_timing:'核对起唱时间', render:'生成字幕画面', mux_video:'合成字幕 MV'};
 let state = {entries:[], current_id:null, playing:false, position:0, started_at:null, levels:{instrumental:1,backing_vocals:1,lead_vocals:0}, revision:0};
@@ -72,35 +73,72 @@ function toast(message, entry) {
   toastTimer = setTimeout(() => $('toast').hidden = true, entry ? 6500 : 3800);
 }
 
-async function request(path, body) {
-  const response = await fetch(path, body ? {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)} : {});
-  const data = await response.json();
-  if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : '请求没有成功，请检查输入后重试');
-  return data;
+async function request(path, body, timeout = 0) {
+  const controller = new AbortController();
+  const timer = timeout ? setTimeout(() => controller.abort(), timeout) : null;
+  try {
+    const response = await fetch(path, {signal:controller.signal, ...(body ?
+      {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)} : {})});
+    const data = await response.json();
+    if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : '请求没有成功，请检查输入后重试');
+    return data;
+  } finally { clearTimeout(timer); }
 }
 
-async function command(action, extra = {}) {
+async function command(action, extra = {}, claim = !['ready','buffering'].includes(action)) {
   try {
     if (['play','pause','seek','restart','next','lead','pitch','ready','buffering'].includes(action) ||
         (action === 'remove' && extra.entry_id === state.current_id)) {
-      if (['ready','buffering'].includes(action) && !tabs.owns()) return null;
+      if (!claim && !tabs.owns()) return null;
       if (extra.revision !== undefined && extra.revision !== state.revision) return null;
-      if (!['ready','buffering'].includes(action) && claimPlayback() && playback.state.playing && action !== 'pause')
+      const claimed = claim && claimPlayback();
+      const session = tabs.record.session;
+      if (claimed && playback.state.playing && action !== 'pause')
         await player.unlock();
-      const {finished} = playback.command(action, extra, state.entries);
+      if (!tabs.owns(session)) { followPlayback(); return null; }
+      playback.command(action, extra, state.entries, clockOffset);
       renderState();
       savePlayback();
-      if (finished) {
-        // Completing a queue entry is shared; starting/stopping audio is not.
-        if (finished.playback_started_at !== null) finished.playback_started_at += clockOffset;
-        acceptState(await request('/v1/room/commands', {action:'finish', ...finished}));
-      }
+      syncFinished();
       return state;
     }
     const updated = await request('/v1/room/commands', {action, ...extra});
     acceptState(updated);
     return updated;
   } catch (error) { toast(error.message); return null; }
+}
+
+function renderConnection() {
+  $('connection-dot').classList.toggle('online', connected && !queueSyncError);
+  $('connection-text').textContent = queueSyncError ? '队列待同步' : connected ? '在线' : '正在重连';
+}
+
+async function syncFinished() {
+  if (finishSending || finishRetry || !tabs.owns() || !playback.pendingFinishes.length) return;
+  const sending = finishSending = playback, session = tabs.record.session;
+  const owns = () => playback === sending && tabs.owns(session);
+  try {
+    await sending.flushFinishes(body => request('/v1/room/commands', body, 10000), updated => {
+      acceptState(updated);
+      savePlayback();
+      queueSyncError = false; finishDelay = 1000;
+    }, owns);
+  } catch {
+    if (owns()) {
+      queueSyncError = true;
+      finishRetry = setTimeout(() => { finishRetry = null; syncFinished(); }, finishDelay);
+      finishDelay = Math.min(30000, finishDelay * 2);
+    }
+  } finally {
+    finishSending = null;
+    renderConnection();
+    if (playback !== sending) syncFinished();
+  }
+}
+
+function retryFinished() {
+  clearTimeout(finishRetry); finishRetry = null;
+  syncFinished();
 }
 
 function switchView(next, {scroll = true} = {}) {
@@ -534,7 +572,7 @@ function renderQueue() {
   $('upcoming-panel').hidden = queueTab !== 'upcoming';
   $('history-panel').hidden = queueTab !== 'history';
   renderHistory();
-  const signature = JSON.stringify([state.entries.map(({stage_progress, active_stages, ...entry}) => entry), state.current_id, state.playing]);
+  const signature = JSON.stringify([state.entries.map(({stage_progress, active_stages, ...entry}) => entry), state.current_id, state.playing, playback.pendingFinishes]);
   $('queue-count').textContent = String(state.entries.length).padStart(2,'0');
   $('nav-count').textContent = state.entries.length;
   $('queue-empty').hidden = state.entries.length > 0;
@@ -549,12 +587,13 @@ function renderQueue() {
   queueSignature = signature;
   $('queue-list').innerHTML = state.entries.map((entry, i) => {
     const active = entry.id === state.current_id;
+    const finishing = playback.isFinished(entry.id);
     const retry = preparationRetry(entry);
     const status = entry.status === 'running' || !statusText(entry) ? '' : `<span class="entry-status ${entry.status === 'queued' ? 'preparing' : ''}">${escape(statusText(entry))}</span>`;
     return `<article class="queue-entry ${active ? 'current' : ''}" data-entry="${escape(entry.id)}"><span class="entry-number">${active && state.playing ? '♫' : String(i+1).padStart(2,'0')}</span>
       <button class="entry-cover" data-action="preview" aria-label="${active ? '查看播放' : '预览'}：${escape(entry.title)}">${entry.poster ? `<img class="entry-art" src="${escape(entry.poster)}" alt="">` : `<span class="entry-art">♪</span>`}</button>
-      <div class="entry-info"><h3 class="entry-title"><button data-action="preview">${escape(entry.title)}</button></h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || 'YouTube 视频')}</p>${entry.status === 'failed' ? '' : preparationElapsedHTML(entry) || status}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : entry.status === 'failed' ? `<p class="entry-error">${escape(statusText(entry))}</p>` : ''}</div>
-      <div class="entry-tools">${retry ? `<button data-action="${retry.action}" aria-label="${retry.label}：${escape(entry.title)}">${icon('restart')}${retry.label}</button>` : ''}<button data-action="top" aria-label="置顶：${escape(entry.title)}" ${queueToTop(state.entries, entry.id, state.playing ? state.current_id : null) ? '' : 'disabled'}>${icon('up')}置顶</button><button data-action="remove" aria-label="移除：${escape(entry.title)}">${icon('trash')}移除</button></div></article>`;
+      <div class="entry-info"><h3 class="entry-title"><button data-action="preview">${escape(entry.title)}</button></h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || 'YouTube 视频')}</p>${finishing ? '<span class="entry-status">等待同步移除</span>' : entry.status === 'failed' ? '' : preparationElapsedHTML(entry) || status}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : entry.status === 'failed' ? `<p class="entry-error">${escape(statusText(entry))}</p>` : ''}</div>
+      <div class="entry-tools">${retry && !finishing ? `<button data-action="${retry.action}" aria-label="${retry.label}：${escape(entry.title)}">${icon('restart')}${retry.label}</button>` : ''}<button data-action="top" aria-label="置顶：${escape(entry.title)}" ${!finishing && queueToTop(state.entries, entry.id, state.playing ? state.current_id : null) ? '' : 'disabled'}>${icon('up')}置顶</button><button data-action="remove" aria-label="移除：${escape(entry.title)}" ${finishing ? 'disabled' : ''}>${icon('trash')}移除</button></div></article>`;
   }).join('');
 }
 
@@ -646,7 +685,7 @@ function updateTime(position) {
   updateCover();
 }
 
-const player = new Player($('video'), updateTime, id => tabs.owns() && command('next', {entry_id:id}));
+const player = new Player($('video'), updateTime, id => command('next', {entry_id:id}, false));
 let bufferingRequest;
 player.onBuffering = (position, startedAt, entryId = player.entry?.id) => {
   const token = `${entryId}:${startedAt}`;
@@ -712,6 +751,7 @@ function acceptState(updated) {
   receivedRoom = true;
   clockOffset = updated.server_time - Date.now()/1000;
   renderState();
+  syncFinished();
 }
 
 function renderState() {
@@ -735,8 +775,10 @@ function renderState() {
 async function activate() {
   loadError = '';
   claimPlayback();
+  const session = tabs.record.session;
   try { await player.unlock(); }
   catch { toast('浏览器还没有启用声音，请再点一次播放'); return false; }
+  if (!tabs.owns(session)) { followPlayback(); return false; }
   return true;
 }
 
@@ -928,7 +970,7 @@ async function nextSong() {
   if (skipping || !state.current_id) return;
   const entry_id = state.current_id;
   skipping = true; updateTransport();
-  try { await activate(); await command('next', {entry_id}); }
+  try { if (await activate()) await command('next', {entry_id}); }
   finally { skipping = false; updateTransport(); }
 }
 document.querySelectorAll('[data-next]').forEach(button => button.onclick = nextSong);
@@ -987,41 +1029,45 @@ function connectEvents() {
   const source = events = new EventSource('/v1/room/events' + (job ? `?job_id=${encodeURIComponent(job)}` : ''));
   source.addEventListener('room', event => {
     if (source !== events) return;
-    $('connection-dot').classList.add('online');
-    $('connection-text').textContent = '在线';
+    connected = true; renderConnection();
     acceptState(JSON.parse(event.data));
   });
+  source.onopen = () => { if (source === events) retryFinished(); };
   source.onerror = () => {
     if (source !== events) return;
-    $('connection-dot').classList.remove('online'); $('connection-text').textContent = '正在重连';
+    connected = false; renderConnection();
   };
 }
 function savePlayback(position) {
   lastPlaybackSave = Date.now();
   const saved = playback.save(position);
-  if (tabs.write(saved)) tabRevision = tabs.record.revision;
+  if (!tabs.write(saved)) { followPlayback(); return; }
+  tabChange = tabs.record.change;
   try { sessionStorage.setItem('karaokePlayback', JSON.stringify(saved)); } catch {}
 }
 function followPlayback() {
   const record = tabs.read();
-  if (record.revision === tabRevision) return;
-  tabRevision = record.revision;
-  if (record.owner !== tabs.id) {
-    player.clear(); readySent = null;
-    playback = new LocalPlayback(record.playback);
-    renderState();
-  }
+  if (record.change === tabChange) return;
+  tabChange = record.change;
+  player.clear(); readySent = null;
+  playback = new LocalPlayback(record.playback);
+  queueSyncError = false;
+  clearTimeout(finishRetry); finishRetry = null;
+  renderState(); renderConnection();
 }
 function claimPlayback() {
   followPlayback();
   if (tabs.owns()) return false;
   playback.reconcile(roomState);
   playback = new LocalPlayback(playback.save());
-  tabs.write(playback.save(), {claim:true}); tabRevision = tabs.record.revision;
+  if (!tabs.write(playback.save(), {claim:true})) { followPlayback(); return false; }
+  tabChange = tabs.record.change;
   renderState();
+  syncFinished();
   return true;
 }
 window.addEventListener('storage', event => { if (event.key === tabs.key) followPlayback(); });
+window.addEventListener('online', retryFinished);
 window.addEventListener('pagehide', () => {
   if (tabs.owns()) { tabs.write(playback.save(), {release:true}); player.stop(); }
   events?.close();
@@ -1029,6 +1075,7 @@ window.addEventListener('pagehide', () => {
 function resumePage() {
   followPlayback();
   events?.close(); events = null; connectEvents();
+  retryFinished();
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) resumePage(); });
 window.addEventListener('pageshow', event => { if (event.persisted) resumePage(); });
