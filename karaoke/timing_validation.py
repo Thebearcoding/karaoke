@@ -122,11 +122,18 @@ def closure_pronunciation(unit, predictions):
                                      for items in matches)
 
 
+def matching_onsets(cue, groups):
+    """Match lexical starts even when old tokens include leading punctuation."""
+    return {g['first']: u for g in groups for u in cue['units']
+            if u['first'] <= g['first'] < u['stop']
+            and not normalized(cue['text'][u['first']:g['first']])}
+
+
 def displaced_units(cue, views, tolerance):
     """Coarse agreement selects another observation, never assigns a time."""
-    old = {u['first']: u for u in cue['units']}
     if len(views) != 2 or not views[0] or len(views[0]) != len(views[1]):
         return []
+    old = matching_onsets(cue, views[0])
     return [a['first'] for a, b in zip(*views) if a['first'] in old
             and (a['first'], a['stop'], a['text']) == (b['first'], b['stop'], b['text'])
             # A coarse disagreement is uncertainty, not permission to keep a
@@ -397,12 +404,13 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                 raise ValueError('Acoustic localization context exceeds 60 seconds')
             letters = [c for c in cue['text'] if c.isalpha()]
             review_language = 'English' if letters and all(c.isascii() for c in letters) else language
-            observation, offset = cue, None
+            observation, offset, predictions = cue, None, None
             if index in repeated:
                 first, stop, text, start_char = repeated[index]
                 begin = result[first-1]['units'][-1]['start']+.015 if first else 0.
                 end = result[stop]['units'][0]['start'] if stop<len(result) else len(wave)/44100
-                if 0 < end-begin <= 60:
+                joint_budget = 32-2*max(protocol.get('context_padding_seconds', [0.]))
+                if 0 < end-begin <= joint_budget:
                     # Identical neighbouring phrases need occurrence identity:
                     # align their complete text once in the same audio context.
                     observation = dict(text=text, aligned_start=begin, aligned_end=end,
@@ -411,12 +419,22 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                     report['occurrence_context'] = dict(lines=[first+1,stop], source_range=[begin,end])
             views = witness(observation, wave, language=review_language)
             if offset is not None:
+                joint = predict(observation, views, [begin,end], review_language)
+                report['occurrence_context'].update(witnesses=views, predictions=joint)
                 if any(normalized(''.join(u['text'] for u in view)) != normalized(observation['text']) or
-                       any(a['start']>=b['start'] for a,b in zip(view,view[1:])) for view in views):
+                       any(a['start']>=b['start'] for a,b in zip(view,view[1:])) for view in [*views,*joint]):
                     raise ValueError('Incomplete repeated phrase context')
-                views = [[dict(u, first=u['first']-offset, stop=u['stop']-offset)
-                          for u in view if offset<=u['first']<u['stop']<=offset+len(cue['text'])]
-                         for view in views]
+                predictions = [[dict(u, first=u['first']-offset, stop=u['stop']-offset)
+                                for u in view if offset<=u['first']<u['stop']<=offset+len(cue['text'])]
+                               for view in joint]
+                if len(predictions)!=3 or not all(predictions):
+                    raise ValueError('Incomplete repeated phrase predictions')
+                # Keep occurrence identity through fine alignment as well.
+                # Use its measured phrase envelope only to reobserve both
+                # audio views; the normal cross-model checks still adopt times.
+                observation = dict(cue, aligned_start=min(v[0]['start'] for v in predictions),
+                    aligned_end=max(v[-1]['end'] for v in predictions), audio_bounds=[begin,end])
+                views = witness(observation, wave, language=review_language)
             report['witnesses'] = views
             signature = lambda v: [(u['first'], u['stop'], u['text']) for u in v]
             if (len(views)!=2 or not views[0] or signature(views[0]) != signature(views[1])
@@ -431,7 +449,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                    or not 0 <= u['start'] < u['end'] <= len(wave)/44100 for v in views for u in v) or any(
                        a['start'] >= b['start'] for v in views for a,b in zip(v,v[1:])):
                 raise ValueError('Invalid acoustic localization intervals')
-            old = {u['first']:u for u in cue['units']}
+            old = matching_onsets(cue, views[0])
             # Coarse localization need not meet the final onset tolerance to
             # justify another observation. Two nearby estimates can both
             # exclude an old time while differing by more than 100 ms.
@@ -454,7 +472,8 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             if not suspects:
                 report['status'] = 'no_corroborated_displacement'
                 continue
-            predictions = predict(cue, views, bounds, review_language)
+            if predictions is None:
+                predictions = predict(cue, views, bounds, review_language)
             report['predictions'] = predictions
             confirmed, proposals = {}, {}
             for group in views[0]:
