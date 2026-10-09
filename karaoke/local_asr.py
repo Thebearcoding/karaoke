@@ -1,15 +1,11 @@
 """Offline Whisper inference with explicit, fully covered audio batches."""
 from collections import Counter
-from contextlib import contextmanager
 from dataclasses import asdict
 from importlib.metadata import version
 import hashlib
 import json
 import os
 from pathlib import Path
-import subprocess
-import sys
-import tempfile
 
 if __package__:
     from .stage_cache import StageCache, digest
@@ -93,55 +89,6 @@ def detect_whisper_language(model, samples):
     return detect_audio_language(samples, detect)
 
 
-@contextmanager
-def isolated_recognizer(config, device, scratch):
-    """Keep CTranslate2's CUDA libraries out of the PyTorch alignment process."""
-    import numpy as np
-    with tempfile.TemporaryDirectory(prefix='recognizer-', dir=scratch) as folder:
-        audio = Path(folder)/'audio.npy'
-        process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
-            '--worker', device, json.dumps(config)], stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, text=True, bufsize=1)
-        try:
-            def recognize(samples):
-                np.save(audio, samples, allow_pickle=False)
-                process.stdin.write(str(audio)+'\n')
-                process.stdin.flush()
-                response = process.stdout.readline()
-                if not response:
-                    raise RuntimeError(f'Local recognizer exited ({process.wait()}); see stage log')
-                data = json.loads(response)
-                if 'error' in data:
-                    raise ValueError(data['error'])
-                return data
-            yield recognize
-        finally:
-            process.stdin.close()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-            process.stdout.close()
-
-
-def recognition_worker(device, config):
-    import numpy as np
-    from faster_whisper import WhisperModel
-    model = WhisperModel(config['model'], device=device, compute_type=config['compute_type'],
-                         cpu_threads=4, local_files_only=True)
-    for path in sys.stdin:
-        try:
-            result = transcribe(model, np.load(path.strip(), allow_pickle=False), 'auto', config['batch_size'])
-        except ValueError as error:
-            result = dict(error=str(error))
-        print(json.dumps(result, ensure_ascii=False), flush=True)
-
-
 def cached_recognition(audio, language, output):
     from faster_whisper import WhisperModel
     from faster_whisper.audio import decode_audio
@@ -162,9 +109,3 @@ def cached_recognition(audio, language, output):
             data['local_inference'].update(config, device=device)
             path.write_text(json.dumps(data, ensure_ascii=False)+'\n')
     return json.loads(path.read_text())
-
-
-if __name__ == '__main__':
-    if len(sys.argv) != 4 or sys.argv[1] != '--worker':
-        raise SystemExit('Use --worker DEVICE CONFIG for isolated recognition')
-    recognition_worker(sys.argv[2], json.loads(sys.argv[3]))

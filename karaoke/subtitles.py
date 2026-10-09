@@ -69,12 +69,6 @@ def highlight_coverage_errors(cues, language):
 def collapsed_phrase(cue, language):
     """Detect gross phrase compression, not normal variation in singing speed."""
     atoms = list(highlight_spans(cue['text'], language))
-    # Display tokenization intentionally leaves Japanese reading groups to
-    # the acoustic model. Compression still has to cover those scripts,
-    # including a failed group that swallowed a complete sentence.
-    covered = {i for first, stop in atoms for i in range(first, stop)}
-    atoms.extend((i, i+1) for i, char in enumerate(cue['text'])
-                 if i not in covered and unicodedata.category(char)[0] in ('L', 'N'))
     spans = [dict(first=0, stop=len(cue['text']),
                   start=cue.get('aligned_start', cue.get('start')),
                   end=cue.get('aligned_end', cue.get('end'))), *(cue.get('units') or [])]

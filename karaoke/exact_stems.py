@@ -165,7 +165,7 @@ def encode_previews(sources, output, gain, frames, channels):
     """Re-encode the whole group at one gain if lossy reconstruction overshoots."""
     for _ in range(3):
         previews, clipped = {}, []
-        with ThreadPoolExecutor(max_workers=min(3, len(sources))) as pool:
+        with ThreadPoolExecutor(max_workers=min(2, len(sources))) as pool:
             pending = {name: pool.submit(encode_preview, source, Path(output)/f'{name}.mp3', gain, frames, channels)
                        for name, source in sources.items()}
             for name, future in pending.items():

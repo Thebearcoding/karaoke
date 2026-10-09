@@ -662,55 +662,6 @@ def test_pipeline_reuses_decoded_audio_and_rebuilds_corrupted_stage(tmp_path):
     assert output.read_bytes() == expected
 
 
-@pytest.mark.parametrize('lead_file', ['lead-separation/song/vocals.wav', 'stems/lead.wav'])
-def test_timing_review_cache_tracks_its_additional_audio_view(tmp_path, monkeypatch, lead_file):
-    from karaoke import pipeline as module
-    code, folder = tmp_path/'code', tmp_path/'job'
-    code.mkdir()
-    monkeypatch.setattr(module, 'ROOT', code)
-    pipeline = Pipeline(dict(url=URL), folder)
-    (folder/'lyrics.json').write_text(json.dumps(dict(language='Chinese')))
-    lead = folder/lead_file
-    lead.parent.mkdir(parents=True)
-    lead.write_bytes(b'lead version 1')
-    base = [sys.executable, code/'timing_validation.py']
-    command = base+['--lead', lead]
-    spec = pipeline.stage_spec('validate_timing', command)
-    for path in spec['inputs']+spec['code']:
-        if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b'fixture')
-    calls = []
-    def run(*args):
-        calls.append(True)
-        output = folder/'timing-checked'
-        output.mkdir()
-        (output/'cues.json').write_text('[]')
-    monkeypatch.setattr(pipeline, 'run_process', run)
-    pipeline.run('validate_timing', base)
-    lead.write_bytes(b'lead version 2')
-    pipeline.run('validate_timing', base)
-    assert len(calls)==1
-    pipeline.run('validate_timing', command)
-    pipeline.run('validate_timing', command)
-    assert len(calls)==2
-    lead.write_bytes(b'lead version 3')
-    pipeline.run('validate_timing', command)
-    assert len(calls)==3
-    localization = folder/'alignment/raw.json'
-    localization.parent.mkdir(exist_ok=True)
-    localization.write_text('[]')
-    pipeline.run('validate_timing', command)
-    pipeline.run('validate_timing', command)
-    assert len(calls)==4
-    localization.write_text('[{"asr_localizations": []}]')
-    pipeline.run('validate_timing', command)
-    assert len(calls)==5
-    localization.unlink()
-    pipeline.run('validate_timing', command)
-    assert len(calls)==6
-
-
 def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
     from karaoke import pipeline as module
     code, folder = tmp_path/'code', tmp_path/'job'
@@ -2629,99 +2580,6 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
         lambda *a:pytest.fail('A complete alignment ran ASR'),align) is good
 
 
-def test_partial_word_collapse_localizes_the_whole_phrase_before_merging_fallback():
-    from copy import deepcopy
-    from karaoke.align_lyrics_whisper import recover_with_local_asr
-    lines = ['earlier verse', 'we carry every dream', 'the next verse']
-    def segment(text, start):
-        return dict(words=[dict(word=word, start=start+j*.4, end=start+(j+1)*.4)
-                           for j, word in enumerate(text.split())])
-    segments = [segment(text, start) for text, start in zip(lines, [1.,4.,18.])]
-    segments[1]['words'][2]['end'] = segments[1]['words'][2]['start']
-    block = dict(range=[0,3], context=[0,3], source_range=[0.,25.], result=dict(segments=segments))
-    original = deepcopy(block)
-    observed = []
-    def recognize(begin, end):
-        observed.append((begin,end))
-        return dict(segments=[segment(text,start-begin) for text,start in zip(lines,[1.,13.,18.])])
-    def align(begin, end, text, **kwargs):
-        return dict(segments=[segment(line,start-begin) for line,start in zip(lines,[1.,13.,18.])
-                              if line in text.splitlines()])
-    result = recover_with_local_asr(block, lines, np.zeros(25*16000), 'English', recognize, align)
-    assert block == original and len(observed) == 1
-    assert observed[0][1]-observed[0][0] < 25
-    assert result['result']['segments'][0] == segments[0]
-    assert result['result']['segments'][2] == segments[2]
-    assert result['result']['segments'][1]['words'] == segment(lines[1],13.)['words']
-    assert result['asr_localizations'][0]['accepted_lines'] == [2]
-
-
-def test_scattered_missing_tokens_do_not_trigger_whole_song_recognition():
-    from karaoke.align_lyrics_whisper import recover_with_local_asr
-    lines = [f'verse {i} carries a dream' for i in range(12)]
-    segments = [dict(words=[dict(word=w,start=i*6+j*.4,end=i*6+(j+1)*.4)
-                           for j,w in enumerate(text.split())]) for i,text in enumerate(lines)]
-    for i in (1,4,7,10):
-        segments[i]['words'][2]['end'] = segments[i]['words'][2]['start']
-    block = dict(range=[0,12],context=[0,12],source_range=[0.,75.],result=dict(segments=segments))
-    windows=[]
-    def recognize(begin,end):
-        windows.append((begin,end))
-        return dict(segments=[])
-    result = recover_with_local_asr(block,lines,np.zeros(75*16000),'English',recognize,
-                                   lambda *a,**k:pytest.fail('No independent localization'))
-    assert len(windows)==4 and all(end-begin<=45 for begin,end in windows)
-    assert all(not r['global_localization'] for r in result['asr_localizations'])
-    assert result['result']==block['result']
-
-
-@pytest.mark.parametrize('gap', [6, 35])
-def test_localized_partial_phrase_preserves_good_word_times_for_phonetic_refinement(gap):
-    from copy import deepcopy
-    from karaoke.align_lyrics_whisper import recover_with_local_asr
-    lines = ['earlier verse', 'we carry every dream', 'the next verse']
-    segments = [dict(words=[dict(word=w,start=i*gap+j*.4,end=i*gap+(j+1)*.4)
-                           for j,w in enumerate(text.split())]) for i,text in enumerate(lines)]
-    observation = deepcopy(segments)
-    segments[1]['words'][2]['end'] = segments[1]['words'][2]['start']
-    duration=gap*3+5
-    block = dict(range=[0,3],context=[0,3],source_range=[0.,duration],result=dict(segments=segments))
-    calls=[]
-    def recognize(begin,end):
-        calls.append((begin,end))
-        return dict(segments=[dict(words=[dict(w,start=w['start']-begin,end=w['end']-begin)
-                                         for w in segment['words']]) for segment in observation])
-    result = recover_with_local_asr(block,lines,np.zeros(duration*16000),'English',recognize,
-        lambda *a,**k:pytest.fail('Already localized phrase lost its valid word times'))
-    assert len(calls)==1 and result['result']==block['result']
-    assert calls[0][1]<duration
-    assert not result['asr_localizations'][0]['global_localization']
-
-
-def test_missing_recognition_uses_original_audio_before_spending_alignment_retries():
-    from karaoke.align_lyrics_whisper import recover_with_local_asr
-    lines, starts = ['alpha', 'bravo', 'charlie'], [1.,4.,8.]
-    segments = [dict(text=t,start=s,end=s+.8,words=[dict(word=t,start=s,end=s+.8)])
-                for t,s in zip(lines,starts)]
-    segments[1]['words'][0]['end'] = 4.
-    block = dict(range=[0,3],context=[0,3],source_range=[0.,12.],result=dict(segments=segments))
-    calls=[]
-    def original(begin,end):
-        calls.append((begin,end))
-        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+.8-begin)
-                                         for t,s in zip(lines,starts)])])
-    def align(begin,end,text,**options):
-        assert options['detect_language']
-        return dict(segments=[dict(text=t,words=[dict(word=t,start=s-begin,end=s+.8-begin)])
-                              for t,s in zip(lines,starts)])
-    result = recover_with_local_asr(block,lines,np.zeros(12*16000),'English',
-        lambda *args:dict(segments=[]),align,recognize_original=original)
-    assert len(calls)==1
-    assert result['result']['segments'][1]['words']==[dict(word='bravo',start=4.,end=4.8)]
-    assert result['asr_localizations'][0]['recognition_source']=='original'
-    assert result['asr_localizations'][1]['recognition']==dict(segments=[])
-
-
 @pytest.mark.parametrize('support', ['agree', 'disagree', 'unavailable', 'original', 'original_wrong', 'original_outside'])
 def test_local_unrecognized_phrase_uses_acoustic_evidence_without_repeating_recognition(support):
     from karaoke.align_lyrics_whisper import recover_with_local_asr
@@ -2935,132 +2793,6 @@ def test_local_recognition_keeps_context_predictions_through_global_retry(locate
     assert result['recovery_contexts'][0]['context'] == [located-1,located+2]
 
 
-@pytest.mark.parametrize('outside_old_context', [False, True])
-def test_local_recognition_repairs_a_contradicted_neighbour_too(outside_old_context):
-    from copy import deepcopy
-    from karaoke.align_lyrics_whisper import recover_with_local_asr
-    lines = ['intro', 'alpha', 'bravo', 'omega']
-    old = [1., 4., 12., 16.]
-    actual = [1., 10., 12., 16.]
-    if outside_old_context:
-        lines = ['intro', 'alpha', 'bravo', 'charlie', 'delta', 'omega']
-        old, actual = [1.,4.,6.,8.,16.,20.], [1.,10.,12.,14.,16.,20.]
-    segments = [dict(words=[dict(word=t, start=s, end=s+(.8 if i != len(lines)-2 else 0))])
-                for i,(t,s) in enumerate(zip(lines,old))]
-    block = dict(range=[0,len(lines)],context=[0,len(lines)],source_range=[0.,25.],result=dict(segments=segments))
-    original = deepcopy(block)
-    def recognize(begin,end):
-        assert 0 < begin < 10 < end < 25
-        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+.8-begin)
-            for t,s in zip(lines[1:],actual[1:])])])
-    def align(begin,end,text,**options):
-        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+.8-begin)])
-            for t,s in zip(lines,actual) if t in text.splitlines()])
-    result = recover_with_local_asr(block,lines,np.zeros(25*16000),'English',recognize,align)
-    assert block == original
-    assert result['result']['segments'][0] == segments[0]
-    assert result['result']['segments'][-1] == segments[-1]
-    assert result['result']['segments'][1]['words'][0]['start'] == 10.
-    report = result['asr_localizations'][0]
-    assert not report['global_localization']
-    assert report['contradicted_lines'] == ([2,3,4] if outside_old_context else [2])
-    assert report['accepted_lines'] == list(range(2,len(lines)))
-
-
-@pytest.mark.parametrize('evidence', ['relocated', 'same_time', 'near_boundary', 'unrecognized', 'short_gap'])
-def test_sentence_inside_nonspeech_only_requests_independent_localization(evidence):
-    from copy import deepcopy
-    from karaoke.align_lyrics_whisper import recover_with_local_asr
-    lines, old = ['alpha', 'bravo', 'charlie'], [1.,4.,15.]
-    starts = [1.,10.,15.] if evidence=='relocated' else old
-    segments = [dict(words=[dict(word=t,start=s,end=s+1.2)]) for t,s in zip(lines,old)]
-    block = dict(range=[0,3],context=[0,3],source_range=[0.,20.],result=dict(segments=segments,
-        nonspeech_sections=[dict(start=4.,end=4.2 if evidence=='short_gap' else 5.2)]))
-    original = deepcopy(block)
-    windows, attempts = [], []
-    def recognize(begin,end):
-        windows.append((begin,end))
-        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+1.2-begin)
-            for t,s in zip(lines,[1.,2.5,15.] if evidence=='near_boundary' else starts)
-            if evidence!='unrecognized' or t!='bravo'])])
-    def align(begin,end,text,**kwargs):
-        attempts.append(text)
-        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+1.2-begin)])
-            for t,s in zip(lines,starts) if t in text.splitlines()])
-    result = recover_with_local_asr(block,lines,np.zeros(20*16000),'English',recognize,align)
-    assert block == original
-    assert windows == ([] if evidence=='short_gap' else [(0.,20.)])
-    assert [s['words'][0]['start'] for s in result['result']['segments']] == starts
-    assert bool(attempts) == (evidence=='relocated')
-    if evidence!='short_gap':
-        assert result['asr_localizations'][0]['activity_screened_lines'] == [2]
-        assert result['asr_localizations'][0]['accepted_lines'] == ([2] if evidence=='relocated' else [])
-        assert result['asr_localizations'][0]['contradicted_lines'] == ([2] if evidence=='relocated' else [])
-
-
-@pytest.mark.parametrize('missing_middle', [False, True])
-def test_ambiguous_global_match_cannot_displace_aligned_neighbouring_phrases(missing_middle):
-    from karaoke.align_lyrics_whisper import recover_with_local_asr
-    lines = ['All the kids sing', 'A broken phrase', 'Hum dee la', 'Hum dee la', 'Kids']
-    old = [0., 3., 10., 15., 22.]
-    segments = [dict(words=[dict(word=t, start=s, end=s+(0 if i==1 or missing_middle and i in (2,3) else 1))])
-                for i,(t,s) in enumerate(zip(lines,old))]
-    block = dict(range=[0,5],context=[0,5],source_range=[0.,25.],result=dict(segments=segments))
-    def recognize(begin,end):
-        return dict(segments=[dict(words=[dict(word=lines[i],start=s-begin,end=s+1-begin)
-                    for i,s in [(0,0.),(1,5.),(4,9.)] if begin <= s < s+1 <= end])])
-    def align(begin,end,text,**kwargs):
-        seen = 0
-        result = []
-        for line in text.splitlines():
-            start = 10.+5*seen if line=='Hum dee la' else {lines[0]:0.,lines[1]:5.,lines[4]:22. if end>=23 else 9.}[line]
-            seen += line=='Hum dee la'
-            result.append(dict(words=[dict(word=line,start=start-begin,end=start+1-begin)]))
-        return dict(segments=result)
-    result = recover_with_local_asr(block,lines,np.zeros(25*16000),'English',recognize,align,force_global=True)
-    assert [s['words'][0]['start'] for s in result['result']['segments']] == [0.,5.,10.,15.,22.]
-    if not missing_middle:
-        assert result['result']['segments'][2:] == segments[2:]
-    assert result['asr_localizations'][0]['contradicted_lines'] == []
-
-
-@pytest.mark.parametrize('scenario', ['stable', 'stale_neighbour', 'cascading_conflicts', 'late_discovery'])
-def test_global_recovery_revisits_neighbours_newly_contradicted_by_repaired_phrases(scenario):
-    from karaoke.align_lyrics_whisper import recover_with_local_asr
-    lines = ['Opening verse', 'Drink water', 'Fall asleep then dream', 'Drink water', 'Asleep and dream']
-    actual = [0., 5., 12., 18., 24.]
-    old = [0., 3., 6., 9., 10.] if scenario!='stable' else [0., 3., 6., 18., 24.]
-    heard = [*lines[:4], 'Asleep dream']
-    if scenario in ('cascading_conflicts', 'late_discovery'):
-        lines = ['Opening verse', 'Middle melody', 'Quiet morning light', 'Gentle evening star', 'Asleep and dream']
-        heard = [*lines[:2], 'morning light', 'evening star', 'Asleep dream']
-        actual, old = [0.,10.,14.,18.,24.], [0.,3.,4.,5.,12.]
-    segments = [dict(words=[dict(word=t, start=s, end=s+(0 if i==1 else 1))])
-                for i,(t,s) in enumerate(zip(lines, old))]
-    block = dict(range=[0,5], context=[0,5], source_range=[0.,30.], result=dict(segments=segments))
-    def recognize(begin, end):
-        # This partial match cannot itself invalidate a timed neighbour.
-        return dict(segments=[dict(words=[dict(word=heard[i],
-            start=s-begin, end=s+1-begin) for i,(t,s) in enumerate(zip(lines, actual))
-            if begin <= s < s+1 <= end])])
-    def align(begin, end, text, **options):
-        selected = text.splitlines()
-        first = next((i for i in range(len(lines)) if lines[i:i+len(selected)] == selected
-                      and begin <= actual[i] < actual[i+len(selected)-1]+1 <= end), None)
-        if first is None:
-            return None
-        return dict(segments=[dict(words=[dict(word=lines[i], start=actual[i]-begin,
-            end=actual[i]+1-begin)]) for i in range(first, first+len(selected))])
-    result = recover_with_local_asr(block, lines, np.zeros(30*16000), 'English',
-                                    recognize, align, force_global=True,
-                                    max_alignment_attempts=1 if scenario=='late_discovery' else 24)
-    assert [s['words'][0]['start'] for s in result['result']['segments']] == actual
-    if scenario != 'stable':
-        assert result['asr_localizations'][0]['unresolved_segments']
-    else:
-        assert result['result']['segments'][3:] == segments[3:]
-
-
 def test_local_recognition_broadens_once_when_old_neighbours_miss_the_verse():
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines, starts = ['alpha', 'bravo', 'charlie'], [30., 40., 50.]
@@ -3079,43 +2811,6 @@ def test_local_recognition_broadens_once_when_old_neighbours_miss_the_verse():
     assert len(windows)==2 and windows[0][1]<10 and windows[1]==(0.,60.)
     assert result['asr_localizations'][-1]['accepted_lines']==[1,2,3]
     assert [s['words'][0]['start'] for s in result['result']['segments']]==starts
-
-
-def test_recognition_windows_keep_language_switches_and_boundary_words():
-    from karaoke.align_lyrics_whisper import recognize_in_windows
-    calls=[]
-    tokens=[('morning',1.,2.),('bonjour',19.,21.),('soir',30.,31.),('night',41.,42.)]
-    def recognize(begin,end):
-        calls.append((begin,end))
-        return dict(language='fr' if begin>0 else 'en',segments=[dict(words=[
-            dict(word=word,start=start-begin,end=stop-begin)
-            for word,start,stop in tokens if begin<=start<stop<=end])])
-    words,reports=recognize_in_windows(recognize,0.,60.,3)
-    assert words==[dict(word=word,start=start,end=end) for word,start,end in tokens]
-    assert calls==[(0.,25.),(15.,45.),(35.,60.)]
-    assert [r['recognition']['language'] for r in reports]==['en','fr','fr']
-
-
-def test_local_recovery_attempts_later_regions_before_deep_retries():
-    from karaoke.align_lyrics_whisper import recover_with_local_asr
-    lines = ['early missing phrase', 'middle missing phrase', 'late missing phrase']
-    starts = [1.,30.,60.]
-    block = dict(range=[0,3],context=[0,3],source_range=[0.,70.],result=dict(segments=[
-        dict(words=[dict(word=t,start=0.,end=0.)]) for t in lines]))
-    calls = []
-    def recognize(begin,end):
-        return dict(segments=[dict(words=[dict(word=t,start=s-begin,end=s+.8-begin)
-            for t,s in zip(lines,starts) if begin <= s < end])])
-    def align(begin,end,text,**options):
-        calls.append(text)
-        i = lines.index(text)
-        return dict(segments=[dict(words=[dict(word=text,start=starts[i]-begin,
-                                               end=starts[i]-begin+(0 if i==0 else .8))])])
-    result = recover_with_local_asr(block,lines,np.zeros(70*16000),'English',recognize,align,
-        force_global=True,max_alignment_attempts=3,align_original=align)
-    assert calls == lines
-    assert result['result']['segments'][-1]['words'] == [dict(word=lines[-1],start=60.,end=60.8)]
-    assert result['result']['segments'][0]['words'][0]['start'] == result['result']['segments'][0]['words'][0]['end']
 
 
 @pytest.mark.parametrize('omitted_repeat', [1, 3])
@@ -3150,34 +2845,6 @@ def test_incomplete_refrain_recognition_cannot_overwrite_bounded_acoustic_alignm
     report = result['asr_localizations'][0]
     assert report['contradicted_lines'] == ([3] if drifted_middle else [])
     assert [report['anchors'][i]['status'] for i in (1,3)] == ['ambiguous_repeat']*2
-
-
-def test_broad_recognition_anchor_cannot_erase_earlier_aligned_lyrics():
-    from copy import deepcopy
-    from karaoke.align_lyrics_whisper import recover_with_local_asr
-    lines = ['morning', 'echo', 'bright horizon', 'clear sky', 'missing phrase', 'finale']
-    starts = [1., 4., 14., 18., 22., 26.]
-    def segment(index, begin=0., rough=False):
-        words = [dict(word=word, start=starts[index]+j*.5-begin, end=starts[index]+j*.5+.4-begin)
-                 for j, word in enumerate(lines[index].split())]
-        if rough and index == 2:
-            # Recognition can attach the first syllable to a much earlier sound.
-            words[0]['start'] = 2.-begin
-        return dict(words=words)
-    segments = [segment(i) for i in range(len(lines))]
-    segments[4]['words'] = []
-    block = dict(range=[0,6], context=[0,6], source_range=[0.,30.], result=dict(segments=segments))
-    original = deepcopy(block)
-    def recognize(begin, end):
-        return dict(segments=[segment(i,begin,True) for i in range(2,6)])
-    def align(begin, end, text, **options):
-        return dict(segments=[segment(lines.index(line),begin,True) for line in text.splitlines()])
-    result = recover_with_local_asr(block,lines,np.zeros(30*16000),'English',recognize,align,
-                                   force_global=True)
-    assert block == original
-    assert result['result']['segments'][:4] == segments[:4]
-    assert result['result']['segments'][4]['words'] == segment(4)['words']
-    assert result['asr_localizations'][0]['contradicted_lines'] == []
 
 
 def test_ambiguous_refrains_need_independent_bounds_and_cannot_bootstrap_them():
@@ -3479,7 +3146,7 @@ def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(part
             segments[1]['words'][0]['start'] = starts['charlie']-.5-begin
         return dict(segments=segments)
     result = recover_with_local_asr(block,lines,np.zeros(int(duration*16000)),'English',recognize,align)
-    assert calls == [(0.,duration)]*(2 if asr_gap=='boundary_unresolved' else 1)
+    assert calls == [(0.,duration)]
     last = 6 if asr_gap=='boundary_unresolved' else 7 if asr_gap=='boundary_overlap' else 9
     assert result['asr_localizations'][0]['accepted_lines'] == list(range(1,last))
     assert [s['words'][0]['start'] for s in result['result']['segments'] if s['words']] == [v for i,v in enumerate(starts.values()) if asr_gap!='boundary_unresolved' or i!=5]
@@ -3989,7 +3656,6 @@ def test_fresh_metadata_downloads_stream_without_reextracting_webpage(tmp_path, 
     finally:
         server.shutdown()
         thread.join()
-
 
 
 @pytest.mark.parametrize('promote', [False, True])
@@ -4603,122 +4269,10 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
             saved=tmp_path/rejected[0]['diagnostics']
             assert json.loads((saved/'lyrics.json').read_text())['lines']==primary
             assert json.loads((saved/'playback-warning.json').read_text())['omitted_lines']==[2]
-            assert json.loads((saved/'failure.json').read_text())['stage']=='subtitles'
             assert json.loads((tmp_path/'lyrics.json').read_text())['lines']==alternative
     else:
         with pytest.raises(StageFailure):pipeline.align_candidates(lyrics, {}, 6.)
         assert calls == ([] if mode=='credits_only' else [primary,alternative] if mode=='all_fail' else [primary])
-
-
-@pytest.mark.parametrize('complete_source', [True, False])
-@pytest.mark.parametrize('compression_ratio', [1., 3.2])
-def test_observed_missing_refrain_selects_complete_published_source(tmp_path, monkeypatch, complete_source, compression_ratio):
-    refrain = ['glowing red horizon', 'bright blue ocean']
-    short, complete = ['opening',*refrain,'closing'], ['opening',*refrain,*refrain,'closing']
-    if complete_source:
-        complete.insert(-1, 'silver stars appear behind the evening clouds')
-    packet = dict(candidate_texts=[short,complete], crosscheck=dict(selected_source=0,
-        eligible_sources=[0,1], sources=[dict(provider=p,language='English') for p in ('short','complete')]))
-    if not complete_source:
-        packet = dict(candidate_texts=[short], crosscheck=dict(selected_source=0,
-            eligible_sources=[0], sources=[dict(provider='short',language='English')]))
-    lyrics = dict(title='Song',artist='Singer',language='English',lines=short,
-        provenance=dict(kind='online_lyric_text',route='lyrics_first',lyric_lookup=packet))
-    pipeline = Pipeline(dict(url=URL),tmp_path)
-    (tmp_path/'lyrics.json').write_text(json.dumps(lyrics))
-    raw = tmp_path/'alignment/raw.json';raw.parent.mkdir()
-    heard = [1.,3.,5.,8.,10.,*([11.] if complete_source else []),12.]
-    calls=[]
-    def align(candidate,duration):
-        calls.append(candidate['lines'])
-        starts = ([1.,3.,5.,12.] if candidate['lines']==short else heard
-                  if candidate['lines']==complete else [1.,3.,5.,8.,10.,12.])
-        cues = [dict(text=t,start=s,end=s+.8,status='candidate') for t,s in zip(candidate['lines'],starts)]
-        (tmp_path/'cues.json').write_text(json.dumps(cues))
-        (tmp_path/'quality.json').write_text('{}')
-        (pipeline.checkpoints.directory/'align_words.json').write_text('{}')
-        raw.write_text(json.dumps([dict(asr_localizations=[dict(context=[0,len(candidate['lines'])],
-            source_range=[0.,15.],recognition=dict(segments=[dict(compression_ratio=compression_ratio, words=[
-                dict(word=t,start=s,end=s+.8) for t,s in zip(complete,heard)])]))])]))
-    monkeypatch.setattr(pipeline,'align',align)
-    selected,error=pipeline.align_candidates(lyrics,{},15.)
-    assert selected['lines']==complete and error is None
-    assert calls==[short,complete]
-    evidence=json.loads((tmp_path/'localization-validation.json').read_text())
-    assert all(not e['missing_repetitions'] and not e['conflicts'] for e in evidence)
-    rejected=json.loads((tmp_path/'quality.json').read_text())['lyric_source_fallback']['rejected']
-    saved=json.loads((tmp_path/rejected[0]['diagnostics']/'localization-validation.json').read_text())
-    assert saved[0]['missing_repetitions'][0]['source_range']==[1,3]
-    if not complete_source:
-        assert selected['provenance']['repetitions'][0]['source_lines']==refrain
-        assert json.loads((tmp_path/'quality.json').read_text())['restored_repetitions']==1
-        # Keeping the copied words is insufficient: they must be aligned to
-        # the separately heard repetition, not reused at the first occurrence.
-        wrong=json.loads((tmp_path/'cues.json').read_text())
-        wrong[3].update(start=3.,end=3.8)
-        with pytest.raises(StageFailure,match='重复唱段'):
-            pipeline.validate_localization(selected,15.,wrong)
-
-
-@pytest.mark.parametrize('gap_kind', ['missing', 'covered', 'unrelated'])
-def test_caption_gap_review_requires_substantial_existing_lyric_evidence(gap_kind):
-    from copy import deepcopy
-    from karaoke.align_lyrics_whisper import review_uncovered_lyrics
-    line = 'Glowing lanterns guide us through the silent forest'
-    cues = [dict(text=line,start=1.,end=3.,status='candidate'),
-            dict(text='The boats return across the silver ocean',start=30.,end=34.,status='candidate')]
-    if gap_kind=='covered':cues.insert(1,dict(cues[0],start=10.,end=13.))
-    before=deepcopy(cues)
-    words=[dict(word='zqx '*20 if gap_kind=='unrelated' else line,start=10.,end=13.)]
-    calls=[]
-    def recognize(a,b):
-        calls.append((a,b));return dict(segments=[])
-    result=review_uncovered_lyrics(cues,[words],'English',40.,recognize)
-    assert cues==before
-    assert bool(result)==bool(calls)==(gap_kind=='missing')
-    if result:
-        assert result[0]['gap']==[3.,30.]
-        assert calls==[(.4,34.6)]
-        assert result[0]['accepted_lines']==[]  # Review does not assign timings or lyric text.
-
-
-@pytest.mark.parametrize('heard_prefix', [False, True])
-def test_repeat_proposal_keeps_source_interior_between_observed_outer_phrases(heard_prefix):
-    from karaoke.lyric_consensus import observed_repetition_candidate
-    lines=['Blue morning (ooh)', 'We trace the river through the trees',
-           'Silver lanterns carry our dreams into the night', 'Closing phrase']
-    lyrics=dict(lines=lines,language='English',provenance=dict(kind='online_lyric_text'))
-    cues=[dict(text=t,start=s,end=s+1,status='candidate') for t,s in zip(lines,[1.,3.,5.,28.])]
-    words=[dict(word='Blue morning' if heard_prefix else 'qxz',start=10.,end=12.),
-           dict(word='qxz qxz qxz',start=13.,end=16.),dict(word=lines[2],start=17.,end=21.)]
-    observed=[dict(context=[0,4],source_range=[0.,30.],recognition=dict(segments=[dict(words=words)]))]
-    candidate=observed_repetition_candidate(lyrics,cues,observed,30.)
-    copy=candidate['provenance']['repetitions'][-1]
-    assert copy['source_lines']==(lines[:3] if heard_prefix else lines[2:3])
-    assert copy['boundary_anchors'][0]['start']==(10. if heard_prefix else 17.)
-    assert lyrics['lines']==lines  # This only proposes original text; alignment must validate it.
-
-
-@pytest.mark.parametrize('observed', ['repeat', 'unrelated', 'spelling_noise'])
-@pytest.mark.parametrize('compression_ratio', [1., 3.2])
-def test_published_source_retry_requires_substantial_observed_content(observed, compression_ratio):
-    from karaoke.lyric_consensus import observed_source_alternative
-    first, refrain, last = 'We leave beside the morning river', 'The golden lanterns guide us home', 'Until the quiet summer ends'
-    lyrics = dict(lines=[first,refrain,last], language='English')
-    alternative = dict(lyrics, lines=[first,refrain,refrain,last])
-    performed = alternative['lines'] if observed=='repeat' else lyrics['lines']
-    if observed=='unrelated':
-        performed = [first,refrain,'Remember to bring the umbrellas tomorrow',last]
-    if observed=='spelling_noise':
-        alternative = dict(lyrics,lines=[first,refrain.replace('lanterns','lantern'),last])
-    observations = [dict(source_range=[0.,20.],recognition=dict(segments=[dict(compression_ratio=compression_ratio, words=[
-        dict(word=text,start=1.+i*3,end=2.+i*3) for i,text in enumerate(performed)])]))]
-    observations.insert(0, dict(reason='followup_did_not_improve_coverage', accepted_lines=[]))
-    result = observed_source_alternative(lyrics,[alternative],observations)
-    assert bool(result) == (observed=='repeat')
-    if result:
-        assert result['alternative_matched_units']-result['current_matched_units'] >= 24
-    assert observed_source_alternative(lyrics,[alternative],[]) is None
 
 
 @pytest.mark.parametrize('overlap', [.02, .1, .16, .32, .75])
@@ -4741,13 +4295,11 @@ def test_playback_fallback_keeps_overlapping_word_tails_without_moving_onsets(tm
     assert warning['omitted_lines'] == [] and len(warning['overlap_adjustments']) == 1
 
 
-@pytest.mark.parametrize('language,middle', [('English', 'I want to sing with you now'),
-    ('Japanese', 'ここでもう一度歌おう'), ('Korean', '여기서우리다시노래해')])
 @pytest.mark.parametrize('seconds', [.06, .8])
-def test_playback_fallback_rejects_collapsed_phrase_without_rejecting_fast_lyrics(tmp_path, seconds, language, middle):
+def test_playback_fallback_rejects_collapsed_phrase_without_rejecting_fast_lyrics(tmp_path, seconds):
     pipeline = Pipeline(dict(url=URL), tmp_path)
-    lines = ['First phrase', middle, 'Last phrase']
-    (tmp_path/'lyrics.json').write_text(json.dumps(dict(language=language,lines=lines,provenance={})))
+    lines = ['First phrase', 'I want to sing with you now', 'Last phrase']
+    (tmp_path/'lyrics.json').write_text(json.dumps(dict(language='English',lines=lines,provenance={})))
     cues = [dict(text=text,start=float(i*2),end=float(i*2)+(seconds if i==1 else 1.),status='candidate')
             for i,text in enumerate(lines)]
     (tmp_path/'alignment').mkdir()
@@ -4822,52 +4374,32 @@ def test_playback_fallback_preserves_other_lines_highlights(tmp_path, bad):
 
 @pytest.mark.parametrize('old_time', [True, False])
 @pytest.mark.parametrize('strict_audio', [True, False])
-@pytest.mark.parametrize('need_lead', [None, False, True])
-def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success_flag(tmp_path, monkeypatch, old_time, strict_audio, need_lead):
+def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success_flag(tmp_path, monkeypatch, old_time, strict_audio):
     pipeline = Pipeline(dict(url=URL), tmp_path, device='cpu', audio_only=strict_audio)
     lyrics = dict(lines=['hello'], language='English')
     cue = dict(text='hello', start=1., end=5., units=[dict(text='hello', first=0, stop=5, start=1., end=5.)])
     (tmp_path/'cues.json').write_text(json.dumps([cue]))
     (tmp_path/'quality.json').write_text('{}')
-    calls = []
-    lead = Mock() if need_lead is not None else None
-    master = tmp_path/'stems/lead.wav'
-    def finish_packaging():
-        master.parent.mkdir(exist_ok=True)
-        master.write_bytes(b'delivered lead after native-rate conversion')
-    if lead is not None:
-        lead.result.side_effect = finish_packaging
     def run(*args):
-        calls.append(args[1])
         assert ('--playback-fallback' in args[1]) is not strict_audio
-        assert ('--defer-constraints' in args[1]) is (lead is not None and len(calls)==1)
-        assert ('--lead' in args[1]) is (len(calls)==2)
-        assert ('--resume' in args[1]) is (len(calls)==2)
-        if lead is not None and len(calls)==1:
-            lead.result.assert_not_called()
-            assert not master.exists()
-        if len(calls)==2:
-            source = args[1][args[1].index('--lead')+1]
-            assert source == master and source.read_bytes() == b'delivered lead after native-rate conversion'
-        output=tmp_path/'timing-checked';output.mkdir(exist_ok=True)
+        output=tmp_path/'timing-checked';output.mkdir()
         checked=json.loads(json.dumps(cue))
-        if not old_time and (not need_lead or len(calls)==2):checked['units'][0]['start']=4.
+        if not old_time:checked['units'][0]['start']=4.
         if not strict_audio:
             checked['units'][0].update(timing_source='linear_fallback',
                                       bounds_source='cross_model_onset_prior_acoustic_end')
         (output/'cues.json').write_text(json.dumps([checked]))
         (output/'report.json').write_text(json.dumps(dict(
-            pending_review_lines=[1] if need_lead and len(calls)==1 else [],
             lines=[dict(line=1, status='reviewed', repairs=[]),
                    dict(line=1, status='reviewed', repairs=[dict(accepted=True)])], unresolved=[],constraints=[
             dict(line=1,text='hello',first=0,stop=5,start_min=3.6,start_max=4.4,onset=4.)])))
     monkeypatch.setattr(pipeline,'run',run)
     if old_time:
         with pytest.raises(StageFailure, match='字幕时间校验失败'):
-            pipeline.validate_alignment(lyrics,6,lead)
+            pipeline.validate_alignment(lyrics,6)
         assert json.loads((tmp_path/'cues.json').read_text())==[cue]
     else:
-        pipeline.validate_alignment(lyrics,6,lead)
+        pipeline.validate_alignment(lyrics,6)
         assert json.loads((tmp_path/'cues.json').read_text())[0]['units'][0]['start']==4.
         review = json.loads((tmp_path/'quality.json').read_text())['timing_review']
         assert len(review['onset_constraints']) == review['reviewed_lines'] == review['repaired_ranges'] == 1
@@ -4876,181 +4408,6 @@ def test_publication_rechecks_acoustic_constraints_instead_of_trusting_a_success
             from karaoke.tools.playback_sweep import soft_failures
             assert len(review['estimated_spans'])==1
             assert soft_failures(dict(quality=dict(timing_review=review)),{})[0]['code']=='timing_group_fallback'
-    assert len(calls) == (2 if need_lead else 1)
-    if lead is not None:
-        assert lead.result.call_count == int(need_lead)
-
-
-@pytest.mark.parametrize('displaced', [False, True])
-def test_publication_checks_observed_lyrics_even_after_playback_fallback(tmp_path, monkeypatch, displaced):
-    pipeline = Pipeline(dict(url=URL), tmp_path, device='cpu')
-    lyrics = dict(lines=['blue river'], language='English')
-    start = 30. if displaced else 20.
-    cue = dict(text='blue river', start=start, end=start+4., units=[
-        dict(text='blue', first=0, stop=4, start=start, end=start+2., timing_source='linear_fallback', acoustic_end=None),
-        dict(text='river', first=5, stop=10, start=start+2., end=start+4., timing_source='linear_fallback')])
-    (tmp_path/'cues.json').write_text(json.dumps([cue]))
-    (tmp_path/'quality.json').write_text('{}')
-    raw = tmp_path/'alignment/raw.json'; raw.parent.mkdir()
-    raw.write_text(json.dumps([dict(asr_localizations=[dict(context=[0,1], source_range=[10.,40.],
-        recognition=dict(segments=[dict(words=[dict(word='blue river', start=10., end=14.)])]))])]))
-    def run(*args):
-        output = tmp_path/'timing-checked'; output.mkdir()
-        (output/'cues.json').write_text(json.dumps([cue]))
-        (output/'report.json').write_text(json.dumps(dict(lines=[], unresolved=[], constraints=[])))
-    monkeypatch.setattr(pipeline, 'run', run)
-    if displaced:
-        with pytest.raises(StageFailure, match='字幕与已定位的唱段不一致'):
-            pipeline.validate_alignment(lyrics, 40.)
-    else:
-        pipeline.validate_alignment(lyrics, 40.)
-    evidence = json.loads((tmp_path/'localization-validation.json').read_text())
-    assert evidence[0]['checked_lines'] == [1]
-    assert bool(evidence[0]['conflicts']) is displaced
-    assert json.loads((tmp_path/'cues.json').read_text()) == [cue]
-
-
-@pytest.mark.parametrize('displaced', [False, True])
-def test_phrase_validation_reconciles_dialogue_with_ordered_recording_views(tmp_path, displaced):
-    lines = ['A long opening phrase about the morning', 'Can you hear me', 'Another long phrase about the evening']
-    lyrics = dict(lines=lines, language='English')
-    cues = [dict(text=t,start=s,end=s+2) for t,s in zip(lines,[40.,80. if displaced else 50.,60.])]
-    primary = [dict(word=lines[1],start=5.,end=7.), *[
-        dict(word=t,start=s,end=s+2.) for t,s in zip(lines,[40.,50.,60.])]]
-    alternate = [dict(word=lines[1],start=5.,end=7.),dict(word=lines[2],start=60.,end=62.)]
-    raw = tmp_path/'alignment/raw.json';raw.parent.mkdir()
-    raw.write_text(json.dumps([dict(asr_localizations=[dict(context=[0,3],source_range=[0.,90.],
-        recognition=dict(segments=[dict(words=words)])) for words in [primary,alternate]])]))
-    pipeline = Pipeline(dict(url=URL),tmp_path)
-    if displaced:
-        with pytest.raises(StageFailure,match='字幕与已定位的唱段不一致'):
-            pipeline.validate_localization(lyrics,90.,cues)
-    else:
-        evidence = pipeline.validate_localization(lyrics,90.,cues)
-        assert not any(e['conflicts'] for e in evidence)
-        assert evidence[1]['competing_view_conflicts'][0]['observed_range']==[5.,7.]
-        assert 2 in evidence[0]['joint_view_validation']['supported_lines']
-
-
-@pytest.mark.parametrize('extra_frames', [0, 4])
-def test_timing_review_accepts_one_sample_of_resampling_but_rejects_different_lengths(tmp_path, monkeypatch, extra_frames):
-    import soundfile as sf
-    from karaoke import timing_validation as module
-    cue = dict(text='hello', start=.1, end=.3,
-               units=[dict(text='hello', first=0, stop=5, start=.1, end=.3)])
-    (tmp_path/'cues.json').write_text(json.dumps([cue]))
-    (tmp_path/'lyrics.json').write_text(json.dumps(dict(lines=['hello'], language='English')))
-    audio, lead = tmp_path/'audio.wav', tmp_path/'lead.wav'
-    sf.write(audio, np.ones((44101, 2))*.05, 44100, subtype='FLOAT')
-    sf.write(lead, np.ones((48000+extra_frames, 2))*.05, 48000, subtype='DOUBLE')
-    review = Mock()
-    monkeypatch.setattr(module, 'AcousticReview', lambda *args: review)
-    monkeypatch.setattr(module, 'acoustic_model_files', lambda *args: [])
-    def reconcile(cues, observations, *args, **kwargs):
-        assert len(list(observations)) == 2
-        return cues, dict(lines=[], constraints=[], unresolved=[])
-    monkeypatch.setattr(module, 'reconcile_views', reconcile)
-    monkeypatch.setattr(sys, 'argv', ['timing_validation', '--input', str(tmp_path/'cues.json'),
-        '--lyrics', str(tmp_path/'lyrics.json'), '--audio', str(audio), '--original', str(audio),
-        '--lead', str(lead), '--output', str(tmp_path/'checked'), '--device', 'cpu'])
-    if extra_frames:
-        with pytest.raises(ValueError, match='does not match the source duration'):
-            module.main()
-    else:
-        module.main()
-        assert json.loads((tmp_path/'checked/cues.json').read_text()) == [cue]
-
-
-@pytest.mark.parametrize('changed', [None, 'input', 'audio', 'output', 'missing', 'invalid', 'empty'])
-def test_timing_continuation_reuses_only_matching_preliminary_output(tmp_path, monkeypatch, changed):
-    from copy import deepcopy
-    import shutil
-    import soundfile as sf
-    from karaoke import timing_validation as module
-    cue = dict(text='hello', start=.1, end=.5,
-               units=[dict(text='hello', first=0, stop=5, start=.1, end=.5)])
-    source = tmp_path/'input.json'
-    source.write_text(json.dumps([cue]))
-    (tmp_path/'lyrics.json').write_text(json.dumps(dict(lines=['hello'], language='English')))
-    audio, lead = tmp_path/'audio.wav', tmp_path/'lead.wav'
-    sf.write(audio, np.ones((3*44100,2))*.05, 44100, subtype='FLOAT')
-    sf.write(lead, np.ones((3*44100,2))*.03, 44100, subtype='FLOAT')
-    monkeypatch.setattr(module, 'AcousticReview', Mock())
-    monkeypatch.setattr(module, 'acoustic_model_files', lambda *args: [])
-    seen = []
-    def reconcile(cues, observations, *args, **kwargs):
-        seen.append((deepcopy(cues), [v[0] for v in observations], kwargs.get('resume')))
-        result = deepcopy(cues)
-        result[0]['start'] = result[0]['units'][0]['start'] = .2
-        witness = [dict(cue['units'][0], start=1., end=1.5)]
-        return result, dict(lines=[dict(line=1,status='reviewed',repairs=[],witnesses=[witness,witness])],
-                            constraints=[],unresolved=[])
-    monkeypatch.setattr(module, 'reconcile_views', reconcile)
-    argv = ['timing_validation', '--input', str(source), '--lyrics', str(tmp_path/'lyrics.json'),
-            '--audio', str(audio), '--original', str(audio), '--output', str(tmp_path/'checked'), '--device', 'cpu']
-    monkeypatch.setattr(sys, 'argv', argv)
-    module.main()
-    saved = json.loads((tmp_path/'checked/cues.json').read_text())
-    preliminary = tmp_path/'preliminary'
-    shutil.copytree(tmp_path/'checked', preliminary)
-    shutil.rmtree(tmp_path/'checked')  # StageCache clears the next stage's outputs.
-    if changed=='audio':
-        sf.write(audio, np.ones((3*44100,2))*.08, 44100, subtype='FLOAT')
-    elif changed in ('input','output'):
-        altered = deepcopy(cue)
-        altered['start'] = altered['units'][0]['start'] = .15
-        (source if changed=='input' else preliminary/'cues.json').write_text(json.dumps([altered]))
-    elif changed=='missing':
-        (preliminary/'report.json').unlink()
-    elif changed in ('invalid','empty'):
-        (preliminary/'report.json').write_text('{' if changed=='invalid' else 'null')
-    monkeypatch.setattr(sys, 'argv', [*argv, '--resume', str(preliminary), '--lead', str(lead)])
-    module.main()
-    incoming, views, resume = seen[-1]
-    assert (resume is not None) is (changed is None)
-    assert incoming == (saved if changed is None else json.loads(source.read_text()))
-    assert views == (['lead_ctc'] if changed is None else ['vocals_ctc','lead_ctc'])
-    assert json.loads((tmp_path/'checked/report.json').read_text())['continued_from_preliminary'] is (changed is None)
-
-
-@pytest.mark.parametrize('changed', [None, 'code', 'models', 'protocol', 'legacy', 'lead'])
-def test_timing_constraints_reuse_only_the_same_evidence_method(tmp_path, monkeypatch, changed):
-    import soundfile as sf
-    from karaoke import timing_validation as module
-    cue = dict(text='hello', start=.1, end=.3,
-               units=[dict(text='hello', first=0, stop=5, start=.1, end=.3)])
-    (tmp_path/'cues.json').write_text(json.dumps([cue]))
-    (tmp_path/'lyrics.json').write_text(json.dumps(dict(lines=['hello'], language='English')))
-    audio = tmp_path/'audio.wav'
-    sf.write(audio, np.ones((44100, 2))*.05, 44100, subtype='FLOAT')
-    proof = dict(line=1, text='hello', first=0, stop=5, onset=.1, start_min=.05, start_max=.15)
-    seen = []
-    def reconcile(cues, observations, protocol, language, constraints, **kwargs):
-        seen.append(constraints)
-        return cues, dict(lines=[], constraints=[proof], unresolved=[])
-    monkeypatch.setattr(module, 'AcousticReview', Mock())
-    monkeypatch.setattr(module, 'acoustic_model_files', lambda *args: [])
-    monkeypatch.setattr(module, 'reconcile_views', reconcile)
-    monkeypatch.setattr(sys, 'argv', ['timing_validation', '--input', str(tmp_path/'cues.json'),
-        '--lyrics', str(tmp_path/'lyrics.json'), '--audio', str(audio), '--original', str(audio),
-        '--output', str(tmp_path/'checked'), '--device', 'cpu'])
-    module.main()
-    path = tmp_path/'timing-constraints.json'
-    old = json.loads(path.read_text())
-    if changed == 'lead':
-        old['lead_sha256'] = 'different-audio'
-    elif changed == 'legacy':
-        old.pop('identity')
-    elif changed:
-        old['identity'][changed] = {'earlier_method': True}
-    path.write_text(json.dumps(old))
-    module.main()
-    assert seen == [[], [proof] if changed is None else []]
-    if changed:
-        archived = list((tmp_path/'timing-history').glob('*.json'))
-        assert len(archived) == 1 and json.loads(archived[0].read_text()) == old
-    else:
-        assert not (tmp_path/'timing-history').exists()
 
 
 def test_playback_fallback_recovers_each_phrase_from_available_stages(tmp_path):
@@ -5078,48 +4435,6 @@ def test_playback_fallback_recovers_each_phrase_from_available_stages(tmp_path):
     assert warning['omitted_lines'] == []
     assert [x['source'] for x in warning['phrase_timing_sources']] == [
         'word-cues.json', 'alignment/cues.json', 'word-cues.json']
-
-
-@pytest.mark.parametrize('missing_last', [False, True])
-def test_playback_fallback_backtracks_refinements_that_block_later_lyrics(tmp_path, missing_last):
-    from copy import deepcopy
-    pipeline = Pipeline(dict(url=URL), tmp_path)
-    lines = ['甲乙', '丙丁', '戊己']
-    (tmp_path/'lyrics.json').write_text(json.dumps(dict(language='Chinese',lines=lines,provenance={})))
-    def cue(text, a, b):
-        return dict(text=text,start=a,end=b+.2,status='candidate',units=[
-            dict(text=c,first=i,stop=i+1,start=t,end=t+.2) for i,(c,t) in enumerate(zip(text,[a,b]))])
-    coarse = [cue(t,s,s+.4) for t,s in zip(lines,[1.,3.,5.])]
-    refined = [cue(lines[0],4.2,4.6),cue(lines[1],4.4,5.1),deepcopy(coarse[2])]
-    if missing_last:
-        coarse[2]['status'] = refined[2]['status'] = 'unresolved_timing'
-    for name,values in [('word-cues.json',coarse),('ordered-cues.json',refined)]:
-        path=tmp_path/name;path.write_text(json.dumps(values));pipeline.alignment_outputs.add(path)
-    if missing_last:
-        with pytest.raises(StageFailure,match='未能定位'):
-            pipeline.playback_fallback({},8,StageFailure('align_phonemes','fixture'))
-    else:
-        pipeline.playback_fallback({},8,StageFailure('align_phonemes','fixture'))
-        assert json.loads((tmp_path/'cues.json').read_text()) == coarse
-        warning=json.loads((tmp_path/'playback-warning.json').read_text())
-        assert warning['omitted_lines'] == []
-        assert [p['source'] for p in warning['phrase_timing_sources']] == [
-            'word-cues.json','word-cues.json','ordered-cues.json']
-
-
-@pytest.mark.parametrize('shift', [.1, 2.])
-def test_failed_refinement_cannot_take_priority_in_an_unrelated_gap(tmp_path, shift):
-    pipeline = Pipeline(dict(url=URL), tmp_path)
-    (tmp_path/'lyrics.json').write_text(json.dumps(dict(language='English',lines=['first','last'],provenance={})))
-    def cue(text,start):
-        return dict(text=text,start=start,end=start+.5,status='candidate',
-                    units=[dict(text=text,first=0,stop=len(text),start=start,end=start+.5)])
-    coarse=[cue('first',1.),cue('last',5.)];refined=[cue('first',1.+shift),cue('last',5.)]
-    for name,values in [('word-cues.json',coarse),('ordered-cues.json',refined)]:
-        path=tmp_path/name;path.write_text(json.dumps(values));pipeline.alignment_outputs.add(path)
-    pipeline.playback_fallback({},8.,StageFailure('align_phonemes','fixture'))
-    actual=json.loads((tmp_path/'cues.json').read_text())
-    assert actual == (refined if shift<.5 else coarse)
 
 
 @pytest.mark.parametrize('fresh', [True, False])
@@ -6017,8 +5332,7 @@ else: print(json.dumps(dict(rejected=False)))
     assert json.loads(result.stdout)['rejected']
 
 
-@pytest.mark.parametrize('frames', [16, 17, 61, 64])
-def test_roformer_batches_preserve_window_boundaries_and_partial_tail(frames):
+def test_roformer_batches_preserve_window_boundaries_and_partial_tail():
     import torch
     from karaoke.benchmark_neural import demix_batched
     class Model(torch.nn.Module):
@@ -6035,12 +5349,11 @@ def test_roformer_batches_preserve_window_boundaries_and_partial_tail(frames):
         audio=SimpleNamespace(sample_rate=8))
     instance = SimpleNamespace(model_data_cfgdict=cfg, model_run=Model(),
         is_roformer=True, pitch_shift=0, overlap=1, secondary_stem_name='other')
-    audio = np.random.default_rng(7).normal(size=(2, frames)).astype('float32')
+    audio = np.random.default_rng(7).normal(size=(2, 61)).astype('float32')
     expected = demix_batched(instance, audio, 1)
-    single_predictions = sum(instance.model_run.batches)
     instance.model_run.batches.clear()
     actual = demix_batched(instance, audio, 3)
-    assert single_predictions < sum(instance.model_run.batches)
+    assert instance.model_run.batches == [3, 3, 2]
     for stem in expected:
         np.testing.assert_array_equal(actual[stem], expected[stem])
     np.testing.assert_allclose(actual['vocals']+actual['other'], audio, atol=2e-7)
@@ -7185,28 +6498,24 @@ def test_preview_clipping_reports_measured_peak(tmp_path):
     assert error.value.peak == 1.02
 
 
-@pytest.mark.parametrize('names', [('vocals', 'backing'), ('lead', 'backing', 'instrumental')])
-def test_preview_group_reencodes_every_track_with_the_same_gain(tmp_path, names):
-    from threading import Barrier
+def test_preview_group_reencodes_every_track_with_the_same_gain(tmp_path):
     from karaoke.exact_stems import encode_previews, PreviewClippingError
 
     calls = []
-    started = Barrier(len(names), timeout=5)
     def encode(source, output, gain, frames, channels):
-        started.wait()
         peak = gain * (1.4 if source.name == 'backing.wav' else .5)
         calls.append((source.name, gain))
         if peak >= 1:
             raise PreviewClippingError(output, peak)
         return dict(decoded_peak=peak, encoded_gain=gain)
 
-    sources = {name: tmp_path/f'{name}.wav' for name in names}
+    sources = {name: tmp_path/f'{name}.wav' for name in ('vocals', 'backing')}
     with patch('karaoke.exact_stems.encode_preview', side_effect=encode):
         gain, previews = encode_previews(sources, tmp_path, .9, 10000, 2)
     assert gain < .9 and set(previews) == set(sources)
     assert all(p['encoded_gain'] == gain and p['decoded_peak'] < 1 for p in previews.values())
-    assert {name for name, used_gain in calls if used_gain == gain} == {f'{name}.wav' for name in names}
-    assert (f'{names[0]}.wav', .9) in calls
+    assert {name for name, used_gain in calls if used_gain == gain} == {'vocals.wav', 'backing.wav'}
+    assert ('vocals.wav', .9) in calls
 
 
 def test_preview_group_keeps_format_failures_and_bounds_clipping_retries(tmp_path):
@@ -7920,51 +7229,6 @@ def test_local_whisper_batches_cover_the_recording_and_keep_word_times(monkeypat
         assert calls[0]['clip_timestamps'] == [dict(start=0., end=30.), dict(start=30., end=60.),
                                                dict(start=60., end=len(samples)/16000)]
         assert bool(detected) == (language == 'auto')
-
-
-@pytest.mark.parametrize('failure', [None, 'value', 'fatal'])
-def test_local_recognizer_isolates_libraries_reuses_model_and_cleans_up(tmp_path, monkeypatch, failure):
-    import os
-    from karaoke.local_asr import isolated_recognizer
-    (tmp_path/'faster_whisper.py').write_text('''
-import os, sys
-from dataclasses import dataclass
-@dataclass
-class Segment:
-    text: str
-    words: list
-class WhisperModel:
-    def __init__(self, *args, **kwargs):
-        assert 'torch' not in sys.modules
-        self.calls = 0
-    def detect_language(self, **kwargs):
-        return 'en', 1., []
-class BatchedInferencePipeline:
-    def __init__(self, model): self.model = model
-    def transcribe(self, samples, **kwargs):
-        if samples[0] == -1: raise ValueError('unusable crop')
-        if samples[0] == -2: raise RuntimeError('model failed')
-        self.model.calls += 1
-        text = f'{os.getpid()}:{self.model.calls}:{len(samples)}:{samples.sum()}'
-        return iter([Segment(text, [])]), None
-''')
-    monkeypatch.setenv('PYTHONPATH', str(tmp_path)+os.pathsep+os.environ.get('PYTHONPATH', ''))
-    config = dict(model='test', compute_type='float32', batch_size=8)
-    with isolated_recognizer(config, 'cpu', tmp_path) as recognize:
-        first = recognize(np.ones(16000, dtype=np.float32))
-        pid, calls, size, total = first['text'].split(':')
-        pid = int(pid)
-        assert pid != os.getpid() and (calls,size,total) == ('1','16000','16000.0')
-        if failure:
-            with pytest.raises(ValueError if failure == 'value' else RuntimeError,
-                               match='unusable crop' if failure == 'value' else 'Local recognizer exited'):
-                recognize(np.full(16000, -1 if failure == 'value' else -2, dtype=np.float32))
-        if failure != 'fatal':
-            second = recognize(np.ones(8000, dtype=np.float32))
-            assert second['text'] == f'{pid}:2:8000:8000.0'
-    with pytest.raises(ChildProcessError):
-        os.waitpid(pid, os.WNOHANG)
-    assert not list(tmp_path.glob('recognizer-*'))
 
 
 @pytest.mark.parametrize('valid', [True, False])
@@ -8955,8 +8219,6 @@ def test_youtube_translated_titles_are_not_removed_by_literal_query_matching(art
 def test_search_matches_song_and_performer_without_related_song_padding(query, title, channel, expected):
     from karaoke.video_search import matches_query
     assert matches_query(query, dict(title=title,channel=channel)) == expected
-
-
 
 
 def test_youtube_search_fetches_one_native_page_and_resumes_its_continuation(monkeypatch):

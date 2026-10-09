@@ -290,49 +290,13 @@ def align_job(aligner, job, full_song=False):
                     break
                 first = min(first, min(a for a, _ in moved))
                 last = max(last, max(b for _, b in moved))
-    # A prediction can stay inside a multi-line context yet move a complete
-    # phrase into the following dialogue. Revisit only disjoint phrases, with
-    # neighbouring text for context; never clamp words to the rough anchor.
-    phrase_retries = []
-    def displaced(i):
-        a, c = anchors[i], cues[i]
-        return a['status'] == 'candidate' and (c['end']+2 < a['start'] or c['start']-2 > a['end'])
-    if scope_blocks and not failures and not order_conflicts():
-        for i in range(len(cues)):
-            if not displaced(i):
-                continue
-            left, right = max(0, i-1), min(len(cues), i+2)
-            if any(anchors[j]['status'] != 'candidate' for j in (left, right-1)):
-                continue
-            begin, end = max(0., anchors[left]['start']-.6), min(len(audio)/rate, anchors[right-1]['end']+.6)
-            if not 0 < end-begin <= 60:
-                continue
-            previous = cues[i]
-            run_blocks([(i, i+1, left, right, begin, end)],
-                       start_id=len(blocks)+len(context_retries)+len(boundary_retries)+len(phrase_retries))
-            phrase_retries.append(dict(line=i+1, context=[left,right], source_range=[begin,end],
-                original_cue=previous, candidate_cue=cues[i], accepted=not displaced(i) and not context_scope_violations(cues, scope_blocks)))
-        outside = context_scope_violations(cues, scope_blocks)
-        if outside:
-            failures.append(dict(lines=[b[:2] for b in outside], error='Phrase retry left its acoustic context'))
-
     if order_conflicts():
         failures.append(dict(lines=sorted(order_conflicts()), error='Word onsets remain out of order'))
-    if scope_blocks:
-        unresolved = [i for i in range(len(cues)) if displaced(i)]
-        if unresolved:
-            failures.append(dict(lines=unresolved, error='Phrase timing contradicts its acoustic location'))
-        unsafe = set(unresolved)
-        unsafe.update(i for a,b in order_conflicts() for i in (a,b))
-        unsafe.update(i for b in context_scope_violations(cues, scope_blocks) for i in range(b[0],b[1]))
-        for i,cue in enumerate(cues):
-            cue['status'] = 'unresolved_timing' if i in unsafe else 'candidate'
     if aligner.device == 'mps':
         torch.mps.synchronize()
     report = dict(method=aligner.method, device=aligner.device, seconds=time.perf_counter()-started,
                   full_song=full_song, failures=failures, scope_blocks=scope_blocks,
                   context_retries=context_retries, boundary_retries=boundary_retries, audio_sha256=sha(job['audio']),
-                  phrase_retries=phrase_retries,
                   onset_ratio=aligner.onset_ratio,
                   anchors_sha256=sha(job['anchors']) if job.get('anchors') else None,
                   lyrics_sha256=sha(job['lyrics']), runner_sha256=sha(__file__),
