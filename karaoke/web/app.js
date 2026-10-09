@@ -922,7 +922,7 @@ $('queue-list').onclick = async event => {
   if (!button || button.disabled) return;
   const id = button.closest('[data-entry]').dataset.entry;
   const action = button.dataset.action;
-  if (action === 'retry' || action === 'reprepare') return retryPreparation(id, action);
+  if (action === 'retry') return retryPreparation(id);
   if (action === 'preview') return previewVideo(state.entries.find(entry => entry.id === id));
   if (action === 'top') {
     const order = queueToTop(state.entries, id, state.playing ? state.current_id : null);
@@ -962,19 +962,15 @@ for (const [id, step] of [['pitch-down', -1], ['pitch-up', 1]]) {
   };
 }
 $('screen-start').onclick = async () => { if (await activate()) { if (!state.playing) await command('play'); else await syncPlayback(); } };
-$('screen-retry').onclick = () => retryPreparation(state.current_id, 'retry');
+$('screen-retry').onclick = () => retryPreparation(state.current_id);
 const preparationRequests = new Set();
-async function retryPreparation(id, action) {
+async function retryPreparation(id) {
   if (preparationRequests.has(id)) return;
   preparationRequests.add(id);
-  document.querySelectorAll(`[data-entry="${CSS.escape(id)}"] [data-action="${action}"]`).forEach(b => b.disabled = true);
+  document.querySelectorAll(`[data-entry="${CSS.escape(id)}"] [data-action="retry"]`).forEach(b => b.disabled = true);
   $('screen-retry').disabled = true;
   try {
-    const updated = await command(action, {entry_id:id});
-    if (updated) {
-      toast(action === 'reprepare' ? '已提交重新准备' : '已提交重试');
-      if (action === 'reprepare') switchView('queue');
-    }
+    if (await command('retry', {entry_id:id})) toast('已提交重试');
   } finally {
     preparationRequests.delete(id);
     $('screen-retry').disabled = false;

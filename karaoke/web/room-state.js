@@ -15,7 +15,7 @@ export function queueToTop(entries, id, playingId = null) {
 export function preparationRetry(entry) {
   if (entry?.status === 'failed' || (entry?.status === 'queued' && entry.next_retry_at))
     return {action:'retry', label:'重试'};
-  return entry?.status === 'completed' ? {action:'reprepare', label:'重新准备'} : null;
+  return null;
 }
 
 const bounded = (value, min, max, fallback) => Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;

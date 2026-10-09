@@ -326,8 +326,7 @@ test('an in-flight finish transfers with the audio session; the old response can
 test('manual preparation actions cover failures and backoff without interrupting an older performance', () => {
   assert.deepEqual(preparationRetry({status:'failed'}),{action:'retry',label:'重试'});
   assert.deepEqual(preparationRetry({status:'queued',next_retry_at:123}),{action:'retry',label:'重试'});
-  assert.deepEqual(preparationRetry({status:'completed'}),{action:'reprepare',label:'重新准备'});
-  for (const status of ['queued','running','unprepared']) assert.equal(preparationRetry({status}),null);
+  for (const status of ['completed','queued','running','unprepared']) assert.equal(preparationRetry({status}),null);
   const original={...song,status:'completed'}, local=new LocalPlayback();
   local.select(original,true);
   local.command('ready',{},[original]);
