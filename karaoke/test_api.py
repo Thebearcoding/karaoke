@@ -4740,7 +4740,8 @@ def test_candidate_localization_checks_the_acoustically_reviewed_timeline(tmp_pa
 
 
 @pytest.mark.parametrize('uncovered', [False, True])
-def test_extra_source_text_only_displaces_usable_lyrics_for_an_uncovered_passage(tmp_path, monkeypatch, uncovered):
+@pytest.mark.parametrize('spelling_noise', [False, True])
+def test_extra_source_text_only_displaces_usable_lyrics_for_an_uncovered_passage(tmp_path, monkeypatch, uncovered, spelling_noise):
     first, chorus, last = ('Morning sunlight reaches the window',
                           'The lantern glows beside the trees', 'We follow the river home')
     extra = 'Silver stars appear behind the evening clouds'
@@ -4765,8 +4766,10 @@ def test_extra_source_text_only_displaces_usable_lyrics_for_an_uncovered_passage
         (tmp_path/'cues.json').write_text(json.dumps(cues))
         (tmp_path/'quality.json').write_text('{}')
         (pipeline.checkpoints.directory/'align_words.json').write_text('{}')
+        observed = [dict(w, word='Silver scars appear beside those even clouds')
+                    if spelling_noise and w['word']==extra else w for w in heard]
         raw.write_text(json.dumps([dict(asr_localizations=[dict(context=[0,len(candidate['lines'])],
-            source_range=[0.,12.], recognition=dict(segments=[dict(words=heard)]))])]))
+            source_range=[0.,12.], recognition=dict(segments=[dict(words=observed)]))])]))
     def validate(candidate, duration, lead):
         reviewed.append(candidate['lines'])
         cues=json.loads((tmp_path/'cues.json').read_text())
@@ -4783,7 +4786,34 @@ def test_extra_source_text_only_displaces_usable_lyrics_for_an_uncovered_passage
     if uncovered:
         rejected=json.loads((tmp_path/'quality.json').read_text())['lyric_source_fallback']['rejected']
         support=json.loads((tmp_path/rejected[0]['diagnostics']/'lyric-source-support.json').read_text())
-        assert support['uncovered_passages'][0]['source_range']==[2,3]
+        passage = support['uncovered_passages'][0]
+        if spelling_noise:
+            assert passage['gap']==[5.,10.]
+            assert passage['alternative_matched_units']>=24
+            assert passage['alternative_matched_units']>passage['current_matched_units']
+        else:
+            assert passage['source_range']==[2,3]
+
+
+@pytest.mark.parametrize('gap', ['unrelated', 'scattered_letters', 'brief'])
+def test_source_retry_does_not_confuse_global_text_gain_with_gap_evidence(gap):
+    from copy import deepcopy
+    from karaoke.lyric_consensus import observed_source_alternative
+    first = 'The golden lanterns guide us through the evening'
+    extra = 'Silver stars appear behind the evening clouds'
+    last = 'We follow the river home'
+    lyrics = dict(lines=[first,last],language='English')
+    alternative = dict(lyrics,lines=[first,extra,last])
+    cues = [dict(text=first,start=1.,end=8.),dict(text=last,start=20.,end=22.)]
+    text = {'unrelated':'qxz '*30, 'scattered_letters':' qxz '.join(extra), 'brief':'Silver stars'}[gap]
+    words = [dict(word=t,start=s,end=e) for t,s,e in
+             [(first,1.,3.),(extra,4.,7.),(text,12.,14.),(last,20.,22.)]]
+    observations = [dict(source_range=[0.,25.],recognition=dict(segments=[dict(words=words)]))]
+    before = deepcopy((lyrics,alternative,cues,observations))
+    # More words match overall, but they are already covered by a caption.
+    assert observed_source_alternative(lyrics,[alternative],observations) is not None
+    assert observed_source_alternative(lyrics,[alternative],observations,cues=cues,duration=25.) is None
+    assert (lyrics,alternative,cues,observations)==before
 
 
 @pytest.mark.parametrize('gap_kind', ['missing', 'covered', 'unrelated'])

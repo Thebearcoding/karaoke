@@ -182,20 +182,38 @@ def observed_source_alternative(lyrics, alternatives, observations, *, cues=None
         begin, end = observation['source_range']
         words = recognized_words(begin, observation['recognition'], end)
         heard = [u for word in words for u in text_units(word['word'], language)]
+        owners = [word for word in words for _ in text_units(word['word'], language)]
         def support(candidate):
             expected = text_units(''.join(candidate['lines']), language)
-            return sum(block.src_end-block.src_start for block in Levenshtein.opcodes(expected, heard)
-                       if block.tag == 'equal')
+            return {index for block in Levenshtein.opcodes(expected, heard) if block.tag == 'equal'
+                    for index in range(block.dest_start, block.dest_end)}
         baseline = support(lyrics)
         for index, candidate in enumerate(alternatives):
             matched = support(candidate)
-            if matched-baseline >= max(24, len(heard)*.05):
+            if len(matched)-len(baseline) >= max(24, len(heard)*.05):
                 missing = None if cues is None else missing_repetitions(
                     candidate['lines'], [dict(c, status='candidate') for c in cues], words, language, duration)
                 if cues is not None and not missing:
+                    # A misspelled observed word need not prevent trying a
+                    # published alternative. Require substantial matching text
+                    # in a real caption gap, using the coverage floor shared
+                    # with lyric_coverage. This proposes text, never timings.
+                    edges = [dict(end=0.), *cues, dict(start=duration)]
+                    for left, right in zip(edges, edges[1:]):
+                        low, high = left['end'], right['start']
+                        if high <= low:
+                            continue
+                        inside = {i for i,w in enumerate(owners)
+                                  if low-.001 <= w['start'] < w['end'] <= high+.001}
+                        count, prior = len(matched & inside), len(baseline & inside)
+                        if count >= max(24, len(inside)*.55) and count > prior:
+                            missing.append(dict(gap=[low,high], recognized_units=len(inside),
+                                current_matched_units=prior, alternative_matched_units=count,
+                                basis='source_overlap_in_caption_gap'))
+                if cues is not None and not missing:
                     continue
                 return dict(alternative=index, source_range=[begin,end], recognized_units=len(heard),
-                            current_matched_units=baseline, alternative_matched_units=matched,
+                            current_matched_units=len(baseline), alternative_matched_units=len(matched),
                             uncovered_passages=missing)
     return None
 
