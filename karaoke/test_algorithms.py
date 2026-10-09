@@ -2519,6 +2519,12 @@ class SubtitleIntegrity(unittest.TestCase):
         self.assertEqual(coverage['status'], 'incomplete')
         self.assertEqual(coverage['uncovered_passages'],
                          [dict(start=6., end=16., recognized_units=32)])
+        for written, spoken in [('小鳥', 'ことり'), ('明日', 'あした')]:
+            with self.subTest(written=written):
+                recovered = anchors_from_words([written],
+                    [dict(word=spoken, start=1., end=3.)], 'Japanese')[0]
+                self.assertEqual((recovered['text'], recovered['start'], recovered['end']),
+                                 (written, 1., 3.))
 
     def test_japanese_spelling_recovery_cannot_borrow_words_across_resolved_lines(self):
         words = [dict(word=text, start=float(i*2), end=float(i*2+1)) for i, text in
@@ -2629,6 +2635,21 @@ class SubtitleIntegrity(unittest.TestCase):
         cue['units'][0].update(text='Here ', end=30.3)
         cue['units'][1]['text'] = text
         self.assertEqual(timeline_support([cue],words,'English')['conflicts'],[])
+
+    def test_stretched_recognition_word_does_not_hide_a_displaced_short_phrase(self):
+        from anchors_from_asr import timeline_support
+        text = '清晨微風吹過河岸'
+        heard = '清晨微風吹過湖岸'
+        words = [dict(word=w, start=10.+i*.4, end=10.+(i+1)*.4)
+                 for i,w in enumerate(heard)]
+        words[0]['start'] = 1.
+        def caption(start):
+            return dict(text=text, start=start, end=start+len(text)*.4, units=[
+                dict(text=w, first=i, stop=i+1, start=start+i*.4, end=start+(i+1)*.4)
+                for i,w in enumerate(text)])
+        early = timeline_support([caption(1.)],words,'Chinese')
+        self.assertEqual([c['line'] for c in early['conflicts']],[1])
+        self.assertEqual(timeline_support([caption(10.)],words,'Chinese')['conflicts'],[])
 
     def test_missing_phrase_cannot_consume_a_later_observed_phrase(self):
         words = [dict(word='blue river', start=20., end=24.),

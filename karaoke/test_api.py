@@ -5365,6 +5365,30 @@ def test_phrase_validation_reconciles_dialogue_with_ordered_recording_views(tmp_
         assert 2 in evidence[0]['joint_view_validation']['supported_lines']
 
 
+@pytest.mark.parametrize('displaced', [False, True])
+def test_ambiguous_global_match_cannot_dismiss_a_local_phrase_conflict(tmp_path, displaced):
+    text, following = '清晨微風吹過河岸', '日光照亮山間小路'
+    lines = [text, following, text, '晚風帶來遠方消息']
+    words = [dict(word=w,start=10.+i*.4,end=10.+(i+1)*.4)
+             for i,w in enumerate('清晨微風吹過湖岸')]
+    words[0]['start'] = 1.
+    marker = dict(word=following,start=20.,end=23.)
+    cues = [dict(text=t,start=s,end=s+len(t)*.4,units=[
+        dict(text=w,first=i,stop=i+1,start=s+i*.4,end=s+(i+1)*.4)
+        for i,w in enumerate(t)]) for t,s in zip(lines,[1. if displaced else 10.,20.,40.,50.])]
+    raw = tmp_path/'alignment/raw.json'; raw.parent.mkdir()
+    raw.write_text(json.dumps([dict(asr_localizations=[
+        dict(context=[0,2],source_range=[0.,30.],recognition=dict(segments=[dict(words=[*words,marker])])),
+        dict(context=[1,2],source_range=[0.,30.],recognition=dict(segments=[dict(words=[marker])]))])]))
+    pipeline = Pipeline(dict(url=URL),tmp_path)
+    lyrics = dict(lines=lines,language='Chinese')
+    if displaced:
+        with pytest.raises(StageFailure,match='字幕与已定位的唱段不一致'):
+            pipeline.validate_localization(lyrics,60.,cues)
+    else:
+        assert not any(e['conflicts'] for e in pipeline.validate_localization(lyrics,60.,cues))
+
+
 @pytest.mark.parametrize('extra_frames', [0, 4])
 def test_timing_review_accepts_one_sample_of_resampling_but_rejects_different_lengths(tmp_path, monkeypatch, extra_frames):
     import soundfile as sf
