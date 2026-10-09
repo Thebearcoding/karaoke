@@ -660,6 +660,7 @@ def test_soak_preserves_failed_stage_diagnostics_after_cache_eviction(tmp_path):
         'lyric-coverage-validation.json': dict(status='incomplete', uncovered_passages=[dict(start=0., end=2.)]),
         'localization-validation.json': [dict(context=[0,1],conflicts=[dict(line=1,observed_range=[10.,12.])])],
         'timing-recovery.json': dict(cues=[dict(text='before repair')], report=dict(constraints=[])),
+        'timing-context-recovery.json': dict(cues=[dict(text='before local observation')]),
     }
     for name, value in final_validation.items():
         (folder/name).write_text(json.dumps(value))
@@ -4956,7 +4957,7 @@ def test_candidate_localization_checks_the_acoustically_reviewed_timeline(tmp_pa
     calls=[]
     def run(stage,command):
         calls.append(stage)
-        output=tmp_path/'timing-checked';output.mkdir()
+        output=tmp_path/'timing-checked';output.mkdir(exist_ok=True)
         (output/'cues.json').write_text(json.dumps(correct if repair else coarse))
         (output/'report.json').write_text(json.dumps(dict(lines=[],unresolved=[],constraints=[])))
     monkeypatch.setattr(pipeline,'align',align)
@@ -4967,7 +4968,7 @@ def test_candidate_localization_checks_the_acoustically_reviewed_timeline(tmp_pa
     else:
         with pytest.raises(StageFailure,match='字幕与已定位'):
             pipeline.align_candidates(lyrics,{},15.)
-    assert calls==['validate_timing']
+    assert calls==['validate_timing']*(1 if repair else 2)
 
 
 @pytest.mark.parametrize('uncovered', [False, True])
@@ -5381,7 +5382,7 @@ def test_publication_checks_observed_lyrics_even_after_playback_fallback(tmp_pat
     raw.write_text(json.dumps([dict(asr_localizations=[dict(context=[0,1], source_range=[10.,40.],
         recognition=dict(segments=[dict(words=[dict(word='blue river', start=10., end=14.)])]))])]))
     def run(*args):
-        output = tmp_path/'timing-checked'; output.mkdir()
+        output = tmp_path/'timing-checked'; output.mkdir(exist_ok=True)
         (output/'cues.json').write_text(json.dumps([cue]))
         (output/'report.json').write_text(json.dumps(dict(lines=[], unresolved=[], constraints=[])))
     monkeypatch.setattr(pipeline, 'run', run)
@@ -5394,6 +5395,48 @@ def test_publication_checks_observed_lyrics_even_after_playback_fallback(tmp_pat
     assert evidence[0]['checked_lines'] == [1]
     assert bool(evidence[0]['conflicts']) is displaced
     assert json.loads((tmp_path/'cues.json').read_text()) == [cue]
+
+
+@pytest.mark.parametrize('repair', [False, True])
+@pytest.mark.parametrize('evidence', ['phrase', 'restored_repetition'])
+def test_publication_rechecks_known_phrase_location_before_changing_lyrics(tmp_path, monkeypatch, repair, evidence):
+    from pathlib import Path
+    lines = ['The lantern shines above the river', 'Morning sunlight fills the open windows']
+    def cue(text, start):
+        return dict(text=text, start=start, end=start+1., units=[
+            dict(text=text, first=0, stop=len(text), start=start, end=start+1.)])
+    original = [cue(lines[0], 8.), cue(lines[1], 30.)]
+    corrected = [cue(lines[0], 20.), original[1]]
+    lyrics = dict(lines=lines, language='English', provenance={})
+    if evidence == 'restored_repetition':
+        lyrics['provenance']['repetitions'] = [dict(output_range=[0,1], source_lines=lines[:1],
+            boundary_anchors=[dict(start=20., end=21.)]*2)]
+    raw = tmp_path/'alignment/raw.json'; raw.parent.mkdir()
+    raw.write_text(json.dumps([dict(asr_localizations=[] if evidence=='restored_repetition' else [
+        dict(context=[0,2], source_range=[0.,40.], recognition=dict(segments=[dict(words=[
+            dict(word=c['text'],start=c['start'],end=c['end']) for c in corrected])]))])]))
+    for name, value in [('lyrics.json',lyrics),('cues.json',original),('quality.json',{})]:
+        (tmp_path/name).write_text(json.dumps(value))
+    pipeline = Pipeline(dict(url=URL),tmp_path)
+    calls=[]
+    def run(stage,command):
+        before=json.loads((tmp_path/'timing-input.json').read_text())
+        calls.append(before)
+        if len(calls)==2:
+            contexts=json.loads(Path(command[command.index('--context-windows')+1]).read_text())['windows']
+            assert len(contexts)==1 and contexts[0]['line']==1 and contexts[0]['text']==lines[0]
+            assert contexts[0]['source_range'][0]<=20.<21.<=contexts[0]['source_range'][1]
+            assert before==original  # A search window must not assign new word times.
+        output=tmp_path/'timing-checked';output.mkdir(exist_ok=True)
+        (output/'cues.json').write_text(json.dumps(corrected if repair and len(calls)==2 else before))
+        (output/'report.json').write_text(json.dumps(dict(lines=[],constraints=[],unresolved=[])))
+    monkeypatch.setattr(pipeline,'run',run)
+    if repair:
+        pipeline.validate_alignment(lyrics,40.)
+        assert json.loads((tmp_path/'cues.json').read_text())==corrected
+    else:
+        with pytest.raises(StageFailure):pipeline.validate_alignment(lyrics,40.)
+    assert len(calls)==2
 
 
 @pytest.mark.parametrize('displaced', [False, True])
@@ -5509,6 +5552,40 @@ def test_timing_constraints_reuse_only_the_same_evidence_method(tmp_path, monkey
         assert len(archived) == 1 and json.loads(archived[0].read_text()) == old
     else:
         assert not (tmp_path/'timing-history').exists()
+
+
+def test_context_retry_keeps_other_lines_review_evidence(tmp_path, monkeypatch):
+    import soundfile as sf
+    from karaoke import timing_validation as module
+    def cue(text,start):
+        return dict(text=text,start=start,end=start+.4,units=[
+            dict(text=text,first=0,stop=len(text),start=start,end=start+.4)])
+    cues=[cue('hello',1.),cue('world',5.)]
+    for name,value in [('cues.json',cues),('lyrics.json',dict(lines=['hello','world'],language='English'))]:
+        (tmp_path/name).write_text(json.dumps(value))
+    audio=tmp_path/'audio.wav';sf.write(audio,np.ones((10*44100,2))*.05,44100,subtype='FLOAT')
+    uncertain=dict(line=1,status='reviewed',repairs=[],witnesses=[cue('hello',2.)['units']]*2)
+    settled=dict(line=2,status='reviewed',repairs=[],witnesses=[cues[1]['units']]*2)
+    calls=[]
+    def reconcile(current,*args,**kwargs):
+        calls.append(kwargs['contexts'])
+        assert current==cues
+        return current,dict(lines=[settled if len(calls)>1 else uncertain],constraints=[],unresolved=[])
+    monkeypatch.setattr(module,'AcousticReview',Mock())
+    monkeypatch.setattr(module,'acoustic_model_files',lambda *args:[])
+    monkeypatch.setattr(module,'reconcile_views',reconcile)
+    args=['timing_validation','--input',str(tmp_path/'cues.json'),'--lyrics',str(tmp_path/'lyrics.json'),
+          '--audio',str(audio),'--original',str(audio),'--output',str(tmp_path/'checked'),'--device','cpu']
+    monkeypatch.setattr(sys,'argv',args);module.main()
+    report=json.loads((tmp_path/'checked/report.json').read_text())
+    assert report['pending_review_lines']==[1]
+    request=tmp_path/'context.json'
+    request.write_text(json.dumps(dict(report=report,windows=[dict(line=2,text='world',source_range=[4.,7.])],cues=cues)))
+    monkeypatch.setattr(sys,'argv',[*args,'--context-windows',str(request)]);module.main()
+    final=json.loads((tmp_path/'checked/report.json').read_text())
+    assert calls==[{}, {1:[4.,7.]}]
+    assert final['pending_review_lines']==[1]
+    assert final['lines']==[uncertain,settled]
 
 
 @pytest.mark.parametrize('changed', [None, 'audio', 'code', 'lead', 'unfinished', 'pending', 'language'])
@@ -9300,6 +9377,8 @@ def test_compaction_keeps_outputs_and_bounded_logs_without_following_symlinks(tm
     (folder/'captioned-picture.render.json').write_text(json.dumps(render_report))
     timing_recovery = dict(cues=[dict(text='before repair')], report=dict(constraints=[]))
     (folder/'timing-recovery.json').write_text(json.dumps(timing_recovery))
+    context_recovery = dict(cues=[dict(text='before local observation')], windows=[dict(line=1,source_range=[10.,12.])])
+    (folder/'timing-context-recovery.json').write_text(json.dumps(context_recovery))
     outside = tmp_path/'precious.wav'
     outside.write_bytes(b'keep me')
     (folder/'raw/link').symlink_to(outside)
@@ -9311,6 +9390,7 @@ def test_compaction_keeps_outputs_and_bounded_logs_without_following_symlinks(tm
     assert json.loads(source_failure.read_text())['lines'] == ['Original rejected text']
     assert json.loads((folder/'captioned-picture.render.json').read_text()) == render_report
     assert json.loads((folder/'timing-recovery.json').read_text()) == timing_recovery
+    assert json.loads((folder/'timing-context-recovery.json').read_text()) == context_recovery
     store.update(job['id'], status='failed', result=None, error=dict(code='cache_full'))
     (folder/'asr').mkdir()
     (folder/'asr/transcription.json').write_text('{"words": []}')

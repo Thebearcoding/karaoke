@@ -187,18 +187,22 @@ def pending_review_lines(cues, report, protocol):
     return pending | {v['proof']['line']-1 for v in timing_violations(cues, report['constraints'])}
 
 
-def reconcile_views(cues, observations, protocol, language, constraints=(), *, playback=False, previous=()):
+def reconcile_views(cues, observations, protocol, language, constraints=(), *, playback=False, previous=(), contexts=None):
     """Spend additional acoustic work only on unresolved local disagreements.
 
     Each observation uses the same acceptance contract and retains all previous
     onset constraints. The iterator may load a different audio view lazily.
     """
     from cjk_recovery import audio_floor
-    result, report, pending = cues, dict(lines=[], constraints=list(constraints)), None
+    result, report, pending = deepcopy(cues) if contexts else cues, dict(lines=[], constraints=list(constraints)), None
+    requested = set(contexts or {})
+    for index, (begin, end) in (contexts or {}).items():
+        result[index].update(aligned_start=begin, aligned_end=end)
     history, floors = [], {}
     for name, wave, witness, predict in observations:
         result, reviewed = reconcile_timing(result, wave, witness, predict, protocol, language,
-            report['constraints'], playback=playback, _review_lines=pending)
+            report['constraints'], playback=playback, _repeat_context=not requested,
+            _review_lines=(set(pending or ()) | requested) if pending is not None or requested else None)
         report['lines'].extend(dict(row, observation=name) for row in reviewed['lines'])
         report.update(constraints=reviewed['constraints'], unresolved=reviewed['unresolved'], accuracy=None)
         unresolved_lines = pending_review_lines(result, report, protocol)
@@ -264,7 +268,7 @@ def reconcile_views(cues, observations, protocol, language, constraints=(), *, p
                         reason='local sweep between independently measured onsets')]))
             report['unresolved'] = timing_violations(result, report['constraints'])
         pending = pending_review_lines(result, report, protocol)
-        if not pending:
+        if not pending and not requested:
             break
     report['pending_review_lines'] = [i+1 for i in sorted(pending or [])]
     return result, report
@@ -428,7 +432,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
         if _review_lines is not None and index not in _review_lines:
             continue
         selected = screened_units(cue, wave, protocol, floor=floor)
-        if not selected and not timing_violations(result, [p for p in ledger if p['line']==index+1]):
+        if not selected and _review_lines is None and not timing_violations(result, [p for p in ledger if p['line']==index+1]):
             continue
         report = dict(line=index+1, screened_units=selected, status='unverified', repairs=[])
         reports.append(report)
@@ -1074,6 +1078,8 @@ def main():
     parser.add_argument('--playback-fallback',action='store_true')
     parser.add_argument('--previous-alignment',type=Path,
                         help='Same-run reviewed candidate before a lyric-source retry')
+    parser.add_argument('--context-windows',type=Path,
+                        help='Observed phrase ranges for one bounded acoustic repair, never word timestamps')
     parser.add_argument('--defer-constraints',action='store_true',
                         help='Save preliminary evidence; the pipeline must enforce constraints before publication')
     args=parser.parse_args()
@@ -1088,11 +1094,22 @@ def main():
     frames=len(wave)
     duration=frames/rate
     validate_timeline(cues,lyrics['lines'],duration,language=lyrics['language'])
+    contexts = {}
+    context_request = read(args.context_windows) if args.context_windows else {}
+    for row in context_request.get('windows', []):
+        index, (begin, end) = row['line']-1, row['source_range']
+        begin, end = max(0.,begin), min(duration,end)
+        if (not 0 <= index < len(cues) or row['text'] != cues[index]['text'] or
+                not 0 <= begin < end <= duration or end-begin > 30):
+            raise ValueError('Acoustic repair context does not match the current lyric or audio')
+        contexts[index] = [begin, end]
     divisor=np.gcd(rate,44100)
     wave=resample_poly(wave.mean(axis=1),44100//divisor,rate//divisor).astype('float32')
     code_root=Path(__file__).resolve().parent
     protocol=read(code_root/'experiments/cjk-onsets-v003/protocol.json')
     source=dict(original=sha(args.original),vocals=sha(args.audio),lyrics=lyrics['lines'])
+    if context_request and context_request['report']['source'] != source:
+        raise ValueError('Acoustic repair observations refer to a different recording or lyric')
     ledger_file=out.parent/'timing-constraints.json'
     ledger=read(ledger_file) if ledger_file.is_file() else {}
     paths=[code_root/name for name in ('timing_validation.py','cjk_recovery.py','align_lyric_phonemes.py',
@@ -1156,7 +1173,9 @@ def main():
     if args.lead is None or ledger.get('lead_sha256') != lead_sha256:
         previous = [row for row in previous if not row.get('observation', '').startswith('lead_')]
     repaired,report=reconcile_views(cues,observations(),protocol,lyrics['language'],constraints,
-                                   playback=args.playback_fallback,previous=previous)
+                                   playback=args.playback_fallback,previous=previous,contexts=contexts)
+    if context_request:
+        report['lines'] = [*context_request['report']['lines'], *report['lines']]
     localization=out.parent/'alignment/raw.json'
     active,superseded=localized_constraints(report,read(localization) if localization.is_file() else [])
     superseded=(ledger.get('superseded',[]) if same_evidence else [])+superseded
@@ -1169,6 +1188,8 @@ def main():
     if args.lead is not None:
         report['lead_sha256']=lead_sha256
     report.update(seconds=time.perf_counter()-started,source=source,input_sha256=sha(args.input))
+    if contexts:
+        report['context_windows'] = contexts
     if reused_source is not None:
         report['reused_source_alignment'] = reused_source
     measurements = list({json.dumps(row, sort_keys=True): row for row in [*previous, *report['lines']]

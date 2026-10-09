@@ -279,6 +279,8 @@ class Pipeline:
                                              'job_schema.py', 'requirements-subtitles.txt')]
             if '--lead' in command:
                 inputs = [*inputs, command[command.index('--lead')+1]]
+            if '--context-windows' in command:
+                inputs = [*inputs, command[command.index('--context-windows')+1]]
             for evidence in ('timing-constraints.json', 'alignment/raw.json'):
                 if (self.output/evidence).is_file():
                     inputs = [*inputs, evidence]
@@ -1069,6 +1071,7 @@ class Pipeline:
                 for name in ('lyrics.json', 'alignment/raw.json', 'alignment/run.json',
                              'playback-warning.json', 'cues.json', 'localization-validation.json',
                              'lyric-source-support.json', 'timing-input.json',
+                             'timing-context-recovery.json',
                              'timing-checked/cues.json', 'timing-checked/report.json', 'timing-constraints.json'):
                     source = self.output/name
                     if source.is_file():
@@ -1281,7 +1284,7 @@ class Pipeline:
             raise StageFailure('subtitles', '字幕与已定位的唱段不一致或遗漏重复唱段；音频位置证据已保留')
         return observations
 
-    def validate_alignment(self, lyrics, duration, lead=None, *, previous=None):
+    def validate_alignment(self, lyrics, duration, lead=None, *, previous=None, context_windows=None):
         from .timing_validation import timing_violations, validate_timeline
         cues = json.loads((self.output/'cues.json').read_text())
         write_json(self.output/'timing-input.json', cues)
@@ -1290,6 +1293,7 @@ class Pipeline:
             '--audio', self.vocals, '--original', self.output/'source-44100.wav',
             '--output', self.output/'timing-checked', '--device', self.device,
             *([] if self.strict_audio else ['--playback-fallback']),
+            *(['--context-windows', context_windows] if context_windows else []),
             *(['--previous-alignment', previous] if previous else [])]
         # Start while packaging is still running. Only unresolved local evidence
         # waits for the delivered lead master, including its native-rate conversion.
@@ -1332,7 +1336,39 @@ class Pipeline:
         # Text completeness is one direction of coverage. When recovery has
         # already heard a lyric elsewhere, the final/fallback captions must
         # cover that passage too. Reuse evidence; do not launch another ASR.
-        observations = self.validate_localization(lyrics, duration, checked)
+        try:
+            observations = self.validate_localization(lyrics, duration, checked)
+        except StageFailure:
+            if self.strict_audio or context_windows is not None:
+                raise
+            observations = json.loads((self.output/'localization-validation.json').read_text())
+            ranges = {}
+            def observe(index, span):
+                if 0 <= index < len(checked) and 0 <= span[0] < span[1] <= duration:
+                    ranges.setdefault(index, []).append(span)
+            for observation in observations:
+                for conflict in observation['conflicts']:
+                    observe(observation['context'][0]+conflict['line']-1, conflict['observed_range'])
+            for repeat in lyrics.get('provenance', {}).get('repetitions', []):
+                first, stop = repeat.get('output_range', (0,0))
+                if not 0 <= first < stop <= len(checked) or lyrics['lines'][first:stop] != repeat.get('source_lines'):
+                    continue
+                for index, anchor in zip((first,stop-1), repeat['boundary_anchors']):
+                    if checked[index]['end']+2 < anchor['start'] or checked[index]['start']-2 > anchor['end']:
+                        observe(index, [anchor['start'],anchor['end']])
+            windows = []
+            for index, spans in ranges.items():
+                begin, end = max(0.,min(s[0] for s in spans)-2), min(duration,max(s[1] for s in spans)+2)
+                if end-begin <= 30:
+                    windows.append(dict(line=index+1, text=checked[index]['text'], source_range=[begin,end]))
+            if not windows:
+                raise
+            # Change only where the acoustic models look. Keep the old word
+            # times and all constraints until new measurements justify a repair.
+            context_windows = self.output/'timing-context-recovery.json'
+            write_json(context_windows, dict(cues=checked, report=report,
+                observations=observations, windows=windows))
+            return self.validate_alignment(lyrics, duration, lead, context_windows=context_windows)
         quality = json.loads((self.output/'quality.json').read_text())
         quality.update(lines=len(checked), units=sum(len(c['units']) for c in checked),
             localization_validation=observations,

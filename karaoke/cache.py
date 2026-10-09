@@ -143,6 +143,7 @@ class SongCache:
                 'captioned-picture.render.json', 'lyric-readings.json',
                 'song-metadata.json', 'checkpoints/extract_song_metadata.json',
                 'lyrics.json', 'timing-constraints.json', 'timing-checked/report.json', 'timing-recovery.json',
+                'timing-context-recovery.json',
                 'quality.json', 'alignment/raw.json', 'lyric-coverage-validation.json',
                 'highlight-validation.json', 'storage-migration.json'}
         keep.update(p.relative_to(folder).as_posix() for p in (folder/'lyric-source-attempts').rglob('*.json'))

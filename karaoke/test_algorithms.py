@@ -917,6 +917,30 @@ class SubtitleIntegrity(unittest.TestCase):
                 self.assertEqual(cue['units'],units)
                 validate_timeline(result,['甲乙'],10.,report['constraints'],'Chinese')
 
+    def test_supplied_phrase_context_only_requests_new_acoustic_measurements(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_views
+        protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
+        units=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='singing_window_consensus')
+               for i,(c,t) in enumerate(zip('甲乙',[1.,1.5]))]
+        cue=dict(text='甲乙',start=1.,end=1.7,units=units)
+        measured=[dict(u,start=t,end=t+.2) for u,t in zip(units,[6.,6.5])]
+        for agrees in (False,True):
+            with self.subTest(agrees=agrees):
+                calls=[]
+                def witness(context,*args,**kwargs):
+                    calls.append((context['aligned_start'],context['aligned_end']))
+                    views=[deepcopy(measured),deepcopy(measured)]
+                    if not agrees:
+                        for u in views[1]:u.update(start=u['start']+.3,end=u['end']+.3)
+                    return views
+                result,report=reconcile_views([cue],[('vocals',np.ones(10*44100)*.1,witness,
+                    lambda *args:[deepcopy(measured) for _ in range(3)])],protocol,'Chinese',contexts={0:[5.,8.]})
+                self.assertTrue(calls)
+                self.assertEqual(calls[0],(5.,8.))
+                self.assertEqual([u['start'] for u in result[0]['units']],[6.,6.5] if agrees else [1.,1.5])
+                self.assertEqual(cue['units'],units)
+
     def test_short_phoneme_can_start_the_right_boundary_group(self):
         from copy import deepcopy
         from timing_validation import reconcile_timing, validate_timeline

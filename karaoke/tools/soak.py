@@ -650,7 +650,8 @@ def record_failure(attempt, job, folder):
                     'published-lyrics.json', 'lyric-lookup.json', 'lyric-readings.json', 'song-metadata.json',
                     'audio-result.json', 'result.json', 'lyric-coverage-validation.json',
                     'lyric-repeat-validation.json', 'highlight-validation.json', 'localization-validation.json',
-                    'timing-checked/*.json', 'timing-constraints.json', 'timing-input.json', 'timing-recovery.json'):
+                    'timing-checked/*.json', 'timing-constraints.json', 'timing-input.json', 'timing-recovery.json',
+                    'timing-context-recovery.json'):
         for path in folder.glob(pattern):
             try:
                 # Alignment retries contain repeated contexts which compress
