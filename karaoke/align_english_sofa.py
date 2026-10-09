@@ -5,6 +5,7 @@ import importlib.util
 import json
 import re
 import sys
+import unicodedata
 
 import numpy as np
 import torch
@@ -58,10 +59,11 @@ class EnglishSofaAligner:
 
     @lru_cache(maxsize=4096)
     def pronunciation(self, word):
-        key = re.sub(r"[^a-z'\-]", '', word.lower().replace('’', "'")).strip("'-")
+        text = unicodedata.normalize('NFKD', word.casefold()).replace('’', "'")
+        key = re.sub(r"[^a-z'\-]", '', text).strip("'-")
         phones = self.lexicon.get(key)
         if phones is None:
-            phones = [p for p in self.g2p.predict_str(key) if not p.startswith('<')]
+            phones = [p for p in self.g2p.predict_str(key) if not p.startswith('<')] if key else []
         if not phones or any(p not in self.model.vocab for p in phones):
             raise ValueError(f'Unsupported pronunciation for {word}: {phones}')
         return phones

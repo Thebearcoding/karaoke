@@ -6082,17 +6082,20 @@ def test_invalid_download_metadata_is_rebuilt_without_reusing_wrong_source(tmp_p
 
 
 @pytest.mark.parametrize('sliced', [False, True])
-def test_english_phonetic_normalization_preserves_caller_audio(sliced):
+@pytest.mark.parametrize('word', ['word', 'à', 'café'])
+def test_english_phonetic_normalization_preserves_caller_audio(sliced, word):
     from align_english_sofa import EnglishSofaAligner
     model = object.__new__(EnglishSofaAligner)
     model.device = 'cpu'
-    model.pronunciation = lambda word: ['AA']
+    model.lexicon = {key: ['AA'] for key in ('word', 'a', 'cafe')}
+    model.g2p = SimpleNamespace(predict_str=Mock(side_effect=AssertionError('Known word sent to G2P')))
     normalized = []
     def extract(wave):
         normalized.append(wave.numpy().copy())
         return wave.unsqueeze(1)
     model.extract = extract
     model.model = SimpleNamespace(
+        vocab={'AA': 1},
         melspec_config=dict(sample_rate=44100, scale_factor=1, hop_length=441),
         _infer_once=lambda mel, duration, phones, ids, owners:
             (None, None, ids, np.array([[0., .01]]), 1., None, None))
@@ -6101,11 +6104,29 @@ def test_english_phonetic_normalization_preserves_caller_audio(sliced):
     audio = buffer[128:-128] if sliced else buffer
     expected = audio*.97/float(np.max(np.abs(audio)))
     for _ in range(2):
-        result, _, _ = model.align(audio, ['word'])
-        assert result[0]['text'] == 'word'
+        result, _, _ = model.align(audio, [word])
+        assert result[0]['text'] == word
         np.testing.assert_array_equal(buffer, original)
         np.testing.assert_allclose(normalized[-1][0], expected, atol=1e-7)
     np.testing.assert_array_equal(normalized[0], normalized[1])
+
+
+@pytest.mark.parametrize('word,key', [
+    ('naïve', 'naive'), ('Straße', 'strasse'), ('a\u0300', 'a'), ("I’ve", "i've"),
+    ('re-enter', 're-enter'), ('', None), ('—’', None), ('東京', None),
+])
+def test_english_pronunciation_normalizes_model_input_before_g2p(word, key):
+    from align_english_sofa import EnglishSofaAligner
+    model = object.__new__(EnglishSofaAligner)
+    model.lexicon, model.model = {}, SimpleNamespace(vocab={'AH': 1})
+    model.g2p = SimpleNamespace(predict_str=Mock(return_value=['<s>', 'AH']))
+    if key is None:
+        with pytest.raises(ValueError, match='Unsupported pronunciation'):
+            model.pronunciation(word)
+        model.g2p.predict_str.assert_not_called()
+    else:
+        assert model.pronunciation(word) == ['AH']
+        model.g2p.predict_str.assert_called_once_with(key)
 
 
 @pytest.mark.parametrize('with_original,late_failure', [(False,False), (True,False), (True,True)])
