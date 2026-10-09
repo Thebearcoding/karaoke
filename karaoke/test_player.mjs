@@ -923,6 +923,61 @@ test('a stalled video freezes the shared clock instead of chasing it with seeks'
   p.clear();
 });
 
+test('presented frames keep audio running through an incorrect video currentTime; real frame stalls still buffer', async () => {
+  const p=setup(), waiting=[], callbacks=new Map(); let request=0;
+  p.video.requestVideoFrameCallback=callback=>{callbacks.set(++request,callback);return request;};
+  p.video.cancelVideoFrameCallback=id=>callbacks.delete(id);
+  const present=time=>{const next=callbacks.entries().next().value;if(next){const [id,callback]=next;callbacks.delete(id);callback(0,{mediaTime:time});}};
+  p.onBuffering=(...args)=>waiting.push(args);
+  try {
+    await p.unlock(); await p.load(song); await p.apply(state,clockOffset());
+    p.context.currentTime=p.audibleWhen; frame();
+    const sources=[...p.sources];
+    // Frames keep advancing, but the media element periodically reports a
+    // stale startup timestamp, as seen in the physical iPad trace.
+    Object.defineProperty(p.video,'currentTime',{configurable:true,get:()=>.011,set(){}});
+    for(let i=0;i<120;i++) {
+      p.context.currentTime+=1/60;
+      if(i%2===0) present(p.outputTime()-p.anchor);
+      frame();
+    }
+    assert.deepEqual(waiting,[]); assert.deepEqual(p.sources,sources);
+    assert.ok(sources.every(source=>!source.stopped));
+    // Browsing away from the picture may suspend presentation callbacks while
+    // the media clock keeps advancing. This must not interrupt the audio.
+    Object.defineProperty(p.video,'currentTime',{configurable:true,get:()=>p.outputTime()-p.anchor,set(){}});
+    for(let i=0;i<120;i++) {p.context.currentTime+=1/60;frame();}
+    assert.deepEqual(waiting,[]); assert.deepEqual(p.sources,sources);
+    const stalledAt=p.video.currentTime;
+    Object.defineProperty(p.video,'currentTime',{configurable:true,get:()=>stalledAt,set(){}});
+    for(let i=0;i<70;i++) {p.context.currentTime+=1/60;frame();}
+    assert.equal(waiting.length,1); assert.equal(p.anchor,null);
+    assert.ok(sources.every(source=>source.stopped)); assert.equal(callbacks.size,0);
+  } finally {p.clear();}
+});
+
+test('video frame callbacks from before a seek or song change cannot replace the current presentation', async () => {
+  const p=setup(), callbacks=new Map(); let request=0;
+  p.video.requestVideoFrameCallback=callback=>{callbacks.set(++request,callback);return request;};
+  p.video.cancelVideoFrameCallback=id=>callbacks.delete(id);
+  try {
+    await p.unlock(); await p.load(song); await p.apply(state,clockOffset());
+    const stale=callbacks.values().next().value;
+    await p.apply({...state,position:12},clockOffset());
+    const latest=callbacks.values().next().value;
+    latest?.(0,{mediaTime:12});
+    stale?.(0,{mediaTime:3});
+    p.video.currentTime=.011;
+    p.context.currentTime=p.audibleWhen; frame();
+    assert.notEqual(p.anchor,null); assert.equal(p.video.paused,false);
+    await p.load({...song,id:'two',job_id:'two'});
+    await p.apply({...state,current_id:'two',position:0},clockOffset());
+    latest?.(0,{mediaTime:19});
+    p.context.currentTime=p.audibleWhen; frame();
+    assert.notEqual(p.anchor,null); assert.equal(p.video.paused,false);
+  } finally {p.clear();}
+});
+
 test('small video drift leaves native playback uninterrupted; genuine desync still buffers', async () => {
   const p=setup(); await p.unlock(); await p.load(song); await p.apply(state,clockOffset());
   p.context.currentTime=p.audibleWhen; frame();

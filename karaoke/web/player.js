@@ -95,8 +95,14 @@ export class Player {
   syncVideo(position) {
     const video = this.video;
     if (this.videoPending) return;
-    if (video.currentTime !== this.lastVideoTime) {
-      this.lastVideoTime = video.currentTime;
+    // Use the frame actually submitted for display. WebKit can briefly report
+    // an old currentTime while still presenting frames from the current run.
+    // Off-screen video need not submit frames. Fall back to its media clock
+    // when the last presentation is stale so browsing the song list keeps playing.
+    const videoTime = this.presentedTime != null && this.context.currentTime - this.presentedAt < .25
+      ? this.presentedTime : video.currentTime;
+    if (videoTime !== this.lastVideoTime) {
+      this.lastVideoTime = videoTime;
       this.lastVideoAdvance = this.context.currentTime;
     }
     // readyState can briefly drop while frames still advance. Freeze only for
@@ -106,7 +112,7 @@ export class Player {
       return;
     }
     if (video.seeking) return;
-    const drift = position - video.currentTime;
+    const drift = position - videoTime;
     // Never chase a moving audio target with seeks. Stop the common clock and
     // prepare one fixed position if the video needs to load or catch up.
     if (Math.abs(drift) > 1) {
@@ -173,6 +179,15 @@ export class Player {
       if (this.context.state !== 'running') throw new Error('声音尚未启动，请点播放重试');
       this.pendingStart = null;
       this.videoRun = pending;
+      if (this.video.requestVideoFrameCallback) {
+        const presented = (_, metadata) => {
+          if (this.videoRun !== pending) return;
+          this.presentedTime = metadata.mediaTime;
+          this.presentedAt = this.context.currentTime;
+          this.videoFrameRequest = this.video.requestVideoFrameCallback(presented);
+        };
+        this.videoFrameRequest = this.video.requestVideoFrameCallback(presented);
+      }
       this.videoPending = true;
       this.audibleWhen = this.context.currentTime + Math.max(pending.when - this.outputTime(),
         .02 + (this.pitchChain?.latency || 0));
@@ -269,6 +284,9 @@ export class Player {
     this.pendingStart?.abort.abort();
     this.pendingStart = null;
     this.videoRun = null;
+    if (this.videoFrameRequest != null) this.video.cancelVideoFrameCallback(this.videoFrameRequest);
+    this.videoFrameRequest = null;
+    this.presentedTime = null;
     this.videoPending = false;
     if (this.video.playbackRate !== 1) this.video.playbackRate = 1;
     if (wasPlaying) this.pitchChain?.stop();
