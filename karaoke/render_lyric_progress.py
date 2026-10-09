@@ -226,10 +226,11 @@ def main():
     if scrim_path:
         scrim_index = next_input
         next_input += 1
-        command += ['-loop', '1', '-framerate', str(fps), '-i', str(scrim_path)]
+        command += ['-i', str(scrim_path)]
     if intro_path:
         intro_index = next_input
-        command += ['-loop', '1', '-framerate', str(fps), '-i', str(intro_path)]
+        command += ['-i', str(intro_path)]
+    # Overlay framesync holds the final image; static PNGs need decoding only once.
     filters = (
         '[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,'
         'fps=30,setpts=PTS-STARTPTS[base];[1:v]setpts=PTS-STARTPTS[text];')

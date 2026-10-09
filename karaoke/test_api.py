@@ -5154,6 +5154,7 @@ def test_picture_analysis_failure_does_not_block_subtitle_rendering(tmp_path):
 @pytest.mark.parametrize('video_only', [False, True])
 def test_static_background_shading_composes_with_intro_and_audio(tmp_path, monkeypatch, video_only):
     from pathlib import Path
+    from PIL import Image
     import karaoke.render_lyric_progress as renderer
     video, audio, output = tmp_path/'picture.mp4', tmp_path/'audio.wav', tmp_path/'output.mp4'
     subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
@@ -5175,6 +5176,15 @@ def test_static_background_shading_composes_with_intro_and_audio(tmp_path, monke
     probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_streams',
         '-of', 'json', str(output)]))
     assert {s['codec_type'] for s in probe['streams']} == ({'video'} if video_only else {'video','audio'})
+    # A single-image input ends after its first frame. Both overlays must still
+    # be visible later, without making the picture or audio end early.
+    frame = np.frombuffer(subprocess.check_output(['ffmpeg', '-v', 'error', '-ss', '0.3',
+        '-i', str(output), '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']), dtype=np.uint8).reshape(720, 1280, 3)
+    assert frame[700, 640].max() < 150
+    intro = np.asarray(Image.open(output.with_suffix('.intro.png')))
+    white = np.argwhere((intro[:, :, :3].min(axis=2) > 200) & (intro[:, :, 3] > 240))
+    y, x = white[len(white)//2]
+    assert frame[y+report['song_intro']['top'], x, 2] > 205
     assert json.loads((tmp_path/'cues.json').read_text()) == cues
 
 
