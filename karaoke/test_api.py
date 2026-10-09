@@ -5026,6 +5026,59 @@ def test_extra_source_text_only_displaces_usable_lyrics_for_an_uncovered_passage
             assert passage['source_range']==[2,3]
 
 
+@pytest.mark.parametrize('heard_intro', [False, True])
+@pytest.mark.parametrize('complete_fallback', [False, True])
+@pytest.mark.parametrize('early_failure', [False, True])
+def test_source_fallback_preserves_recording_evidence(tmp_path, monkeypatch, heard_intro, complete_fallback, early_failure):
+    intro = 'Silver lanterns shine above the quiet river'
+    verse, closing = 'Morning sunlight fills the open windows', 'We walk home across the hills'
+    primary, shorter, complete = [intro, verse, 'An old closing line'], [verse, closing], [intro, verse, closing]
+    texts = [primary, shorter, *([complete] if complete_fallback else [])]
+    packet = dict(candidate_texts=texts, crosscheck=dict(selected_source=0,
+        eligible_sources=list(range(len(texts))), sources=[dict(provider=str(i), language='English')
+                                                        for i in range(len(texts))]))
+    lyrics = dict(title='Song', artist='Singer', language='English', lines=primary,
+        provenance=dict(kind='online_lyric_text', route='lyrics_first', lyric_lookup=packet))
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    (tmp_path/'lyrics.json').write_text(json.dumps(lyrics))
+    raw = tmp_path/'alignment/raw.json'; raw.parent.mkdir()
+    calls = []
+    def align(candidate, duration):
+        calls.append(candidate['lines'])
+        starts = [1., 10., 20.] if len(candidate['lines'])==3 else [10., 20.]
+        cues = [dict(text=t, start=s, end=s+2., status='candidate')
+                for t,s in zip(candidate['lines'], starts)]
+        (tmp_path/'cues.json').write_text(json.dumps(cues))
+        (tmp_path/'quality.json').write_text('{}')
+        (pipeline.checkpoints.directory/'align_words.json').write_text('{}')
+        # Only the first attempt needed recognition of the intro. Later local
+        # repairs have different lyric line indexes and observe only the verse.
+        words = [dict(word=verse, start=10., end=12.)]
+        if candidate['lines']==primary and heard_intro:
+            words.insert(0, dict(word=intro, start=1., end=3.))
+        raw.write_text(json.dumps([dict(asr_localizations=[dict(context=[0,len(candidate['lines'])],
+            source_range=[0.,25.], recognition=dict(segments=[dict(words=words)]))])]))
+        if early_failure and candidate['lines']==primary:
+            raise StageFailure('subtitles', 'Closing line does not match the recording')
+    def fallback(metadata, duration, error):
+        raise error
+    def validate(candidate, duration, lead, **kwargs):
+        if candidate['lines']==primary:
+            raise StageFailure('subtitles', 'Closing line does not match the recording')
+        pipeline.validate_localization(candidate, duration, json.loads((tmp_path/'cues.json').read_text()))
+    monkeypatch.setattr(pipeline, 'align', align)
+    monkeypatch.setattr(pipeline, 'validate_alignment', validate)
+    monkeypatch.setattr(pipeline, 'playback_fallback', fallback)
+    if heard_intro and not complete_fallback:
+        with pytest.raises(StageFailure, match='尚未覆盖'):
+            pipeline.align_candidates(lyrics, {}, 25.)
+    else:
+        selected, error = pipeline.align_candidates(lyrics, {}, 25.)
+        assert selected['lines']==(complete if heard_intro else shorter)
+        assert error is None
+    assert calls==[primary, shorter, *([complete] if heard_intro and complete_fallback else [])]
+
+
 @pytest.mark.parametrize('gap', ['unrelated', 'scattered_letters', 'brief'])
 def test_source_retry_does_not_confuse_global_text_gain_with_gap_evidence(gap):
     from copy import deepcopy

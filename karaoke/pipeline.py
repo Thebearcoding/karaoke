@@ -999,14 +999,15 @@ class Pipeline:
                 seen.add(key)
         if not candidates:
             raise StageFailure('lyrics', '未找到可用的歌词正文')
-        attempts, previous = [], None
+        attempts, previous, recording_observations = [], None, {}
         for index, candidate in enumerate(candidates):
             if index or candidate is not lyrics:
                 self.aligned_cues = None
                 self.alignment_outputs.clear()
                 write_json(self.output/'lyrics.json', candidate)
                 self.phase(song_info={k:candidate[k] for k in ('title', 'artist', 'language')})
-            error, observations, preferred = None, [], None
+            error, preferred = None, None
+            observations = list(recording_observations.values())
             try:
                 try:
                     self.align(candidate, duration)
@@ -1015,17 +1016,31 @@ class Pipeline:
                         raise
                     error = caught
                     candidate = self.playback_fallback(metadata, duration, caught)
-                raw_path = self.output/'alignment/raw.json'
-                observations = [o for block in json.loads(raw_path.read_text())
-                                for o in block.get('asr_localizations', [])] if raw_path.is_file() else []
+                finally:
+                    raw_path = self.output/'alignment/raw.json'
+                    if raw_path.is_file():
+                        for block in json.loads(raw_path.read_text()):
+                            for observation in block.get('asr_localizations', []):
+                                if observation.get('recognition'):
+                                    key = json.dumps([observation['source_range'], observation['recognition']], sort_keys=True)
+                                    recording_observations.setdefault(key, observation)
+                    # Recognition belongs to the recording, not a candidate's line
+                    # indexes. A narrower retry must not forget an observed verse.
+                    observations = list(recording_observations.values())
                 # The final timing review can expose a gap previously hidden
                 # by a held caption. Keep it in the same bounded source-repair
                 # loop; every replacement must pass this review again. Its
                 # localization gate runs after the acoustic repair, not before.
                 self.validate_alignment(candidate, duration, lead, previous=previous)
-                preferred = observed_source_alternative(candidate, candidates[index+1:], observations,
+                remaining = candidates[index+1:]
+                missing = observed_source_alternative(candidate, [*remaining, *candidates[:index]], observations,
                     cues=json.loads((self.output/'cues.json').read_text()), duration=duration)
-                if preferred:
+                if missing:
+                    # Failed sources still provide text evidence, but only an
+                    # untried source may be scheduled again.
+                    write_json(self.output/'lyric-source-support.json', missing)
+                    if missing['alternative'] < len(remaining):
+                        preferred = missing
                     raise StageFailure('subtitles', '备用歌词包含已听到但尚未覆盖的唱段；正在核验备用正文')
             except StageFailure as failure:
                 if not self.strict_audio and failure.stage == 'subtitles' and observations:
