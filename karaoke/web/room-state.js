@@ -65,6 +65,7 @@ export class LocalPlayback {
       levels:{instrumental:1, backing_vocals:1, lead_vocals:bounded(saved?.levels?.lead_vocals, 0, 1, 0)},
       pitch_semitones:Math.round(bounded(saved?.pitch_semitones, -6, 6, 0))};
     this.playedAt = saved?.played_at || null;
+    this.leadRestore = this.state.levels.lead_vocals || bounded(saved?.lead_restore, 0, 1, 1) || 1;
     this.pendingFinishes = saved?.pending_finishes || (saved?.finished_ids || []).map(entry_id =>
       ({entry_id, playback_started_at:null}));
   }
@@ -128,7 +129,7 @@ export class LocalPlayback {
 
   command(action, extra, entries, clockOffset = 0) {
     const state = this.state;
-    if (extra.entry_id && !['lead','pitch'].includes(action) && extra.entry_id !== this.entry?.id) return {};
+    if (extra.entry_id && !['lead','toggle_lead','pitch'].includes(action) && extra.entry_id !== this.entry?.id) return {};
     this.markPlayed();
     let finished;
     if (['next','remove'].includes(action)) {
@@ -137,8 +138,10 @@ export class LocalPlayback {
         playback_started_at:this.playedAt === null ? null : this.playedAt + clockOffset};
       if (finished) this.pendingFinishes.push(finished);
       this.select(target || null, action === 'remove' ? state.playing : true);
-    } else if (action === 'lead') {
-      state.levels.lead_vocals = bounded(extra.level, 0, 1, state.levels.lead_vocals);
+    } else if (action === 'lead' || action === 'toggle_lead') {
+      const level = action === 'toggle_lead' ? (state.levels.lead_vocals > 0 ? 0 : this.leadRestore) : extra.level;
+      state.levels.lead_vocals = bounded(level, 0, 1, state.levels.lead_vocals);
+      if (state.levels.lead_vocals > 0) this.leadRestore = state.levels.lead_vocals;
     } else if (action === 'pitch') {
       state.pitch_semitones = extra.pitch_semitones;
     } else if (action === 'play') state.playing = true;
@@ -159,6 +162,7 @@ export class LocalPlayback {
   save(position = this.position()) {
     this.markPlayed();
     return {entry:this.entry, playing:this.state.playing, position:Math.max(0, position), levels:this.state.levels,
-      pitch_semitones:this.state.pitch_semitones, played_at:this.playedAt, pending_finishes:this.pendingFinishes};
+      pitch_semitones:this.state.pitch_semitones, lead_restore:this.leadRestore,
+      played_at:this.playedAt, pending_finishes:this.pendingFinishes};
   }
 }

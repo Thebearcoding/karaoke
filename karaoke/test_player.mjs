@@ -454,9 +454,25 @@ test('lead percentage preserves the mix and playback through adjustment, refresh
     local.command('lead',{level},entries);
     assert.equal(local.state.levels.lead_vocals,expected);
   }
+  local.command('toggle_lead',{},entries); await p.apply(local.reconcile({entries}),0);
+  assert.equal(local.state.levels.lead_vocals,0);
+  assert.deepEqual(p.gains.map(g=>g.gain.value),[1,1,0]);
+  assert.deepEqual(p.sources,sources); // Muting never reloads or restarts the song.
+  const restored=new LocalPlayback(JSON.parse(JSON.stringify(local.save())));
+  restored.command('toggle_lead',{},entries);
+  assert.equal(restored.state.levels.lead_vocals,.35);
+  assert.equal(local.state.levels.lead_vocals,0);
   local.command('next',{entry_id:'one'},[...entries,{...song,id:'two',status:'completed'}]);
+  local.command('toggle_lead',{},entries);
+  assert.equal(local.state.levels.lead_vocals,.35); // Song changes retain the restore level.
+  local.command('lead',{level:0},entries); local.command('lead',{level:.05},entries);
+  local.command('toggle_lead',{},entries); local.command('toggle_lead',{},entries);
+  assert.equal(local.state.levels.lead_vocals,.05); // +/- replaces the remembered nonzero level.
+  local.command('lead',{level:.35},entries);
   assert.deepEqual(local.state.levels,{instrumental:1,backing_vocals:1,lead_vocals:.35});
   assert.equal(new LocalPlayback(local.save()).state.levels.lead_vocals,.35);
+  const initial=new LocalPlayback(); initial.command('toggle_lead',{},[]);
+  assert.equal(initial.state.levels.lead_vocals,1); // No previous nonzero setting yet.
   p.clear();
 });
 

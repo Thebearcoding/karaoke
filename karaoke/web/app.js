@@ -41,6 +41,8 @@ function renderRange(input) {
 function renderMixer() {
   player.setLevels(state.levels);
   const level = state.levels.lead_vocals;
+  $('lead-toggle').textContent = `主唱：${level > 0 ? '开' : '关'}`;
+  $('lead-toggle').setAttribute('aria-pressed', String(level > 0));
   $('lead-value').textContent = `${Math.round(level * 100)}%`;
   $('lead-down').disabled = level <= 0;
   $('lead-up').disabled = level >= 1;
@@ -87,7 +89,7 @@ async function request(path, body, timeout = 0) {
 
 async function command(action, extra = {}, claim = !['ready','buffering'].includes(action)) {
   try {
-    if (['play','pause','seek','restart','next','lead','pitch','ready','buffering'].includes(action) ||
+    if (['play','pause','seek','restart','next','lead','toggle_lead','pitch','ready','buffering'].includes(action) ||
         (action === 'remove' && extra.entry_id === state.current_id)) {
       if (!claim && !tabs.owns()) return null;
       if (extra.revision !== undefined && extra.revision !== state.revision) return null;
@@ -976,6 +978,7 @@ async function nextSong() {
 document.querySelectorAll('[data-next]').forEach(button => button.onclick = nextSong);
 $('now-song').onclick = () => switchView('player');
 $('transport-restart').onclick = () => command('restart');
+$('lead-toggle').onclick = () => command('toggle_lead');
 for (const [id, step] of [['lead-down', -5], ['lead-up', 5]]) {
   $(id).onclick = () => command('lead', {level:(Math.round(state.levels.lead_vocals * 100) + step) / 100});
 }

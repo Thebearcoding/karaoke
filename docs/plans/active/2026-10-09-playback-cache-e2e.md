@@ -79,6 +79,8 @@ the existing Blue Bird entry, history, settings, credentials, and source files.
 - Queue audit reproduced four defects: paused performances followed queue reorder; failed finishes were never acknowledged/retried; simultaneous tab claims could share a revision; legacy server selection overrode preparation order. Preserve actual paused sessions, persist finish commands until idempotent acknowledgement, fence owners by unique session/change tokens, and use queue order in both worker paths. Remove the unused browser select command.
 - Queue regression: 1552 Python tests + 446 subtests, 83 JavaScript tests and empty-data startup passed. In a separate room with real production media, verified pause/reorder/refresh, failed finish requests, lost replies, ownership transfer, automatic next song, seek, lead level and pitch. Desktop and 390x844 screenshots preserve the existing hierarchy and permanent controls.
 
+- Follow-up: the lead label becomes a one-click on/off control. Off sets gain to zero; on restores the last nonzero level (100% without history). Existing +/-5% remains, and remembered gain follows the same browser session across tabs and refresh. Real mobile UI verified 35% -> 0% -> 35%.
+
 ## Work and Invariants
 
 `karaoke/web/room-state.js` owns current selection and saved transport. Expired
