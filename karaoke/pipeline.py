@@ -1144,6 +1144,13 @@ class Pipeline:
             reconstruction=stems['reconstruction']['vocal_first'], device=self.device)
         if not self.audio_only:
             self.render_video(result)
+        if not self.strict_audio:
+            from .exact_stems import compact_playback_audio
+            compression_started = time.perf_counter()
+            result = compact_playback_audio(self.output, result)
+            self.timings['compress_audio'] = round(time.perf_counter()-compression_started, 3)
+            records.update({key: result['artifacts'][key]
+                            for key in ('instrumental', 'backing_vocals', 'lead_vocals')})
         for key, artifact in result['artifacts'].items():
             artifact.update(records[key] if key in records else self.artifact_record(artifact['path']))
         result.update(processing_seconds=round(time.perf_counter()-started, 3), timings=self.timings,

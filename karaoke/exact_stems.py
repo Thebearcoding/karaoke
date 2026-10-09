@@ -180,6 +180,59 @@ def encode_previews(sources, output, gain, frames, channels):
     raise worst
 
 
+def compact_playback_audio(folder, result):
+    """Store the same 24-bit PCM that the streaming player already receives."""
+    folder = Path(folder).resolve()
+    names = ('instrumental', 'backing_vocals', 'lead_vocals')
+    if result.get('audio_storage'):
+        return result
+    gain = result['shared_preview_gain']
+    if not np.isfinite(gain) or not 0 < gain <= 1:
+        raise ValueError('Invalid shared audio gain')
+    records, checks = {}, {}
+    for name in names:
+        source = (folder/result['artifacts'][name]['path']).resolve()
+        if not source.is_relative_to(folder):
+            raise ValueError('Expected a managed WAV master')
+        target = source.with_suffix('.flac')
+        temporary = target.with_suffix('.tmp.flac')
+        try:
+            with sf.SoundFile(source) as original:
+                if original.format != 'WAV' or original.subtype != 'DOUBLE' or not original.frames:
+                    raise ValueError('Expected a nonempty float64 calculation master')
+                shape = (original.samplerate, original.channels, original.frames)
+                with sf.SoundFile(temporary, 'w', samplerate=shape[0], channels=shape[1],
+                                  format='FLAC', subtype='PCM_24') as encoded:
+                    for samples in original.blocks(65536, dtype='float64', always_2d=True):
+                        samples *= gain
+                        if not np.isfinite(samples).all() or np.max(np.abs(samples)) >= 1:
+                            raise ValueError('Invalid or clipped playback master')
+                        encoded.write(samples)
+                original.seek(0)
+                error = 0.
+                with sf.SoundFile(temporary) as encoded:
+                    if (encoded.samplerate, encoded.channels, encoded.frames) != shape:
+                        raise ValueError('Compressed audio changed the complete time axis')
+                    for samples in original.blocks(65536, dtype='float64', always_2d=True):
+                        decoded = encoded.read(len(samples), dtype='float64', always_2d=True)
+                        error = max(error, float(np.max(np.abs(decoded-samples*gain))))
+                if error > 2**-23:
+                    raise ValueError('Compressed audio exceeds 24-bit quantization error')
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        records[name] = dict(path=target.relative_to(folder).as_posix(),
+                             bytes=target.stat().st_size, sha256=sha(target))
+        checks[name] = dict(source_sha256=sha(source), source_bytes=source.stat().st_size,
+                            max_absolute_error=error)
+    # Commit the three paths together. WAVs remain until normal successful-job
+    # compaction, so a failed conversion never destroys a usable calculation.
+    return {**result, 'artifacts': {**result['artifacts'], **records},
+            'shared_preview_gain': 1.,
+            'audio_storage': dict(format='FLAC', subtype='PCM_24', source_gain=gain,
+                                  reference='shared-gain float64 calculation masters', tracks=checks)}
+
+
 def build(source_path, estimate_path, output, *, previews=True, source_pcm=None):
     source_path, estimate_path, output = (Path(p).resolve() for p in (source_path, estimate_path, output))
     if output.exists():

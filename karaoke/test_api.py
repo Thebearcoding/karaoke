@@ -153,8 +153,11 @@ def test_submission_outputs_cache_and_range_requests(tmp_path):
 
 
 @pytest.mark.parametrize('rate,playback_rate', [(16000,48000), (44100,48000), (48000,44100)])
-def test_playback_windows_preserve_channels_gain_and_boundaries_and_release_leases(tmp_path, rate, playback_rate):
+@pytest.mark.parametrize('compact', [False, True])
+def test_playback_windows_preserve_channels_gain_and_boundaries_and_release_leases(tmp_path, rate, playback_rate, compact):
     import soundfile as sf
+    from karaoke.api import playback_window_bytes
+    from karaoke.exact_stems import compact_playback_audio
     app = create_app(tmp_path, version='test')
     store = app.state.store
     job, _ = store.create(JobRequest(url=URL), 'test')
@@ -167,6 +170,13 @@ def test_playback_windows_preserve_channels_gain_and_boundaries_and_release_leas
         sf.write(path, samples/(i+1), rate, subtype='DOUBLE')
         artifacts[name] = dict(path=path.name, bytes=path.stat().st_size)
     result = dict(artifacts=artifacts, shared_preview_gain=.6)
+    if compact:
+        result = compact_playback_audio(folder, result)
+        assert compact_playback_audio(folder, result) == result
+        from karaoke.tools.soak import verify_stems
+        assert verify_stems({key: folder/value['path'] for key, value in result['artifacts'].items()},
+                            9, storage=result['audio_storage'])['frames'] == rate*9
+        artifacts = result['artifacts']
     store.update(job['id'], status='completed', result=result, last_accessed_at='2000-01-01T00:00:00Z')
     # Do not start the worker: only exercise the existing completed artifacts.
     client = TestClient(app)
@@ -182,12 +192,19 @@ def test_playback_windows_preserve_channels_gain_and_boundaries_and_release_leas
             assert response.status_code == 200
             assert response.headers['content-type'] == 'audio/flac'
             audio, sample_rate = sf.read(io.BytesIO(response.content), always_2d=True)
+            if compact:
+                previous = playback_window_bytes(folder/f'{name}.wav', info, index, .6)
+                np.testing.assert_array_equal(audio, sf.read(io.BytesIO(previous), always_2d=True)[0])
             assert sample_rate == rate
             parts.append(audio[:rate*8] if index == 0 else audio[info['padding_frames']:])
         decoded = np.concatenate(parts)
         np.testing.assert_allclose(decoded, samples*.6/(i+1), rtol=0, atol=9e-8)
         assert not store.cache.leases
     assert store.read(job['id'])['last_accessed_at'] != '2000-01-01T00:00:00Z'
+    if compact:
+        store.cache.compact(store.read(job['id']))
+        assert not list(folder.glob('*.wav'))
+        assert all((folder/artifact['path']).is_file() for artifact in result['artifacts'].values())
     assert client.get(f'{url}/instrumental/2').status_code == 409
     assert client.get(f'{url}/instrumental/-1').status_code == 404
     assert client.get(f'{url}/unknown/0').status_code == 404
@@ -199,6 +216,27 @@ def test_playback_windows_preserve_channels_gain_and_boundaries_and_release_leas
     assert client.get(url).status_code == 410
     store.update(job['id'], status='running')
     assert client.get(url).status_code == 409
+
+
+@pytest.mark.parametrize('invalid', ['nonfinite', 'clipped'])
+def test_compact_audio_does_not_publish_or_delete_masters_on_failure(tmp_path, invalid):
+    import soundfile as sf
+    from karaoke.exact_stems import compact_playback_audio
+    artifacts = {}
+    for name in ('instrumental', 'backing_vocals', 'lead_vocals'):
+        path = tmp_path/f'{name}.wav'
+        samples = np.full((100, 2), .2)
+        if name == 'lead_vocals':
+            samples[50] = np.nan if invalid == 'nonfinite' else 2
+        sf.write(path, samples, 8000, subtype='DOUBLE')
+        artifacts[name] = dict(path=path.name, bytes=path.stat().st_size, sha256=file_hash(path))
+    result = dict(artifacts=artifacts, shared_preview_gain=.5)
+    original = json.dumps(result, sort_keys=True)
+    with pytest.raises(ValueError, match='Invalid or clipped'):
+        compact_playback_audio(tmp_path, result)
+    assert json.dumps(result, sort_keys=True) == original
+    assert all(file_hash(tmp_path/a['path']) == a['sha256'] for a in artifacts.values())
+    assert not list(tmp_path.glob('*.tmp.flac'))
 
 
 def test_failures_are_visible_and_retry_creates_new_job(tmp_path):
@@ -4307,8 +4345,8 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
     sf.write(pipeline.vocals, np.zeros(44100), 44100)
     (tmp_path/'stems').mkdir()
     for name in ('instrumental', 'backing-vocals', 'lead'):
-        for extension in ('wav', 'mp3'):
-            (tmp_path/f'stems/{name}.{extension}').write_bytes(b'artifact fixture')
+        sf.write(tmp_path/f'stems/{name}.wav', np.zeros(44100), 44100, subtype='DOUBLE')
+        (tmp_path/f'stems/{name}.mp3').write_bytes(b'artifact fixture')
     (tmp_path/'stems/manifest.json').write_text(json.dumps(dict(
         preview_shared_gain=.8, reconstruction=dict(vocal_first={'verified': True}))))
     lyrics = dict(title='Example', artist='Singer', language='English', lines=['A little song'], provenance={})
@@ -4404,7 +4442,8 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
         assert fallback[0]['units'] == [dict(text='A little song', first=0, stop=13, start=.1, end=.9,
                                            timing_source='linear_fallback', bounds_source='neighbor_or_phrase')]
         assert ('mv' in result['artifacts']) == (not audio_only)
-        assert result['shared_preview_gain'] == .8
+        assert result['shared_preview_gain'] == 1
+        assert result['audio_storage']['source_gain'] == .8
         assert (tmp_path/'audio-result.json').exists() == audio_only
         assert validated == [True], 'Playback fallback bypassed the common timing gate'
 
@@ -7393,11 +7432,12 @@ def test_cached_video_restore_preserves_audio_version_across_upgrade(tmp_path, q
 
 
 @pytest.mark.parametrize('source_matches', [True, False])
-def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch, source_matches):
+@pytest.mark.parametrize('compact', [False, True])
+def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch, source_matches, compact):
     import shutil
     from pathlib import Path
     import soundfile as sf
-    from karaoke.exact_stems import decode_source, pcm_sha
+    from karaoke.exact_stems import compact_playback_audio, decode_source, pcm_sha
     source = tmp_path/'original.mkv'
     subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-f', 'lavfi', '-i',
         'color=c=black:s=320x180:r=30:d=2', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2',
@@ -7410,6 +7450,8 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
     result['reconstruction']['source_pcm_sha256'] = pcm_sha(audio) if source_matches else 'different-recording'
     for name, level in [('instrumental', .5), ('backing_vocals', .25), ('lead_vocals', .25)]:
         sf.write(folder/name, audio*level, rate, format='WAV', subtype='DOUBLE')
+    if compact:
+        result = compact_playback_audio(folder, result)
     (folder/'subtitles').write_text(json.dumps([dict(text='Hello',start=0,end=2,
         units=[dict(text='Hello',start=.5,end=1.5,first=0,stop=5)])]))
     before = {}
@@ -7417,7 +7459,7 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
         if name != 'mv':
             path = folder/artifact['path']
             artifact.update(bytes=path.stat().st_size, sha256=file_hash(path))
-            before[name] = path.read_bytes()
+            before[artifact['path']] = path.read_bytes()
     (folder/'result.json').write_text(json.dumps(result))
     (folder/'mv.mp4').unlink()
     result['artifacts']['poster'] = dict(path='missing-poster.jpg', bytes=100, sha256='missing')
@@ -7439,9 +7481,9 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
         # Splitting picture encoding from audio muxing must not change either
         # decoded stream compared with the established all-at-once renderer.
         mixed = folder/'expected-mix.wav'
-        samples, rate = sf.read(folder/'instrumental', dtype='float32', always_2d=True)
+        samples, rate = sf.read(folder/result['artifacts']['instrumental']['path'], dtype='float32', always_2d=True)
         if result['mv_audio'] == 'instrumental_backing':
-            samples += sf.read(folder/'backing_vocals', dtype='float32', always_2d=True)[0]
+            samples += sf.read(folder/result['artifacts']['backing_vocals']['path'], dtype='float32', always_2d=True)[0]
         sf.write(mixed, samples, rate, subtype='FLOAT')
         baseline = folder/'baseline.mp4'
         subprocess.run([sys.executable, str(Path(__file__).with_name('render_lyric_progress.py')),
@@ -7496,6 +7538,8 @@ def test_pipeline_materializes_all_media_before_ready(tmp_path, monkeypatch):
     assert {'mv', 'instrumental', 'backing_vocals', 'lead_vocals', 'instrumental_preview',
             'backing_vocals_preview', 'lead_vocals_preview', 'subtitles'} <= result['artifacts'].keys()
     assert json.loads((tmp_path/'result.json').read_text()) == result
+    assert result['audio_storage']['subtype'] == 'PCM_24'
+    assert result['shared_preview_gain'] == 1
     for artifact in result['artifacts'].values():
         path = tmp_path/artifact['path']
         assert path.stat().st_size == artifact['bytes'] and file_hash(path) == artifact['sha256']

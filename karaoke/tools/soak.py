@@ -164,15 +164,21 @@ def resolved_audio_failure(case, version):
             and datetime.fromisoformat(download['finished_at']) > datetime.fromisoformat(last['finished_at']))
 
 
-def verify_stems(paths, duration):
+def verify_stems(paths, duration, *, storage=None):
     import numpy as np
     import soundfile as sf
     with ExitStack() as stack:
         files = [stack.enter_context(sf.SoundFile(paths[name]))
                  for name in ('lead_vocals', 'backing_vocals', 'instrumental')]
         formats = {(f.samplerate, f.channels, len(f), f.subtype) for f in files}
-        if len(formats) != 1 or files[0].subtype != 'DOUBLE' or not len(files[0]):
-            raise ValueError('Three stems have incompatible formats or are not float64 masters')
+        compact = storage is not None
+        if compact and (storage.get('format') != 'FLAC' or storage.get('subtype') != 'PCM_24' or
+                        not 0 < storage.get('source_gain', 0) <= 1):
+            raise ValueError('Invalid compact audio storage description')
+        if (len(formats) != 1 or not len(files[0]) or
+                any(f.subtype != ('PCM_24' if compact else 'DOUBLE') or
+                    f.format != ('FLAC' if compact else 'WAV') for f in files)):
+            raise ValueError('Three stems have incompatible master formats')
         rate, channels, frames, _ = formats.pop()
         if abs(frames/rate-duration) > 2/min(rate, 44100):
             raise ValueError('Stem duration differs from the complete source')
@@ -212,7 +218,9 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False, playback_po
                 if response.content != stream.read(end-start+1):
                     raise ValueError(f'Artifact range content mismatch: {name}')
         paths[name], hashes[name] = path, digest
-    audio_format = verify_stems(paths, result['duration_seconds'])
+    audio_format = verify_stems(paths, result['duration_seconds'], storage=result.get('audio_storage'))
+    if result.get('audio_storage') and result['shared_preview_gain'] != 1:
+        raise ValueError('Compact playback audio must not apply its common gain twice')
     cues = json.loads(paths['subtitles'].read_text())
     if not cues:
         raise ValueError('No usable subtitles; audio and diagnostics retained')

@@ -211,9 +211,9 @@ LRU 优先回收视频：任务为 `video_evicted`、`restore_video: true`，仅
 | 名称 | 文件 |
 |---|---|
 | `mv` | 已烧录字幕的完整 MP4；混音含义见 `result.mv_audio` |
-| `instrumental` | 背景音乐 WAV |
-| `backing_vocals` | 伴唱 WAV |
-| `lead_vocals` | 主唱 WAV |
+| `instrumental` | 背景音乐无损音轨 |
+| `backing_vocals` | 伴唱无损音轨 |
+| `lead_vocals` | 主唱无损音轨 |
 | `instrumental_preview` | 背景音乐 MP3 |
 | `backing_vocals_preview` | 伴唱 MP3 |
 | `lead_vocals_preview` | 主唱 MP3 |
@@ -325,7 +325,9 @@ with httpx.Client(timeout=30) as client:
 
 中文和日文沿用歌声音素与三窗口筛选；英文沿用歌声音素起点和 Whisper 近邻融合。所有语言都使用当前句＋下一句、琥珀色点亮、硬切、片头信息和四秒开唱提示。视频中的旧字幕不参与歌词识别或对齐。
 
-母版是未缩放的 float64 WAV，按 `(主唱 + 伴唱) + 背景音乐` 合并验证原始 PCM。MP3 和 MV 使用同一个防削波增益。编码试听允许一个 MP3 帧以内的末尾静音填充；缺失音频或新增非静音样本仍失败。精确还原不等于分离纯度，也不证明亮字准确率；结果中这两项没有伪造分数。
+三轨在 float64 中计算，按 `(主唱 + 伴唱) + 背景音乐` 记录未缩放 PCM 的重合误差。普通点歌与 `--playback-audio` 最后将播放器原本接收的共同增益 24 位 PCM 保存为 FLAC，保留原采样率、声道和帧数；完成后临时 WAV 由原有缓存回收流程清除。`audio_storage` 记录格式、原共同增益、原文件哈希及逐轨量化误差，`reconstruction` 仍是压缩前计算的诊断。此时 `shared_preview_gain=1`，防止播放或补视频时重复调低音量。严格 `--audio-only` 验收仍输出未缩放的 float64 WAV。旧 WAV 成品也继续可播。
+
+FLAC 对 24 位 PCM 无损；由 float64 转为 24 位的误差必须不超过一个最低有效位，并与原播放器实际发送的采样值一致。MP3 和 MV 沿用同一个防削波增益。编码试听允许一个 MP3 帧以内的末尾静音填充；缺失音频或新增非静音样本仍失败。重合误差不等于分离纯度，也不证明亮字准确率；结果中这两项没有伪造分数。
 
 MP3 试听使用 LAME 命令行写入完整的尾部填充信息，避免某些末帧长度解码后多出采样。公共增益先应用于临时 24-bit 整数 PCM WAV，避免链接 libsndfile 的 Linux LAME 自动归一化浮点输入；编码完成即删除，原 float64 母版不变。仍按原始采样率、声道、帧数、峰值和尾部静音验证，不通过裁掉验证结果或放宽阈值处理异常。
 
