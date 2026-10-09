@@ -1,6 +1,7 @@
 """Force-align lyrics to vocal audio without video or external subtitle times."""
 
 import argparse
+from contextlib import nullcontext
 from copy import deepcopy
 import hashlib
 from importlib.metadata import version
@@ -273,30 +274,52 @@ def acoustic_segments(lines, units, begin, end):
 
 def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                           force_global=False, max_alignment_attempts=24, recovery_contexts=None, localize=None,
-                          align_original=None, recognize_original=None):
+                          align_original=None, recognize_original=None, _revisited_conflicts=()):
     """Use recognition only to locate failed lyrics, never as replacement text."""
-    from anchors_from_asr import anchors_from_words
+    from anchors_from_asr import anchors_from_words, observed_context, combine_anchor_views
     from lyric_progress import partial_alignment_cues
     duration = len(audio)/16000
     cues = partial_alignment_cues(lines, [block], duration, language)
     bad = {i for i in range(*block['range']) if cues[i]['status'] != 'candidate'}
+    unanchored = set(bad)
     first, stop = block['context']
     if len(block['result']['segments']) != stop-first:
         return block
     for i in range(*block['range']):
-        words = [w for w in block['result']['segments'][i-first]['words'] if normalized(w['word'])]
-        if len(words) >= 4 and sum(w['end']-w['start'] < .015 for w in words) > len(words)/2:
-            bad.add(i)  # A tiny surviving token must not hide a collapsed phrase.
+        # Merging a zero-duration word makes a drawable fallback, not evidence
+        # that the sentence is in the right passage. Check the raw alignment
+        # before that merge can hide a partial collapse into spoken dialogue.
+        segment = block['result']['segments'][i-first]
+        words = [w for w in segment['words'] if normalized(w['word'])]
+        compressed = len(words) >= 4 and sum(w['end']-w['start'] < .015 for w in words) > len(words)/2
+        if compressed:
+            unanchored.add(i)
+        if compressed or not valid_recovery(dict(segments=[segment]), [lines[i]],
+                                            block['source_range'][1]-block['source_range'][0]):
+            bad.add(i)
         if i > block['range'][0] and all(cues[j]['status'] == 'candidate' for j in (i-1, i)):
             try:
                 presentation_cues(cues[i-1:i+1], duration, lead=0, tail=0, bridge_gap=0)
             except ValueError:
                 bad.update((i-1, i))  # Complete words can still occupy the wrong repeated passage.
-    if not bad:
+                unanchored.update((i-1, i))
+    # Attention can place a perfectly complete sentence inside an instrumental
+    # gap. Reuse the aligner's own activity map to request localization; silence
+    # alone neither invalidates lyrics nor supplies replacement timestamps.
+    quiet = set()
+    gaps = [(g['start']+block['source_range'][0], g['end']+block['source_range'][0])
+            for g in (block['result'].get('nonspeech_sections') or []) if g['end']-g['start'] >= 1.]
+    for i in range(*block['range']):
+        cue = cues[i]
+        if cue['status'] == 'candidate' and cue['end']-cue['start'] >= 1.:
+            overlap = sum(max(0., min(end, cue['end'])-max(begin, cue['start'])) for begin,end in gaps)
+            if overlap >= .8*(cue['end']-cue['start']):
+                quiet.add(i)
+    if not bad and not quiet:
         return block
     # Widespread collapse makes the old neighbouring times unsafe as anchors.
     # Otherwise recognize just the failed run plus its two neighbouring lines.
-    windows, remaining = [], sorted(bad)
+    windows, remaining = [], sorted(bad | quiet)
     while remaining:
         left = remaining.pop(0)
         right = left+1
@@ -308,7 +331,9 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         begin = max(0., cues[left]['start']-.6) if cues[left]['status'] == 'candidate' else 0.
         end = min(duration, cues[right-1]['end']+.6) if cues[right-1]['status'] == 'candidate' else duration
         windows.append((left, right, begin, end))
-    global_recovery = force_global or len(bad) >= max(4, (stop-first+4)//5) or any(e-b > 45 for _, _, b, e in windows)
+    # Scattered partial word failures do not invalidate the song's anchors.
+    # Keep them local even when many lines contain a missing token.
+    global_recovery = force_global or bool(quiet) or len(unanchored) >= max(4, (stop-first+4)//5)
     untimed = {i for i in bad if cues[i]['status'] == 'unresolved_timing'}
     if global_recovery:
         windows = [(first, stop, block['source_range'][0], block['source_range'][1])]
@@ -317,13 +342,18 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
     result, reports, budget = deepcopy(block), [], max_alignment_attempts
     contexts = [] if recovery_contexts is None else recovery_contexts
     needs_relocation = False
+    newly_conflicting = set()
+    revisited = set(_revisited_conflicts)
     for left, right, begin, end in windows[:8]:
         report = dict(context=[left, right], source_range=[begin, end], global_localization=global_recovery,
-                      accepted_lines=[], attempts=[])
+                      accepted_lines=[], attempts=[], activity_screened_lines=sorted(i+1 for i in quiet))
         reports.append(report)
         if needs_relocation and not untimed.intersection(range(left, right)):
             report['reason'] = 'deferred_until_missing_lines_are_located'
             continue
+        # A long interlude does not invalidate neighbouring lyric anchors.
+        # recognize_audio divides this bounded search into overlapping chunks;
+        # recovered phrase bounds then narrow the acoustic alignment itself.
         if not 0 <= begin < end <= duration or end-begin > 600:
             report['reason'] = 'localization_budget_exceeded'
             continue
@@ -334,7 +364,43 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             continue
         report['recognition'] = response
         words = recognized_words(begin, response, end)
+        if not global_recovery:
+            # The old time window may actually contain earlier/later lyrics.
+            # Include those independently heard full phrases before deciding
+            # which neighbours can safely remain untouched.
+            cf, cs = observed_context(lines[first:stop], words, language, left-first, right-first)
+            left, right = first+cf, first+cs
+            report['context'] = [left, right]
         anchors = anchors_from_words(lines[left:right], words, language, allow_missing=True)
+        if recognize_original is not None and budget > 0 and any(
+                a['status'] != 'candidate' and cues[left+i]['status'] == 'candidate'
+                for i,a in enumerate(anchors)):
+            # A separated voice can erase another singer or a language switch.
+            # Compare the original recording before spending alignment retries
+            # around plausible but unverified times. Truly untimed lines still
+            # use the cheaper bounded recovery below. Keep both observations.
+            budget -= 1
+            try:
+                alternate = recognize_original(begin, end)
+                alternate_words = recognized_words(begin, alternate, end)
+                if not global_recovery:
+                    cf, cs = observed_context(lines[first:stop], alternate_words, language, left-first, right-first)
+                    left, right = first+cf, first+cs
+                    report['context'] = [left,right]
+                    anchors = anchors_from_words(lines[left:right], words, language, allow_missing=True)
+                alternate_anchors = anchors_from_words(lines[left:right], alternate_words, language, allow_missing=True)
+                combined = combine_anchor_views([anchors, alternate_anchors])
+                support = lambda rows: sum(a['matched_fraction']*len(a['text']) for a in rows)
+                other = alternate
+                if support(alternate_anchors) > support(anchors):
+                    other, response, words, anchors = response, alternate, alternate_words, alternate_anchors
+                    report.update(recognition=response, recognition_source='original')
+                anchors = combined
+                report['anchor_view_sources'] = ['vocals', 'original']
+                reports.append(dict(context=[left,right], source_range=[begin,end], recognition=other,
+                    reason='alternate_recognition_observation', accepted_lines=[], attempts=[]))
+            except ValueError as error:
+                report['original_recognition_error'] = str(error)
         if global_recovery:
             report['recognition_anchors'] = anchors
             anchors = recovery_anchors(anchors)
@@ -345,23 +411,41 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 needs_relocation = True
             continue
         targets = bad.intersection(range(left, right))
-        mislocalized = set()
+        # A local crop also observes its neighbouring phrases. A superficially
+        # valid neighbour is not read-only when the complete phrase was heard
+        # elsewhere in that same crop. Partial/ambiguous text is not evidence
+        # against it, and recognition never supplies the replacement timing.
+        mislocalized = {i+left for i, a in enumerate(anchors)
+            if a.get('match_basis') in ('complete_phrase', 'complete_clause') and a['status'] == 'candidate'
+            and cues[i+left]['status'] == 'candidate' and (
+                cues[i+left]['end']+2 < a['start'] or cues[i+left]['start']-2 > a['end'])}
         if global_recovery:
-            # A several-second contradiction from independently recognized
-            # words is evidence that a superficially valid old line also drifted.
-            mislocalized.update(i+left for i, a in enumerate(anchors) if a['status'] == 'candidate'
-                and cues[i+left]['status'] == 'candidate' and (
-                    abs(cues[i+left]['start']-a['start']) > 4 or
-                    cues[i+left]['end'] < a['start'] or cues[i+left]['start'] > a['end']))
+            # Only independently matched phrases can contradict existing
+            # timing, directly or through their neighbours. An ambiguous
+            # short match may help find an untimed line, but cannot crop away
+            # already aligned singing on either side.
+            independent = lambda a: a['status'] == 'candidate' and a.get('match_basis') in (
+                'complete_phrase', 'complete_clause')
             for i, anchor in enumerate(anchors):
                 if anchor['status'] == 'candidate' or cues[i+left]['status'] != 'candidate':
                     continue
-                before = [a for a in anchors[:i] if a['status'] == 'candidate']
-                after = [a for a in anchors[i+1:] if a['status'] == 'candidate']
+                before = [a for a in anchors[:i] if independent(a)]
+                after = [a for a in anchors[i+1:] if independent(a)]
                 if before and after and (cues[i+left]['start'] < before[-1]['start']-2 or
                                          cues[i+left]['end'] > after[0]['end']+2):
                     mislocalized.add(i+left)
-            targets.update(mislocalized)
+        targets.update(mislocalized)
+        bad.update(mislocalized)
+        # A localized phrase with a missing token still has usable neighbours.
+        # Leave those times to phonetic refinement instead of realigning the
+        # whole sentence just because its display fallback merged one word.
+        located_partial = {i for i in targets-unanchored-mislocalized
+            if anchors[i-left]['status']=='candidate' and cues[i]['status']=='candidate'
+            and max(cues[i]['start'],anchors[i-left]['start']) <
+                min(cues[i]['end'],anchors[i-left]['end'])}
+        targets.difference_update(located_partial)
+        bad.difference_update(located_partial)
+        revisited.update(targets)
         report['contradicted_lines'] = sorted(i+1 for i in mislocalized)
         proposed, replaced = deepcopy(result), []
         try:
@@ -372,6 +456,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
         priority = lambda b: not untimed.intersection(range(b[0]+left, b[1]+left))
         blocks.sort(key=priority)
         relocalized = set()
+        primary_predictions, tried_cores = {}, set()
         for block_index, (start, stop_line, cf, cs, ab, ae) in enumerate(blocks):
             selected = targets.intersection(range(start+left, stop_line+left))
             # The recognizer only observed this crop. Missing edge anchors
@@ -405,17 +490,34 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             # gap. Charge longer windows to the same total work budget instead
             # of silently skipping every unresolved verse longer than 45 s.
             cost = 2 if ae-ab > 45 else 1
-            if not 0 < ae-ab <= 90 or budget < cost:
+            cached_primary = region in primary_predictions
+            if not 0 < ae-ab <= 90 or (budget < cost and not cached_primary):
                 attempt['reason'] = 'window_exceeds_limit' if not 0 < ae-ab <= 90 else 'local_retry_budget_exhausted'
                 continue
-            budget -= cost
-            try:
-                candidate = align_candidate(align, ab, ae, '\n'.join(lines[cf+left:cs+left]), gap_padding=None,
-                                  dynamic_heads=True, max_word_dur=None, word_dur_factor=None)
-            except ValueError as error:
-                attempt['error'] = str(error)
-                candidate = None
+            if cached_primary:
+                candidate = primary_predictions.pop(region)
+                attempt['reused_primary_prediction'] = True
+            else:
+                budget -= cost
+                tried_cores.add((start, stop_line))
+                try:
+                    candidate = align_candidate(align, ab, ae, '\n'.join(lines[cf+left:cs+left]), gap_padding=None,
+                                      dynamic_heads=True, max_word_dur=None, word_dur_factor=None, detect_language=True)
+                except ValueError as error:
+                    attempt['error'] = str(error)
+                    candidate = None
             attempt['result'] = candidate
+            if (not valid_recovery(candidate, lines[cf+left:cs+left], ae-ab) and
+                    any((a,b) not in tried_cores and targets.intersection(range(a+left,b+left))
+                        and any(anchors[i]['status'] == 'candidate' for i in range(a,b))
+                        for a,b,*_ in blocks[block_index+1:])):
+                # Give other located regions their basic attempt before one
+                # hard passage consumes the budget. Already narrowed searches
+                # still take priority over other wholly unlocated regions.
+                primary_predictions[region] = candidate
+                blocks.append(region)
+                attempt['fallbacks_deferred'] = True
+                continue
             if (align_original is not None and budget >= cost and
                     not valid_recovery(candidate, lines[cf+left:cs+left], ae-ab)):
                 # Separation can suppress a real choir/quiet voice. Change the
@@ -423,7 +525,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 budget -= cost
                 try:
                     alternate = align_candidate(align_original, ab, ae, '\n'.join(lines[cf+left:cs+left]),
-                        gap_padding=None, dynamic_heads=True, max_word_dur=None, word_dur_factor=None)
+                        gap_padding=None, dynamic_heads=True, max_word_dur=None, word_dur_factor=None, detect_language=True)
                     accepted = valid_recovery(alternate, lines[cf+left:cs+left], ae-ab)
                     attempt['original_mix_alignment'] = dict(result=alternate, accepted=accepted)
                     if accepted:
@@ -599,6 +701,12 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                         conflicts.update({i, j}-set(replaced) or {i, j})
                 if not conflicts:
                     break
+                discovered = conflicts-bad-revisited
+                newly_conflicting.update(discovered)
+                # Moving a phrase can reveal a previously invisible task.
+                # Reserve a primary and alternate attempt for each new target;
+                # a failed old target cannot replenish its own budget.
+                budget += 2*len(discovered)
                 for i in conflicts:
                     segment = proposed['result']['segments'][i-first]
                     rejected[i+1] = deepcopy(segment)
@@ -613,26 +721,74 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                       original_segments={i+1: result['result']['segments'][i-first] for i in replaced})
         result, cues = proposed, fresh
         bad.difference_update(replaced)
-    if bad and not global_recovery and budget > 0:
+    if bad.intersection(unanchored | newly_conflicting) and (not global_recovery or newly_conflicting) and budget > 0:
         # Apparently valid neighbours can squeeze missing lyrics into a window
         # that never contained them. Broaden once, sharing the remaining budget.
-        result = recover_with_local_asr(result, lines, audio, language, recognize, align,
+        # A repaired phrase can also expose a new conflict with an old neighbour.
+        # Revisit that changed context rather than ending with discarded lyrics.
+        # Seeing a neighbour as context is not the same as selecting its repair.
+        # Each newly invalidated line can trigger this only once. Its reserved
+        # work cannot be consumed by the earlier, already completed targets.
+        followup = recover_with_local_asr(result, lines, audio, language, recognize, align,
                                        force_global=True, max_alignment_attempts=budget, recovery_contexts=contexts,
                                        localize=localize, align_original=align_original,
-                                       recognize_original=recognize_original)
-        reports.extend(result.get('asr_localizations', []))
+                                       recognize_original=recognize_original,
+                                       _revisited_conflicts=revisited | bad | newly_conflicting)
+        reports.extend(followup.get('asr_localizations', []))
+        usable = lambda value: sum(c['status'] == 'candidate' for c in
+            partial_alignment_cues(lines, [value], duration, language))
+        if not global_recovery or usable(followup) > usable(result):
+            result = followup
+        else:
+            reports.append(dict(reason='followup_did_not_improve_coverage', accepted_lines=[]))
     result['asr_localizations'] = reports
     result['recovery_contexts'] = contexts
     return result
 
 
 def recognized_words(begin, response, end):
+    # Compression ratio measures repeated text, not whether singing occurred.
+    # Real refrains can exceed speech-ASR's repetition threshold. These words
+    # only locate supplied lyrics; acoustic alignment still supplies timings.
     words = [dict(w, start=w['start']+begin, end=w['end']+begin)
              for s in response.get('segments', [])
-             if s.get('no_speech_prob', 0) < .6 and s.get('compression_ratio', 0) < 2.4
+             if s.get('no_speech_prob', 0) < .6
              for w in s.get('words') or [] if np.isfinite([w['start'], w['end']]).all()
              and 0 <= w['start'] < w['end'] <= end-begin+.001]
     return words
+
+
+def review_uncovered_lyrics(cues, word_views, language, duration, recognize):
+    """Recheck a caption gap when observed words resemble substantial lyrics."""
+    from anchors_from_asr import anchors_from_words, text_units
+    lines = [c['text'] for c in cues]
+    timed = [c for c in cues if c.get('status') == 'candidate']
+    edges = [dict(start=0., end=0.), *timed, dict(start=duration, end=duration)]
+    reviews = []
+    for left, right in zip(edges, edges[1:]):
+        begin, end = left['end'], right['start']
+        low, high = max(0.,left['start']-.6), min(duration,right['end']+.6)
+        if not begin < end or not 0 < high-low <= 90 or len(reviews) >= 8:
+            continue
+        supported = 0
+        for words in word_views:
+            inside = [w for w in words if w['end'] > begin+.001 and w['start'] < end-.001]
+            if sum(len(text_units(w['word'],language)) for w in inside) < 24:
+                continue
+            anchors = anchors_from_words(lines,inside,language,allow_missing=True)
+            supported = max(supported,sum(len(text_units(a['text'],language))*a['matched_fraction']
+                for a in anchors if a['status']=='candidate' and a['matched_density']>=.8))
+        if supported < 24:
+            continue
+        review = dict(context=[0,len(lines)],source_range=[low,high],gap=[begin,end],
+                      reason='uncovered_lyric_review',matched_reference_units=supported,
+                      accepted_lines=[],attempts=[])
+        try:
+            review['recognition'] = recognize(low,high)
+        except ValueError as error:
+            review['error'] = str(error)
+        reviews.append(review)
+    return reviews
 
 
 def recognize_in_windows(recognize, begin, end, chunks):
@@ -1053,6 +1209,7 @@ def main():
     heads = model._buffers.pop('alignment_heads')
     model.to(args.device)
     model.register_buffer('alignment_heads', heads, persistent=False)
+    recognition_config = None
     loading = time.perf_counter()-loading_start
     print(json.dumps({'model_loaded_seconds': loading, 'model': args.model}), flush=True)
     for job in jobs:
@@ -1146,27 +1303,53 @@ def main():
                 return align_audio(begin+start, begin+stop, text, **options)
 
             def recognize_audio(start, stop, *, original_mix=False):
+                nonlocal recognition_config
                 from stage_cache import StageCache
+                import local_asr
+                fallback = None
+                if original_mix and local_asr.offline():
+                    if recognition_config is None:
+                        recognition_config = local_asr.configuration()
+                        recognition_config['model_sha256'] = {name:sha(Path(recognition_config['model'])/name)
+                            for name in recognition_config['model_files']}
+                    fallback = recognition_config
                 config = dict(start=start, stop=stop, language=None, model=args.model,
                               model_sha256=model_hash, device=args.device,
                               temperature=0, condition_on_previous_text=False,
+                              fallback_recognizer=fallback,
                               implementation=inspect.getsource(recognize_audio), original_mix=original_mix,
+                              windowing=inspect.getsource(recognize_in_windows),
+                              word_filter=inspect.getsource(recognized_words),
                               audio_reader=inspect.getsource(audio_clip),
                               packages={name: version(name) for name in ('stable-ts', 'openai-whisper')})
                 key = 'alignment_localization_'+hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:16]
                 path = output.parent/'asr-requests'/(key+'.json')
                 path.parent.mkdir(exist_ok=True)
                 with StageCache(output.parent).stage(key, inputs=[job['original_audio'] if original_mix else job['audio']], outputs=[path], config=config,
-                        code=[Path(inspect.getfile(StageCache)), Path(inspect.getfile(detect_whisper_language))]) as reused:
+                        code=[Path(inspect.getfile(StageCache)), Path(inspect.getfile(local_asr))]) as reused:
                     if not reused:
                         report_progress(detail='定位未对齐的唱段')
                         clip = audio_clip(start, stop, original_mix)
-                        detected, probes = detect_whisper_language(model, clip) if stop-start > 30 else (None, [])
-                        recognized = model.transcribe(clip,
-                            language=detected, temperature=0, condition_on_previous_text=False,
-                            word_timestamps=True, regroup=False, verbose=None,
-                            fp16=args.device == 'cuda')
-                        response = dict(recognized.to_dict(), language_detection=probes)
+                        def transcribe_chunk(samples):
+                            return model.transcribe(samples,
+                                language=None, temperature=0, condition_on_previous_text=False,
+                                word_timestamps=True, regroup=False, verbose=None,
+                                fp16=args.device == 'cuda').to_dict()
+                        # A whole-recording language choice can translate or
+                        # erase a later language. Reuse the overlapping-window
+                        # recovery path, detecting language in each crop.
+                        seconds = len(clip)/16000
+                        worker = (local_asr.isolated_recognizer(fallback,
+                            'cuda' if args.device == 'cuda' else 'cpu', path.parent)
+                            if fallback else nullcontext(transcribe_chunk))
+                        with worker as recognize:
+                            transcribe_window = lambda left, right: recognize(clip[round(left*16000):round(right*16000)])
+                            if seconds > 30:
+                                words, windows = recognize_in_windows(transcribe_window, 0., seconds,
+                                                                     int(np.ceil(seconds/20)))
+                                response = dict(segments=[dict(words=words)], multilingual_windows=windows)
+                            else:
+                                response = transcribe_window(0., seconds)
                         path.write_text(json.dumps(response, ensure_ascii=False, default=json_number)+'\n')
                 return dict(json.loads(path.read_text()), localization_cache=dict(file=path.name, reused=reused))
 
@@ -1215,6 +1398,13 @@ def main():
         contexts = [context for block in raw_blocks for context in block.pop('recovery_contexts', [])]
         cues, raw_blocks, boundary_repairs = stitch_blocks(
             lyrics['lines'], [*raw_blocks, *contexts], duration, lyrics['language'], align_audio)
+        if job.get('original_audio') and job.get('localize_with_asr', True):
+            observed = [o for block in raw_blocks for o in block.get('asr_localizations', []) if o.get('recognition')]
+            word_views = [recognized_words(o['source_range'][0],o['recognition'],o['source_range'][1]) for o in observed]
+            reviews = review_uncovered_lyrics(cues,word_views,lyrics['language'],duration,
+                lambda a,b: recognize_audio(a,b,original_mix=True))
+            if reviews:
+                raw_blocks[-1].setdefault('asr_localizations', []).extend(reviews)
         (output/'raw.json').write_text(json.dumps(raw_blocks, ensure_ascii=False, indent=2, default=json_number)+'\n')
         # stitch_blocks already rejects mismatched text per line. Preserve its
         # unresolved cues and raw rejected predictions so the caller can try a

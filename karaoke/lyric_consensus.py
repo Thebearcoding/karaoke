@@ -51,7 +51,7 @@ def compare_lyrics(candidates):
 
 def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, reference_lines=()):
     """Read source-bound Music lyrics or an identity-matched NetEase release."""
-    if provider != 'youtube_music' and not song.get('title'):
+    if provider != 'youtube_music' and (not song.get('title') or not song.get('artist')):
         return None, dict(provider=provider, status='missing_identity')
     if provider == 'youtube_music' and not re.fullmatch(r'[A-Za-z0-9_-]{11}', metadata.get('id') or ''):
         return None, dict(provider=provider, status='missing_video_identity')
@@ -71,8 +71,7 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
             recording_identity = {}
             try:
                 if provider == 'netease':
-                    query = ' '.join(lookup.names(song[k], title=k == 'title')[-1]
-                                     for k in ('title','artist') if song.get(k))
+                    query = ' '.join(lookup.names(song[k], title=k == 'title')[-1] for k in ('title','artist'))
                     url = 'https://music.163.com/api/cloudsearch/pc?'+urlencode(dict(s=query, type=1, limit=30, offset=0))
                     packet = lookup.cached_lyric_request(provider, url, cache, lambda: read_document(url, timeout=10))
                     if packet.get('code') != 200:
@@ -164,6 +163,113 @@ def alternative_lyric_candidates(lyrics, packet):
         report = dict(sources[index], crosscheck=selected_review)
         yield dict(lyrics, lines=texts[index], language=report.get('language') or lyrics['language'], provenance=dict(
             lyrics['provenance'], lyric_lookup=report, text_transform=report.get('text_transform', 'whitespace_only')))
+
+
+def observed_source_alternative(lyrics, alternatives, observations):
+    """Use existing recognition to request a better-supported published text.
+
+    This selects another alignment attempt, not accepted lyrics or timestamps.
+    A substantial gain is required so spelling noise cannot flip the source.
+    """
+    from .anchors_from_asr import text_units
+    from .align_lyrics_whisper import recognized_words
+    from rapidfuzz.distance import Levenshtein
+
+    language = lyrics['language']
+    recognized = (o for o in observations if o.get('recognition'))
+    for observation in sorted(recognized, key=lambda o:o['source_range'][1]-o['source_range'][0], reverse=True):
+        begin, end = observation['source_range']
+        words = recognized_words(begin, observation['recognition'], end)
+        heard = [u for word in words for u in text_units(word['word'], language)]
+        def support(candidate):
+            expected = text_units(''.join(candidate['lines']), language)
+            return sum(block.src_end-block.src_start for block in Levenshtein.opcodes(expected, heard)
+                       if block.tag == 'equal')
+        baseline = support(lyrics)
+        for index, candidate in enumerate(alternatives):
+            matched = support(candidate)
+            if matched-baseline >= max(24, len(heard)*.05):
+                return dict(alternative=index, source_range=[begin,end], recognized_units=len(heard),
+                            current_matched_units=baseline, alternative_matched_units=matched)
+    return None
+
+
+def observed_repetition_candidate(lyrics, cues, observations, duration):
+    """Propose exact source-text copies; their times still need full alignment."""
+    from .align_lyrics_whisper import recognized_words
+    from .anchors_from_asr import anchors_from_words
+    from .song_sources import missing_repetitions
+    from .subtitles import normalized
+
+    provenance = lyrics.get('provenance', {})
+    if provenance.get('kind') not in ('online_lyric_text', 'video_description') or provenance.get('repetition_passes', 0) >= 4:
+        return None
+    lines, language = lyrics['lines'], lyrics['language']
+    proposals = []
+    for observation in observations:
+        if not observation.get('recognition'):
+            continue
+        begin, end = observation['source_range']
+        words = recognized_words(begin, observation['recognition'], end)
+        found = missing_repetitions(lines, [dict(c,status='candidate') for c in cues], words, language, duration)
+        if not found or any(f['ambiguous'] for f in found):
+            continue
+        if any(r['output_range'][0] < f['insertion_index'] < r['output_range'][1]
+               for f in found for r in provenance.get('repetitions', []) if 'output_range' in r):
+            continue
+        copies = []
+        for item in found:
+            first, stop = item['source_range']
+            anchors = item['boundary_anchors']
+            covered = None
+            # A recognizer can hear the outer phrases while garbling the
+            # interior. Use them to propose the complete source passage; the
+            # next acoustic alignment must still verify every copied line.
+            # Include neighbouring tails: an old held subtitle can overlap
+            # the first words of the omitted passage.
+            insertion = item['insertion_index']
+            low = max(0.,cues[insertion-1]['start']-.6) if insertion else 0.
+            high = min(duration,cues[insertion]['end']+.6) if insertion<len(cues) else duration
+            gap_words = [w for w in words if low-.001 <= w['start'] and w['end'] <= high+.001]
+            context = anchors_from_words(lines[:stop],gap_words,language,allow_missing=True)
+            def strong(a):
+                return a['status']=='candidate' and (a['matched_fraction']>=.8 or
+                    a.get('match_basis') in ('complete_phrase','complete_clause'))
+            starts = [i for i,a in enumerate(context[:first]) if strong(a) and a['end']<=anchors[-1]['end'] and not any(
+                normalized(c['text']).casefold()==normalized(a['text']).casefold() and
+                c['start']-2 <= a['end'] and a['start'] <= c['end']+2 for c in cues)]
+            if starts and strong(context[-1]):
+                first = min(starts)
+                anchors = [context[first],context[-1]]
+                covered = sum(a['matched_fraction']*len(a['text']) for a in context[first:])/max(1,sum(map(len,lines[first:stop])))
+            copy = dict(item, source_range=[first,stop], source_lines=lines[first:stop],
+                        boundary_anchors=anchors, observation_range=[begin,end],
+                        seed_source_range=item['source_range'], seed_similarity=item['similarity'],
+                        context_coverage=covered)
+            copy.pop('similarity')
+            copies.append(copy)
+        copies.sort(key=lambda c:c['boundary_anchors'][0]['start'])
+        if any(a['boundary_anchors'][-1]['end'] > b['boundary_anchors'][0]['start']
+               for a,b in zip(copies,copies[1:])):
+            continue
+        expanded, positions, additions = [], {}, []
+        for index in range(len(lines)+1):
+            for copy in copies:
+                if copy['insertion_index'] == index:
+                    first = len(expanded)
+                    expanded.extend(copy['source_lines'])
+                    additions.append(dict(copy, output_range=[first,len(expanded)]))
+            if index < len(lines):
+                positions[index] = len(expanded)
+                expanded.append(lines[index])
+        if len(expanded)>1000:
+            continue
+        previous = [dict(r, output_range=[positions[r['output_range'][0]], positions[r['output_range'][1]-1]+1])
+                    for r in provenance.get('repetitions', [])]
+        candidate = dict(lyrics, lines=expanded, provenance=dict(provenance, text_transform='source_repetitions',
+            repetition_passes=provenance.get('repetition_passes',0)+1, repetitions=[*previous,*additions]))
+        proposals.append(candidate)
+    return max(proposals, key=lambda c:len(normalized(''.join(c['lines']))), default=None)
 
 
 def fetch_lyric_consensus(song, metadata, duration, cache, description=None, preserve_title=False, *, prefetched=None):

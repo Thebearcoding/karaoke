@@ -257,9 +257,11 @@ class Pipeline:
         config = dict(command=[str(a) for a in command], compute_concurrency=self.compute_concurrency)
         if name == 'validate_timing':
             from .timing_validation import acoustic_model_files
-            constraints = self.output/'timing-constraints.json'
-            if constraints.is_file():
-                inputs = [*inputs, 'timing-constraints.json']
+            if '--lead' in command:
+                inputs = [*inputs, command[command.index('--lead')+1]]
+            for evidence in ('timing-constraints.json', 'alignment/raw.json'):
+                if (self.output/evidence).is_file():
+                    inputs = [*inputs, evidence]
             weights = acoustic_model_files(ROOT)
             config['weights'] = [(str(p), p.stat().st_size, p.stat().st_mtime_ns)
                                  for p in weights if p.is_file()]
@@ -929,14 +931,14 @@ class Pipeline:
             lyrics_provenance=lyrics['provenance'], onset_accuracy=None, separation_purity=None,
             english_context_scope=english_context_scope,
             independent_asr_coverage=None if direct else True,
-            restored_repetitions=0 if direct else len(repeats['expansions']),
+            restored_repetitions=len(lyrics['provenance'].get('repetitions', [])) if direct else len(repeats['expansions']),
             fallback_units=sum(u.get('timing_source') == 'prior_word_fallback' for u in units),
             **alignment_recovery_summary(raw),
             line_order_fallback_lines=order_fallbacks,
             countdown_events=countdown_events(cues)))
 
     def align_candidates(self, lyrics, metadata, duration):
-        from .lyric_consensus import alternative_lyric_candidates
+        from .lyric_consensus import alternative_lyric_candidates, observed_source_alternative, observed_repetition_candidate
         from .lyric_lookup import published_lyric_lines
         from .subtitles import normalized
         packet = lyrics.get('provenance', {}).get('lyric_lookup', {}) if not self.strict_audio else {}
@@ -971,35 +973,64 @@ class Pipeline:
                 self.phase(song_info={k:candidate[k] for k in ('title', 'artist', 'language')})
             error = None
             try:
-                self.align(candidate, duration)
-            except (StageFailure, ValueError) as caught:
-                if self.strict_audio:
-                    raise
-                error = caught
                 try:
-                    candidate = self.playback_fallback(metadata, duration, caught)
-                except StageFailure as failure:
-                    if (failure.stage != 'subtitles' or index+1 == len(candidates) or
-                            not (self.checkpoints.directory/'align_words.json').is_file()):
+                    self.align(candidate, duration)
+                except (StageFailure, ValueError) as caught:
+                    if self.strict_audio:
                         raise
-                    # Preserve the rejected whole text and its actual alignment,
-                    # then let the normal stage cache rebuild for the next text.
-                    folder = self.output/'lyric-source-attempts'/str(time.time_ns())
-                    folder.mkdir(parents=True)
-                    for name in ('lyrics.json', 'alignment/raw.json', 'alignment/run.json',
-                                 'playback-warning.json', 'cues.json'):
-                        source = self.output/name
-                        if source.is_file():
-                            target = folder/name
-                            target.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy2(source, target)
-                    attempts.append(dict(source=candidate['provenance'].get('lyric_lookup'),
-                        error=str(failure), diagnostics=str(folder.relative_to(self.output))))
-                    continue
-            if attempts:
+                    error = caught
+                    candidate = self.playback_fallback(metadata, duration, caught)
+                raw_path = self.output/'alignment/raw.json'
+                observations = [o for block in json.loads(raw_path.read_text())
+                                for o in block.get('asr_localizations', [])] if raw_path.is_file() else []
+                localization_error = None
+                try:
+                    self.validate_localization(candidate, duration)
+                except StageFailure as failure:
+                    localization_error = failure
+                if index+1 < len(candidates):
+                    preferred = observed_source_alternative(candidate, candidates[index+1:], observations)
+                    if preferred:
+                        position = index+1+preferred['alternative']
+                        candidates[index+1], candidates[position] = candidates[position], candidates[index+1]
+                        write_json(self.output/'lyric-source-support.json', preferred)
+                        raise StageFailure('subtitles', '已有音频识别支持更完整的歌词来源；正在核验备用正文')
+                if not self.strict_audio:
+                    repeated = observed_repetition_candidate(candidate,
+                        json.loads((self.output/'cues.json').read_text()), observations, duration)
+                    key = normalized(''.join(repeated['lines'])).casefold() if repeated else None
+                    if key and key not in seen:
+                        seen.add(key)
+                        candidates.insert(index+1,repeated)
+                        raise StageFailure('subtitles', '音频中发现重复唱段；正在重新对齐来源中的完整原文')
+                if localization_error is not None:
+                    raise localization_error
+            except StageFailure as failure:
+                if (self.strict_audio or failure.stage != 'subtitles' or index+1 == len(candidates) or
+                        not (self.checkpoints.directory/'align_words.json').is_file()):
+                    raise
+                # Preserve the rejected whole text and its actual alignment,
+                # then let the normal stage cache rebuild for the next text.
+                folder = self.output/'lyric-source-attempts'/str(time.time_ns())
+                folder.mkdir(parents=True)
+                write_json(folder/'failure.json', dict(stage=failure.stage, message=str(failure)))
+                for name in ('lyrics.json', 'alignment/raw.json', 'alignment/run.json',
+                             'playback-warning.json', 'cues.json', 'localization-validation.json',
+                             'lyric-source-support.json'):
+                    source = self.output/name
+                    if source.is_file():
+                        target = folder/name
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(source, target)
+                attempts.append(dict(source=candidate['provenance'].get('lyric_lookup'),
+                    error=str(failure), diagnostics=str(folder.relative_to(self.output))))
+                continue
+            if attempts or candidate.get('provenance', {}).get('repetitions'):
                 quality = json.loads((self.output/'quality.json').read_text())
-                quality['lyric_source_fallback'] = dict(rejected=attempts,
-                    selected=candidate['provenance']['lyric_lookup'])
+                if attempts:
+                    quality['lyric_source_fallback'] = dict(rejected=attempts,
+                        selected=candidate['provenance']['lyric_lookup'])
+                quality['restored_repetitions'] = len(candidate['provenance'].get('repetitions', []))
                 write_json(self.output/'quality.json', quality)
             return candidate, error
 
@@ -1087,7 +1118,7 @@ class Pipeline:
                 lyrics = self.playback_fallback(metadata, duration, text_error)
             # This gate is intentionally outside the fallback catch: a fallback
             # must not resurrect a timestamp contradicted by acoustic evidence.
-            self.validate_alignment(lyrics, duration)
+            self.validate_alignment(lyrics, duration, packaging)
             render_info = dict(title=lyrics['title'], artist=lyrics['artist'], language=lyrics['language'],
                                duration_seconds=duration)
             def prepare_picture():
@@ -1133,24 +1164,95 @@ class Pipeline:
         file = self.output/path
         return dict(path=str(path), bytes=file.stat().st_size, sha256=file_hash(file))
 
+    def validate_localization(self, lyrics, duration, cues=None):
+        """Reuse observed text to check both misplaced and omitted passages."""
+        from .anchors_from_asr import timeline_support, observed_context
+        from .align_lyrics_whisper import recognized_words
+        observations, word_views = [], []
+        raw_path = self.output/'alignment/raw.json'
+        if raw_path.is_file():
+            if cues is None:
+                cues = json.loads((self.output/'cues.json').read_text())
+            timed = [dict(c, status='candidate') for c in cues]
+            for block in json.loads(raw_path.read_text()):
+                for localization in block.get('asr_localizations', []):
+                    if not localization.get('recognition'):
+                        continue
+                    first, stop = localization['context']
+                    begin, end = localization['source_range']
+                    words = recognized_words(begin, localization['recognition'], end)
+                    word_views.append(words)
+                    first, stop = observed_context(lyrics['lines'], words, lyrics['language'], first, stop)
+                    evidence = timeline_support(cues[first:stop], words, lyrics['language'])
+                    evidence['missing_repetitions'] = missing_repetitions(
+                        lyrics['lines'], timed, words, lyrics['language'], duration)
+                    observations.append(dict(context=[first, stop], source_range=[begin, end], **evidence))
+            if len(word_views) > 1:
+                joint = timeline_support(cues, word_views[0], lyrics['language'], other_word_views=word_views[1:])
+                for observation in observations:
+                    # Dialogue can repeat a lyric verbatim. A single view's
+                    # isolated occurrence cannot overturn another occurrence
+                    # supported by the ordered surrounding lyric sequence.
+                    conflicts = observation['conflicts']
+                    disputed = [c for c in conflicts if c['line']+observation['context'][0] in joint['supported_lines']]
+                    if disputed:
+                        observation['competing_view_conflicts'] = disputed
+                        observation['conflicts'] = [c for c in conflicts if c not in disputed]
+                observations[0]['joint_view_validation'] = joint
+        write_json(self.output/'localization-validation.json', observations)
+        repeats = []
+        if cues is not None:
+            for repeat in lyrics.get('provenance', {}).get('repetitions', []):
+                if 'output_range' not in repeat or 'source_lines' not in repeat:
+                    continue
+                first, stop = repeat['output_range']
+                if lyrics['lines'][first:stop] != repeat['source_lines']:
+                    raise StageFailure('subtitles', '重复唱段的来源文字不一致；诊断已保留')
+                for index, anchor in zip((first,stop-1),repeat['boundary_anchors']):
+                    cue = cues[index]
+                    conflict = cue['end']+2 < anchor['start'] or cue['start']-2 > anchor['end']
+                    repeats.append(dict(line=index+1, caption_range=[cue['start'],cue['end']],
+                                        observed_range=[anchor['start'],anchor['end']], conflict=conflict))
+        if repeats:
+            repeat_path = self.output/'lyric-repeat-validation.json'
+            earlier = json.loads(repeat_path.read_text()) if repeat_path.is_file() else {}
+            write_json(repeat_path, dict(earlier, restored=repeats))
+        if any(r['conflict'] for r in repeats):
+            raise StageFailure('subtitles', '恢复的重复唱段仍未落在已观察的音频范围；诊断已保留')
+        if any(o['conflicts'] or o['missing_repetitions'] for o in observations):
+            raise StageFailure('subtitles', '字幕与已定位的唱段不一致或遗漏重复唱段；音频位置证据已保留')
+        return observations
 
-    def validate_alignment(self, lyrics, duration):
+    def validate_alignment(self, lyrics, duration, lead=None):
         from .timing_validation import validate_timeline
         cues = json.loads((self.output/'cues.json').read_text())
         write_json(self.output/'timing-input.json', cues)
-        self.run('validate_timing', [sys.executable, ROOT/'timing_validation.py',
+        command = [sys.executable, ROOT/'timing_validation.py',
             '--input', self.output/'timing-input.json', '--lyrics', self.output/'lyrics.json',
             '--audio', self.vocals, '--original', self.output/'source-44100.wav',
             '--output', self.output/'timing-checked', '--device', self.device,
-            *([] if self.strict_audio else ['--playback-fallback'])])
+            *([] if self.strict_audio else ['--playback-fallback'])]
+        # Start while packaging is still running. Only unresolved local evidence
+        # waits for the delivered lead master, including its native-rate conversion.
+        # Review the sound the user receives, not an intermediate model output.
+        self.run('validate_timing', command+(['--defer-constraints'] if lead is not None else []))
+        report = json.loads((self.output/'timing-checked/report.json').read_text())
+        if lead is not None and (report.get('pending_review_lines') or report['unresolved']):
+            lead.result()
+            self.run('validate_timing', command+['--lead', self.output/'stems/lead.wav'])
         checked = json.loads((self.output/'timing-checked/cues.json').read_text())
         report = json.loads((self.output/'timing-checked/report.json').read_text())
         try:
             validate_timeline(checked, lyrics['lines'], duration, report['constraints'], lyrics['language'])
         except ValueError as error:
             raise StageFailure('validate_timing', '字幕时间校验失败；局部修复诊断已保留') from error
+        # Text completeness is one direction of coverage. When recovery has
+        # already heard a lyric elsewhere, the final/fallback captions must
+        # cover that passage too. Reuse evidence; do not launch another ASR.
+        observations = self.validate_localization(lyrics, duration, checked)
         quality = json.loads((self.output/'quality.json').read_text())
         quality.update(lines=len(checked), units=sum(len(c['units']) for c in checked),
+            localization_validation=observations,
             timing_review=dict(reviewed_lines=len({r['line'] for r in report['lines']}),
                 review_attempts=len(report['lines']),
                 onset_constraints=report['constraints'], unresolved=report['unresolved'],
@@ -1160,6 +1262,7 @@ class Pipeline:
                                  if u.get('timing_source')=='linear_fallback' and
                                  u.get('bounds_source') in ('cross_model_onsets','cross_model_span_end',
                                                           'cross_model_onset_prior_acoustic_end')],
+                pending_review_lines=report.get('pending_review_lines', []),
                 unverified_lines=sorted({r['line'] for r in report['lines'] if r['status']=='unverified'})),
             onset_accuracy=None)
         quality['fallback_units'] = sum(u.get('timing_source') == 'prior_word_fallback'
@@ -1212,9 +1315,10 @@ class Pipeline:
                 candidates.insert(before_coarse, raw)
             except (OSError, ValueError, KeyError, TypeError):
                 pass
+        options = []
         for line, text in enumerate(lyrics['lines']):
+            options.append([])
             if line+1 in recovery.get('unresolved_localization_lines', []):
-                omitted.append(line+1)
                 continue
             for name, candidate in candidates:
                 cue = candidate[line]
@@ -1224,18 +1328,50 @@ class Pipeline:
                             not 0 <= cue['start'] < cue['end'] <= duration+.001):
                         continue
                     units = playback_units(cue, lyrics['language'])
-                    if cues:
-                        presentation_cues([cues[-1], cue], duration, lead=0, tail=0, bridge_gap=0)
-                        if cues[-1]['units'][-1]['start'] >= units[0]['start']:
-                            continue
                 except (AttributeError, KeyError, TypeError, ValueError):
                     continue
-                cues.append(dict(cue, units=units))
-                sources.append(dict(line=line+1, source=name))
-                estimated.extend(dict(line=line+1, **u) for u in units if u.get('timing_source') == 'linear_fallback')
-                break
+                options[-1].append((name, dict(cue, units=units)))
+            located = next((c for name in ('word-cues.json', 'alignment/raw.json', 'alignment/cues.json', 'anchors.json')
+                            for n,c in options[-1] if n==name), None)
+            if located is not None:
+                # A failed refinement may remain ordered while drifting into
+                # the following gap. Prefer the located phrase, retaining the
+                # other candidate only if it is needed for a complete path.
+                low, high = located['units'][0]['start'], located['units'][-1]['end']
+                options[-1].sort(key=lambda pair: pair[1]['units'][-1]['end'] <= low or
+                                 pair[1]['units'][0]['start'] >= high)
+        def follows(previous, current):
+            try:
+                presentation_cues([previous, current], duration, lead=0, tail=0, bridge_gap=0)
+                return previous['units'][-1]['start'] < current['units'][0]['start']
+            except ValueError:
+                return False
+        # A locally preferred refinement must not consume the next sentence.
+        # Find a complete ordered path through existing candidates first;
+        # priority stays unchanged and no timestamps are manufactured.
+        paths = [{} for _ in options]
+        for line in range(len(options)-1, -1, -1):
+            for index, (_, cue) in enumerate(options[line]):
+                if line == len(options)-1:
+                    paths[line][index] = None
+                else:
+                    following = next((j for j in paths[line+1] if follows(cue, options[line+1][j][1])), None)
+                    if following is not None:
+                        paths[line][index] = following
+        choice = next(iter(paths[0]), None) if paths else None
+        for line, candidates in enumerate(options):
+            if choice is not None:
+                selected = candidates[choice]
+                choice = paths[line][choice]
             else:
+                selected = next((pair for pair in candidates if not cues or follows(cues[-1], pair[1])), None)
+            if selected is None:
                 omitted.append(line+1)
+                continue
+            name, cue = selected
+            cues.append(cue)
+            sources.append(dict(line=line+1, source=name))
+            estimated.extend(dict(line=line+1, **u) for u in cue['units'] if u.get('timing_source') == 'linear_fallback')
         # Reuse normal display-boundary handling. Acoustic word onsets stay
         # untouched; a small overlapping tail must not delete a whole phrase.
         display, boundaries = presentation_cues(cues, duration, lead=0, tail=0, bridge_gap=0)
