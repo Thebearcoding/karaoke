@@ -4833,6 +4833,10 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
     def align(candidate, duration):
         calls.append(candidate['lines'])
         assert candidate['language'] == 'English'
+        for name in ('lyric-repeat-validation.json', 'timing-context-recovery.json'):
+            assert not (tmp_path/name).exists()
+            if candidate['lines']==primary:
+                (tmp_path/name).write_text(json.dumps(dict(previous_candidate=primary)))
         if mode == 'resource_failure':raise StageFailure('align_words', 'CUDA out of memory')
         (pipeline.checkpoints.directory/'align_words.json').write_text('{}')
         cues = [dict(text=t,start=1.+i*2,end=2.+i*2,status='candidate')
@@ -4862,6 +4866,9 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
             assert json.loads((saved/'lyrics.json').read_text())['lines']==primary
             assert json.loads((saved/'playback-warning.json').read_text())['omitted_lines']==[2]
             assert json.loads((saved/'failure.json').read_text())['stage']=='subtitles'
+            for name in ('lyric-repeat-validation.json', 'timing-context-recovery.json'):
+                assert json.loads((saved/name).read_text())['previous_candidate']==primary
+                assert not (tmp_path/name).exists()
             assert json.loads((tmp_path/'lyrics.json').read_text())['lines']==alternative
     else:
         with pytest.raises(StageFailure):pipeline.align_candidates(lyrics, {}, 6.)
@@ -5457,8 +5464,61 @@ def test_phrase_validation_reconciles_dialogue_with_ordered_recording_views(tmp_
     else:
         evidence = pipeline.validate_localization(lyrics,90.,cues)
         assert not any(e['conflicts'] for e in evidence)
-        assert evidence[1]['competing_view_conflicts'][0]['observed_range']==[5.,7.]
+        assert evidence[1]['ambiguous_lines']==[2]
         assert 2 in evidence[0]['joint_view_validation']['supported_lines']
+
+
+def test_localization_report_does_not_keep_an_older_lyric_source_failure(tmp_path):
+    previous = dict(missing=[dict(source_range=[3,5])], restored=[dict(line=87,conflict=True)])
+    path = tmp_path/'lyric-repeat-validation.json'
+    path.write_text(json.dumps(previous))
+    lyrics = dict(lines=['A complete phrase'], language='English', provenance={})
+    cues = [dict(text=lyrics['lines'][0], start=1., end=3.)]
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    pipeline.validate_localization(lyrics,5.,cues)
+    report = json.loads(path.read_text())
+    assert not report['missing'] and not report['restored']
+
+
+@pytest.mark.parametrize('alternate', ['more_occurrences', 'same', 'missing', 'outside'])
+def test_partial_recording_cannot_number_refrains_when_another_view_hears_more(tmp_path, alternate):
+    full = 'Let me sail across the sea'
+    lines = [full, 'Let me sail across the', full, 'Then we sail across the']
+    lyrics = dict(lines=lines, language='English', provenance={})
+    cues = [dict(text=t, start=s, end=s+3.) for t,s in zip(lines,[10.,20.,30.,40.])]
+    primary = [dict(word=full,start=s,end=s+3.) for s in (30.,40.)]
+    other = ([dict(word=full,start=s,end=s+3.) for s in (10.,20.,30.,40.)]
+             if alternate=='more_occurrences' else primary if alternate=='same' else [])
+    if alternate=='outside':
+        other = [dict(word=full,start=s,end=s+3.) for s in (60.,70.,80.,90.)]
+    raw = tmp_path/'alignment/raw.json'; raw.parent.mkdir()
+    raw.write_text(json.dumps([dict(asr_localizations=[dict(context=[0,4],source_range=[0.,end],
+        recognition=dict(segments=[dict(words=words)])) for words,end in
+        ((primary,50.),(other,100. if alternate=='outside' else 50.))])]))
+    pipeline = Pipeline(dict(url=URL),tmp_path)
+    if alternate=='more_occurrences':
+        observations = pipeline.validate_localization(lyrics,100.,cues)
+        assert observations[0]['ambiguous_lines']==[1,3]
+        assert not any(o['conflicts'] for o in observations)
+    else:
+        with pytest.raises(StageFailure,match='字幕与已定位的唱段不一致'):
+            pipeline.validate_localization(lyrics,100.,cues)
+    assert [c['start'] for c in cues]==[10.,20.,30.,40.]
+
+
+def test_wider_recording_view_can_disprove_a_local_occurrence_count(tmp_path):
+    full = 'Blue birds cross the river'
+    lines = ['Grey birds cross the river', full]
+    lyrics = dict(lines=lines,language='English',provenance={})
+    cues = [dict(text=t,start=s,end=s+3.) for t,s in zip(lines,[10.,30.])]
+    raw = tmp_path/'alignment/raw.json';raw.parent.mkdir()
+    raw.write_text(json.dumps([dict(asr_localizations=[dict(context=[0,2],source_range=[0.,end],
+        recognition=dict(segments=[dict(words=[dict(word=full,start=s,end=s+3.) for s in starts])]))
+        for starts,end in (([10.],15.),([10.,30.],40.))])]))
+    observations = Pipeline(dict(url=URL),tmp_path).validate_localization(lyrics,40.,cues)
+    assert observations[0]['ambiguous_occurrence_conflicts'][0]['line']==2
+    assert not any(o['conflicts'] for o in observations)
+    assert cues[-1]['start']==30.
 
 
 @pytest.mark.parametrize('displaced', [False, True])

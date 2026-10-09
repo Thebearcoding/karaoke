@@ -1002,7 +1002,12 @@ class Pipeline:
         if not candidates:
             raise StageFailure('lyrics', '未找到可用的歌词正文')
         attempts, previous, recording_observations = [], None, {}
+        candidate_reports = ('playback-warning.json', 'lyric-source-support.json',
+            'lyric-repeat-validation.json', 'localization-validation.json',
+            'timing-context-recovery.json', 'timing-recovery.json')
         for index, candidate in enumerate(candidates):
+            for name in candidate_reports:
+                (self.output/name).unlink(missing_ok=True)
             if index or candidate is not lyrics:
                 self.aligned_cues = None
                 self.alignment_outputs.clear()
@@ -1069,9 +1074,7 @@ class Pipeline:
                 folder.mkdir(parents=True)
                 write_json(folder/'failure.json', dict(stage=failure.stage, message=str(failure)))
                 for name in ('lyrics.json', 'alignment/raw.json', 'alignment/run.json',
-                             'playback-warning.json', 'cues.json', 'localization-validation.json',
-                             'lyric-source-support.json', 'timing-input.json',
-                             'timing-context-recovery.json',
+                             'cues.json', 'timing-input.json', *candidate_reports,
                              'timing-checked/cues.json', 'timing-checked/report.json', 'timing-constraints.json'):
                     source = self.output/name
                     if source.is_file():
@@ -1244,21 +1247,31 @@ class Pipeline:
                     words = recognized_words(begin, localization['recognition'], end)
                     word_views.append(words)
                     first, stop = observed_context(lyrics['lines'], words, lyrics['language'], first, stop)
-                    evidence = timeline_support(cues[first:stop], words, lyrics['language'])
-                    evidence['missing_repetitions'] = missing_repetitions(
-                        lyrics['lines'], timed, words, lyrics['language'], duration)
-                    observations.append(dict(context=[first, stop], source_range=[begin, end], **evidence))
+                    observations.append(dict(context=[first, stop], source_range=[begin, end]))
+            for observation, words in zip(observations, word_views):
+                first, stop = observation['context']
+                begin, end = observation['source_range']
+                other_views = [[w for w in view if begin <= (w['start']+w['end'])/2 <= end]
+                               for view in word_views if view is not words]
+                observation.update(timeline_support(cues[first:stop], words, lyrics['language'],
+                    other_word_views=other_views, combine=False))
+                observation['missing_repetitions'] = missing_repetitions(
+                    lyrics['lines'], timed, words, lyrics['language'], duration)
             if len(word_views) > 1:
                 joint = timeline_support(cues, word_views[0], lyrics['language'], other_word_views=word_views[1:])
                 for observation in observations:
                     # Dialogue can repeat a lyric verbatim. A single view's
                     # isolated occurrence cannot overturn another occurrence
                     # supported by the ordered surrounding lyric sequence.
-                    conflicts = observation['conflicts']
-                    disputed = [c for c in conflicts if c['line']+observation['context'][0] in joint['supported_lines']]
-                    if disputed:
-                        observation['competing_view_conflicts'] = disputed
-                        observation['conflicts'] = [c for c in conflicts if c not in disputed]
+                    # A wider view can also disprove a local occurrence count
+                    # without establishing which copy is the correct one.
+                    for key, lines in (('competing_view_conflicts',joint['supported_lines']),
+                                       ('ambiguous_occurrence_conflicts',joint['ambiguous_lines'])):
+                        conflicts = observation['conflicts']
+                        disputed = [c for c in conflicts if c['line']+observation['context'][0] in lines]
+                        if disputed:
+                            observation[key] = disputed
+                            observation['conflicts'] = [c for c in conflicts if c not in disputed]
                 observations[0]['joint_view_validation'] = joint
         write_json(self.output/'localization-validation.json', observations)
         repeats = []
@@ -1274,10 +1287,11 @@ class Pipeline:
                     conflict = cue['end']+2 < anchor['start'] or cue['start']-2 > anchor['end']
                     repeats.append(dict(line=index+1, caption_range=[cue['start'],cue['end']],
                                         observed_range=[anchor['start'],anchor['end']], conflict=conflict))
-        if repeats:
-            repeat_path = self.output/'lyric-repeat-validation.json'
-            earlier = json.loads(repeat_path.read_text()) if repeat_path.is_file() else {}
-            write_json(repeat_path, dict(earlier, restored=repeats))
+        # This report belongs to the current candidate, including an empty one.
+        # Superseded source failures remain in their archived attempts.
+        write_json(self.output/'lyric-repeat-validation.json', dict(
+            missing=[r for o in observations for r in o['missing_repetitions']] or None,
+            restored=repeats))
         if any(r['conflict'] for r in repeats):
             raise StageFailure('subtitles', '恢复的重复唱段仍未落在已观察的音频范围；诊断已保留')
         if any(o['conflicts'] or o['missing_repetitions'] for o in observations):

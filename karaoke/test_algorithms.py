@@ -2710,7 +2710,8 @@ class SubtitleIntegrity(unittest.TestCase):
     def test_refrain_identity_can_be_resolved_between_independent_phrases(self):
         from anchors_from_asr import timeline_support
         lines = ['Opening', 'Sing again', 'Left marker', 'Sing again', 'Right marker', 'Ending']
-        for case in ('bounded', 'missing_left', 'missing_right', 'extra_refrain'):
+        for case in ('bounded', 'missing_left', 'missing_right', 'extra_refrain',
+                     'other_extra_inside', 'other_extra_outside'):
             with self.subTest(case=case):
                 observed = [('Opening',0.), ('Left marker',8.), ('Sing again',13.),
                             ('Right marker',16.), ('Ending',20.)]
@@ -2721,9 +2722,15 @@ class SubtitleIntegrity(unittest.TestCase):
                     observed[3:3] = [('Sing again',14.), ('Sing again',15.)]
                 words = [dict(word=t,start=s,end=s+1) for t,s in observed]
                 cues = [dict(text=t,start=s,end=s+1) for t,s in zip(lines,[0.,3.,8.,9.,16.,20.])]
-                support = timeline_support(cues,words,'English')
-                self.assertEqual(4 in support['checked_lines'], case == 'bounded')
-                if case == 'bounded':
+                other = []
+                if case.startswith('other_extra_'):
+                    extra = dict(word='Sing again',start=14. if case.endswith('inside') else 2.,
+                                 end=15. if case.endswith('inside') else 3.)
+                    other = [sorted([*words,extra],key=lambda w:w['start'])]
+                support = timeline_support(cues,words,'English',other_word_views=other,combine=False)
+                resolved = case in ('bounded','other_extra_outside')
+                self.assertEqual(4 in support['checked_lines'], resolved)
+                if resolved:
                     self.assertIn(dict(line=4,caption_range=[9.,10.],observed_range=[13.,14.]),support['conflicts'])
 
     def test_phrase_location_check_uses_audio_text_not_loudness_or_duration(self):

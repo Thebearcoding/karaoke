@@ -34,7 +34,7 @@ def matching_spans(text):
     return spans
 
 
-def _match_words(lines, words, units, *, word_evidence=True):
+def _match_words(lines, words, units, *, word_evidence=True, other_word_views=()):
     keys = [units(line) for line in lines]
     expected = [unit for key in keys for unit in key]
     observed, owners = [], []
@@ -42,7 +42,9 @@ def _match_words(lines, words, units, *, word_evidence=True):
         value = units(word['word'])
         observed.extend(value)
         owners.extend([i]*len(value))
-    correspondence, boundaries, source_ranges = {}, [], {}
+    other_observed = [[unit for word in view for unit in units(word['word'])]
+                      for view in other_word_views if view is not words]
+    correspondence, boundaries, source_ranges, ambiguous = {}, [], {}, []
     if expected and observed:
         observed_words = [tuple(units(word['word'][a:b])) for word in (words if word_evidence else [])
                           for a,b in matching_spans(word['word'])]
@@ -100,6 +102,12 @@ def _match_words(lines, words, units, *, word_evidence=True):
             hits = [i for i in range(len(observed)-len(key)+1)
                     if tuple(observed[i:i+len(key)]) == key]
             if len(hits) == len(starts):
+                # Equal counts in one partial recognition do not prove that
+                # every occurrence was heard. Another view may contain more.
+                if any(sum(tuple(view[i:i+len(key)]) == key for i in range(len(view)-len(key)+1))
+                       > len(starts) for view in other_observed):
+                    ambiguous.extend((start, start+len(key)) for start in starts)
+                    continue
                 candidates.extend((start, start+len(key), hit, hit+len(key))
                                   for start, hit in zip(starts, hits))
         for refinement in range(2):
@@ -120,6 +128,10 @@ def _match_words(lines, words, units, *, word_evidence=True):
             # within both text intervals; song edges alone supply no evidence.
             for left, right in zip(boundaries, boundaries[1:]):
                 first, stop, begin, end = left[1], right[0], left[3], right[2]
+                lo, hi = words[owners[begin-1]]['end'], words[owners[end]]['start']
+                other_within = [[unit for word in view if lo <= (word['start']+word['end'])/2 <= hi
+                                 for unit in units(word['word'])]
+                                for view in other_word_views if view is not words]
                 for key, starts in [*positions.items(), *clause_positions.items()]:
                     within = [s for s in starts if first <= s and s+len(key) <= stop]
                     if not within or within != [i for i in range(first, stop-len(key)+1)
@@ -128,6 +140,10 @@ def _match_words(lines, words, units, *, word_evidence=True):
                     hits = [i for i in range(begin, end-len(key)+1)
                             if tuple(observed[i:i+len(key)]) == key]
                     if len(hits) == len(within):
+                        if any(sum(tuple(view[i:i+len(key)]) == key for i in range(len(view)-len(key)+1))
+                               > len(within) for view in other_within):
+                            ambiguous.extend((start, start+len(key)) for start in within)
+                            continue
                         candidates.extend((s, s+len(key), h, h+len(key)) for s,h in zip(within,hits))
         alphabet = {unit: i for i, unit in enumerate(dict.fromkeys(expected+observed))}
         # Minimize ordinary edit distance first, then internal gap runs.
@@ -180,6 +196,8 @@ def _match_words(lines, words, units, *, word_evidence=True):
                      'matched_fraction': coverage, 'matched_density': density,
                      'status': 'candidate' if end > start else 'unresolved_timing',
                      'source': 'asr_rough_anchor'})
+        if any(position <= a < b <= position+len(key) for a,b in ambiguous):
+            cues[-1]['ambiguous_occurrences'] = True
         clauses = [(a,b,c,d) for a,b,c,d in boundaries
                    if position <= a < b <= position+len(key) and b-a >= len(key)/2]
         if any(a == position and b == position+len(key) for a, b, _, _ in clauses):
@@ -218,8 +236,8 @@ def japanese_reading_units(text):
     return text_units(text, 'Japanese')
 
 
-def anchors_from_words(lines, words, language, allow_missing=False):
-    cues = _match_words(lines, words, lambda text: text_units(text, language))
+def anchors_from_words(lines, words, language, allow_missing=False, *, other_word_views=()):
+    cues = _match_words(lines, words, lambda text: text_units(text, language), other_word_views=other_word_views)
     if language == 'Japanese':
         # Recover kana/kanji spelling differences only where written matching
         # failed. Phonetic matches must not move existing anchors or absorb
@@ -314,23 +332,25 @@ def phrase_conflict(cue, anchor, *, fragments=True):
     return False
 
 
-def timeline_support(cues, words, language, *, other_word_views=()):
+def timeline_support(cues, words, language, *, other_word_views=(), combine=True):
     """Check coarse phrase location against already observed audio text.
 
     This is not an onset-accuracy measurement. Silence and held syllables do
     not fail a duration heuristic; only independently located lyrics can
     contradict a caption, and ambiguous/missing recognition stays unknown.
     """
-    anchors = anchors_from_words([c['text'] for c in cues], words, language, allow_missing=True)
-    if other_word_views:
-        anchors = combine_anchor_views([anchors, *(anchors_from_words(
-            [c['text'] for c in cues], view, language, allow_missing=True) for view in other_word_views)])
-    checked, conflicts, supported = [], [], []
+    views = [words, *other_word_views]
+    matches = [anchors_from_words([c['text'] for c in cues], view, language, allow_missing=True,
+                                  other_word_views=views) for view in (views if combine else [words])]
+    anchors = combine_anchor_views(matches) if len(matches) > 1 else matches[0]
+    checked, conflicts, supported, ambiguous = [], [], [], []
     for i, (cue, anchor) in enumerate(zip(cues, anchors), 1):
         # A rough match with unresolved occurrence cannot dismiss a conflict
         # established by an independently matched phrase in another view.
         if (anchor['status'] != 'candidate' or
                 anchor.get('match_basis') not in ('complete_phrase', 'complete_clause', 'exact_fragment')):
+            if any(view[i-1].get('ambiguous_occurrences') for view in matches):
+                ambiguous.append(i)
             continue
         units = cue.get('units') or []
         begin = min((u['start'] for u in units), default=cue['start'])
@@ -345,7 +365,7 @@ def timeline_support(cues, words, language, *, other_word_views=()):
         if conflict:
             conflicts.append(dict(line=i, caption_range=[begin, end],
                                   observed_range=[observed_begin, observed_end]))
-    return dict(checked_lines=checked, conflicts=conflicts, supported_lines=supported)
+    return dict(checked_lines=checked, conflicts=conflicts, supported_lines=supported, ambiguous_lines=ambiguous)
 
 
 def main():
