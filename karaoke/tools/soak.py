@@ -196,6 +196,8 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False, playback_po
     folder = (data_dir/job['id']).resolve()
     result = json.loads((folder/('audio-result.json' if audio_only else 'result.json')).read_text())
     required = REQUIRED-{'mv'} if audio_only else REQUIRED
+    if result.get('audio_storage', {}).get('format') == 'FLAC':
+        required = {name for name in required if not name.endswith('_preview')}
     if not required <= result['artifacts'].keys():
         raise ValueError('Missing required output artifacts')
     paths, hashes = {}, {}
@@ -269,7 +271,7 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False, playback_po
         if coverage['status'] != 'complete':
             raise ValueError('Subtitles omit recognized lyric passages')
     for name in ('mv', 'instrumental_preview', 'backing_vocals_preview', 'lead_vocals_preview'):
-        if audio_only and name == 'mv':
+        if name not in paths:
             continue
         probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_streams',
             '-show_format', '-of', 'json', str(paths[name])], timeout=30))

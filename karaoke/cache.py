@@ -18,8 +18,7 @@ def can_restore_video(folder, result):
     """Only discard an MV when its expensive inputs and source identity survive."""
     try:
         artifacts = result['artifacts']
-        required = {'mv', 'instrumental', 'backing_vocals', 'lead_vocals', 'subtitles',
-                    'instrumental_preview', 'backing_vocals_preview', 'lead_vocals_preview'}
+        required = {'mv', 'instrumental', 'backing_vocals', 'lead_vocals', 'subtitles'}
         if not required <= artifacts.keys() or not result['reconstruction']['source_pcm_sha256']:
             return False
         if not result['language'] or not 0 < result['shared_preview_gain'] <= 1 or result['duration_seconds'] <= 0:

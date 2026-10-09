@@ -223,16 +223,14 @@ class Pipeline:
         }.items()}
         specs = {
             'decode_audio': (['download/source.mkv'], ['source-44100.wav'], []),
-            'decode_native': (['download/source.mkv'], ['source-native.wav', 'source-native.json'], [ROOT/'exact_stems.py']),
             'separate_music': (['source-44100.wav'], ['music-separation'], [ROOT/'benchmark_neural.py']),
-            'package_two_stems': (['download/source.mkv', 'music-separation/song/vocals.wav'],
-                                  ['two-stems'], [ROOT/'exact_stems.py']),
             'resample_vocals': (['music-separation/song/vocals.wav'],
                                 ['vocals-16k.wav'] + (['vocals-asr.mp3'] if self.strict_audio else []), []),
             'transcribe': (['vocals-asr.mp3', 'source-44100.wav'], ['asr'], [ROOT/p for p in
                 ('transcribe_lyrics.py', 'local_asr.py', 'anchors_from_asr.py', 'subtitles.py', 'job_schema.py')]),
             'separate_lead': (['music-separation/song/vocals.wav'], ['lead-separation'], [ROOT/'benchmark_neural.py']),
-            'package_three_stems': (['two-stems', 'lead-separation/song/vocals.wav'],
+            'package_three_stems': (['download/source.mkv', 'music-separation/song/vocals.wav',
+                                     'lead-separation/song/vocals.wav'],
                                     ['stems'], [ROOT/'exact_stems.py', ROOT/'three_stems.py']),
             'align_words': (['vocals-16k.wav', 'source-44100.wav', 'lyrics.json', 'anchors.json', 'alignment-jobs.json'],
                             ['alignment'], alignment_code['align_words']),
@@ -252,8 +250,6 @@ class Pipeline:
         if name not in specs:
             return None
         inputs, outputs, code = specs[name]
-        if name in ('package_two_stems', 'package_three_stems') and '--source-pcm' in command:
-            inputs = [*inputs, 'source-native.wav', 'source-native.json']
         config = dict(command=[str(a) for a in command], compute_concurrency=self.compute_concurrency)
         if name == 'validate_timing':
             from .timing_validation import acoustic_model_files
@@ -1043,9 +1039,10 @@ class Pipeline:
         import soundfile as sf
         text_error = None
         artifacts = dict(instrumental='stems/instrumental.wav',
-            backing_vocals='stems/backing-vocals.wav', lead_vocals='stems/lead.wav',
-            instrumental_preview='stems/instrumental.mp3', backing_vocals_preview='stems/backing-vocals.mp3',
-            lead_vocals_preview='stems/lead.mp3')
+            backing_vocals='stems/backing-vocals.wav', lead_vocals='stems/lead.wav')
+        if self.strict_audio:
+            artifacts.update(instrumental_preview='stems/instrumental.mp3',
+                backing_vocals_preview='stems/backing-vocals.mp3', lead_vocals_preview='stems/lead.mp3')
         with ThreadPoolExecutor(max_workers=4) as pool:
             text, text_duration = None, None
             def start_text(metadata, duration):
@@ -1065,8 +1062,6 @@ class Pipeline:
                                   seconds=min(30, source_duration*.1))
                 return result
             video = pool.submit(complete_video) if not self.audio_only else None
-            native = pool.submit(self.run, 'decode_native', [sys.executable, ROOT/'exact_stems.py', 'decode',
-                '--source', self.source, '--output', self.output/'source-native.wav'])
             if self.device == 'auto':
                 import torch
                 self.device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -1085,17 +1080,22 @@ class Pipeline:
                 ROOT/'models/pretrained/karaoke_bs_roformer_anvuew.yaml', '--target-stem', 'Vocals',
                 '--inputs', self.output/'vocal-inputs.json', '--output', self.output/'lead-separation'])
             def package_stems():
-                native.result()
-                self.run('package_two_stems', [sys.executable, ROOT/'exact_stems.py', 'build',
-                    '--source', self.source, '--vocals-estimate', self.vocals,
-                    '--output', self.output/'two-stems', '--source-pcm', self.output/'source-native.wav',
-                    *([] if self.strict_audio else ['--no-previews'])])
                 lead.result()
                 self.run('package_three_stems', [sys.executable, ROOT/'three_stems.py',
-                    'build', '--existing', self.output/'two-stems', '--lead-estimate',
+                    'build', '--source', self.source, '--vocals-estimate', self.vocals, '--lead-estimate',
                     self.output/'lead-separation/song/vocals.wav', '--output', self.output/'stems',
-                    '--source-pcm', self.output/'source-native.wav', '--no-karaoke-preview'])
-                return {key: self.artifact_record(path) for key, path in artifacts.items()}
+                    '--no-karaoke-preview', *([] if self.strict_audio else ['--no-previews'])])
+                records = {key: self.artifact_record(path) for key, path in artifacts.items()}
+                compressed = None
+                if not self.strict_audio:
+                    from .exact_stems import compact_playback_audio
+                    compression_started = time.perf_counter()
+                    stems = json.loads((self.output/'stems/manifest.json').read_text())
+                    compressed = compact_playback_audio(self.output, dict(artifacts=records,
+                        shared_preview_gain=stems['preview_shared_gain']))
+                    with self.lock:
+                        self.timings['compress_audio'] = round(time.perf_counter()-compression_started, 3)
+                return records, compressed
             packaging = pool.submit(package_stems)
             self.run('resample_vocals', ['ffmpeg', '-v', 'error', '-nostdin', '-i', self.vocals,
                 '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', self.output/'vocals-16k.wav',
@@ -1126,7 +1126,7 @@ class Pipeline:
                 self.render_picture(render_info)
                 return source_metadata
             picture = pool.submit(prepare_picture) if video is not None else None
-            records = packaging.result()
+            records, compressed = packaging.result()
             if picture is not None:
                 metadata = picture.result()
         stems = json.loads((self.output/'stems/manifest.json').read_text())
@@ -1141,13 +1141,11 @@ class Pipeline:
             quality=json.loads((self.output/'quality.json').read_text()),
             reconstruction=stems['reconstruction']['vocal_first'], device=self.device)
         if not self.audio_only:
-            self.render_video(result)
-        if not self.strict_audio:
-            from .exact_stems import compact_playback_audio
-            compression_started = time.perf_counter()
-            result = compact_playback_audio(self.output, result)
-            self.timings['compress_audio'] = round(time.perf_counter()-compression_started, 3)
-            records.update({key: result['artifacts'][key]
+            self.render_video(result, self.output/'captioned-picture.mp4')
+        if compressed is not None:
+            result.update(audio_storage=compressed['audio_storage'], shared_preview_gain=1.)
+            result['artifacts'].update(compressed['artifacts'])
+            records.update({key: compressed['artifacts'][key]
                             for key in ('instrumental', 'backing_vocals', 'lead_vocals')})
         for key, artifact in result['artifacts'].items():
             artifact.update(records[key] if key in records else self.artifact_record(artifact['path']))
@@ -1415,7 +1413,7 @@ class Pipeline:
                     '--countdown', '--output', picture])
         return picture
 
-    def render_video(self, result):
+    def render_video(self, result, picture=None):
         paths = {name: self.output/a['path'] for name, a in result['artifacts'].items()}
         with self.checkpoints.stage('render',
                 inputs=[self.video, paths['instrumental'], paths['backing_vocals'], paths['subtitles']],
@@ -1426,27 +1424,26 @@ class Pipeline:
                 code=[ROOT/p for p in ('render_lyric_progress.py', 'render_subtitles.py', 'subtitles.py', 'lyric_progress.py',
                                       'subtitle_style.py', 'subtitle-styles.json')]) as reused:
             if not reused:
-                self.render_uncached(result)
+                self.render_uncached(result, picture)
 
-    def render_uncached(self, result):
-        import soundfile as sf
-        picture = self.render_picture(result)
+    def render_uncached(self, result, picture=None):
+        picture = picture if picture is not None else self.render_picture(result)
         presentation = json.loads(picture.with_suffix('.render.json').read_text())
         result.setdefault('quality', {}).update(
             countdown_events=presentation['countdown']['events'],
             opening_countdown=presentation['opening_countdown'])
         paths = {name: self.output/a['path'] for name, a in result['artifacts'].items()}
-        instrumental, rate = sf.read(paths['instrumental'], dtype='float32', always_2d=True)
+        audio_inputs = ['-i', paths['instrumental']]
+        mixing = '[1:a]aformat=sample_fmts=fltp[audio];'
         if result['mv_audio'] == 'instrumental_backing':
-            backing, _ = sf.read(paths['backing_vocals'], dtype='float32', always_2d=True)
-            instrumental += backing
-        mixed = self.output/'render-mix.wav'
-        sf.write(mixed, instrumental, rate, subtype='FLOAT')
+            audio_inputs += ['-i', paths['backing_vocals']]
+            mixing = ('[1:a]aformat=sample_fmts=fltp[i];[2:a]aformat=sample_fmts=fltp[b];'
+                      '[i][b]amix=inputs=2:normalize=0[audio];')
         rendered = self.output/'rendered-mv.mp4'
         rendered.unlink(missing_ok=True)
-        self.run('mux_video', ['ffmpeg', '-v', 'error', '-nostdin', '-i', picture, '-i', mixed,
-            '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-af',
-            f"volume={result['shared_preview_gain']:.17g},asetpts=PTS-STARTPTS", '-c:a', 'aac', '-b:a', '192k',
+        self.run('mux_video', ['ffmpeg', '-v', 'error', '-nostdin', '-i', picture, *audio_inputs,
+            '-filter_complex', mixing+f"[audio]volume={result['shared_preview_gain']:.17g},asetpts=PTS-STARTPTS[mix]",
+            '-map', '0:v:0', '-map', '[mix]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
             '-t', result['duration_seconds'], '-movflags', '+faststart', rendered])
         self.run('verify_video', ['ffmpeg', '-v', 'error', '-nostdin', '-i', rendered, '-f', 'null', '-'])
         probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',
@@ -1455,7 +1452,6 @@ class Pipeline:
                 abs(float(probe['format']['duration'])-result['duration_seconds']) > .1):
             raise StageFailure('verify_video', '成品视频缺少音画或时长不符')
         rendered.replace(paths['mv'])
-        mixed.unlink()
 
     def restore_video(self):
         """Rebuild only the discarded video; never run a model or change cached audio/cues."""

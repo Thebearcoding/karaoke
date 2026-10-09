@@ -1,4 +1,4 @@
-"""Split an accepted vocal master into lead/backing vocals, preserving music."""
+"""Export native-rate stems from separation estimates or an existing vocal master."""
 
 import argparse
 import json
@@ -21,27 +21,43 @@ def check_three(source, lead, backing_vocals, instrumental):
     }
 
 
-def build(existing, estimate, output, video=None, *, source_pcm=None, karaoke_preview=True):
-    existing, estimate, output = (Path(p).resolve() for p in (existing, estimate, output))
+def build(existing, estimate, output, video=None, *, source_pcm=None, karaoke_preview=True,
+          source_path=None, vocals_estimate=None, previews=True):
+    estimate, output = (Path(p).resolve() for p in (estimate, output))
     if output.exists():
         raise FileExistsError(f'Preserve existing output: {output}')
     started = time.perf_counter()
-    old = json.loads((existing/'manifest.json').read_text())
-    spec = old['source']
-    if sha(spec['path']) != spec['container_sha256']:
-        raise ValueError('Original source changed')
-    for master in old['masters'].values():
-        if sha(existing/master['file']) != master['sha256']:
-            raise ValueError(f"Existing master changed: {master['file']}")
-    source, rate, _ = source_samples(spec['path'], source_pcm)
-    vocals, instrumental = read_masters(existing, rate, source.shape)
-    reconstruction_report(source, vocals, instrumental)
+    if source_path is not None:
+        source_path, vocals_estimate = (Path(p).resolve() for p in (source_path, vocals_estimate))
+        source, rate, decoder = decode_source(source_path)
+        spec = dict(path=str(source_path), container_sha256=sha(source_path), decoder=decoder,
+                    sample_rate=rate, channels=source.shape[1], frames=len(source))
+        vocals, vocal_resampling = native_vocals(vocals_estimate, rate, source.shape)
+        vocals, instrumental = complementary_split(source, vocals)
+        origin = dict(vocals_estimate=dict(path=str(vocals_estimate), sha256=sha(vocals_estimate),
+                                          **vocal_resampling))
+    else:
+        existing = Path(existing).resolve()
+        old = json.loads((existing/'manifest.json').read_text())
+        spec = old['source']
+        if sha(spec['path']) != spec['container_sha256']:
+            raise ValueError('Original source changed')
+        for master in old['masters'].values():
+            if sha(existing/master['file']) != master['sha256']:
+                raise ValueError(f"Existing master changed: {master['file']}")
+        source, rate, _ = source_samples(spec['path'], source_pcm)
+        vocals, instrumental = read_masters(existing, rate, source.shape)
+        reconstruction_report(source, vocals, instrumental)
+        origin = dict(existing_package=dict(path=str(existing), manifest_sha256=sha(existing/'manifest.json')))
     raw_lead, resampling = native_vocals(estimate, rate, source.shape)
     lead, backing_vocals = complementary_split(vocals, raw_lead)
     output.mkdir(parents=True)
     for name, audio in [('lead', lead), ('backing-vocals', backing_vocals)]:
         sf.write(output/f'{name}.wav', audio, rate, subtype='DOUBLE')
-    shutil.copy2(existing/'backing.wav', output/'instrumental.wav')
+    if source_path is None:
+        shutil.copy2(existing/'backing.wav', output/'instrumental.wav')
+    else:
+        sf.write(output/'instrumental.wav', instrumental, rate, subtype='DOUBLE')
     # Read actual serialized masters, including the copied instrumental.
     tracks = {}
     for name in ('lead', 'backing-vocals', 'instrumental'):
@@ -51,18 +67,19 @@ def build(existing, estimate, output, video=None, *, source_pcm=None, karaoke_pr
             raise ValueError(f'Incorrect master format: {path}')
         tracks[name] = audio
     checks = check_three(source, tracks['lead'], tracks['backing-vocals'], tracks['instrumental'])
-    if sha(output/'instrumental.wav') != old['masters']['backing']['sha256']:
+    if source_path is None and sha(output/'instrumental.wav') != old['masters']['backing']['sha256']:
         raise ArithmeticError('Instrumental must be an unchanged copy')
     karaoke = tracks['instrumental'] + tracks['backing-vocals']
     peak = max(float(np.max(np.abs(a))) for a in (*tracks.values(), source, karaoke))
     gain = min(1., .84/max(peak, 1e-12))
     temporary_mix = output/'.karaoke-mix.wav'
-    if karaoke_preview or video:
+    if (previews and karaoke_preview) or video:
         sf.write(temporary_mix, karaoke, rate, subtype='FLOAT')
     preview_inputs = {name: output/f'{name}.wav' for name in tracks}
     if karaoke_preview:
         preview_inputs['karaoke'] = temporary_mix
-    gain, previews = encode_previews(preview_inputs, output, gain, len(source), source.shape[1])
+    gain, previews = (encode_previews(preview_inputs, output, gain, len(source), source.shape[1])
+                      if previews else (gain, {}))
     video_record = None
     if video:
         video = Path(video).resolve()
@@ -78,14 +95,13 @@ def build(existing, estimate, output, video=None, *, source_pcm=None, karaoke_pr
             'command': command, 'full_decode_passed': True,
             'video': 'Stream copy of the existing hard-cut, aligned-subtitle render'}
     temporary_mix.unlink(missing_ok=True)
-    manifest = {'schema_version': 1, 'source': spec,
-        'existing_package': {'path': str(existing), 'manifest_sha256': sha(existing/'manifest.json')},
+    manifest = {'schema_version': 1, 'source': spec, **origin,
         'lead_estimate': {'path': str(estimate), 'sha256': sha(estimate), **resampling},
         'masters': {name: {'file': f'{name}.wav', 'sha256': sha(output/f'{name}.wav'),
                           'format': 'WAV DOUBLE; unscaled'} for name in tracks},
         'semantics': {'lead': 'Karaoke model lead-vocal estimate; original reverb retained',
-            'backing-vocals': 'Existing full vocal master minus the lead estimate',
-            'instrumental': 'Unchanged existing instrumental master',
+            'backing-vocals': 'Native-rate full vocal estimate minus the lead estimate',
+            'instrumental': 'Source minus the native-rate full vocal estimate',
             'karaoke': 'Instrumental plus backing vocals'},
         'reconstruction_order': '(lead + backing-vocals) + instrumental, float64',
         'reconstruction': checks,
@@ -119,16 +135,23 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     create = sub.add_parser('build')
-    create.add_argument('--existing', type=Path, required=True)
+    inputs = create.add_mutually_exclusive_group(required=True)
+    inputs.add_argument('--existing', type=Path)
+    inputs.add_argument('--source', type=Path)
+    create.add_argument('--vocals-estimate', type=Path)
     create.add_argument('--lead-estimate', type=Path, required=True)
     create.add_argument('--output', type=Path, required=True)
     create.add_argument('--video', type=Path)
     create.add_argument('--source-pcm', type=Path)
     create.add_argument('--no-karaoke-preview', action='store_true')
+    create.add_argument('--no-previews', action='store_true')
     check = sub.add_parser('verify')
     check.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
+    if args.command == 'build' and args.source is not None and args.vocals_estimate is None:
+        parser.error('--source requires --vocals-estimate')
     result = (build(args.existing, args.lead_estimate, args.output, args.video, source_pcm=args.source_pcm,
-                    karaoke_preview=not args.no_karaoke_preview)
+                    karaoke_preview=not args.no_karaoke_preview, source_path=args.source,
+                    vocals_estimate=args.vocals_estimate, previews=not args.no_previews)
               if args.command == 'build' else verify(args.output))
     print(json.dumps(result, indent=2))

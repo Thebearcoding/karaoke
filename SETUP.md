@@ -16,7 +16,7 @@ python3.12 -m venv .venv
 
 ## 2. 完整处理环境
 
-需要 `ffmpeg`、`ffprobe`、`lame` 和 Node.js 22+ 在 PATH 中，例如 macOS 使用 `brew install ffmpeg lame node`，Debian/Ubuntu 使用 `sudo apt-get install ffmpeg lame libsndfile1` 并安装 Node.js 22+。LAME 命令行负责 MP3 试听文件的完整尾部填充信息；FFmpeg 负责母版解码、公共增益转换与视频编码。YouTube 下载启用 Node.js 执行播放器脚本；`yt-dlp[default]` 同时安装与下载器版本配套的 EJS 组件，不在下载时拉取额外脚本。Node.js 也用于播放器和音频变调测试，前端本身不需要构建。实时升降调的 Signalsmith Stretch / WASM 随源码提供，不需要额外安装、模型下载或运行时 CDN；版本和许可见 `karaoke/dependencies/pitch-shift.json`。
+需要 `ffmpeg`、`ffprobe` 和 Node.js 22+ 在 PATH 中；严格音频验收及独立 MP3 导出还需要 `lame`。例如 macOS 使用 `brew install ffmpeg lame node`，Debian/Ubuntu 使用 `sudo apt-get install ffmpeg lame libsndfile1` 并安装 Node.js 22+。普通点歌只生成三轨 FLAC，不调用 LAME；FFmpeg 负责母版解码、公共增益转换与视频编码。YouTube 下载启用 Node.js 执行播放器脚本；`yt-dlp[default]` 同时安装与下载器版本配套的 EJS 组件，不在下载时拉取额外脚本。Node.js 也用于播放器和音频变调测试，前端本身不需要构建。实时升降调的 Signalsmith Stretch / WASM 随源码提供，不需要额外安装、模型下载或运行时 CDN；版本和许可见 `karaoke/dependencies/pitch-shift.json`。
 
 主环境负责音频导出、ASR、歌词整理、对齐及字幕渲染。先按硬件安装匹配版本的 PyTorch 与 torchaudio，再装项目依赖。当前 Mac / MPS 开发环境使用 Python 3.12、`torch==2.11.0`、`torchaudio==2.11.0`：
 

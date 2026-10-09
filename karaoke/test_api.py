@@ -4261,7 +4261,7 @@ def test_download_selects_720p_without_reducing_audio_quality(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize('mode', ['full', 'audio', 'playback_audio'])
-@pytest.mark.parametrize('failure', ['transcribe', 'prepare_lyrics', 'align_words', 'align_phonemes', 'no_subtitles', 'separate_lead', 'package_three_stems', 'validate_timing', 'overlap', 'dependency_overlap', 'render_overlap', 'video_overlap'])
+@pytest.mark.parametrize('failure', ['transcribe', 'prepare_lyrics', 'align_words', 'align_phonemes', 'no_subtitles', 'separate_lead', 'package_three_stems', 'validate_timing', 'overlap', 'dependency_overlap', 'render_overlap', 'video_overlap', 'compression_overlap'])
 def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(tmp_path, monkeypatch, mode, failure):
     import soundfile as sf
     audio_only, strict = mode != 'full', mode == 'audio'
@@ -4289,6 +4289,13 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
     alignment_started = threading.Event()
     picture_started = threading.Event()
     lyrics_started, resampled, packaged = (threading.Event() for _ in range(3))
+    from karaoke import exact_stems
+    original_compact = exact_stems.compact_playback_audio
+    def compact(*args):
+        if failure == 'compression_overlap' and not audio_only:
+            assert picture_started.wait(5), 'Picture rendering waited for independent FLAC encoding'
+        return original_compact(*args)
+    monkeypatch.setattr(exact_stems, 'compact_playback_audio', compact)
     def fail(stage):
         if stage == 'separate_lead' and failure == 'overlap':
             assert alignment_started.wait(10), 'Alignment waited for independent lead separation'
@@ -4297,11 +4304,10 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
         if failure == 'dependency_overlap':
             if stage == 'separate_music' and not strict:
                 assert lyrics_started.wait(5), 'Lyric lookup waited for separation'
-            elif stage == 'package_two_stems':
-                assert resampled.wait(5), 'Resampling waited for independent stem packaging'
             elif stage == 'resample_vocals':
                 resampled.set()
             elif stage == 'package_three_stems':
+                assert resampled.wait(5), 'Resampling waited for independent stem packaging'
                 packaged.set()
         if stage == failure:
             raise StageFailure(stage, 'fixture failure')
@@ -4340,7 +4346,7 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
         assert alignment_started.wait(5), 'Alignment waited for the picture download'
         return metadata
     monkeypatch.setattr(pipeline, 'promote_video', promote)
-    monkeypatch.setattr(pipeline, 'render_video', lambda result: (tmp_path/'mv.mp4').write_bytes(b'video fixture'))
+    monkeypatch.setattr(pipeline, 'render_video', lambda result, picture=None: (tmp_path/'mv.mp4').write_bytes(b'video fixture'))
     if failure.endswith('overlap'):
         result = pipeline.execute()
         assert result['validation_scope'] == ('audio_and_lyrics' if audio_only else 'full_mv')
@@ -6979,6 +6985,46 @@ def test_master_only_package_still_builds_verified_three_stem_previews(tmp_path,
         exact_stems.verify(two)
 
 
+@pytest.mark.parametrize('rate,channels', [(44100, 2), (48000, 2), (44100, 1), (48000, 1)])
+def test_direct_three_stems_matches_two_step_samples_without_unused_previews(tmp_path, monkeypatch, rate, channels):
+    import soundfile as sf
+    from scipy.signal import resample_poly
+    from karaoke import exact_stems, three_stems
+    from karaoke.exact_stems import compact_playback_audio
+    frames = rate + 13
+    time = np.arange(frames) / rate
+    source = np.column_stack([.15*np.sin(2*np.pi*(440+100*i)*time) for i in range(channels)])
+    source[-3:] = 1e-30
+    original = tmp_path/'source.wav'
+    sf.write(original, source, rate, subtype='DOUBLE')
+    divisor = np.gcd(rate, 44100)
+    model_input = resample_poly(source, 44100//divisor, rate//divisor).astype('float32')
+    for name, fraction in [('vocals', .6), ('lead', .4)]:
+        estimate = model_input*fraction
+        estimate[-3:] = .001
+        sf.write(tmp_path/f'{name}.wav', estimate, 44100, subtype='FLOAT')
+    two, old, direct = (tmp_path/name for name in ('two', 'old', 'direct'))
+    exact_stems.build(original, tmp_path/'vocals.wav', two, previews=False)
+    previous = three_stems.build(two, tmp_path/'lead.wav', old, karaoke_preview=False)
+    monkeypatch.setattr(three_stems, 'encode_previews', lambda *a, **k: pytest.fail('Unused MP3 encoding'))
+    current = three_stems.build(None, tmp_path/'lead.wav', direct, source_path=original,
+                               vocals_estimate=tmp_path/'vocals.wav', previews=False)
+    assert not list(direct.glob('*.mp3')) and not (direct/'.karaoke-mix.wav').exists()
+    assert current['preview_shared_gain'] == previous['preview_shared_gain']
+    assert current['reconstruction'] == previous['reconstruction'] == three_stems.verify(direct)
+    for name in current['masters']:
+        before, old_rate = sf.read(old/current['masters'][name]['file'], dtype='float64', always_2d=True)
+        after, new_rate = sf.read(direct/current['masters'][name]['file'], dtype='float64', always_2d=True)
+        assert old_rate == new_rate == rate and after.shape == (frames, channels)
+        np.testing.assert_array_equal(after, before)
+    result = dict(shared_preview_gain=current['preview_shared_gain'], artifacts={
+        name:dict(path=filename+'.wav') for name,filename in
+        [('instrumental','instrumental'), ('backing_vocals','backing-vocals'), ('lead_vocals','lead')]})
+    saved = [compact_playback_audio(folder, result) for folder in (old, direct)]
+    for name in result['artifacts']:
+        assert saved[0]['artifacts'][name]['sha256'] == saved[1]['artifacts'][name]['sha256']
+
+
 def test_preview_clipping_reports_measured_peak(tmp_path):
     from karaoke.exact_stems import PreviewClippingError
 
@@ -7286,7 +7332,8 @@ def test_cached_video_restore_preserves_audio_version_across_upgrade(tmp_path, q
 
 @pytest.mark.parametrize('source_matches', [True, False])
 @pytest.mark.parametrize('compact', [False, True])
-def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch, source_matches, compact):
+@pytest.mark.parametrize('mv_audio', ['instrumental', 'instrumental_backing'])
+def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch, source_matches, compact, mv_audio):
     import shutil
     from pathlib import Path
     import soundfile as sf
@@ -7299,7 +7346,7 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
     store = Store(tmp_path/'cache')
     job = cache_fixture(store, '1', restorable=True)
     folder, result = store.root/job['id'], job['result']
-    result.update(duration_seconds=2)
+    result.update(duration_seconds=2, mv_audio=mv_audio)
     result['reconstruction']['source_pcm_sha256'] = pcm_sha(audio) if source_matches else 'different-recording'
     for name, level in [('instrumental', .5), ('backing_vocals', .25), ('lead_vocals', .25)]:
         sf.write(folder/name, audio*level, rate, format='WAV', subtype='DOUBLE')
@@ -7328,6 +7375,7 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
         assert set(restored['video_restore']['timings']) == {'verify_video', 'render', 'mux_video'}
         assert (folder/'mv.mp4').stat().st_size > 2048
         assert restored['artifacts']['mv']['sha256'] == file_hash(folder/'mv.mp4')
+        assert not (folder/'render-mix.wav').exists()
         opening = restored['quality']['opening_countdown']
         assert opening['start'] == -3.5 and opening['onset'] == .5
         assert opening['dots'] == 3 and 0 < opening['y'] < opening['height']
@@ -7388,8 +7436,10 @@ def test_pipeline_materializes_all_media_before_ready(tmp_path, monkeypatch):
         (tmp_path/'quality.json').write_text('{}')
     monkeypatch.setattr(pipeline, 'align', align)
     result = pipeline.execute()
-    assert {'mv', 'instrumental', 'backing_vocals', 'lead_vocals', 'instrumental_preview',
-            'backing_vocals_preview', 'lead_vocals_preview', 'subtitles'} <= result['artifacts'].keys()
+    assert {'mv', 'instrumental', 'backing_vocals', 'lead_vocals', 'subtitles'} <= result['artifacts'].keys()
+    assert not list(tmp_path.rglob('*.mp3'))
+    assert not (tmp_path/'two-stems').exists() and not (tmp_path/'source-native.wav').exists()
+    assert not (tmp_path/'render-mix.wav').exists()
     assert json.loads((tmp_path/'result.json').read_text()) == result
     assert result['audio_storage']['subtype'] == 'PCM_24'
     assert result['shared_preview_gain'] == 1
@@ -7398,7 +7448,14 @@ def test_pipeline_materializes_all_media_before_ready(tmp_path, monkeypatch):
         assert path.stat().st_size == artifact['bytes'] and file_hash(path) == artifact['sha256']
     assert verify(tmp_path/'stems')['vocal_first'] == result['reconstruction']
     assert all(result['stage_timeline'][name]['status'] == 'completed' for name in
-               ('decode_native', 'package_two_stems', 'package_three_stems', 'render', 'mux_video', 'verify_video'))
+               ('package_three_stems', 'render', 'mux_video', 'verify_video'))
+    from karaoke.cache import can_restore_video
+    assert can_restore_video(tmp_path, result), 'FLAC-only playback must support later video restoration'
+    from karaoke.tools.soak import verify_outputs
+    audio_result = {**result, 'artifacts':{name:a for name,a in result['artifacts'].items() if name != 'mv'}}
+    (tmp_path/'audio-result.json').write_text(json.dumps(audio_result))
+    evidence = verify_outputs(None, '', tmp_path.parent, {'id':tmp_path.name}, audio_only=True, playback_policy=True)
+    assert evidence['subtitle_lines'] == 1 and evidence['audio_format']['frames'] == sf.info(tmp_path/'stems/lead.flac').frames
 
 
 @pytest.mark.parametrize('fallback_text', ['恢复的歌词', '哒'*100])
