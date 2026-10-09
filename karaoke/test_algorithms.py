@@ -415,6 +415,46 @@ class SubtitleIntegrity(unittest.TestCase):
                     self.assertEqual(bool(calls), source != 'singing_phonemes')
                     self.assertFalse(report['unresolved'])
 
+    def test_timing_observation_context_does_not_expand_the_local_edit(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        units = [dict(first=i, stop=i+1, text=c, start=t, end=t+.2,
+                      timing_source='prior_word_fallback')
+                 for i, (c, t) in enumerate(zip('甲乙', [1.2, 2.8]))]
+        target = dict(text='甲乙', start=1.2, end=3., units=units)
+        def neighbor(text, start):
+            return dict(text=text, start=start, end=start+.2,
+                        units=[dict(first=0, stop=1, text=text, start=start, end=start+.2)])
+        cues = [neighbor('前', .5), target, neighbor('后', 3.4)]
+        for mode in ('right_context', 'left_context', 'outside_left_edit', 'outside_right_edit',
+                     'silent', 'disagree', 'invalid_source', 'nonfinite', 'incomplete'):
+            with self.subTest(mode=mode):
+                times = {'left_context': [.2, 2.2], 'outside_left_edit': [.2, .8],
+                         'outside_right_edit': [3.2, 3.6]}.get(mode, [2., 3.6])
+                measured = [dict(u, start=t, end=t+.2) for u, t in zip(units, times)]
+                views = [deepcopy(measured), deepcopy(measured)]
+                predictions = [deepcopy(measured) for _ in range(3)]
+                if mode == 'disagree': predictions[0][0]['start'] += .2
+                if mode == 'invalid_source': views[0][-1].update(start=6., end=6.2)
+                if mode == 'nonfinite': views[0][-1]['start'] = float('nan')
+                if mode == 'incomplete': views[0][-1]['text'] = '错'
+                calls = []
+                def predict(cue, observed, bounds, language):
+                    calls.append(bounds)
+                    return predictions
+                wave = np.full(44100*5, 0. if mode == 'silent' else .1)
+                result, report = reconcile_timing(cues, wave, lambda *a, **k: views,
+                    predict, protocol, 'Chinese', _retry_context=False, _review_lines={1})
+                expected = {'right_context': [2., 2.8], 'left_context': [1.2, 2.2]}.get(mode, [1.2, 2.8])
+                self.assertEqual([u['start'] for u in result[1]['units']], expected)
+                self.assertEqual([u['start'] for u in units], [1.2, 2.8])
+                self.assertEqual([result[i]['units'][0]['start'] for i in (0, 2)], [.5, 3.4])
+                self.assertEqual(len(calls), 0 if mode in ('invalid_source', 'nonfinite', 'incomplete') else 1)
+                validate_timeline(result, [c['text'] for c in cues], 5., language='Chinese')
+                if mode in ('right_context', 'left_context'):
+                    self.assertFalse(report['unresolved'])
+
     def test_timing_contract_relocates_the_minimum_span_and_never_resurrects_old_times(self):
         from copy import deepcopy
         from timing_validation import reconcile_timing, timing_violations, validate_timeline

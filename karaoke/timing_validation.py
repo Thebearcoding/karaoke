@@ -334,11 +334,12 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                 raise ValueError('Incomplete acoustic text evidence')
             bounds = [result[index-1]['units'][-1]['start']+.015 if index else 0.,
                       result[index+1]['units'][0]['start'] if index+1<len(result) else len(wave)/44100]
+            # Observation context may overlap an uncertain neighbour. Only
+            # the proposed local replacement must fit the lyric boundaries.
             if any(not np.isfinite([u['start'],u['end']]).all()
-                   or not bounds[0] <= u['start'] < bounds[1]
-                   or not u['start'] < u['end'] <= len(wave)/44100 for v in views for u in v) or any(
+                   or not 0 <= u['start'] < u['end'] <= len(wave)/44100 for v in views for u in v) or any(
                        a['start'] >= b['start'] for v in views for a,b in zip(v,v[1:])):
-                raise ValueError('Acoustic localization crosses neighbouring lyrics')
+                raise ValueError('Invalid acoustic localization intervals')
             old = {u['first']:u for u in cue['units']}
             # Coarse localization need not meet the final onset tolerance to
             # justify another observation. Two nearby estimates can both
@@ -455,6 +456,8 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                             reason='replacement lacks audible vocal support'
                             report.setdefault('unsupported_spans', []).append(dict(
                                 first=unit['first'], stop=unit['stop'], start=unit['start'], end=unit['end']))
+                    if any(not bounds[0] <= u['start'] < bounds[1] for u in members):
+                        reason='local replacement crosses neighbouring lyrics'
                 attempt=dict(first=units[lo]['first'],stop=units[hi-1]['stop'],accepted=reason is None,reason=reason)
                 report['repairs'].append(attempt)
                 # An isolated matching syllable is not a durable constraint
