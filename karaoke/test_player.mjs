@@ -45,6 +45,32 @@ function setup(onEnd=()=>{}) {
   return p;
 }
 const clockOffset = () => 100-Date.now()/1000;
+test('two-track songs load two streams, retain the bed and adjust only the lead', async () => {
+  const previous = globalThis.fetch, urls = [];
+  globalThis.fetch = async url => {
+    urls.push(url);
+    return {ok:true, json:async()=>({...metadata, stems:['accompaniment','lead_vocals']}), arrayBuffer:async()=>url};
+  };
+  const p=setup();
+  try {
+    await p.unlock();
+    const entry={...song,artifacts:{mv:'silent.mp4',accompaniment:'bed.flac',lead_vocals:'lead.flac'}};
+    await p.load(entry); await p.apply(state,clockOffset());
+    assert.equal(p.sources.length,2);
+    assert.equal(p.sources[0].target,p.gains[0]); assert.equal(p.sources[1].target,p.gains[2]);
+    assert.ok(!urls.some(url=>url.includes('/backing_vocals/') || url.includes('/instrumental/')));
+    const sources=[...p.sources];
+    for (const lead of [0,.35,1]) {
+      p.setLevels({lead_vocals:lead});
+      assert.equal(p.gains[0].gain.value,1); assert.equal(p.gains[2].gain.value,lead);
+      assert.deepEqual(p.sources,sources);
+    }
+    assert.equal(p.matches({...entry,artifacts:{...entry.artifacts,accompaniment:'new.flac'}}),false);
+    await p.load(entry,12); await p.apply({...state,position:12,started_at:101},clockOffset());
+    assert.ok(p.sources.every(source=>source.started[1]===12));
+    p.clear(); assert.equal(p.sources.length,0);
+  } finally {p.clear();globalThis.fetch=previous;}
+});
 // The wall clock and simulated AudioContext advance only when the test asks.
 beforeEach(t => t.mock.method(Date, 'now', () => 100_000));
 

@@ -239,6 +239,151 @@ def test_compact_audio_does_not_publish_or_delete_masters_on_failure(tmp_path, i
     assert not list(tmp_path.glob('*.tmp.flac'))
 
 
+@pytest.mark.parametrize('rate,channels', [(44100, 1), (48000, 2)])
+@pytest.mark.parametrize('legacy_flac', [False, True])
+def test_two_track_export_preserves_the_mix_and_streams_only_two_tracks(tmp_path, rate, channels, legacy_flac):
+    import soundfile as sf
+    from karaoke.exact_stems import compact_playback_audio
+    from karaoke.tools.soak import verify_stems
+    app = create_app(tmp_path)
+    store = app.state.store
+    job, _ = store.create(JobRequest(url=URL), 'old-audio')
+    folder = tmp_path/job['id']
+    waves = np.random.default_rng(4).uniform(-.2, .2, (3, rate*9, channels))
+    artifacts = {}
+    names = ('instrumental', 'backing_vocals', 'lead_vocals')
+    for name, wave in zip(names, waves):
+        path = folder/(name+'.wav')
+        sf.write(path, wave, rate, subtype='DOUBLE')
+        artifacts[name] = dict(path=path.name, bytes=path.stat().st_size, sha256=file_hash(path))
+    original = dict(artifacts=artifacts, shared_preview_gain=.6)
+    if legacy_flac:
+        original = compact_playback_audio(folder, original)
+        waves = [sf.read(folder/original['artifacts'][name]['path'], always_2d=True)[0] for name in names]
+    expected = [(waves[0]+waves[1])*original['shared_preview_gain'], waves[2]*original['shared_preview_gain']]
+    result = compact_playback_audio(folder, original, combine=True)
+    assert set(result['artifacts']) == {'accompaniment', 'lead_vocals'}
+    assert compact_playback_audio(folder, result, combine=True) == result
+    paths = {key:folder/a['path'] for key,a in result['artifacts'].items()}
+    assert verify_stems(paths, 9, storage=result['audio_storage'])['channels'] == channels
+    for key, wave in zip(('accompaniment', 'lead_vocals'), expected):
+        actual = sf.read(paths[key], always_2d=True)[0]
+        np.testing.assert_allclose(actual, wave, rtol=0, atol=2**-23)
+    store.update(job['id'], status='completed', result=result)
+    client = TestClient(app)
+    url = f'/v1/jobs/{job["id"]}/playback'
+    info = client.get(url).json()
+    assert info['stems'] == ['accompaniment', 'lead_vocals']
+    assert client.get(url+'/backing_vocals/0').status_code == 404
+    for name in info['stems']:
+        response = client.get(url+'/'+name+'/1')
+        assert response.status_code == 200
+        decoded = sf.read(io.BytesIO(response.content), always_2d=True)[0]
+        stored = sf.read(paths[name], always_2d=True)[0]
+        np.testing.assert_array_equal(decoded, stored[rate*8-info['padding_frames']:])
+
+
+@pytest.mark.parametrize('bad_input', [False, True])
+def test_storage_migration_keeps_identity_and_subtitles_and_releases_intermediates(tmp_path, bad_input):
+    import soundfile as sf
+    from karaoke.exact_stems import compact_playback_audio
+    from karaoke.tools.compact_storage import migrate, video_hash
+    store = Store(tmp_path)
+    job = cache_fixture(store, '1', restorable=True)
+    folder = tmp_path/job['id']
+    result = job['result']
+    result['duration_seconds'] = 1
+    wave = .1*np.sin(np.arange(48000)*2*np.pi*440/48000)
+    for name in ('instrumental', 'backing_vocals', 'lead_vocals'):
+        sf.write(folder/result['artifacts'][name]['path'], wave, 48000, format='WAV', subtype='DOUBLE')
+    result = compact_playback_audio(folder, result)
+    subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i','color=c=blue:s=160x90:r=30:d=1',
+                    '-f','lavfi','-i','sine=duration=1','-c:v','libx264','-c:a','aac',str(folder/'mv.mp4')],check=True)
+    for artifact in result['artifacts'].values():
+        path = folder/artifact['path']
+        artifact.update(bytes=path.stat().st_size,sha256=file_hash(path))
+    (folder/'result.json').write_text(json.dumps(result))
+    job = store.update(job['id'], result=result)
+    before = {a['path']:(folder/a['path']).read_bytes() for a in result['artifacts'].values()}
+    if bad_input:
+        (folder/result['artifacts']['lead_vocals']['path']).write_bytes(b'corrupted')
+        with pytest.raises(ValueError,match='Original artifact'):
+            migrate(store,job)
+        assert store.read(job['id'])['result'] == result
+        assert (folder/'mv.mp4').read_bytes() == before['mv.mp4']
+        return
+    video_before = video_hash(folder/'mv.mp4')
+    for name in ('music-separation','lead-separation'):
+        (folder/name).mkdir()
+        (folder/name/'vocals.wav').write_bytes(b'working audio')
+    report = migrate(store,job)
+    fresh = store.read(job['id'])
+    assert fresh['id'] == job['id'] and fresh['pipeline_version'] == job['pipeline_version']
+    assert set(fresh['result']['artifacts']) == {'mv','subtitles','poster','accompaniment','lead_vocals'}
+    assert (folder/'subtitles').read_bytes() == before['subtitles']
+    assert video_hash(folder/fresh['result']['artifacts']['mv']['path']) == video_before
+    assert not list(folder.rglob('*.wav')) and not (folder/'music-separation').exists()
+    assert not (folder/'instrumental_preview').exists()
+    assert report['status']=='migrated'
+    assert migrate(store,fresh)['artifacts']==fresh['result']['artifacts']
+
+
+def test_projected_checkpoint_ignores_unused_files_but_rechecks_required_audio(tmp_path):
+    from karaoke.stage_cache import StageCache, retained_files
+    source, folder = tmp_path/'source', tmp_path/'model'
+    source.write_bytes(b'input')
+    cache = StageCache(tmp_path)
+    with cache.stage('model', inputs=[source], outputs=[folder]):
+        folder.mkdir()
+        (folder/'vocals.wav').write_bytes(b'needed')
+        (folder/'backing.wav').write_bytes(b'unused')
+    (folder/'backing.wav').unlink()
+    required = [folder/'vocals.wav']
+    with cache.stage('model', inputs=[source], outputs=[folder], required=required) as hit:
+        assert hit
+    assert 'model/backing.wav' not in retained_files(tmp_path)
+    required[0].write_bytes(b'corrupt')
+    with cache.stage('model', inputs=[source], outputs=[folder], required=required) as hit:
+        assert not hit
+        folder.mkdir()
+        required[0].write_bytes(b'recomputed')
+
+
+def test_runtime_separation_exports_only_its_consumed_target(tmp_path):
+    import soundfile as sf
+    from karaoke.benchmark_neural import run_cases
+    wave = np.random.default_rng(2).uniform(-.2, .2, (441, 2)).astype('float32')
+    source = tmp_path/'source.wav'
+    sf.write(source, wave, 44100, subtype='FLOAT')
+    cases = tmp_path/'cases.json'
+    cases.write_text(json.dumps([dict(id='song', input=str(source), input_sha256=file_hash(source))]))
+    out = tmp_path/'out'
+    rows = run_cases(lambda x:(None, x*.5), out, {}, cases, target_only=True)
+    np.testing.assert_array_equal(sf.read(out/'song/vocals.wav', dtype='float32')[0], wave*.5)
+    assert not (out/'song/backing.wav').exists()
+    assert rows[0]['vocals_sha256'] == file_hash(out/'song/vocals.wav')
+
+
+def test_published_media_dedup_counts_physical_storage_and_survives_other_job_removal(tmp_path):
+    import shutil
+    store = Store(tmp_path)
+    jobs = [cache_fixture(store, str(i)) for i in (1, 2)]
+    for job in jobs:
+        result = job['result']
+        path = tmp_path/job['id']/'mv.mp4'
+        result['artifacts']['mv']['sha256'] = file_hash(path)
+        store.update(job['id'], result=result)
+    jobs = store.list(-1)
+    store.cache.compact(jobs[0])
+    paths = [tmp_path/job['id']/'mv.mp4' for job in jobs]
+    assert paths[0].stat().st_ino == paths[1].stat().st_ino
+    store.cache.enforce()
+    logical = sum(store.cache.size(tmp_path/job['id']) for job in jobs)
+    assert store.cache.stats['used_bytes'] == logical-paths[0].stat().st_size
+    shutil.rmtree(paths[0].parent)
+    assert paths[1].read_bytes() == b'x'*2048
+
+
 def test_failures_are_visible_and_retry_creates_new_job(tmp_path):
     def failed_worker(folder):
         return [sys.executable, '-c',
@@ -4291,10 +4436,10 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
     lyrics_started, resampled, packaged = (threading.Event() for _ in range(3))
     from karaoke import exact_stems
     original_compact = exact_stems.compact_playback_audio
-    def compact(*args):
+    def compact(*args, **kwargs):
         if failure == 'compression_overlap' and not audio_only:
             assert picture_started.wait(5), 'Picture rendering waited for independent FLAC encoding'
-        return original_compact(*args)
+        return original_compact(*args, **kwargs)
     monkeypatch.setattr(exact_stems, 'compact_playback_audio', compact)
     def fail(stage):
         if stage == 'separate_lead' and failure == 'overlap':
@@ -7270,8 +7415,8 @@ def test_video_restore_url_deduplicates_across_renderer_versions(tmp_path):
     restored, cached = store.create(request, 'new-renderer')
     duplicate, duplicate_cached = store.create(request, 'new-renderer')
     assert restored['id'] == duplicate['id'] == original['id']
-    assert not cached and duplicate_cached and not restored['restore_video']
-    assert restored['pipeline_version'] == 'new-renderer'
+    assert not cached and duplicate_cached and restored['restore_video']
+    assert restored['pipeline_version'] == original['pipeline_version']
     assert restored['result'] == original['result']
     changed, _ = store.create(request.model_copy(update={'mv_audio':'instrumental'}), 'new-renderer')
     assert changed['id'] != original['id']
@@ -7279,10 +7424,12 @@ def test_video_restore_url_deduplicates_across_renderer_versions(tmp_path):
     assert forced['id'] != original['id']
 
 
-def test_completed_version_refresh_keeps_valid_stage_checkpoints(tmp_path):
+@pytest.mark.parametrize('status', ['completed', 'failed'])
+def test_version_refresh_only_keeps_unfinished_stage_checkpoints(tmp_path, status):
     from karaoke.stage_cache import StageCache
     store = Store(tmp_path)
     old = cache_fixture(store, '1', restorable=True)
+    old = store.update(old['id'], status=status)
     folder = tmp_path/old['id']
     source, separated, aligned, code = [folder/name for name in
         ('download/source.mkv', 'music-separation/vocals.wav', 'aligned', 'align.py')]
@@ -7299,10 +7446,19 @@ def test_completed_version_refresh_keeps_valid_stage_checkpoints(tmp_path):
         aligned.write_bytes(b'old timings')
     store.cache.compact(old)
     refreshed, hit = store.create(JobRequest(**{**old['input'],'force':False}), 'new')
+    if status == 'completed':
+        assert hit and refreshed['id'] == old['id'] and refreshed['status'] == 'completed'
+        assert refreshed['pipeline_version'] == old['pipeline_version']
+        assert not separated.exists() and not aligned.exists() and source.exists()
+        return
     assert not hit and refreshed['id']==old['id'] and refreshed['status']=='queued'
     code.write_text('version = 2')
     with StageCache(folder).stage('separate_music', inputs=[source], outputs=[separated]) as hit:
-        assert hit and separated.read_bytes()==b'computed stem'
+        assert hit is (status == 'failed')
+        if not hit:
+            separated.parent.mkdir(exist_ok=True)
+            separated.write_bytes(b'computed stem')
+        assert separated.read_bytes()==b'computed stem'
     with StageCache(folder).stage('align', inputs=[separated], outputs=[aligned], code=[code]) as hit:
         assert not hit and not aligned.exists()
         aligned.write_bytes(b'new timings')
@@ -7372,7 +7528,8 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
     monkeypatch.setattr(pipeline, 'download', download)
     if source_matches:
         restored = pipeline.restore_video()
-        assert set(restored['video_restore']['timings']) == {'verify_video', 'render', 'mux_video'}
+        assert set(restored['video_restore']['timings']) == {'verify_video', 'render'}
+        assert restored['video_only']
         assert (folder/'mv.mp4').stat().st_size > 2048
         assert restored['artifacts']['mv']['sha256'] == file_hash(folder/'mv.mp4')
         assert not (folder/'render-mix.wav').exists()
@@ -7392,10 +7549,13 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
             '--song-info', str(folder/'song-info.json'), '--language', 'Latin', '--duration', '2',
             '--gain', str(result['shared_preview_gain']), '--bottom-margin', '96', '--output', str(baseline)],
             check=True, capture_output=True)
-        for stream in ('v:0', 'a:0'):
+        for stream in ('v:0',):
             hashes = [subprocess.check_output(['ffmpeg', '-v', 'error', '-i', str(path), '-map', '0:'+stream,
                 '-f', 'hash', '-hash', 'sha256', '-']) for path in (baseline, folder/'mv.mp4')]
             assert hashes[0] == hashes[1]
+        probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_streams',
+            '-of', 'json', str(folder/'mv.mp4')]))
+        assert [s['codec_type'] for s in probe['streams']] == ['video']
     else:
         with pytest.raises(StageFailure, match='音频与缓存版本不同'):
             pipeline.restore_video()
@@ -7436,7 +7596,8 @@ def test_pipeline_materializes_all_media_before_ready(tmp_path, monkeypatch):
         (tmp_path/'quality.json').write_text('{}')
     monkeypatch.setattr(pipeline, 'align', align)
     result = pipeline.execute()
-    assert {'mv', 'instrumental', 'backing_vocals', 'lead_vocals', 'subtitles'} <= result['artifacts'].keys()
+    assert {'mv', 'accompaniment', 'lead_vocals', 'subtitles'} <= result['artifacts'].keys()
+    assert not {'instrumental', 'backing_vocals'} & result['artifacts'].keys()
     assert not list(tmp_path.rglob('*.mp3'))
     assert not (tmp_path/'two-stems').exists() and not (tmp_path/'source-native.wav').exists()
     assert not (tmp_path/'render-mix.wav').exists()
@@ -7448,7 +7609,7 @@ def test_pipeline_materializes_all_media_before_ready(tmp_path, monkeypatch):
         assert path.stat().st_size == artifact['bytes'] and file_hash(path) == artifact['sha256']
     assert verify(tmp_path/'stems')['vocal_first'] == result['reconstruction']
     assert all(result['stage_timeline'][name]['status'] == 'completed' for name in
-               ('package_three_stems', 'render', 'mux_video', 'verify_video'))
+               ('package_three_stems', 'render', 'verify_video'))
     from karaoke.cache import can_restore_video
     assert can_restore_video(tmp_path, result), 'FLAC-only playback must support later video restoration'
     from karaoke.tools.soak import verify_outputs

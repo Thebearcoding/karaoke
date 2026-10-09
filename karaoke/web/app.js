@@ -1,4 +1,5 @@
 import { Player } from './player.js';
+import { mountPreview } from './preview.js';
 import { isStaleRoomSnapshot, LocalPlayback, queueToTop, preparationRetry } from './room-state.js';
 import { createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
 
@@ -435,6 +436,7 @@ async function openQueuedSong(id) {
   switchView('player');
 }
 
+let closeCachedPreview = null;
 function previewVideo(song) {
   if (current() && queuePosition(song, [current()])) { switchView('player'); return; }
   previewSong = song;
@@ -443,12 +445,12 @@ function previewVideo(song) {
   $('preview-source').textContent = `在 ${song.url.includes('youtube.com') ? 'YouTube' : 'B站'} 观看 ↗`;
   $('preview-error').hidden = true;
   const cached = library.find(item => item.url === song.url && item.status === 'completed' && item.job_id);
+  closeCachedPreview?.(); closeCachedPreview = null;
   if (cached) {
-    const video = document.createElement('video');
-    video.src = cached.artifacts.mv;
-    video.controls = true;
-    video.preload = 'metadata';
-    $('preview-player').replaceChildren(video);
+    closeCachedPreview = mountPreview($('preview-player'), cached, error => {
+      $('preview-error').textContent = error.message;
+      $('preview-error').hidden = false;
+    });
     $('video-preview').showModal();
     updateAddButtons();
     return;
@@ -784,7 +786,10 @@ $('video-grid').onclick = event => {
 };
 $('preview-add').onclick = () => addVideo(previewSong);
 $('close-preview').onclick = () => $('video-preview').close();
-$('video-preview').onclose = () => { $('preview-player').replaceChildren(); previewSong = null; };
+$('video-preview').onclose = () => {
+  closeCachedPreview?.(); closeCachedPreview = null;
+  $('preview-player').replaceChildren(); previewSong = null;
+};
 $('video-preview').onclick = event => { if (event.target === $('video-preview')) $('video-preview').close(); };
 $('add-form').onsubmit = async event => {
   event.preventDefault();

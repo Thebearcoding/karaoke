@@ -2,6 +2,7 @@
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 import hashlib
 import json
 from pathlib import Path
@@ -180,56 +181,81 @@ def encode_previews(sources, output, gain, frames, channels):
     raise worst
 
 
-def compact_playback_audio(folder, result):
-    """Store the same 24-bit PCM that the streaming player already receives."""
+def compact_playback_audio(folder, result, *, combine=False):
+    """Encode common-gain playback tracks; optionally fold backing into the bed.
+
+    Originals survive until the caller publishes and validates the whole result.
+    The same path migrates old FLAC songs without rerunning their models.
+    """
     folder = Path(folder).resolve()
     names = ('instrumental', 'backing_vocals', 'lead_vocals')
-    if result.get('audio_storage'):
+    if 'accompaniment' in result['artifacts'] or result.get('audio_storage') and not combine:
         return result
     gain = result['shared_preview_gain']
     if not np.isfinite(gain) or not 0 < gain <= 1:
         raise ValueError('Invalid shared audio gain')
     records, checks = {}, {}
-    for name in names:
-        source = (folder/result['artifacts'][name]['path']).resolve()
-        if not source.is_relative_to(folder):
-            raise ValueError('Expected a managed WAV master')
-        target = source.with_suffix('.flac')
+    groups = ({'accompaniment': names[:2], 'lead_vocals': names[2:]} if combine else
+              {name: (name,) for name in names})
+    for name, inputs in groups.items():
+        if combine and result.get('audio_storage') and len(inputs) == 1:
+            records[name] = result['artifacts'][inputs[0]]
+            checks[name] = result['audio_storage'].get('tracks', {}).get(inputs[0], {})
+            continue
+        sources = [(folder/result['artifacts'][key]['path']).resolve() for key in inputs]
+        if any(not p.is_relative_to(folder) or p.is_symlink() for p in sources):
+            raise ValueError('Expected managed audio tracks')
+        target = (sources[0].parent/'accompaniment.flac' if name == 'accompaniment' else
+                  sources[0].with_suffix('.flac'))
         temporary = target.with_suffix('.tmp.flac')
         try:
-            with sf.SoundFile(source) as original:
-                if original.format != 'WAV' or original.subtype != 'DOUBLE' or not original.frames:
-                    raise ValueError('Expected a nonempty float64 calculation master')
+            with ExitStack() as stack:
+                originals = [stack.enter_context(sf.SoundFile(p)) for p in sources]
+                original = originals[0]
+                expected = ('FLAC', 'PCM_24') if result.get('audio_storage') else ('WAV', 'DOUBLE')
                 shape = (original.samplerate, original.channels, original.frames)
+                if not original.frames or any((f.format, f.subtype) != expected or
+                        (f.samplerate, f.channels, f.frames) != shape for f in originals):
+                    raise ValueError('Expected complete matching calculation or playback tracks')
                 with sf.SoundFile(temporary, 'w', samplerate=shape[0], channels=shape[1],
                                   format='FLAC', subtype='PCM_24') as encoded:
                     for samples in original.blocks(65536, dtype='float64', always_2d=True):
+                        for other in originals[1:]:
+                            samples += other.read(len(samples), dtype='float64', always_2d=True)
                         samples *= gain
                         if not np.isfinite(samples).all() or np.max(np.abs(samples)) >= 1:
                             raise ValueError('Invalid or clipped playback master')
                         encoded.write(samples)
-                original.seek(0)
+                for f in originals:
+                    f.seek(0)
                 error = 0.
                 with sf.SoundFile(temporary) as encoded:
                     if (encoded.samplerate, encoded.channels, encoded.frames) != shape:
                         raise ValueError('Compressed audio changed the complete time axis')
                     for samples in original.blocks(65536, dtype='float64', always_2d=True):
+                        for other in originals[1:]:
+                            samples += other.read(len(samples), dtype='float64', always_2d=True)
                         decoded = encoded.read(len(samples), dtype='float64', always_2d=True)
                         error = max(error, float(np.max(np.abs(decoded-samples*gain))))
                 if error > 2**-23:
                     raise ValueError('Compressed audio exceeds 24-bit quantization error')
+            # Record the input before an existing FLAC path is replaced.
+            checks[name] = dict(sources=[dict(sha256=sha(p), bytes=p.stat().st_size) for p in sources],
+                                max_absolute_error=error)
             temporary.replace(target)
         finally:
             temporary.unlink(missing_ok=True)
         records[name] = dict(path=target.relative_to(folder).as_posix(),
                              bytes=target.stat().st_size, sha256=sha(target))
-        checks[name] = dict(source_sha256=sha(source), source_bytes=source.stat().st_size,
-                            max_absolute_error=error)
     # Commit the three paths together. WAVs remain until normal successful-job
     # compaction, so a failed conversion never destroys a usable calculation.
-    return {**result, 'artifacts': {**result['artifacts'], **records},
+    artifacts = {key: value for key, value in result['artifacts'].items()
+                 if not combine or key not in names and not key.endswith('_preview')}
+    return {**result, 'artifacts': {**artifacts, **records},
             'shared_preview_gain': 1.,
-            'audio_storage': dict(format='FLAC', subtype='PCM_24', source_gain=gain,
+            'audio_storage': dict(format='FLAC', subtype='PCM_24',
+                                  source_gain=result.get('audio_storage', {}).get('source_gain', gain),
+                                  layout='accompaniment_and_lead' if combine else 'three_stems',
                                   reference='shared-gain float64 calculation masters', tracks=checks)}
 
 

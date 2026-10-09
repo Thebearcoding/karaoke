@@ -20,7 +20,7 @@ import time
 
 import httpx
 
-from karaoke.job_schema import provider_error, retry_fields, video_url
+from karaoke.job_schema import playback_stems, provider_error, retry_fields, video_url
 from karaoke.local_asr import offline
 
 
@@ -169,7 +169,7 @@ def verify_stems(paths, duration, *, storage=None):
     import soundfile as sf
     with ExitStack() as stack:
         files = [stack.enter_context(sf.SoundFile(paths[name]))
-                 for name in ('lead_vocals', 'backing_vocals', 'instrumental')]
+                 for name in playback_stems(paths)]
         formats = {(f.samplerate, f.channels, len(f), f.subtype) for f in files}
         compact = storage is not None
         if compact and (storage.get('format') != 'FLAC' or storage.get('subtype') != 'PCM_24' or
@@ -178,7 +178,7 @@ def verify_stems(paths, duration, *, storage=None):
         if (len(formats) != 1 or not len(files[0]) or
                 any(f.subtype != ('PCM_24' if compact else 'DOUBLE') or
                     f.format != ('FLAC' if compact else 'WAV') for f in files)):
-            raise ValueError('Three stems have incompatible master formats')
+            raise ValueError('Stems have incompatible master formats')
         rate, channels, frames, _ = formats.pop()
         if abs(frames/rate-duration) > 2/min(rate, 44100):
             raise ValueError('Stem duration differs from the complete source')
@@ -198,6 +198,7 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False, playback_po
     required = REQUIRED-{'mv'} if audio_only else REQUIRED
     if result.get('audio_storage', {}).get('format') == 'FLAC':
         required = {name for name in required if not name.endswith('_preview')}
+        required = (required-{'instrumental', 'backing_vocals', 'lead_vocals'}) | set(playback_stems(result['artifacts']))
     if not required <= result['artifacts'].keys():
         raise ValueError('Missing required output artifacts')
     paths, hashes = {}, {}
@@ -275,13 +276,13 @@ def verify_outputs(client, base, data_dir, job, *, audio_only=False, playback_po
             continue
         probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_streams',
             '-show_format', '-of', 'json', str(paths[name])], timeout=30))
-        needed = {'audio', 'video'} if name == 'mv' else {'audio'}
+        needed = ({'video'} if result.get('video_only') else {'audio', 'video'}) if name == 'mv' else {'audio'}
         streams = [s for s in probe['streams'] if s['codec_type'] in needed]
         if {s['codec_type'] for s in streams} != needed or any(
                 abs(float(s.get('duration', probe['format']['duration']))-duration) > .15 for s in streams):
             raise ValueError(f'Truncated media or missing stream: {name}')
         command = ['ffmpeg', '-nostdin', '-v', 'error', '-xerror', '-i', str(paths[name])]
-        command += ['-map', '0:v:0', '-map', '0:a:0'] if name == 'mv' else ['-map', '0:a:0']
+        command += sum((['-map', '0:'+kind[0]+':0'] for kind in sorted(needed)), [])
         subprocess.run(command+['-f', 'null', '-'], check=True, capture_output=True, timeout=300)
     return dict(validation_scope=('playback_audio' if playback_policy and audio_only else
                                   'audio_and_lyrics' if audio_only else 'full_mv'),

@@ -37,24 +37,36 @@ class StageCache:
         return records
 
     @contextmanager
-    def stage(self, name, *, inputs, outputs, config=None, code=()):
+    def stage(self, name, *, inputs, outputs, config=None, code=(), required=None):
         if any(Path(p).is_symlink() for p in outputs):
             raise ValueError('Checkpoint output cannot be a symlink')
         outputs = [Path(p).resolve() for p in outputs]
         if any(not p.is_relative_to(self.root) or p == self.root or p.is_relative_to(self.directory) for p in outputs):
             raise ValueError('Checkpoint outputs must be managed job files')
+        if required is not None:
+            if any(Path(p).is_symlink() for p in required):
+                raise ValueError('Required checkpoint output cannot be a symlink')
+            required = [Path(p).resolve() for p in required]
+            if not required or any(not any(p == out or p.is_relative_to(out) for out in outputs) for p in required):
+                raise ValueError('Required files must belong to checkpoint outputs')
         signature = dict(schema_version=1, inputs=self.files(inputs),
                          code=self.files(code) if code else {}, config=config)
         fingerprint = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
         checkpoint = self.directory/(name+'.json')
         try:
             old = json.loads(checkpoint.read_text())
-            current = self.files(outputs)
+            current = self.files(required if required is not None else outputs)
+            expected = ({key: old['outputs'].get(key) for key in current} if required is not None else old['outputs'])
             valid = old['fingerprint'] == fingerprint and bool(old['outputs']) and all(
-                current.get(key) == value for key, value in old['outputs'].items())
+                current.get(key) == value for key, value in expected.items())
         except (OSError, ValueError, KeyError, TypeError):
             valid = False
         if valid:
+            if required is not None and old['outputs'] != current:
+                old['outputs'] = current
+                temporary = checkpoint.with_suffix('.tmp')
+                temporary.write_text(json.dumps(old, ensure_ascii=False, indent=2)+'\n')
+                temporary.replace(checkpoint)
             self.reused.append(name)
             yield True
             return
@@ -67,7 +79,7 @@ class StageCache:
                 output.unlink(missing_ok=True)
         started = time.perf_counter()
         yield False
-        record = dict(fingerprint=fingerprint, **signature, outputs=self.files(outputs),
+        record = dict(fingerprint=fingerprint, **signature, outputs=self.files(required if required is not None else outputs),
                       seconds=round(time.perf_counter()-started, 3))
         temporary = checkpoint.with_suffix('.tmp')
         temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2)+'\n')

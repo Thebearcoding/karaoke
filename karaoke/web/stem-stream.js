@@ -1,6 +1,5 @@
 // Download ahead to the end of the song; decode only nearby windows.
-// Frame indices place all three stems on the shared AudioContext timeline.
-const stems = ['instrumental', 'backing_vocals', 'lead_vocals'];
+// Frame indices place every published stem on the shared AudioContext timeline.
 const decodeAheadSeconds = 24;
 
 async function readMedia(url, signal, consume) {
@@ -43,6 +42,7 @@ export class StemStream {
     this.encoded = new Map();
     this.loading = this.read(url, signal, response => response.json()).then(info => {
       this.info = info;
+      this.stems = info.stems || ['instrumental', 'backing_vocals', 'lead_vocals'];
       this.duration = info.frames / info.sample_rate;
       this.count = Math.ceil(info.frames / info.chunk_frames);
     });
@@ -60,7 +60,7 @@ export class StemStream {
 
   download(index) {
     if (!this.encoded.has(index)) {
-      this.encoded.set(index, Promise.all(stems.map(stem =>
+      this.encoded.set(index, Promise.all(this.stems.map(stem =>
         this.read(`${this.url}/${stem}/${index}`, this.signal, response => response.arrayBuffer()))));
     }
     return this.encoded.get(index);

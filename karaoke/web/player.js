@@ -48,6 +48,7 @@ export class Player {
     this.pitch = 0;
     this.pitchFactory = pitchFactory;
     const tick = () => {
+      if (this.disposed) return;
       if (this.anchor !== null && this.context.state === 'running') {
         if (this.pendingStart) {
           const pending = this.pendingStart;
@@ -281,9 +282,15 @@ export class Player {
     this.video.load();
   }
 
+  dispose() {
+    this.disposed = true;
+    this.clear();
+    this.context?.close();
+  }
+
   matches(entry) {
     return Boolean(entry && this.key === entry.id && this.entry?.job_id === entry.job_id &&
-      ['mv', 'instrumental', 'backing_vocals', 'lead_vocals'].every(
+      ['mv', 'accompaniment', 'instrumental', 'backing_vocals', 'lead_vocals'].every(
         name => this.entry.artifacts[name] === entry.artifacts[name]));
   }
 
@@ -380,7 +387,8 @@ export class Player {
       for (const [i, buffer] of audio.entries()) {
         const source = this.context.createBufferSource();
         source.buffer = buffer;
-        source.connect(this.gains[i]);
+        const name = stream.stems[i];
+        source.connect(this.gains[name === 'lead_vocals' ? 2 : name === 'backing_vocals' ? 1 : 0]);
         source.onended = () => {
           source.disconnect();
           this.sources = this.sources.filter(item => item !== source);

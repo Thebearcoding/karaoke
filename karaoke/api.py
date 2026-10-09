@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .cache import CacheFull, GIB, SongCache, can_restore_video
-from .job_schema import JobRequest, download_backoff, retry_after_seconds, retry_fields as source_retry_fields
+from .job_schema import JobRequest, download_backoff, playback_stems, retry_after_seconds, retry_fields as source_retry_fields
 from .room import AddSong, Room, RoomCommand, Updates, artifact_url
 from .video_search import SearchCursorExpired, VideoSearch
 
@@ -45,7 +45,6 @@ def retry_fields(error, diagnostic, number, *, failed_at):
     return policy
 
 
-PLAYBACK_STEMS = ('instrumental', 'backing_vocals', 'lead_vocals')
 CHUNK_SECONDS = 8
 
 
@@ -53,7 +52,8 @@ def playback_sources(folder, result, playback_rate):
     import soundfile as sf
     paths = []
     formats = []
-    for name in PLAYBACK_STEMS:
+    names = playback_stems(result['artifacts'])
+    for name in names:
         path = (folder / result['artifacts'][name]['path']).resolve()
         if not path.is_relative_to(folder) or not path.is_file():
             raise ValueError('Missing stem')
@@ -70,7 +70,7 @@ def playback_sources(folder, result, playback_rate):
     # browser clocks. Otherwise per-window resampling introduces a phase jump.
     common_rate = math.gcd(rate, playback_rate)
     padding = math.ceil(.02 * common_rate) * rate // common_rate
-    return paths, dict(sample_rate=rate, channels=channels, frames=frames,
+    return paths, dict(stems=names, sample_rate=rate, channels=channels, frames=frames,
                        chunk_frames=rate * CHUNK_SECONDS, padding_frames=padding)
 
 
@@ -177,10 +177,6 @@ class Store:
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             if not payload.force:
-                in_use = set(self.cache.leases)
-                if db.execute("SELECT 1 FROM sqlite_master WHERE name='room'").fetchone():
-                    state = json.loads(db.execute('SELECT state FROM room WHERE id=1').fetchone()[0])
-                    in_use.update(e['job_id'] for e in state['entries'] if e['id'] == state['current_id'])
                 rows = db.execute("""SELECT doc FROM jobs WHERE
                     (cache_key=? AND status IN ('queued','running','completed'))
                     OR status IN ('queued','failed','cancelled','audio_ready','source_ready','completed') OR json_extract(doc, '$.restore_video')=1
@@ -190,26 +186,15 @@ class Store:
                     doc = json.loads(row[0])
                     if {k: v for k, v in doc['input'].items() if k != 'force'} != key_payload:
                         continue
-                    refresh = doc.get('pipeline_version') != version and (
-                        doc['status'] == 'completed' or doc.get('restore_video'))
-                    if refresh:
-                        # Revalidation must not replace media underneath a player or transfer.
-                        if doc['id'] in in_use or doc['status'] == 'running' or not (self.root/doc['id']).is_dir():
-                            continue
-                        doc['restore_video'] = False
-                        doc['song_info'] = known_song_info(doc)
-                        (self.root/doc['id']/'progress.json').write_text(
-                            json.dumps({'song_info': doc['song_info']}, ensure_ascii=False)+'\n')
-                    if doc['status'] == 'queued':
+                    if doc['status'] == 'queued' and not doc.get('restore_video'):
                         # Pending work has not executed the old pipeline yet.
                         doc.update(pipeline_version=version, updated_at=now())
                         db.execute('UPDATE jobs SET cache_key=? WHERE id=?', (key, doc['id']))
-                    if (doc['status'] in ('failed', 'cancelled', 'audio_ready', 'source_ready') or
-                            (refresh and doc['status'] != 'queued')) and not doc.get('restore_video'):
+                    if doc['status'] in ('failed', 'cancelled', 'audio_ready', 'source_ready') and not doc.get('restore_video'):
                         folder = self.root/doc['id']
                         source_ready = doc['status'] == 'source_ready' and all((folder/name).is_file()
                             for name in ('source.json', 'download/source.mkv', 'download/source.info.json'))
-                        if (not refresh and not source_ready and doc['status'] != 'cancelled'
+                        if (not source_ready and doc['status'] != 'cancelled'
                                 and not any((folder/'checkpoints').glob('*.json'))):
                             continue
                         doc.update(status='queued', active_stages=[], stage_progress={}, timings={},
@@ -506,7 +491,7 @@ class Worker:
             result_path = folder/'result.json'
             if process.returncode == 0 and result_path.exists():
                 result = json.loads(result_path.read_text())
-                if not {'mv', 'instrumental', 'backing_vocals', 'lead_vocals'} <= result['artifacts'].keys():
+                if not {'mv', *playback_stems(result['artifacts'])} <= result['artifacts'].keys():
                     raise ValueError('Pipeline omitted a required output')
                 for name, artifact in list(result['artifacts'].items()):
                     path = (folder/artifact['path']).resolve()
@@ -807,14 +792,15 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
             raise HTTPException(410, '歌曲缓存已回收，请重新点歌')
         if doc['status'] != 'completed':
             raise HTTPException(409, '歌曲尚未准备完成')
-        if chunk < 0 or stem is not None and stem not in PLAYBACK_STEMS:
+        names = playback_stems(doc['result']['artifacts'])
+        if chunk < 0 or stem is not None and stem not in names:
             raise HTTPException(404, 'Unknown audio window')
         store.cache.acquire(key, record_access=stem is not None)
         try:
             paths, info = playback_sources(store.cache.folder(key), doc['result'], sample_rate)
             if stem is None:
                 return info
-            data = playback_window_bytes(paths[PLAYBACK_STEMS.index(stem)], info, chunk, doc['result']['shared_preview_gain'])
+            data = playback_window_bytes(paths[names.index(stem)], info, chunk, doc['result']['shared_preview_gain'])
             return Response(data, media_type='audio/flac', headers={'Cache-Control': 'no-store'})
         except (OSError, ValueError, TypeError, KeyError, RuntimeError) as error:
             raise HTTPException(409, '播放音轨不完整，请重新准备') from error

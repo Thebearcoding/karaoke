@@ -301,8 +301,11 @@ class Pipeline:
             config['fallback_model'] = os.getenv('KARAOKE_ASR_FALLBACK_MODEL', 'gpt-4o-transcribe')
             weights = ROOT/'models/alignment/whisper/large-v3-turbo.pt'
             config['local_repair_weights'] = (weights.stat().st_size, weights.stat().st_mtime_ns) if weights.is_file() else None
-        return dict(inputs=[self.output/p for p in inputs], outputs=[self.output/p for p in outputs],
+        spec = dict(inputs=[self.output/p for p in inputs], outputs=[self.output/p for p in outputs],
                     config=config, code=code)
+        if name in ('separate_music', 'separate_lead') and not self.strict_audio:
+            spec['required'] = [self.output/outputs[0]/'song/vocals.wav']
+        return spec
 
     def phase(self, name=None, active=False, *, song_info=None):
         with self.lock:
@@ -1071,7 +1074,8 @@ class Pipeline:
             self.inputs(audio, 'mixture-inputs.json')
             duration = sf.info(audio).duration
             common = [self.separator_python, '-u', ROOT/'benchmark_neural.py', '--device', self.device,
-                      '--batch-size', os.getenv('KARAOKE_SEPARATION_BATCH_SIZE', '1')]
+                      '--batch-size', os.getenv('KARAOKE_SEPARATION_BATCH_SIZE', '1'),
+                      *([] if self.strict_audio else ['--target-only'])]
             self.run('separate_music', common + ['--model', 'vocals_mel_band_roformer.ckpt', '--config',
                 ROOT/'models/pretrained/vocals_mel_band_roformer.yaml', '--inputs', self.output/'mixture-inputs.json',
                 '--output', self.output/'music-separation'])
@@ -1092,7 +1096,7 @@ class Pipeline:
                     compression_started = time.perf_counter()
                     stems = json.loads((self.output/'stems/manifest.json').read_text())
                     compressed = compact_playback_audio(self.output, dict(artifacts=records,
-                        shared_preview_gain=stems['preview_shared_gain']))
+                        shared_preview_gain=stems['preview_shared_gain']), combine=True)
                     with self.lock:
                         self.timings['compress_audio'] = round(time.perf_counter()-compression_started, 3)
                 return records, compressed
@@ -1144,9 +1148,10 @@ class Pipeline:
             self.render_video(result, self.output/'captioned-picture.mp4')
         if compressed is not None:
             result.update(audio_storage=compressed['audio_storage'], shared_preview_gain=1.)
+            for name in ('instrumental', 'backing_vocals', 'lead_vocals'):
+                result['artifacts'].pop(name, None)
             result['artifacts'].update(compressed['artifacts'])
-            records.update({key: compressed['artifacts'][key]
-                            for key in ('instrumental', 'backing_vocals', 'lead_vocals')})
+            records.update(compressed['artifacts'])
         for key, artifact in result['artifacts'].items():
             artifact.update(records[key] if key in records else self.artifact_record(artifact['path']))
         result.update(processing_seconds=round(time.perf_counter()-started, 3), timings=self.timings,
@@ -1415,11 +1420,11 @@ class Pipeline:
 
     def render_video(self, result, picture=None):
         paths = {name: self.output/a['path'] for name, a in result['artifacts'].items()}
+        result['video_only'] = True
         with self.checkpoints.stage('render',
-                inputs=[self.video, paths['instrumental'], paths['backing_vocals'], paths['subtitles']],
+                inputs=[self.video, paths['subtitles']],
                 outputs=[paths['mv']],
-                config={**{key: result[key] for key in ('title', 'artist', 'language', 'mv_audio',
-                    'duration_seconds', 'shared_preview_gain')},
+                config={**{key: result[key] for key in ('title', 'artist', 'language', 'duration_seconds')},
                     'implementation': inspect.getsource(type(self).render_uncached)},
                 code=[ROOT/p for p in ('render_lyric_progress.py', 'render_subtitles.py', 'subtitles.py', 'lyric_progress.py',
                                       'subtitle_style.py', 'subtitle-styles.json')]) as reused:
@@ -1433,28 +1438,13 @@ class Pipeline:
             countdown_events=presentation['countdown']['events'],
             opening_countdown=presentation['opening_countdown'])
         paths = {name: self.output/a['path'] for name, a in result['artifacts'].items()}
-        audio_inputs = ['-i', paths['instrumental']]
-        mixing = '[1:a]aformat=sample_fmts=fltp[audio];'
-        if result['mv_audio'] == 'instrumental_backing':
-            audio_inputs += ['-i', paths['backing_vocals']]
-            # FLAC decoders can emit uneven frames; feed amix equal sample
-            # blocks without padding or changing any samples at the tail.
-            frame = 'aformat=sample_fmts=fltp,asetnsamples=n=1024:p=0,asetpts=N/SR/TB'
-            mixing = (f'[1:a]{frame}[i];[2:a]{frame}[b];'
-                      '[i][b]amix=inputs=2:normalize=0[audio];')
-        rendered = self.output/'rendered-mv.mp4'
-        rendered.unlink(missing_ok=True)
-        self.run('mux_video', ['ffmpeg', '-v', 'error', '-nostdin', '-i', picture, *audio_inputs,
-            '-filter_complex', mixing+f"[audio]volume={result['shared_preview_gain']:.17g},asetpts=PTS-STARTPTS[mix]",
-            '-map', '0:v:0', '-map', '[mix]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
-            '-t', result['duration_seconds'], '-movflags', '+faststart', rendered])
-        self.run('verify_video', ['ffmpeg', '-v', 'error', '-nostdin', '-i', rendered, '-f', 'null', '-'])
+        self.run('verify_video', ['ffmpeg', '-v', 'error', '-xerror', '-nostdin', '-i', picture, '-f', 'null', '-'])
         probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',
-            'format=duration:stream=codec_type', '-of', 'json', str(rendered)]))
-        if ({s['codec_type'] for s in probe['streams']} != {'audio', 'video'} or
+            'format=duration:stream=codec_type', '-of', 'json', str(picture)]))
+        if ({s['codec_type'] for s in probe['streams']} != {'video'} or
                 abs(float(probe['format']['duration'])-result['duration_seconds']) > .1):
-            raise StageFailure('verify_video', '成品视频缺少音画或时长不符')
-        rendered.replace(paths['mv'])
+            raise StageFailure('verify_video', '成品视频缺少画面或时长不符')
+        picture.replace(paths['mv'])
 
     def restore_video(self):
         """Rebuild only the discarded video; never run a model or change cached audio/cues."""

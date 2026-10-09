@@ -13,6 +13,12 @@ from urllib.parse import parse_qs, urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+def playback_stems(artifacts):
+    """Published playback layouts; old three-track songs remain playable."""
+    return (('accompaniment', 'lead_vocals') if 'accompaniment' in artifacts else
+            ('instrumental', 'backing_vocals', 'lead_vocals'))
+
+
 def download_backoff(url, directory=None, *, until=0):
     """Share explicit provider limits with already-started pipeline children."""
     directory = directory or os.getenv('KARAOKE_STAGE_LOCK_DIR')

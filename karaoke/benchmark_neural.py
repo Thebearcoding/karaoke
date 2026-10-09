@@ -64,7 +64,7 @@ def demix_batched(instance, mix, batch_size):
     return {cfg.training.target_instrument: primary, instance.secondary_stem_name: mix-primary}
 
 
-def run_cases(infer, output, metadata, cases_path=EXPERIMENT/'inputs.json'):
+def run_cases(infer, output, metadata, cases_path=EXPERIMENT/'inputs.json', *, target_only=False):
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f'Refusing to overwrite experiment output: {output}')
     output.mkdir(parents=True, exist_ok=True)
@@ -80,27 +80,30 @@ def run_cases(infer, output, metadata, cases_path=EXPERIMENT/'inputs.json'):
         backing, vocals = separated[:2]
         extra_stems = separated[2] if len(separated) == 3 else {}
         elapsed = time.perf_counter()-started
-        if backing.shape != x.shape or vocals.shape != x.shape:
+        if vocals.shape != x.shape or backing is not None and backing.shape != x.shape:
             raise ValueError('Separation outputs must preserve the input shape')
-        if not np.isfinite(backing).all() or not np.isfinite(vocals).all():
+        if not np.isfinite(vocals).all() or backing is not None and not np.isfinite(backing).all():
             raise ValueError('Separation outputs contain non-finite samples')
         folder = output/case['id']; folder.mkdir()
-        for label, wave in [('backing', backing), ('vocals', vocals)]:
+        for label, wave in ([('vocals', vocals)] if target_only else [('backing', backing), ('vocals', vocals)]):
             sf.write(folder/f'{label}.wav', wave, rate, subtype='FLOAT')
         for label, wave in extra_stems.items():
             if wave.shape != x.shape or not np.isfinite(wave).all():
                 raise ValueError(f'Invalid additional model output: {label}')
             sf.write(folder/f'model-{label}.wav', wave, rate, subtype='FLOAT')
         row = {'id': case['id'], 'seconds': elapsed, 'rtf': elapsed/(len(x)/rate),
-               'sum_reconstruction_snr_db': snr(x, x-backing-vocals),
-               'backing_sha256': sha(folder/'backing.wav'), 'vocals_sha256': sha(folder/'vocals.wav')}
+               'vocals_sha256': sha(folder/'vocals.wav')}
+        if not target_only:
+            row.update(sum_reconstruction_snr_db=snr(x, x-backing-vocals),
+                       backing_sha256=sha(folder/'backing.wav'))
         if extra_stems:
             row['model_stems'] = {label: {'file': f'model-{label}.wav',
                 'sha256': sha(folder/f'model-{label}.wav')} for label in extra_stems}
         if 'reference_backing' in case:
             truth, truth_rate = sf.read(case['reference_backing'], dtype='float32', always_2d=True)
             assert truth_rate == rate and truth.shape == x.shape
-            row['reconstruction_db'] = snr(truth, backing-truth)
+            candidate = x-vocals if backing is None else backing
+            row['reconstruction_db'] = snr(truth, candidate-truth)
             row['input_reconstruction_db'] = snr(truth, x-truth)
             row['improvement_db'] = row['reconstruction_db']-row['input_reconstruction_db']
         records.append(row)
@@ -121,6 +124,7 @@ def main():
     parser.add_argument('--inputs', type=Path, default=EXPERIMENT/'inputs.json')
     parser.add_argument('--device', choices=['auto', 'cpu', 'mps', 'cuda'], default='mps')
     parser.add_argument('--batch-size', type=int, default=1, help='Audio windows per forward pass')
+    parser.add_argument('--target-only', action='store_true', help='Skip the unused complementary output')
     args = parser.parse_args()
     if args.batch_size < 1:
         parser.error('--batch-size must be positive')
@@ -197,7 +201,7 @@ def main():
             extra = {name: np.asarray(stems[name], dtype='float32').T[pad:pad+len(x)]/gain
                      for name in args.export_stem}
             return x-vocals, vocals, extra
-        return x-vocals, vocals
+        return (None if args.target_only else x-vocals), vocals
     metadata = {'model': args.model, 'target_stem': args.target_stem, 'exported_model_stems': args.export_stem,
         'output_semantics': {'vocals.wav': 'selected target stem', 'backing.wav': 'input minus selected target stem'},
         'model_sha256': sha(ROOT/'models/pretrained'/args.model),
@@ -210,9 +214,11 @@ def main():
         'architecture_file': inspect.getfile(instance.model_run.__class__),
         'architecture_sha256': sha(inspect.getfile(instance.model_run.__class__)),
         'runner_sha256': sha(__file__), 'acceptance': 'comparison only; not accepted'}
+    if args.target_only:
+        metadata['output_semantics'].pop('backing.wav')
     if args.config:
         metadata['config'] = {'path': str(config_path), 'sha256': sha(config_path)}
-    run_cases(infer, args.output, metadata, args.inputs)
+    run_cases(infer, args.output, metadata, args.inputs, target_only=args.target_only)
 
 
 if __name__ == '__main__':
