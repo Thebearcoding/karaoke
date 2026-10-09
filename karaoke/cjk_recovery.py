@@ -190,9 +190,10 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *,
             return None, 'conflict with adjacent words'
         if all(events) and (end-start < .035 or any(u['emission_end'] > bounds[1] for u in primary)):
             return None, 'CTC event lacks room before the following word'
-        # CTC emissions can be one frame wide. Verify actual vocal support at
-        # the onset; a longer display hold alone cannot supply that evidence.
-        support_end = min(end, start+.035) if all(events) or label_events else end
+        # Only sparse CTC events need the short onset check. Dense phonetic
+        # spans may start with a quiet closure; their measured acoustic end
+        # is evidence, unlike a CTC display hold extended to the next word.
+        support_end = min(end, start+.035) if all(events) else end
         piece = wave[round(start*44100):round(support_end*44100)]
         if not len(piece) or not np.isfinite(piece).all() or float(np.sqrt(np.mean(piece**2))) <= floor:
             return None, 'insufficient audible vocal support'
