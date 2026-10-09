@@ -4739,6 +4739,53 @@ def test_candidate_localization_checks_the_acoustically_reviewed_timeline(tmp_pa
     assert calls==['validate_timing']
 
 
+@pytest.mark.parametrize('uncovered', [False, True])
+def test_extra_source_text_only_displaces_usable_lyrics_for_an_uncovered_passage(tmp_path, monkeypatch, uncovered):
+    first, chorus, last = ('Morning sunlight reaches the window',
+                          'The lantern glows beside the trees', 'We follow the river home')
+    extra = 'Silver stars appear behind the evening clouds'
+    primary, alternative = [first, chorus, last], [first, chorus, extra, last]
+    packet = dict(candidate_texts=[primary, alternative], crosscheck=dict(selected_source=0,
+        eligible_sources=[0,1], sources=[dict(provider=p, language='English') for p in ('primary','alternate')]))
+    lyrics = dict(title='Song', artist='Singer', language='English', lines=primary,
+        provenance=dict(kind='online_lyric_text', route='lyrics_first', lyric_lookup=packet))
+    pipeline = Pipeline(dict(url=URL), tmp_path)
+    (tmp_path/'lyrics.json').write_text(json.dumps(lyrics))
+    raw = tmp_path/'alignment/raw.json'; raw.parent.mkdir()
+    calls, reviewed = [], []
+    heard = [dict(word=t, start=s, end=e) for t,s,e in
+             [(first,1.,2.), (chorus,4.,5. if uncovered else 8.), (extra,6.,7.8), (last,10.,11.)]]
+    def align(candidate, duration):
+        calls.append(candidate['lines'])
+        cues = [dict(text=w['word'], start=w['start'], end=w['end'], status='candidate')
+                for w in heard if w['word'] in candidate['lines']]
+        # The coarse held caption initially hides the separate passage.
+        if uncovered and candidate['lines']==primary:
+            cues[1]['end']=8.
+        (tmp_path/'cues.json').write_text(json.dumps(cues))
+        (tmp_path/'quality.json').write_text('{}')
+        (pipeline.checkpoints.directory/'align_words.json').write_text('{}')
+        raw.write_text(json.dumps([dict(asr_localizations=[dict(context=[0,len(candidate['lines'])],
+            source_range=[0.,12.], recognition=dict(segments=[dict(words=heard)]))])]))
+    def validate(candidate, duration, lead):
+        reviewed.append(candidate['lines'])
+        cues=json.loads((tmp_path/'cues.json').read_text())
+        if uncovered:
+            cues[1]['end']=5.
+            (tmp_path/'cues.json').write_text(json.dumps(cues))
+        pipeline.validate_localization(candidate, duration, cues)
+    monkeypatch.setattr(pipeline, 'align', align)
+    monkeypatch.setattr(pipeline, 'validate_alignment', validate)
+    selected, error = pipeline.align_candidates(lyrics, {}, 12.)
+    assert selected['lines']==(alternative if uncovered else primary)
+    assert calls==reviewed==([primary, alternative] if uncovered else [primary])
+    assert error is None
+    if uncovered:
+        rejected=json.loads((tmp_path/'quality.json').read_text())['lyric_source_fallback']['rejected']
+        support=json.loads((tmp_path/rejected[0]['diagnostics']/'lyric-source-support.json').read_text())
+        assert support['uncovered_passages'][0]['source_range']==[2,3]
+
+
 @pytest.mark.parametrize('gap_kind', ['missing', 'covered', 'unrelated'])
 def test_caption_gap_review_requires_substantial_existing_lyric_evidence(gap_kind):
     from copy import deepcopy

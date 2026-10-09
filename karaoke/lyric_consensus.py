@@ -165,14 +165,15 @@ def alternative_lyric_candidates(lyrics, packet):
             lyrics['provenance'], lyric_lookup=report, text_transform=report.get('text_transform', 'whitespace_only')))
 
 
-def observed_source_alternative(lyrics, alternatives, observations):
+def observed_source_alternative(lyrics, alternatives, observations, *, cues=None, duration=None):
     """Use existing recognition to request a better-supported published text.
 
-    This selects another alignment attempt, not accepted lyrics or timestamps.
-    A substantial gain is required so spelling noise cannot flip the source.
+    After a usable alignment, require an observed uncovered passage as well.
+    Extra matching ad-libs over an existing sung line cannot invalidate it.
     """
     from .anchors_from_asr import text_units
     from .align_lyrics_whisper import recognized_words
+    from .song_sources import missing_repetitions
     from rapidfuzz.distance import Levenshtein
 
     language = lyrics['language']
@@ -189,8 +190,13 @@ def observed_source_alternative(lyrics, alternatives, observations):
         for index, candidate in enumerate(alternatives):
             matched = support(candidate)
             if matched-baseline >= max(24, len(heard)*.05):
+                missing = None if cues is None else missing_repetitions(
+                    candidate['lines'], [dict(c, status='candidate') for c in cues], words, language, duration)
+                if cues is not None and not missing:
+                    continue
                 return dict(alternative=index, source_range=[begin,end], recognized_units=len(heard),
-                            current_matched_units=baseline, alternative_matched_units=matched)
+                            current_matched_units=baseline, alternative_matched_units=matched,
+                            uncovered_passages=missing)
     return None
 
 

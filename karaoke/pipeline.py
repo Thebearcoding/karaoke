@@ -1005,26 +1005,31 @@ class Pipeline:
                 raw_path = self.output/'alignment/raw.json'
                 observations = [o for block in json.loads(raw_path.read_text())
                                 for o in block.get('asr_localizations', [])] if raw_path.is_file() else []
-                if index+1 < len(candidates):
-                    preferred = observed_source_alternative(candidate, candidates[index+1:], observations)
-                    if preferred:
-                        position = index+1+preferred['alternative']
-                        candidates[index+1], candidates[position] = candidates[position], candidates[index+1]
-                        write_json(self.output/'lyric-source-support.json', preferred)
-                        raise StageFailure('subtitles', '已有音频识别支持更完整的歌词来源；正在核验备用正文')
                 # The final timing review can expose a gap previously hidden
                 # by a held caption. Keep it in the same bounded source-repair
                 # loop; every replacement must pass this review again. Its
                 # localization gate runs after the acoustic repair, not before.
                 self.validate_alignment(candidate, duration, lead)
+                preferred = observed_source_alternative(candidate, candidates[index+1:], observations,
+                    cues=json.loads((self.output/'cues.json').read_text()), duration=duration)
+                if preferred:
+                    raise StageFailure('subtitles', '备用歌词包含已听到但尚未覆盖的唱段；正在核验备用正文')
             except StageFailure as failure:
-                if not self.strict_audio and failure.stage == 'subtitles' and observations and not preferred:
-                    repeated = observed_repetition_candidate(candidate,
-                        json.loads((self.output/'cues.json').read_text()), observations, duration)
-                    key = normalized(''.join(repeated['lines'])).casefold() if repeated else None
-                    if key and key not in seen:
-                        seen.add(key)
-                        candidates.insert(index+1,repeated)
+                if not self.strict_audio and failure.stage == 'subtitles' and observations:
+                    # Text overlap orders retries after an actual failure; it
+                    # cannot veto a complete, acoustically checked candidate.
+                    preferred = preferred or observed_source_alternative(candidate, candidates[index+1:], observations)
+                    if preferred:
+                        position = index+1+preferred['alternative']
+                        candidates[index+1], candidates[position] = candidates[position], candidates[index+1]
+                        write_json(self.output/'lyric-source-support.json', preferred)
+                    else:
+                        repeated = observed_repetition_candidate(candidate,
+                            json.loads((self.output/'cues.json').read_text()), observations, duration)
+                        key = normalized(''.join(repeated['lines'])).casefold() if repeated else None
+                        if key and key not in seen:
+                            seen.add(key)
+                            candidates.insert(index+1,repeated)
                 if (self.strict_audio or failure.stage != 'subtitles' or index+1 == len(candidates) or
                         not (self.checkpoints.directory/'align_words.json').is_file()):
                     raise
