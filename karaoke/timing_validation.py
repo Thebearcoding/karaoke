@@ -29,7 +29,7 @@ def timing_violations(cues, constraints):
     return errors
 
 
-def localized_constraints(cues, report, blocks):
+def localized_constraints(report, blocks):
     """Retire a wrong-phrase proof only after relocation and new acoustic proof.
 
     A phonetic aligner assumes its supplied words occur in the crop. A later
@@ -37,33 +37,34 @@ def localized_constraints(cues, report, blocks):
     proofs and the localization evidence instead of making a bad crop eternal.
     """
     active, superseded = [], []
-    proposals = [p for row in report['lines'] for p in row.get('proposed_constraints', [])
-                 if not timing_violations(cues, [p])]
+    # The selected candidate can itself belong to the wrong repetition. Use
+    # independent phrase identity to choose the applicable proof, then let
+    # final validation reject/reselect the candidate under that proof.
+    proposals = [p for row in report['lines'] for p in row.get('proposed_constraints', [])]
     observations = [o for block in blocks for o in block.get('asr_localizations', [])]
     for proof in report['constraints']:
         replacement = None
-        if timing_violations(cues, [proof]):
-            for observed in observations:
-                # A stretched old phrase can overlap the right passage while
-                # one of its word proofs points elsewhere. Compare the proof
-                # itself with the newly located phrase, not the old envelope.
-                if proof['line'] not in observed.get('accepted_lines', []):
-                    continue
-                index = proof['line']-1-observed['context'][0]
-                anchors = observed.get('anchors', [])
-                if not 0 <= index < len(anchors):
-                    continue
-                anchor = anchors[index]
-                if anchor['status']!='candidate' or anchor['text']!=proof['text']:
-                    continue
-                if anchor['start']-2 <= proof['onset'] <= anchor['end']+2:
-                    continue
-                revised = next((p for p in proposals if all(p[k]==proof[k] for k in ('line','text','first','stop'))
-                    and anchor['start']-2 <= p['onset'] <= anchor['end']+2), None)
-                if revised is not None:
-                    replacement = dict(proof=proof, replacement=revised, anchor=anchor,
-                        source_range=observed['source_range'], reason='independently_relocalized_phrase')
-                    break
+        for observed in observations:
+            # A stretched old phrase can overlap the right passage while
+            # one of its word proofs points elsewhere. Compare the proof
+            # itself with the newly located phrase, not the old envelope.
+            if proof['line'] not in observed.get('accepted_lines', []):
+                continue
+            index = proof['line']-1-observed['context'][0]
+            anchors = observed.get('anchors', [])
+            if not 0 <= index < len(anchors):
+                continue
+            anchor = anchors[index]
+            if anchor['status']!='candidate' or anchor['text']!=proof['text']:
+                continue
+            if anchor['start']-2 <= proof['onset'] <= anchor['end']+2:
+                continue
+            revised = next((p for p in proposals if all(p[k]==proof[k] for k in ('line','text','first','stop'))
+                and anchor['start']-2 <= p['onset'] <= anchor['end']+2), None)
+            if revised is not None:
+                replacement = dict(proof=proof, replacement=revised, anchor=anchor,
+                    source_range=observed['source_range'], reason='independently_relocalized_phrase')
+                break
         if replacement is None:
             if proof not in active:
                 active.append(proof)
@@ -890,7 +891,7 @@ def main():
     repaired,report=reconcile_views(cues,observations(),protocol,lyrics['language'],constraints,
                                    playback=args.playback_fallback,previous=previous)
     localization=out.parent/'alignment/raw.json'
-    active,superseded=localized_constraints(repaired,report,read(localization) if localization.is_file() else [])
+    active,superseded=localized_constraints(report,read(localization) if localization.is_file() else [])
     superseded=(ledger.get('superseded',[]) if same_evidence else [])+superseded
     report.update(constraints=active,unresolved=timing_violations(repaired,active),superseded_constraints=superseded)
     report['pending_review_lines']=[i+1 for i in sorted(pending_review_lines(repaired,report,protocol))]
