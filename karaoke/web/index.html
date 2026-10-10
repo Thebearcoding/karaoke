@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#ffffff">
   <title>余音 · 今晚唱点什么</title>
   <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/theme.js"></script>
   <script type="module" src="/assets/app.js"></script>
 </head>
 <body>
@@ -21,6 +22,8 @@
     <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7"/></symbol>
     <symbol id="i-up" viewBox="0 0 24 24"><path d="m6 14 6-6 6 6"/></symbol>
     <symbol id="i-restart" viewBox="0 0 24 24"><path d="M4 10a8 8 0 1 1 0 5M4 4v6h6"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.5 13.5A8.5 8.5 0 0 1 10.5 3.5a8.5 8.5 0 1 0 10 10Z"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
   </svg>
 
   <header class="topbar">
@@ -30,6 +33,7 @@
       <button data-view="player">正在播放 <span id="playing-dot" hidden></span></button>
       <button data-view="queue" class="mobile-only">待唱 <span id="nav-count">0</span></button>
     </nav>
+    <button id="theme-toggle" class="theme-toggle" aria-label="切换到夜间模式" title="切换到夜间模式"><svg class="icon theme-moon" aria-hidden="true"><use href="#i-moon"/></svg><svg class="icon theme-sun" aria-hidden="true"><use href="#i-sun"/></svg></button>
     <div class="connection"><span id="connection-dot"></span><span id="connection-text">连接中</span></div>
   </header>
 
