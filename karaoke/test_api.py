@@ -2902,7 +2902,8 @@ def test_published_lyrics_reject_wrong_credits_versions_and_empty_text(change):
     assert published_candidate([dict(row, **change)], song, 'Official Music Video')[0] is None
 
 
-@pytest.mark.parametrize('edition', ['Edited Version', 'Album Version', 'Live Version', 'Acoustic Ver.'])
+@pytest.mark.parametrize('edition', ['Edited Version', 'Album Version', 'Live Version', 'Acoustic Ver.',
+                                   '國', '國語版', '粵', '韩语版'])
 @pytest.mark.parametrize('bilingual', [False, True])
 def test_explicit_recording_version_keeps_work_identity_and_release_preference(edition, bilingual):
     from karaoke.lyric_lookup import published_candidate, identity
@@ -2923,6 +2924,20 @@ def test_explicit_recording_version_keeps_work_identity_and_release_preference(e
     for real_subtitle in ('Part II', 'Conversion', 'A Story', 'From Home', 'We Live Here'):
         assert not identity('Evening ('+real_subtitle+')', title=True) & identity('Evening', title=True)
     assert published_candidate([row], dict(song, title='Evening (Instrumental Version)'), '', allow_recording_mismatch=True)[0] is None
+
+
+@pytest.mark.parametrize('source,matching,other', [('國', '国语版', '粤语版'),
+    ('粵', 'Cantonese Version', 'Mandarin Version'), ('日本語版', 'Japanese Ver.', 'English Version')])
+def test_language_edition_aliases_match_without_merging_other_languages(source, matching, other):
+    from karaoke.lyric_lookup import published_candidate
+    song = dict(title=f'Evening ({source})', artist='Singer')
+    row = dict(trackId=1, trackTitle=f'Evening ({matching})', artists=[dict(artistName='Singer')],
+               album={}, lyrics='We sing through the night\nUntil the morning comes')
+    assert published_candidate([row], song, song['title'])[0] == row['lyrics'].splitlines()
+    alternate = dict(row, trackId=2, trackTitle=f'Evening ({other})')
+    assert published_candidate([alternate], song, song['title'])[0] is None
+    _, report = published_candidate([alternate, row], song, song['title'], allow_recording_mismatch=True)
+    assert report['url'].endswith('/1') and report['recording_mismatches'] == []
 
 
 @pytest.mark.parametrize('traditional,simplified', [('什麼時候', '什么时候'), ('乾杯以後', '干杯以后'), ('臺灣', '台湾')])

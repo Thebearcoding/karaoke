@@ -20,14 +20,14 @@ from opencc import OpenCC
 from rapidfuzz.distance import Levenshtein
 
 from .anchors_from_asr import text_units
-from .job_schema import provider_error, retry_after_seconds, retry_fields, song_language
+from .job_schema import language_code, provider_error, retry_after_seconds, retry_fields, song_language
 from .song_sources import (SongText, extract_song_metadata, find_verified_lyrics,
                            join_punctuation_lines, video_song_info)
 from .source_captions import read_document
 
 
 _traditional, _simplified = OpenCC('s2t'), OpenCC('tw2s')
-_versioned_title = re.compile(r'(.+?)\s*\(([^()]*\b(?:version|ver\.?))\)\s*$', re.I)
+_versioned_title = re.compile(r'(.+?)\s*\(([^()]*(?:\b(?:version|ver\.?)|版本?)|[国國粤粵])\)\s*$', re.I)
 _soundtrack_credit = re.compile(r'(?:大型)?(?:纪录片|电影|电视剧|动画片|网络剧|网剧|剧集)?'
     r'\s*《[^《》]+》\s*(?:人物)?(?:主题[歌曲]|片[头尾]曲|插曲)|from\s+["“][^"“”]+["”]', re.I)
 _credit_separators = r'\s*[&,/×+、;]\s*|\s+·\s+|\s+\b(?:feat\.?|featuring|ft\.?|with)\s+'
@@ -496,7 +496,11 @@ def recording_mismatches(song, source_title, title, album):
     # Instrumentals, karaoke edits and remixes are not interchangeable lyrics.
     if (expected ^ actual) - {'live', 'acoustic'}:
         return None
-    editions = lambda values: {canonical_script(m[2]).casefold() for value in values
+    def edition_key(label):
+        name = re.sub(r'\s*(?:\b(?:version|ver\.?)|版本?)$', '', label, flags=re.I).strip().casefold()
+        language = language_code({'国': 'Mandarin', '国语': 'Mandarin', '粤': 'Cantonese'}.get(canonical_script(name), name))
+        return language or canonical_script(label).casefold()
+    editions = lambda values: {edition_key(m[2]) for value in values
         if (m := _versioned_title.fullmatch(unicodedata.normalize('NFKC', value or '')))}
     mismatch = ['version'] if expected != actual or editions((source_title, song['title'])) != editions((title, album)) else []
     features = lambda values: {name for value in values
