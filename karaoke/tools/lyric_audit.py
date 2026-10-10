@@ -28,8 +28,7 @@ def write(path, value):
 
 
 def text_key(lines):
-    text = lyric_lookup.canonical_script('\n'.join(lines)).casefold()
-    return ''.join(c for c in text if c.isalnum())
+    return lyric_lookup.comparison_key('\n'.join(lines))
 
 
 def assess(lyrics, lookup, reference=None):

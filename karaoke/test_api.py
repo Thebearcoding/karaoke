@@ -6756,6 +6756,31 @@ def test_published_ruby_source_supplies_lyrics_without_singing_the_readings(tmp_
     assert len(calls) == (3 if case == 'wrong_work' else 2)
 
 
+@pytest.mark.parametrize('extra', ['ふるさと', 'また会おう'])
+def test_explicit_source_readings_do_not_outvote_plain_lyrics_or_remove_sung_responses(tmp_path, monkeypatch, extra):
+    from karaoke import lyric_readings, lyric_consensus as module
+    from karaoke.stage_cache import StageCache
+    plain = ['故郷へ向かう長い道を今も歩いている', '明日の朝には会えるから今日は一緒に歌おう']
+    annotated = [plain[0].replace('故郷', '故郷('+extra+')'), plain[1]]
+    page = ('<meta property="og:title" content="帰り道 歌詞 夕灯 ふりがな付 - うたてん">'
+        '<div class="hiragana">' + '<br>'.join(plain).replace('故郷',
+        '<span class="ruby"><span class="rb">故郷</span><span class="rt">ふるさと</span></span>') + '</div>')
+    monkeypatch.setattr(lyric_readings, 'read_page', lambda url:
+        '<a href="/lyric/example/">result</a>' if '/search?' in url else page)
+    monkeypatch.setattr(module.lookup, 'fetch_published_lyrics', lambda *a:
+        (annotated, dict(provider='line_music', language='Japanese')))
+    monkeypatch.setattr(module.lookup, 'fetch_lyrics', lambda *a: dict(status='unavailable'))
+    additional = module.fetch_additional_lyrics
+    monkeypatch.setattr(module, 'fetch_additional_lyrics', lambda provider, *a, **kw:
+        additional(provider, *a, **kw) if provider == 'utaten' else
+        (annotated, dict(provider=provider, language='Japanese')))
+    lines, report = module.fetch_lyric_consensus(dict(title='帰り道', artist='夕灯'), {}, 60, StageCache(tmp_path))
+    assert lines == (plain if extra == 'ふるさと' else annotated)
+    assert bool(report['crosscheck']['serialized_reading_variants']) == (extra == 'ふるさと')
+    assert plain in report['candidate_texts'] and annotated in report['candidate_texts']
+    assert report['crosscheck']['rejected_sources'] == []
+
+
 def test_changed_published_readings_invalidate_both_render_caches(tmp_path, monkeypatch):
     from karaoke import lyric_readings as readings
     from karaoke.pipeline import Pipeline

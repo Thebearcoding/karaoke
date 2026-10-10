@@ -33,6 +33,10 @@ def canonical_script(text):
     return _simplified.convert(_traditional.convert(unicodedata.normalize('NFKC', text)))
 
 
+def comparison_key(text):
+    return ''.join(c for c in canonical_script(text).casefold() if c.isalnum())
+
+
 class LyricRequestError(httpx.HTTPError):
     def __init__(self, report):
         super().__init__(report.get('error', 'Lyric provider is unavailable'))
@@ -665,11 +669,14 @@ def fetch_reading_lyrics(song, cache, duration=None, reference_lines=(), source_
             if text and mismatch is not None and (title_match and (artist_match or partial_credit) or corroborated) and not short_lyric_text(text, duration):
                 if partial_credit and not artist_match:
                     mismatch.append('performers')
+                readings = [dict(after=len(comparison_key(page.text[:span['stop']])),
+                                 text=comparison_key(span['reading'])) for span in page.spans
+                            if comparison_key(span['reading'])] if comparison_key(page.text) == comparison_key(''.join(text)) else []
                 return text, dict(status='candidate', provider='utaten', publisher='utaten', language=text_language('\n'.join(text)),
                     url=url, track=actual.get('title'), artist=actual.get('artist'), attempts=attempts,
                     text_sha256=hashlib.sha256(page.text.encode()).hexdigest(), excluded_credit_lines=excluded,
                     text_transform='published_ruby_body_without_readings', recording_mismatches=mismatch,
-                    provider_timestamps_used=False)
+                    provider_timestamps_used=False, reading_annotations=readings)
     return None, dict(status='no_matching_published_text', provider='utaten', attempts=attempts)
 
 

@@ -11,9 +11,29 @@ import time
 from urllib.parse import urlencode
 
 import requests
+from rapidfuzz.distance import Levenshtein
 
 from . import lyric_lookup as lookup
 from .source_captions import read_document
+
+
+def serialized_reading_variants(candidates):
+    """Identify text that differs only by a source's explicit ruby annotations."""
+    keys = [lookup.comparison_key(''.join(lines)) for lines, _ in candidates]
+    variants = {}
+    for source, (_, report) in enumerate(candidates):
+        readings = {(r['after'], r['text']) for r in report.get('reading_annotations', [])}
+        if not readings:
+            continue
+        for index, key in enumerate(keys):
+            if index == source or index in variants:
+                continue
+            changes = [o for o in Levenshtein.opcodes(keys[source], key) if o.tag != 'equal']
+            if changes and all(o.tag == 'insert' and
+                               (o.src_start, key[o.dest_start:o.dest_end]) in readings for o in changes):
+                variants[index] = dict(source=index, plain_source=source,
+                    reading_ranges=[[o.dest_start, o.dest_end] for o in changes])
+    return list(variants.values())
 
 
 def compare_lyrics(candidates):
@@ -445,12 +465,14 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
     rejected = {i: issue for i, (text, _) in enumerate(candidates)
                 if (issue := lookup.short_lyric_text(text, duration))}
     review['rejected_sources'] = [dict(issue, source=i) for i, issue in sorted(rejected.items())]
+    review['serialized_reading_variants'] = serialized_reading_variants(candidates)
+    annotated = {r['source'] for r in review['serialized_reading_variants']}
     usable = set(range(len(candidates))) - rejected.keys()
     if usable:
         # A known different performance remains a weaker fallback. Duration
         # alone cannot establish that: music videos add intros and credits.
         preferred = ('utaten', 'line_music', 'youtube_music', 'netease', 'lyricsweb', 'video_description', 'lrclib')
-        eligible = {i for i in usable if not set(candidates[i][1].get('recording_mismatches') or []) - {'duration'}}
+        eligible = {i for i in usable - annotated if not set(candidates[i][1].get('recording_mismatches') or []) - {'duration'}}
         eligible = eligible or usable
         review['eligible_sources'] = sorted(eligible)
         index = min(eligible, key=lambda i: preferred.index(candidates[i][1]['provider']))
