@@ -47,41 +47,49 @@ export class Player {
     this.levels = {instrumental:1, backing_vocals:1, lead_vocals:0};
     this.pitch = 0;
     this.pitchFactory = pitchFactory;
-    const tick = () => {
-      if (this.disposed) return;
-      if (this.anchor !== null && this.context.state === 'running') {
-        if (this.pendingStart) {
-          const pending = this.pendingStart;
-          this.onTick(pending.position === 0 ? Math.min(0, this.outputTime() - this.anchor) : pending.position);
-          requestAnimationFrame(tick); return;
-        }
-        this.pump();
-        if (this.anchor === null) { requestAnimationFrame(tick); return; }
-        const outputTime = this.outputTime();
-        const elapsed = outputTime - this.anchor;
-        const position = Math.min(this.scheduledUntil,
-          this.startPosition === 0 ? elapsed : Math.max(this.startPosition, elapsed));
-        if (this.videoPending && outputTime >= this.audibleWhen) {
-          this.videoPending = false;
-          this.lastVideoTime = this.video.currentTime;
-          this.lastVideoAdvance = this.context.currentTime;
-          const run = this.videoRun;
-          this.video.play().catch(error => {
-            if (this.videoRun === run) this.failPlayback(error, position);
-          });
-        }
-        if (position >= this.entry.duration - 0.025) {
-          const id = this.entry.id;
-          this.stop();
-          this.onEnd(id);
-        } else {
-          this.syncVideo(Math.max(0, position));
-          if (this.anchor !== null) this.onTick(position);
-        }
+  }
+
+  scheduleTick(delay) {
+    this.tickTimer = setTimeout(() => this.tick(), delay);
+  }
+
+  tick() {
+    clearTimeout(this.tickTimer);
+    this.tickTimer = null;
+    if (this.disposed || this.anchor === null || this.context.state !== 'running') return;
+    if (this.pendingStart) {
+      const pending = this.pendingStart;
+      this.onTick(pending.position === 0 ? Math.min(0, this.outputTime() - this.anchor) : pending.position);
+    } else {
+      this.pump();
+      if (this.anchor === null) return;
+      const outputTime = this.outputTime();
+      const elapsed = outputTime - this.anchor;
+      const position = Math.min(this.scheduledUntil,
+        this.startPosition === 0 ? elapsed : Math.max(this.startPosition, elapsed));
+      if (this.videoPending && outputTime >= this.audibleWhen) {
+        this.videoPending = false;
+        this.lastVideoTime = this.video.currentTime;
+        this.lastVideoAdvance = this.context.currentTime;
+        const run = this.videoRun;
+        this.video.play().catch(error => {
+          if (this.videoRun === run) this.failPlayback(error, position);
+        });
       }
-      requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
+      if (position >= this.entry.duration - 0.025) {
+        const id = this.entry.id;
+        this.stop();
+        this.onEnd(id);
+      } else {
+        this.syncVideo(Math.max(0, position));
+        if (this.anchor !== null) this.onTick(position);
+      }
+    }
+    // Audio is already scheduled on its own clock; the baked video needs no
+    // per-frame JavaScript. Wake for tenths on the controls and exactly at the
+    // audible start, rather than tying media maintenance to display refreshes.
+    if (this.anchor !== null) this.scheduleTick(this.videoPending
+      ? Math.min(100, Math.max(1, (this.audibleWhen - this.outputTime()) * 1000)) : 100);
   }
 
   outputTime() {
@@ -95,11 +103,10 @@ export class Player {
   syncVideo(position) {
     const video = this.video;
     if (this.videoPending) return;
-    // Use the frame actually submitted for display. WebKit can briefly report
-    // an old currentTime while still presenting frames from the current run.
-    // Off-screen video need not submit frames. Fall back to its media clock
-    // when the last presentation is stale so browsing the song list keeps playing.
-    const videoTime = this.presentedTime != null && this.context.currentTime - this.presentedAt < .25
+    // A presentation sample only exists after a suspicious media-clock reading.
+    // Healthy native playback must not keep a per-frame observer running.
+    const fresh = this.presentedTime != null && this.context.currentTime - this.presentedAt < .25;
+    const videoTime = fresh
       ? this.presentedTime : video.currentTime;
     if (videoTime !== this.lastVideoTime) {
       this.lastVideoTime = videoTime;
@@ -107,20 +114,36 @@ export class Player {
     }
     // readyState can briefly drop while frames still advance. Freeze only for
     // an actual pause/stall, not a momentary change in the decoder's buffer.
-    if (video.paused || this.context.currentTime - this.lastVideoAdvance > 1) {
+    if (video.paused) {
       this.waitForMedia(position);
       return;
     }
-    if (video.seeking) return;
-    const drift = position - videoTime;
-    // Never chase a moving audio target with seeks. Stop the common clock and
-    // prepare one fixed position if the video needs to load or catch up.
-    if (Math.abs(drift) > 1) {
-      this.waitForMedia(position);
+    const stalled = this.context.currentTime - this.lastVideoAdvance > 1;
+    const drifted = !video.seeking && Math.abs(position - videoTime) > 1;
+    if (!stalled && !drifted) {
+      if (this.videoFrameRequest != null) video.cancelVideoFrameCallback(this.videoFrameRequest);
+      this.videoFrameRequest = null;
+      return;
     }
-    // Leave normal playback at native speed. On WebKit, changing rate stalls
-    // the decoder and shifts its clock; correcting that shift repeats the
-    // stall. Small timestamp differences must not create playback interruptions.
+    if (!fresh && video.requestVideoFrameCallback) {
+      if (this.videoFrameRequest == null) {
+        const run = this.videoRun;
+        this.videoCheckStarted = this.context.currentTime;
+        this.videoFrameRequest = video.requestVideoFrameCallback((_, metadata) => {
+          if (this.videoRun !== run) return;
+          this.videoFrameRequest = null;
+          this.presentedTime = metadata.mediaTime;
+          this.presentedAt = this.context.currentTime;
+        });
+        return;
+      }
+      // Off-screen or genuinely stalled video may never deliver a callback.
+      // A valid media clock above remains sufficient; otherwise bound the wait.
+      if (this.context.currentTime - this.videoCheckStarted < .25) return;
+    }
+    // Never chase a moving target. Stop and prepare a fixed position only
+    // after a frame confirms the mismatch, or the confirmation times out.
+    this.waitForMedia(position);
   }
 
   waitForMedia(position) {
@@ -179,15 +202,6 @@ export class Player {
       if (this.context.state !== 'running') throw new Error('声音尚未启动，请点播放重试');
       this.pendingStart = null;
       this.videoRun = pending;
-      if (this.video.requestVideoFrameCallback) {
-        const presented = (_, metadata) => {
-          if (this.videoRun !== pending) return;
-          this.presentedTime = metadata.mediaTime;
-          this.presentedAt = this.context.currentTime;
-          this.videoFrameRequest = this.video.requestVideoFrameCallback(presented);
-        };
-        this.videoFrameRequest = this.video.requestVideoFrameCallback(presented);
-      }
       this.videoPending = true;
       this.audibleWhen = this.context.currentTime + Math.max(pending.when - this.outputTime(),
         .02 + (this.pitchChain?.latency || 0));
@@ -196,6 +210,7 @@ export class Player {
       this.lastVideoAdvance = this.context.currentTime;
       this.pump();
       this.pitchChain?.start(this.audibleWhen);
+      this.tick();
     } catch (error) {
       if (this.pendingStart !== pending) return;
       this.failPlayback(error, pending.position);
@@ -274,6 +289,8 @@ export class Player {
 
   stop() {
     const wasPlaying = this.anchor !== null;
+    clearTimeout(this.tickTimer);
+    this.tickTimer = null;
     for (const source of this.sources) {
       try { source.stop(); } catch { /* Already ended. */ }
       source.disconnect();
@@ -385,6 +402,7 @@ export class Player {
     this.nextWindow = this.stream.index(position);
     this.scheduledUntil = position;
     const pending = this.pendingStart = {position, when:this.audibleWhen, abort:new AbortController()};
+    this.tick();
     return this.startVideo(pending);
   }
 

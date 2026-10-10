@@ -93,7 +93,6 @@ test('removing the current song preserves pause or continuous-play intent', () =
 });
 
 let frame;
-globalThis.requestAnimationFrame = callback => { frame = callback; };
 class Context {
   sampleRate = 48000;
   currentTime = 10;
@@ -104,6 +103,7 @@ class Context {
     return {playbackRate:{value:1},connect(target){this.target=target;},start(time,offset,duration){this.started=[time,offset];this.length=duration;},stop(){this.stopped=true;},disconnect(){}};
   }
   resume() { return Promise.resolve(); }
+  close() { this.state='closed'; return Promise.resolve(); }
   decodeAudioData(data) { return Promise.resolve({duration:20, tag:data}); }
 }
 globalThis.window = {AudioContext:Context};
@@ -121,9 +121,54 @@ function setup(onEnd=()=>{}) {
     get:()=>position+(video.paused ? 0 : (p?.context?.currentTime ?? 10)-since),
     set:value=>{position=value;since=p?.context?.currentTime ?? 10;}});
   p=new Player(video,()=>{},onEnd);
+  // Most tests advance the audio clock explicitly. Scheduling itself is
+  // exercised with fake timers below, independent of monitor refresh rate.
+  p.scheduleTick=()=>{};
+  frame=()=>p.tick();
   return p;
 }
 const clockOffset = () => 100-Date.now()/1000;
+test('media maintenance sleeps while idle and preserves a precise start without per-frame work', async t => {
+  t.mock.timers.enable({apis:['setTimeout', 'Date'], now:100000});
+  const p=setup(), ticks=[], ended=[];
+  delete p.scheduleTick;
+  p.onTick=value=>ticks.push(value);
+  p.onEnd=id=>ended.push(id);
+  await p.unlock(); await p.load(song);
+  Object.defineProperty(p.context,'currentTime',{get:()=>10+(Date.now()-100000)/1000});
+  const advance = milliseconds => {
+    for(let remaining=milliseconds; remaining>0;) {
+      const step=Math.min(25,remaining); t.mock.timers.tick(step); remaining-=step;
+    }
+  };
+  try {
+    advance(1000);
+    assert.deepEqual(ticks,[]);
+    await p.apply({...state,position:0,started_at:Date.now()/1000+.125},0);
+    const sources=[...p.sources], audible=p.audibleWhen;
+    advance(100); assert.equal(p.video.paused,true);
+    advance(25); assert.equal(p.video.paused,false);
+    assert.ok(Math.abs(p.context.currentTime-audible)<1e-8);
+    ticks.length=0;
+    advance(1000);
+    assert.equal(ticks.length,10);
+    assert.ok(Math.abs(ticks.at(-1)-1)<1e-8);
+    assert.deepEqual(p.sources,sources);
+    p.stop(); const pausedTicks=ticks.length;
+    advance(1000);
+    assert.equal(ticks.length,pausedTicks);
+    assert.ok(sources.every(source=>source.stopped));
+    assert.deepEqual(ended,[]);
+    await p.apply({...state,position:19.5,started_at:Date.now()/1000},0);
+    advance(750);
+    assert.deepEqual(ended,['one']);
+    const finalTicks=ticks.length;
+    advance(1000);
+    assert.equal(ticks.length,finalTicks);
+    assert.deepEqual(ended,['one']);
+  } finally {p.dispose();}
+});
+
 test('two-track songs load two streams, retain the bed and adjust only the lead', async () => {
   const previous = globalThis.fetch, urls = [];
   globalThis.fetch = async url => {
@@ -922,7 +967,7 @@ test('a stalled video freezes the shared clock instead of chasing it with seeks'
   p.clear();
 });
 
-test('presented frames keep audio running through an incorrect video currentTime; real frame stalls still buffer', async () => {
+test('only suspicious video clocks request a frame; healthy playback and off-screen clocks need no observer', async () => {
   const p=setup(), waiting=[], callbacks=new Map(); let request=0;
   p.video.requestVideoFrameCallback=callback=>{callbacks.set(++request,callback);return request;};
   p.video.cancelVideoFrameCallback=id=>callbacks.delete(id);
@@ -932,13 +977,17 @@ test('presented frames keep audio running through an incorrect video currentTime
     await p.unlock(); await p.load(song); await p.apply(state,clockOffset());
     p.context.currentTime=p.audibleWhen; frame();
     const sources=[...p.sources];
+    for(let i=0;i<20;i++) {p.context.currentTime+=.1;frame();}
+    assert.equal(request,0);
     // Frames keep advancing, but the media element periodically reports a
     // stale startup timestamp, as seen in the physical iPad trace.
     Object.defineProperty(p.video,'currentTime',{configurable:true,get:()=>.011,set(){}});
-    for(let i=0;i<120;i++) {
-      p.context.currentTime+=1/60;
-      if(i%2===0) present(p.outputTime()-p.anchor);
+    for(let i=0;i<20;i++) {
+      p.context.currentTime+=.1;
       frame();
+      assert.ok(callbacks.size<=1);
+      present(p.outputTime()-p.anchor);
+      assert.equal(callbacks.size,0,'a frame sample must not subscribe to the next frame');
     }
     assert.deepEqual(waiting,[]); assert.deepEqual(p.sources,sources);
     assert.ok(sources.every(source=>!source.stopped));
@@ -947,9 +996,17 @@ test('presented frames keep audio running through an incorrect video currentTime
     Object.defineProperty(p.video,'currentTime',{configurable:true,get:()=>p.outputTime()-p.anchor,set(){}});
     for(let i=0;i<120;i++) {p.context.currentTime+=1/60;frame();}
     assert.deepEqual(waiting,[]); assert.deepEqual(p.sources,sources);
+    Object.defineProperty(p.video,'currentTime',{configurable:true,get:()=>.011,set(){}});
+    p.context.currentTime+=.3;frame();
+    assert.equal(callbacks.size,1);
+    // If the native clock recovers before an off-screen callback arrives,
+    // cancel that probe instead of reusing its expired deadline later.
+    Object.defineProperty(p.video,'currentTime',{configurable:true,get:()=>p.outputTime()-p.anchor,set(){}});
+    p.context.currentTime+=.1;frame();
+    assert.equal(callbacks.size,0);
     const stalledAt=p.video.currentTime;
     Object.defineProperty(p.video,'currentTime',{configurable:true,get:()=>stalledAt,set(){}});
-    for(let i=0;i<70;i++) {p.context.currentTime+=1/60;frame();}
+    for(let i=0;i<16;i++) {p.context.currentTime+=.1;frame();}
     assert.equal(waiting.length,1); assert.equal(p.anchor,null);
     assert.ok(sources.every(source=>source.stopped)); assert.equal(callbacks.size,0);
   } finally {p.clear();}
@@ -961,9 +1018,15 @@ test('video frame callbacks from before a seek or song change cannot replace the
   p.video.cancelVideoFrameCallback=id=>callbacks.delete(id);
   try {
     await p.unlock(); await p.load(song); await p.apply(state,clockOffset());
+    p.context.currentTime=p.audibleWhen; frame();
+    p.video.currentTime=.011; frame();
     const stale=callbacks.values().next().value;
+    assert.equal(typeof stale,'function');
     await p.apply({...state,position:12},clockOffset());
+    p.context.currentTime=p.audibleWhen; frame();
+    p.video.currentTime=.011; frame();
     const latest=callbacks.values().next().value;
+    assert.equal(typeof latest,'function');
     latest?.(0,{mediaTime:12});
     stale?.(0,{mediaTime:3});
     p.video.currentTime=.011;
