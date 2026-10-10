@@ -156,10 +156,10 @@ export function createViewHistory(history, capture, apply) {
   return {save, push, restore, back};
 }
 
-export function filterSongs(songs, query) {
+export function filterSongs(songs, query, fields = ['title','artist']) {
   const normalize = text => String(text || '').normalize('NFKC').toLocaleLowerCase();
   const terms = normalize(query).trim().split(/\s+/);
-  return songs.filter(song => terms.every(term => normalize(`${song.title} ${song.artist}`).includes(term)));
+  return songs.filter(song => terms.every(term => normalize(fields.map(field => song[field] || '').join(' ')).includes(term)));
 }
 
 export function historySuggestions(history) {
@@ -196,6 +196,15 @@ export function libraryArtists(library) {
 export function searchLibrary(library, query) {
   return librarySongs(library, 'all', query)
     .map(song => ({...song, provider:'local', thumbnail:song.poster, uploader:song.artist}));
+}
+
+export function artistLibrarySongs(library, name, catalogue = []) {
+  const ready = librarySongs(library);
+  const sources = new Set(catalogue.map(queueKey).filter(Boolean));
+  const matches = new Set(name ? filterSongs(ready, name, ['artist']) : []);
+  for (const song of ready) if (sources.has(queueKey(song))) matches.add(song);
+  const credits = new Set([...matches].map(song => song.artist).filter(Boolean));
+  return ready.filter(song => matches.has(song) || credits.has(song.artist));
 }
 
 export function librarySongs(library, filter = 'all', query = '') {

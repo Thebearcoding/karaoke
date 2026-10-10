@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
-import {createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, libraryArtists, historySuggestions} from './web/search.js';
+import {createVideoSearch, createViewHistory, previewURL, searchLibrary, artistLibrarySongs, librarySongs, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, libraryArtists, historySuggestions} from './web/search.js';
 
 function setup() {
   const requests = [], snapshots = [];
@@ -73,6 +73,29 @@ test('history search matches song and artist while preserving performance order 
   assert.deepEqual(filterSongs(songs,'tk'), [songs[1]]);
   assert.deepEqual(filterSongs(songs,'missing'), []);
   assert.equal(songs[0].id,'recent');
+});
+
+test('artist-page local songs match artist credits rather than song titles or unavailable cache', () => {
+  const songs = [
+    {id:'solo',title:'One',artist:'ＡＤＥＬＥ',status:'completed'},
+    {id:'credit',title:'Two',artist:'Adele, Guest Vocalist',status:'completed'},
+    {id:'title',title:'Adele',artist:'Other',status:'completed'},
+    {id:'missing',title:'Three',artist:'Adele',status:'video_evicted'},
+    {id:'other',title:'Four',artist:'Other',status:'completed'},
+  ];
+  assert.deepEqual(artistLibrarySongs(songs,'adele').map(s => s.id), ['solo','credit']);
+  assert.deepEqual(artistLibrarySongs(songs,'other').map(s => s.id), ['title','other']);
+  assert.deepEqual(artistLibrarySongs(songs,'unknown'), []);
+  assert.deepEqual(artistLibrarySongs(songs,''), []);
+  const translated = [
+    {id:'shared',artist:'Saved credit',url:'https://youtu.be/abcdefghijk',status:'completed'},
+    {id:'same-credit',artist:'Saved credit',url:'https://youtu.be/12345678901',status:'completed'},
+    {id:'different',artist:'Different',status:'completed'},
+    {id:'evicted',artist:'Saved credit',status:'video_evicted'},
+  ];
+  const catalogue = [{url:'https://music.youtube.com/watch?v=abcdefghijk'}];
+  assert.deepEqual(artistLibrarySongs(translated,'Translated credit',catalogue).map(s => s.id), ['shared','same-credit']);
+  assert.deepEqual(artistLibrarySongs(translated,'Unrelated',[]), []);
 });
 
 test('recent songs use the latest performance of each source', () => {

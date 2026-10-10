@@ -1,7 +1,7 @@
 import { Player } from './player.js';
 import { mountPreview } from './preview.js';
 import { isStaleRoomSnapshot, LocalPlayback, PlaybackTabs, RoomEvents, queueToTop, preparationRetry } from './room-state.js';
-import { createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, libraryArtists, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
+import { createVideoSearch, createViewHistory, previewURL, searchLibrary, artistLibrarySongs, librarySongs, libraryArtists, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
 
 const $ = id => document.getElementById(id);
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -185,12 +185,12 @@ function restoreView(saved) {
 
 function renderLibrary() {
   const query = $('song-input').value.trim();
-  $('song-input').placeholder = ['artists','artist'].includes(videoSource) ? '搜索歌手' : '搜索歌名或歌手';
   const isURL = /^https?:\/\//i.test(query);
   $('title-row').hidden = !isURL;
   $('submit-song').innerHTML = `${isURL ? '点歌' : '搜索'} ${icon('arrow')}`;
-  const search = isURL ? '' : query.toLocaleLowerCase();
-  const songs = librarySongs(library, search ? 'all' : filter, search);
+  const artist = videoSource === 'artist' ? catalogueSelection?.title || searchSnapshot?.artist?.metadata?.title : '';
+  const search = (artist || (isURL ? '' : query)).toLocaleLowerCase();
+  const songs = artist ? artistLibrarySongs(library, artist, searchSnapshot?.artist?.results) : librarySongs(library, search ? 'all' : filter, search);
   const page = paginateSongs(songs, libraryPage);
   if (receivedRoom) libraryPage = page.page;
   const preparedView = filter === 'all' && !search;
@@ -202,7 +202,7 @@ function renderLibrary() {
     const count = button.querySelector('span');
     if (count) count.textContent = librarySongs(library, button.dataset.filter).length;
   });
-  $('local-library').hidden = Boolean((searchQuery && videoSource !== 'songs') || (search && !songs.length));
+  $('local-library').hidden = Boolean((searchQuery && !['songs','artists','artist'].includes(videoSource)) || (search && !songs.length));
   document.querySelector('#local-library .filters').hidden = Boolean(search);
   document.querySelectorAll('.library-pagination').forEach(nav => {
     nav.hidden = page.pages < 2;
@@ -839,7 +839,7 @@ document.querySelectorAll('.library-pagination select').forEach(select => select
   changeLibraryPage(Number(select.value)));
 $('song-input').oninput = () => { if (view !== 'library') switchView('library'); editSearch(); };
 $('more-artists').onclick = () => {
-  changeSearchMode('artists', '');
+  changeSearchMode('songs', '');
   renderLibrary();
   $('song-input').focus({preventScroll:true});
 };
