@@ -96,10 +96,9 @@ html{scroll-padding-top:calc(var(--header-height,80px) + 20px)}
 @media(max-width:1100px){.queue-panel{border-left:0}.recent-songs{gap:16px}}
 @media(max-width:760px){.home-discovery{margin:24px 0 30px}.home-discovery h2{font-size:19px}.recent-songs{grid-template-columns:none;grid-auto-flow:column;grid-auto-columns:140px;gap:16px;overflow-x:auto;padding-bottom:8px;scroll-snap-type:x proximity;scrollbar-width:thin}.recent-song{scroll-snap-align:start;min-height:0;padding:0}.recent-preview{min-height:0}.recent-song>.music-add{min-height:44px}.recent-info strong{font-size:14px}.brand strong{font-size:23px}}
 
-/* Preserve the content scale that works on tablets; wide space separates tasks. */
+/* Keep the shared frame stable across views; fullscreen expands the video. */
 @media(min-width:1101px){
   body{--desktop-width:1200px}
-  body[data-view=player]{--desktop-width:1480px}
   .topbar{padding-inline:max(32px,calc((100vw - var(--desktop-width) + 64px)/2))}
   .workspace{max-width:var(--desktop-width);grid-template-columns:minmax(0,1fr) 272px;gap:32px;padding-inline:32px}
   .transport{padding-inline:32px}

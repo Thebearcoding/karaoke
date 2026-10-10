@@ -46,7 +46,7 @@ function renderMixer() {
   $('lead-toggle').setAttribute('aria-pressed', String(level > 0));
   $('lead-value').textContent = `${Math.round(level * 100)}%`;
   $('lead-down').disabled = level <= 0;
-  $('lead-up').disabled = level >= 1;
+  $('lead-up').disabled = level <= 0 || level >= 1;
 }
 
 function renderStorage() {
