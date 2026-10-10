@@ -1687,6 +1687,24 @@ def test_quoted_video_credits_fill_missing_fields_without_overwriting_music_tags
         assert video_song_info(dict(metadata, title=title)) == dict(title=title, artist='', duration_seconds=0)
 
 
+def test_shorter_platform_translation_does_not_discard_the_native_title(tmp_path, monkeypatch):
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    body = ['晚風吹過山谷我們一起唱歌', '星光照亮回家的路走向遠方']
+    def additional(provider, *args, **kwargs):
+        return None, dict(provider=provider, recording_identity=dict(
+            video_id='abcdefghijk', title='Evening Wind', artist='林林'))
+    def published(song, *args):
+        assert '晚風' in lyric_lookup.song_names(song, 'title')
+        return body, dict(provider='line_music', language='Chinese')
+    monkeypatch.setattr(lyric_consensus, 'fetch_additional_lyrics', additional)
+    monkeypatch.setattr(lyric_lookup, 'fetch_published_lyrics', published)
+    monkeypatch.setattr(lyric_lookup, 'fetch_lyrics', lambda *args: dict(status='unavailable'))
+    result = lyric_lookup.prepare_online_lyrics(dict(url=URL), dict(id='abcdefghijk',
+        title='林林 Lin Lin【晚風 Evening Wind】Official Music Video'), 30, StageCache(tmp_path), 'unused', None)
+    assert result['lines'] == body and result['title'] == '晚風 Evening Wind'
+
+
 def test_known_video_credits_do_not_skip_lyrics_in_its_description(tmp_path, monkeypatch):
     from karaoke import lyric_lookup, lyric_consensus
     from karaoke.stage_cache import StageCache
@@ -2641,6 +2659,16 @@ def test_netease_reads_duet_lyrics_after_matching_reordered_credit(tmp_path, mon
         assert lines == ['微風裡慢慢歌唱', '星光下靜靜傾聽']
         assert report['url'].endswith('id=2')
     assert len(calls) == 2
+
+
+def test_lyric_search_preserves_provider_declared_title_and_artist_aliases():
+    from karaoke.lyric_lookup import published_candidate
+    body = '夜の向こうに光が見える\n一緒に歩いて明日を探そう'
+    row = dict(trackId=123, trackTitle='帰り道', trackAliases=['Way Home'],
+        artists=[dict(artistName='夕灯', artistAliases=['Evening Light'])], album={}, lyrics=body)
+    lines, report = published_candidate([row], dict(title='Way Home', artist='Evening Light'), '')
+    assert lines == body.splitlines() and report['artists'] == ['夕灯']
+    assert published_candidate([dict(row, trackAliases=[])], dict(title='Another song', artist='Evening Light'), '')[0] is None
 
 
 @pytest.mark.parametrize('first_hit', ['yes', 'wrong_identity', 'short', 'header'])
@@ -6533,6 +6561,34 @@ def test_unavailable_published_readings_do_not_fail_valid_lyrics(tmp_path, monke
     assert packet['status'] == 'unavailable' and packet['error']
     assert readings.load_readings(path, [dict(text=t) for t in lines])[0] == []
     assert readings.resolve_readings(lines[0])[0] == ((0, 2, 'きょう'), (3, 4, 'そら'))
+
+
+@pytest.mark.parametrize('case', ['native', 'alias', 'wrong_work', 'live'])
+def test_published_ruby_source_supplies_lyrics_without_singing_the_readings(tmp_path, monkeypatch, case):
+    from karaoke import lyric_readings, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    body = ['故郷へ向かう長い道を今も歩いている', '明日の朝には会えるから今日は一緒に歌おう', 'あの日の星を見上げながら夜の海を渡ってゆこう']
+    song = dict(title='帰り道', artist='夕灯')
+    if case == 'alias':song = dict(title='Way Home', artist='Evening Light')
+    if case == 'live':song['title'] += ' (Live)'
+    if case == 'wrong_work':song['artist'] = 'Another singer'
+    calls = []
+    html = ('<meta property="og:title" content="帰り道 歌詞 夕灯 ふりがな付 - うたてん">'
+            '<div class="comments">Wrong song</div><div class="hiragana">' +
+            '<br>'.join(body).replace('故郷', '<span class="ruby"><span class="rb">故郷</span><span class="rt">ふるさと</span></span>') +
+            '</div><div class="romaji">Never sing this</div>')
+    def read(url):
+        calls.append(url)
+        return '<a href="/lyric/example/">result</a>' if '/search?' in url else html
+    monkeypatch.setattr(lyric_readings, 'read_page', read)
+    for _ in range(2):
+        lines, report = lyric_consensus.fetch_additional_lyrics('utaten', song, {}, StageCache(tmp_path), 180,
+            reference_lines=body if case == 'alias' else ())
+        assert lines == (None if case == 'wrong_work' else body)
+        if lines:
+            assert report['recording_mismatches'] == (['version'] if case == 'live' else [])
+            assert report['url'] == 'https://utaten.com/lyric/example/'
+    assert len(calls) == (3 if case == 'wrong_work' else 2)
 
 
 def test_changed_published_readings_invalidate_both_render_caches(tmp_path, monkeypatch):

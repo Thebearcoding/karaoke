@@ -19,13 +19,17 @@ class ReadingPage(HTMLParser):
     """Read UtaTen's ruby body; navigation, romanization and comments are excluded."""
     def __init__(self, html):
         super().__init__(convert_charrefs=True)
-        self.text, self.spans, self.links = '', [], []
+        self.text, self.spans, self.links, self.identity = '', [], [], {}
         self.depth, self.stack, self.ruby, self.in_reading = 0, [], None, False
         self.feed(html)
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         classes = attrs.get('class', '').split()
+        if tag == 'meta' and attrs.get('property') == 'og:title':
+            match = re.fullmatch(r'(.+?) 歌詞 (.+?) ふりがな付(?: - .+)?', attrs.get('content', ''))
+            if match:
+                self.identity = dict(title=match[1].strip(), artist=match[2].strip())
         if tag == 'a' and re.fullmatch(r'/lyric/[A-Za-z0-9]+/', attrs.get('href', '')):
             if attrs['href'] not in self.links:
                 self.links.append(attrs['href'])

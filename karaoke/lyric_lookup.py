@@ -447,12 +447,17 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
         if not isinstance(title, str) or not isinstance(row.get('artists'), list) or not isinstance(row.get('album'), dict):
             continue
         artists = [a.get('artistName') for a in row['artists'] if isinstance(a, dict)]
+        artist_aliases = [name for a in row['artists'] if isinstance(a, dict)
+                          for name in a.get('artistAliases') or [] if isinstance(name, str)]
         album = row['album'].get('albumTitle', '')
         if not isinstance(album, str):
             continue
-        if not any(artist_credit_matches(credit, artists) for credit in song_names(song, 'artist')):
+        if not any(artist_credit_matches(credit, artists) or artist_credit_matches(credit, artist_aliases)
+                   for credit in song_names(song, 'artist')):
             continue
-        title_match = any(identity(name, title=True) & identity(title, title=True) for name in song_names(song, 'title'))
+        title_aliases = [title, *(name for name in row.get('trackAliases') or [] if isinstance(name, str))]
+        title_match = any(identity(name, title=True) & identity(alias, title=True)
+                          for name in song_names(song, 'title') for alias in title_aliases)
         if not title_match:
             identity_candidates.append(dict(title=title, track_id=str(row.get('trackId', ''))))
             if not usable_reference:
@@ -612,6 +617,43 @@ def catalogue_lyric_identity(song, duration, cache):
             return None, dict(report, status='ambiguous')
         return ordered[0], dict(report, status='candidate')
     return None, report
+
+
+def fetch_reading_lyrics(song, cache, duration=None, reference_lines=(), source_title=None):
+    """Reuse the published ruby parser for original Japanese text as well."""
+    from .lyric_readings import ReadingPage, read_page
+    title, artist = song_names(song, 'title')[-1], song_names(song, 'artist')[-1]
+    fetch = lambda url: cached_lyric_request('utaten_readings', url, cache, lambda: read_page(url))
+    attempts, seen = [], set()
+    reference = ''.join(reference_lines)
+    for query in (dict(title=title, artist_name=artist), dict(title=title)):
+        url = 'https://utaten.com/search?'+urlencode(query)
+        listing = ReadingPage(fetch(url))
+        for link in listing.links[:5]:
+            if link in seen:
+                continue
+            seen.add(link)
+            url = 'https://utaten.com'+link
+            page = ReadingPage(fetch(url))
+            actual = page.identity
+            title_match = any(identity(name, title=True) & identity(actual.get('title'), title=True)
+                              for name in song_names(song, 'title'))
+            artist_match = any(artist_credit_matches(name, [actual.get('artist')]) for name in song_names(song, 'artist'))
+            mismatch = recording_mismatches(song, source_title, actual.get('title'), None)
+            text, excluded = published_lyric_lines(page.text, actual.get('title') or '', [actual.get('artist')])
+            left, right = text_units(''.join(text), 'Japanese'), text_units(reference, 'Japanese')
+            matched = sum(b.src_end-b.src_start for b in Levenshtein.opcodes(left, right) if b.tag == 'equal')
+            corroborated = (min(len(left), len(right)) >= 40 and min(len(set(left)), len(set(right))) >= 10 and
+                            matched >= min(len(left), len(right))*.9 and matched >= max(len(left), len(right))*.65)
+            attempts.append(dict(url=url, identity=actual, title_match=title_match, artist_match=artist_match,
+                                 corroborated=corroborated))
+            if text and mismatch is not None and (title_match and artist_match or corroborated) and not short_lyric_text(text, duration):
+                return text, dict(status='candidate', provider='utaten', publisher='utaten', language=text_language('\n'.join(text)),
+                    url=url, track=actual.get('title'), artist=actual.get('artist'), attempts=attempts,
+                    text_sha256=hashlib.sha256(page.text.encode()).hexdigest(), excluded_credit_lines=excluded,
+                    text_transform='published_ruby_body_without_readings', recording_mismatches=mismatch,
+                    provider_timestamps_used=False)
+    return None, dict(status='no_matching_published_text', provider='utaten', attempts=attempts)
 
 
 def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_root):
@@ -775,7 +817,8 @@ def prepared_lyrics_identity(url, metadata):
     root = Path(__file__).parent
     return dict(url=url, metadata_sha256=hashlib.sha256(json.dumps(metadata, sort_keys=True).encode()).hexdigest(),
                 code_sha256={name: hashlib.sha256((root/name).read_bytes()).hexdigest()
-                             for name in ('lyric_lookup.py', 'lyric_consensus.py', 'song_sources.py', 'source_captions.py')})
+                             for name in ('lyric_lookup.py', 'lyric_consensus.py', 'song_sources.py', 'source_captions.py',
+                                          'lyric_readings.py')})
 
 
 def read_prepared_lyrics(path, url, metadata):

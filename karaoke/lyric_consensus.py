@@ -53,6 +53,11 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
     """Read source-bound Music lyrics or an identity-matched NetEase release."""
     if provider != 'youtube_music' and (not song.get('title') or not song.get('artist')):
         return None, dict(provider=provider, status='missing_identity')
+    if provider == 'utaten':
+        try:
+            return lookup.fetch_reading_lyrics(song, cache, duration, reference_lines, metadata.get('title'))
+        except Exception as error:
+            return None, dict(lookup.lyric_request_error(error), provider=provider)
     if provider == 'youtube_music' and not re.fullmatch(r'[A-Za-z0-9_-]{11}', metadata.get('id') or ''):
         return None, dict(provider=provider, status='missing_video_identity')
     path, stage = cache.root/(provider+'-lyrics.json'), 'fetch_'+provider+'_lyrics'
@@ -76,8 +81,9 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
                     packet = lookup.cached_lyric_request(provider, url, cache, lambda: read_document(url, timeout=10))
                     if packet.get('code') != 200:
                         raise ValueError('NetEase lyric search rejected the request')
-                    rows = [dict(trackId=r.get('id'), trackTitle=r.get('name'),
-                        artists=[dict(artistName=a.get('name')) for a in r.get('ar') or [] if isinstance(a, dict)],
+                    rows = [dict(trackId=r.get('id'), trackTitle=r.get('name'), trackAliases=r.get('alia') or r.get('tns') or [],
+                        artists=[dict(artistName=a.get('name'), artistAliases=a.get('alias') or a.get('tns') or [])
+                                 for a in r.get('ar') or [] if isinstance(a, dict)],
                         album=dict(albumTitle=(r['al'].get('name') or '') if isinstance(r.get('al'), dict) else ''),
                         duration_seconds=r['dt']/1000 if isinstance(r.get('dt'), (int, float)) else None)
                         for r in (packet.get('result') or {}).get('songs') or [] if isinstance(r, dict)]
@@ -379,6 +385,7 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
         if not recording.get('video_id') or recording['video_id'] != metadata.get('id'):
             recording = {}
         source_title_preferred = bool(not preserve_title and recording.get('title') and
+            len(lookup.names(song.get('title'), title=True)) == 1 and
             len(recording['title']) < len(song.get('title') or '') and
             lookup.identity(recording['title'], title=True) & lookup.identity(song.get('title'), title=True))
         for key in ('title', 'artist'):
@@ -429,6 +436,10 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
                                             identity_candidates=report['identity_candidates']))
                 continue
             results[index] = retry
+    if (any(lookup.text_language(''.join(text)) == 'Japanese' for text, _ in results if text) or
+            not reference and re.search(r'[\u3040-\u30ff\u3400-\u9fff]', song.get('title') or '')):
+        results.append(fetch(('utaten', lambda: fetch_additional_lyrics('utaten', song, metadata, cache, duration,
+                                                                       reference_lines=reference or ()))))
     candidates = [(lines, report) for lines, report in results if lines]
     _, review = compare_lyrics(candidates)
     lines = None
@@ -463,7 +474,7 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
     if usable:
         # A known different performance remains a weaker fallback. Duration
         # alone cannot establish that: music videos add intros and credits.
-        preferred = ('line_music', 'youtube_music', 'netease', 'video_description', 'lrclib')
+        preferred = ('utaten', 'line_music', 'youtube_music', 'netease', 'video_description', 'lrclib')
         eligible = {i for i in usable if not set(candidates[i][1].get('recording_mismatches') or []) - {'duration'}}
         eligible = eligible or usable
         review['eligible_sources'] = sorted(eligible)
