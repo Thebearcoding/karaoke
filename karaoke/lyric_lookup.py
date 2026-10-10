@@ -877,12 +877,13 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 description_sha256=hashlib.sha256(description.encode()).hexdigest(), lyric_line_numbers=selected,
                 language=song.get('language') or text_language(''.join(text)), url=request['url'],
                 text_sha256=hashlib.sha256('\n'.join(text).encode()).hexdigest())
-        from .lyric_consensus import fetch_lyric_consensus
+        from .lyric_consensus import fetch_lyric_consensus, resolve_recording_artists
         lines, report = fetch_lyric_consensus(song, metadata, duration, cache, read_description, preserve_title)
         if not lines or (parsed and report.get('crosscheck', {}).get('status') == 'insufficient_sources'):
             retained_lines, retained_report, retained_song = lines, report, dict(song)
             original = {key: song.get(key) for key in ('title', 'artist')}
             previous, attempts, accepted = report, [], False
+            artist_resolution = None
             # Retain a platform-confirmed performer while resolving an upload
             # title. A description can also credit producers or session players.
             for key in ('title', 'artist'):
@@ -895,6 +896,8 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                     if r.get('provider') == 'youtube_music' and
                     (r.get('recording_identity') or {}).get('video_id') == metadata.get('id')), {})
                 confirmed_alias = recording.get(key)
+                if key == 'artist' and not retained_lines and recording.get('artists'):
+                    confirmed_alias, artist_resolution = resolve_recording_artists(recording, cache)
                 if confirmed_alias and not identity(confirmed_alias, title=key == 'title') & identity(song.get(key), title=key == 'title'):
                     song[key] = confirmed_alias
                     description_text = None
@@ -927,6 +930,8 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 report = dict(report, identity_recovery=dict(original=original,
                     resolved={key: song.get(key) for key in original}, recovered=accepted,
                     attempts=attempts, previous_lookup=previous))
+            if artist_resolution:
+                report = dict(report, artist_identity_lookup=artist_resolution)
         # Watch-page "artists" can merely repeat a video's upload channel.
         # Only recover missing credits; never replace an explicit performer.
         if (not lines and not request.get('artist') and not video_song_info(metadata).get('artist')

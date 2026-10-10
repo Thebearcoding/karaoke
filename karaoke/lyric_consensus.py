@@ -65,6 +65,33 @@ def compare_lyrics(candidates):
     return (candidates[ordered[0][0]][0] if agreed else None), report
 
 
+def resolve_recording_artists(recording, cache):
+    """Read names by the artist IDs on this recording, never by name search."""
+    from ytmusicapi import YTMusic
+    resolved = []
+    with requests.Session() as session:
+        session.request = functools.partial(session.request, timeout=10)
+        session.hooks['response'].append(lambda response, *a, **kw: response.raise_for_status())
+        music = YTMusic(language='zh_CN', requests_session=session)
+        for artist in recording.get('artists') or []:
+            row = dict(artist)
+            if row.get('id'):
+                try:
+                    page = lookup.cached_lyric_request('youtube_music',
+                        dict(method='artist', browse_id=row['id'], locale='zh_CN'), cache,
+                        lambda: music.get_artist(row['id']))
+                    if isinstance(page.get('name'), str) and page['name'].strip():
+                        # The response's channelId is the subscription channel,
+                        # not necessarily the artist browse ID we requested.
+                        row.update(name=page['name'].strip(), original_name=artist.get('name'),
+                                   subscription_channel_id=page.get('channelId'))
+                except Exception as error:
+                    row['error'] = lookup.lyric_request_error(error)
+            resolved.append(row)
+    name = ' · '.join(row['name'] for row in resolved if row.get('name'))
+    return name or recording.get('artist'), dict(provider='youtube_music', artists=resolved)
+
+
 def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, reference_lines=()):
     """Read source-bound Music lyrics or an identity-matched NetEase release."""
     if provider != 'youtube_music' and (not song.get('title') or not song.get('artist')):
@@ -92,25 +119,32 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
             recording_identity = {}
             try:
                 if provider == 'netease':
-                    query = ' '.join(lookup.song_names(song, k)[-1] for k in ('title','artist'))
-                    url = 'https://music.163.com/api/cloudsearch/pc?'+urlencode(dict(s=query, type=1, limit=30, offset=0))
-                    packet = lookup.cached_lyric_request(provider, url, cache, lambda: read_document(url, timeout=10))
-                    if packet.get('code') != 200:
-                        raise ValueError('NetEase lyric search rejected the request')
-                    rows = [dict(trackId=r.get('id'), trackTitle=r.get('name'), trackAliases=(r.get('alia') or []) + (r.get('tns') or []),
-                        artists=[dict(artistName=a.get('name'), artistAliases=(a.get('alias') or []) + (a.get('tns') or []))
-                                 for a in r.get('ar') or [] if isinstance(a, dict)],
-                        album=dict(albumTitle=(r['al'].get('name') or '') if isinstance(r.get('al'), dict) else ''),
-                        duration_seconds=r['dt']/1000 if isinstance(r.get('dt'), (int, float)) else None)
-                        for r in (packet.get('result') or {}).get('songs') or [] if isinstance(r, dict)]
                     def lyrics(row):
                         if not str(row['trackId']).isdigit():
                             return None
                         url = 'https://music.163.com/api/song/lyric?'+urlencode(dict(id=row['trackId'], lv=-1, kv=-1, tv=-1))
                         data = lookup.cached_lyric_request(provider, url, cache, lambda: read_document(url, timeout=10))
                         return data.get('lrc', {}).get('lyric')
-                    lines, report = lookup.published_candidate(rows, song, metadata.get('title'),
-                        read_lyrics=lyrics, allow_recording_mismatch=True, duration=duration, reference_lines=reference_lines)
+                    title, artist = (lookup.song_names(song, k)[-1] for k in ('title','artist'))
+                    attempted, rejected = [], []
+                    for query in dict.fromkeys([title+' '+artist, title]):
+                        url = 'https://music.163.com/api/cloudsearch/pc?'+urlencode(dict(s=query, type=1, limit=30, offset=0))
+                        packet = lookup.cached_lyric_request(provider, url, cache, lambda: read_document(url, timeout=10))
+                        if packet.get('code') != 200:
+                            raise ValueError('NetEase lyric search rejected the request')
+                        rows = [dict(trackId=r.get('id'), trackTitle=r.get('name'), trackAliases=(r.get('alia') or []) + (r.get('tns') or []),
+                            artists=[dict(artistName=a.get('name'), artistAliases=(a.get('alias') or []) + (a.get('tns') or []))
+                                     for a in r.get('ar') or [] if isinstance(a, dict)],
+                            album=dict(albumTitle=(r['al'].get('name') or '') if isinstance(r.get('al'), dict) else ''),
+                            duration_seconds=r['dt']/1000 if isinstance(r.get('dt'), (int, float)) else None)
+                            for r in (packet.get('result') or {}).get('songs') or [] if isinstance(r, dict)]
+                        attempted.append(query)
+                        lines, report = lookup.published_candidate(rows, song, metadata.get('title'),
+                            read_lyrics=lyrics, allow_recording_mismatch=True, duration=duration, reference_lines=reference_lines)
+                        rejected.extend(report.get('rejected_candidates', []))
+                        if lines:
+                            break
+                    report.update(queries=attempted, rejected_candidates=rejected)
                     if lines:
                         report['url'] = 'https://music.163.com/#/song?id='+report['url'].rsplit('/',1)[-1]
                 else:
@@ -127,7 +161,8 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
                             raise ValueError('Music lyrics refer to another recording')
                         track = listing['tracks'][0]
                         recording_identity = dict(title=track.get('title') or '', video_id=video,
-                            artist=' · '.join(a['name'] for a in track.get('artists', []) if a.get('name')))
+                            artist=' · '.join(a['name'] for a in track.get('artists', []) if a.get('name')),
+                            artists=[dict(name=a.get('name'), id=a.get('id')) for a in track.get('artists') or []])
                         result = (lookup.cached_lyric_request(provider,
                             dict(video_id=video, method='lyrics', browse_id=listing['lyrics'], locale='zh_CN'), cache,
                             lambda: music.get_lyrics(listing['lyrics'])) if listing.get('lyrics') else None)

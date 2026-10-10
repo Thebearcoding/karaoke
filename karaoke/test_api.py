@@ -1372,6 +1372,57 @@ def test_lyric_identity_reuses_platform_native_alias_without_model(tmp_path, mon
         assert result['provenance']['lyric_lookup']['identity_recovery']['recovered']
 
 
+@pytest.mark.parametrize('scenario', ['recover', 'explicit', 'other_video', 'subscription_channel', 'usable', 'artist_error'])
+def test_lyric_identity_resolves_recording_artist_id_only_after_lookup_fails(tmp_path, monkeypatch, scenario):
+    from urllib.parse import parse_qs, urlsplit
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    from openai import OpenAIError
+    import ytmusicapi
+    body = ['微風裡慢慢歌唱', '星光下靜靜傾聽']
+    calls = []
+    class Music:
+        def __init__(self, **kwargs): pass
+        def get_watch_playlist(self, videoId, limit):
+            calls.append('watch')
+            return dict(lyrics=None, tracks=[dict(videoId='bbbbbbbbbbb' if scenario=='other_video' else videoId,
+                title='Evening', artists=[dict(name='Lin Lin', id='artist-id')])])
+        def search(self, *args, **kwargs): return []
+        def get_artist(self, browse_id):
+            calls.append(('artist', browse_id))
+            if scenario=='artist_error': raise ConnectionError('temporary provider error')
+            return dict(name='林林', channelId='subscription-id' if scenario=='subscription_channel' else browse_id)
+    def read(url, **kwargs):
+        query = parse_qs(urlsplit(url).query)
+        if 'cloudsearch' in url:
+            calls.append(('query',query['s'][0]))
+            artist = 'Lin Lin' if scenario=='usable' else '林林'
+            return dict(code=200, result=dict(songs=[dict(id=1,name='Evening',ar=[dict(name=artist)],dt=30000)]
+                if query['s'][0]=='Evening' or scenario=='usable' else []))
+        calls.append('body')
+        return dict(lrc=dict(lyric='\n'.join(body)))
+    monkeypatch.setattr(ytmusicapi,'YTMusic',Music)
+    monkeypatch.setattr(lyric_consensus,'read_document',read)
+    monkeypatch.setattr(lyric_lookup,'extract_song_metadata',lambda *a:(_ for _ in ()).throw(OpenAIError('unavailable')))
+    monkeypatch.setattr(lyric_lookup,'fetch_lyrics',lambda *a:dict(status='no_supported_recording'))
+    monkeypatch.setattr(lyric_lookup,'fetch_published_lyrics',lambda *a,**k:(None,dict(provider='line_music')))
+    monkeypatch.setattr(lyric_lookup,'fetch_structured_lyrics',lambda *a,**k:(None,dict(provider='lyricsweb')))
+    monkeypatch.setattr(lyric_lookup,'fetch_reading_lyrics',lambda *a,**k:(None,dict(provider='utaten')))
+    request=dict(url=URL,**({'artist':'Lin Lin'} if scenario=='explicit' else {}))
+    metadata=dict(id='aaaaaaaaaaa',track='Evening',artist='Lin Lin')
+    for _ in range(2):
+        result=lyric_lookup.prepare_online_lyrics(request,metadata,30,StageCache(tmp_path),'unused',None)
+        assert bool(result)==(scenario in ('recover','subscription_channel','usable'))
+    assert calls.count('watch')==1
+    assert calls.count(('artist','artist-id'))==(1 if scenario in ('recover','subscription_channel','artist_error') else 0)
+    assert calls.count(('query','Evening'))==(0 if scenario=='usable' else 1)
+    if result:
+        assert result['lines']==body and calls.count('body')==1
+        if scenario=='recover':
+            assert result['artist']=='林林'
+            assert result['provenance']['lyric_lookup']['artist_identity_lookup']['artists'][0]['id']=='artist-id'
+
+
 @pytest.mark.parametrize('tag,canonical,model_code', [('ko-KR','Korean','ko'),
     ('iw','Hebrew','he'),('jw','Javanese','jw'),('cmn','Chinese','zh'),
     ('yue','Cantonese','yue'),('粤语','Cantonese','yue'),('zh-yue','Cantonese','yue')])
@@ -2106,6 +2157,28 @@ def test_netease_lyrics_use_release_metadata_before_provider_order(tmp_path, mon
         assert lines and report['url'].endswith('id=2')
         assert report['duration_seconds'] == 316.933
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize('artist', ['Singer', 'Unrelated performer'])
+def test_netease_broadens_query_without_broadening_result_identity(tmp_path, monkeypatch, artist):
+    from urllib.parse import parse_qs, urlsplit
+    from karaoke import lyric_consensus as module
+    from karaoke.stage_cache import StageCache
+    calls = []
+    def read(url, **kwargs):
+        query=parse_qs(urlsplit(url).query)
+        if 'cloudsearch' in url:
+            calls.append(query['s'][0])
+            return dict(code=200,result=dict(songs=[dict(id=1,name='Evening',ar=[dict(name=artist)])]
+                if query['s'][0]=='Evening' else []))
+        calls.append('body')
+        return dict(lrc=dict(lyric='Stars above the quiet shore\nWe sing until the morning comes'))
+    monkeypatch.setattr(module,'read_document',read)
+    for _ in range(2):
+        lines,report=module.fetch_additional_lyrics('netease',dict(title='Evening',artist='Singer · Composer'),{},StageCache(tmp_path))
+        assert bool(lines)==(artist=='Singer')
+    assert calls==['Evening Singer · Composer','Evening']+(['body'] if lines else [])
+    assert report['queries']==['Evening Singer · Composer','Evening']
 
 
 def test_published_lyric_release_preference_keeps_complete_fallbacks():
