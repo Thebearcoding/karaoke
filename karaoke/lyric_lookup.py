@@ -1,6 +1,7 @@
 """Optional independent lyric text; provider timestamps never become onsets."""
 import hashlib
 import html
+from difflib import SequenceMatcher
 from functools import lru_cache
 import json
 import math
@@ -108,9 +109,18 @@ def names(value, *, title=False):
                        r'(?:official\s+)?lyrics?\s+video)(?:\s+(?:hd|4k))?[\])]\s*$', '', value, flags=re.I)
         if clean and clean != value:
             return result + names(clean, title=True)
+    # A bilingual title may contain punctuation and a version label on both
+    # sides ("日本語 (Live) - English (Live)"). Preserve those labels instead
+    # of requiring the entire native half to contain only non-Latin letters.
+    pair = re.fullmatch(r'(.+?)\s+[-–—]\s+(.+)', value)
+    if pair:
+        native_side = lambda text: any(c.isalpha() and 'LATIN' not in unicodedata.name(c, '') for c in text)
+        if native_side(pair[1]) != native_side(pair[2]) and version_tags(pair[1]) == version_tags(pair[2]):
+            result.extend((pair[2], pair[1]) if native_side(pair[1]) else (pair[1], pair[2]))
+            return list(dict.fromkeys(result))
     # Platforms publish original names together with Latin-script aliases.
     # Version labels are not translations: never strip "Live", "Remix", etc.
-    native = r'[^\W\d_\x00-\x7f]+(?:[ ·][^\W\d_\x00-\x7f]+)*'
+    native = r'[^\W\d_\x00-\x7f]+(?:[ ,·、&/]+[^\W\d_\x00-\x7f]+)*'
     latin = r'[A-Za-z][\x20-\x7e]*?'
     match = re.fullmatch(rf'({native})(?:\s+(?:[-–—]\s+)?({latin})|\s*\(({latin})\))', value)
     reverse = re.fullmatch(rf'({latin})(?:\s+({native})|\s*\(({native})\))', value)
@@ -120,6 +130,12 @@ def names(value, *, title=False):
                 r'라이브|리믹스|어쿠스틱|인스트루멘탈|버전', local):
             result.extend((english, local))
     return result
+
+
+def song_names(song, key):
+    """Keep source-confirmed spellings available after choosing a display name."""
+    return list(dict.fromkeys(name for value in [song.get(key), *song.get(key+'_aliases', [])]
+                              for name in names(value, title=key == 'title')))
 
 
 def identity(value, *, title=False):
@@ -140,6 +156,12 @@ def identity(value, *, title=False):
                                  r'\s*《[^《》()]+》\s*(?:主题[歌曲]|片[头尾]曲|插曲)\)', name)
             if match:
                 aliases.append(match[1])
+            # Performance/release labels describe the recording, not the work
+            # title. recording_mismatches still records them separately.
+            base = re.sub(r'\s*\((?:(?:live|现场|現場)(?:\b|[ |/]).*?|cover(?: version)?|(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?)\)\s*$',
+                          '', name, flags=re.I).strip()
+            if base and base != name:
+                aliases.append(base)
     return {''.join(c for c in name if c.isalnum()) for name in aliases} - {''}
 
 
@@ -156,6 +178,7 @@ def artist_credit_matches(credit, artists):
     if len(members) < 2 or not all(members):
         return False
     expected |= identity(''.join(re.split(separators, credit, flags=re.I)))
+    expected.update(name for alias in names(credit) for name in identity(alias))
 
     @lru_cache(None)
     def consume(text, remaining):
@@ -179,7 +202,7 @@ def live_performance(value):
 
 
 def fetch_lyrics(song, metadata_path, cache):
-    titles, artists = names(song.get('title'), title=True), names(song.get('artist'))
+    titles, artists = song_names(song, 'title'), song_names(song, 'artist')
     if not titles or not artists or not metadata_path.is_file():
         return dict(status='missing_identity')
     queries = [dict(track_name=titles[0], artist_name=artists[0])]
@@ -266,9 +289,9 @@ def published_lyric_lines(text, title, artists=()):
     role = (r'歌名|歌曲|词|曲|词曲|作词|作曲|编曲(?:协力)?|演唱|专辑|发行日|音乐制作(?:人|助理)?|制作人|制作助理|监制|'
         r'弦乐(?:编写|编曲)?|(?:人声|配唱|伴唱|主唱|合唱|童声|合声|和声|和音)(?:编写|编曲|编配|制作|录音)?(?:人|师|指导)?|钢琴|(?:低音)?吉他|贝斯|鼓|器乐|'
         r'(?:第[一二三四\d]+)?(?:小提琴|中提琴|大提琴)|录音(?:师|助理|(?:工作)?室)?|混音(?:师|(?:工作)?室)?|母带(?:后期(?:处理|制作))?(?:人|工程师|录音室)?|音频(?:助理|工程师)|'
-        r'title|artist|album|composer|lyricist|producer|lyrics|music(?: production)?|written by|produced by|'
+        r'(?:song )?title|song name|artist|album|composer|lyricist|producer|lyrics|music(?: production)?|written by|produced by|'
         r'guitar|bass|drums|piano|strings|instrumental|recorded by|mixed by|mastered by|audio engineer|assistant engineer|'
-        r'arrangement|(?:backing |lead )?vocal(?: arrangement)?|(?:recording|mixing|mastering)(?: engineer| studio)?(?: \(vocals\))?|'
+        r'arrange(?:ment|r)|(?:backing |lead )?vocals?(?: arrangement)?|(?:recording|mixing|mastering)(?: engineer| studio)?(?: \(vocals\))?|'
         r'production assistant|[OS]P|O[AC](?:\s*/\s*O[AC])?|publisher|copyright')
     # A translated role is still metadata: "编曲 Arrangement: ...".
     # Require complete recognized labels before the colon, not arbitrary prose.
@@ -291,7 +314,8 @@ def published_lyric_lines(text, title, artists=()):
             continue
         if line:
             rows.append((i, line))
-    is_credit = lambda line: bool(credit.match(converter.convert(unicodedata.normalize('NFKC', line))))
+    is_credit = lambda line: bool(credit.match(converter.convert(unicodedata.normalize('NFKC', line))) or
+                                 re.fullmatch(r'credits?(?:\s+list)?\s*[:：]?', line, re.I))
     artist_ids = set().union(*(identity(artist) for artist in artists))
     def title_artist(line):
         return any(identity(candidate_title, title=True) & identity(title, title=True) and
@@ -319,6 +343,59 @@ def published_lyric_lines(text, title, artists=()):
     elif any(len(timestamps.get(i, [])) > 1 for i, _ in body):
         raise ValueError('Repeated LRC lines need a fully timed body to preserve lyric order')
     return join_punctuation_lines([line for _, line in body]), sorted(metadata+[i for i, _ in rows[:first]+rows[stop:]])
+
+
+def description_lyrics(metadata, reference_lines=()):
+    """Select an explicitly labelled or corroborated block, never generate text."""
+    from rapidfuzz.fuzz import partial_ratio
+    description = (metadata.get('description') or '')[:30000]
+    rows = list(enumerate(description.splitlines(), 1))
+    converter = OpenCC('tw2s')
+    normalize = lambda text: ''.join(c for c in converter.convert(text).casefold() if c.isalnum())
+    reference = normalize(''.join(reference_lines))
+    song = video_song_info(metadata)
+    sections, section, labelled = [], [], False
+    for number, line in [*rows, (len(rows)+1, '#end')]:
+        if re.fullmatch(r'[\[【<＜#\s]*(?:lyrics?|歌詞|歌词|가사)[\]】>＞\s:：]*', line, re.I):
+            section, labelled = [], True
+        elif re.search(r'https?://|www\.|^#|^[-_=━─]{2,}$', line.strip()):
+            if section:
+                sections.append((section, labelled))
+            section, labelled = [], False
+        else:
+            section.append((number, line.strip()))
+    candidates = []
+    for section, labelled in sections:
+        if not labelled:
+            if len(reference) < 40:
+                continue
+            matching = [i for i, (_, line) in enumerate(section) if len(normalize(line)) >= 4 and
+                        partial_ratio(normalize(line), reference) >= 85]
+            if len(matching) < 3:
+                continue
+            first, last = matching[0], matching[-1]
+            # Retain whole opening/closing stanzas, including orthographic
+            # variants that did not match a particular reference spelling.
+            while first and section[first-1][1]: first -= 1
+            while last+1 < len(section) and section[last+1][1]: last += 1
+            section = section[first:last+1]
+        selected = [(n, line) for n, line in section if line]
+        text, excluded = published_lyric_lines('\n'.join(line for _, line in selected),
+            song['title'], [song['artist']])
+        body = normalize(''.join(text))
+        overlap = sum(b.size for b in SequenceMatcher(None, body, reference, autojunk=False).get_matching_blocks())
+        if not body or (not labelled and overlap < max(len(reference), len(body))*.7):
+            continue
+        candidates.append((labelled, overlap, text, [n for i, (n, _) in enumerate(selected, 1) if i not in excluded]))
+    if not candidates:
+        return None
+    labelled, _, text, numbers = max(candidates, key=lambda item: item[:2])
+    return text, dict(provider='video_description', publisher='youtube', kind='video_description',
+        language=text_language(''.join(text)), url='https://www.youtube.com/watch?v='+metadata.get('id', ''),
+        description_sha256=hashlib.sha256(description.encode()).hexdigest(), lyric_line_numbers=numbers,
+        text_sha256=hashlib.sha256('\n'.join(text).encode()).hexdigest(),
+        extraction='explicit_lyric_heading' if labelled else 'published_text_overlap',
+        provider_timestamps_used=False)
 
 
 def version_tags(text):
@@ -373,9 +450,9 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
         album = row['album'].get('albumTitle', '')
         if not isinstance(album, str):
             continue
-        if not artist_credit_matches(song['artist'], artists):
+        if not any(artist_credit_matches(credit, artists) for credit in song_names(song, 'artist')):
             continue
-        title_match = bool(identity(song['title'], title=True) & identity(title, title=True))
+        title_match = any(identity(name, title=True) & identity(title, title=True) for name in song_names(song, 'title'))
         if not title_match:
             identity_candidates.append(dict(title=title, track_id=str(row.get('trackId', ''))))
             if not usable_reference:
@@ -453,8 +530,8 @@ def fetch_published_lyrics(song, source_title, cache, duration=None, *, referenc
     if not song.get('title') or not song.get('artist'):
         return None, dict(status='missing_identity', provider='line_music')
     path, stage = cache.root/'published-lyrics.json', 'fetch_published_lyrics'
-    title = names(song['title'], title=True)[-1]
-    queries = list(dict.fromkeys([' '.join((title, names(song['artist'])[-1])), title]))
+    title = song_names(song, 'title')[-1]
+    queries = list(dict.fromkeys([' '.join((title, song_names(song, 'artist')[-1])), title]))
     try:
         old = json.loads(path.read_text())
         if lyric_retry_due(dict(old.get('report') or {}, retry_at=old.get('retry_at')), 'line_music', cache):
@@ -726,8 +803,10 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
     for row in packet['results']:
         # A text search can return covers, live cuts and unrelated recordings.
         # Identity and duration must agree before using any audio-text score.
-        if (not identity(song['title'], title=True) & identity(row.get('trackName'), title=True) or
-                not artist_credit_matches(song['artist'], [row.get('artistName')]) or row.get('instrumental') is not False):
+        if (not any(identity(name, title=True) & identity(row.get('trackName'), title=True) for name in song_names(song, 'title')) or
+                not any(artist_credit_matches(name, [row.get('artistName')]) for name in song_names(song, 'artist')) or row.get('instrumental') is not False):
+            continue
+        if not allow_recording_mismatch and version_tags(song['title']) != version_tags(row.get('trackName')):
             continue
         mismatch = (recording_mismatches(song, source_title, row.get('trackName'), row.get('albumName'))
                     if allow_recording_mismatch else ['live_performance'] if performance and performance not in

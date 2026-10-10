@@ -71,16 +71,16 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
             recording_identity = {}
             try:
                 if provider == 'netease':
-                    query = ' '.join(lookup.names(song[k], title=k == 'title')[-1] for k in ('title','artist'))
+                    query = ' '.join(lookup.song_names(song, k)[-1] for k in ('title','artist'))
                     url = 'https://music.163.com/api/cloudsearch/pc?'+urlencode(dict(s=query, type=1, limit=30, offset=0))
                     packet = lookup.cached_lyric_request(provider, url, cache, lambda: read_document(url, timeout=10))
                     if packet.get('code') != 200:
                         raise ValueError('NetEase lyric search rejected the request')
-                    rows = [dict(trackId=r['id'], trackTitle=r['name'],
-                        artists=[dict(artistName=a['name']) for a in r['ar']],
-                        album=dict(albumTitle=r['al']['name']),
+                    rows = [dict(trackId=r.get('id'), trackTitle=r.get('name'),
+                        artists=[dict(artistName=a.get('name')) for a in r.get('ar') or [] if isinstance(a, dict)],
+                        album=dict(albumTitle=(r['al'].get('name') or '') if isinstance(r.get('al'), dict) else ''),
                         duration_seconds=r['dt']/1000 if isinstance(r.get('dt'), (int, float)) else None)
-                        for r in packet['result'].get('songs', [])]
+                        for r in (packet.get('result') or {}).get('songs') or [] if isinstance(r, dict)]
                     def lyrics(row):
                         if not str(row['trackId']).isdigit():
                             return None
@@ -94,6 +94,7 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
                 else:
                     from ytmusicapi import YTMusic
                     video = metadata.get('id', '')
+                    lyric_video, release = video, None
                     with requests.Session() as session:
                         session.request = functools.partial(session.request, timeout=10)
                         session.hooks['response'].append(lambda response, *a, **kw: response.raise_for_status())
@@ -108,6 +109,42 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
                         result = (lookup.cached_lyric_request(provider,
                             dict(video_id=video, method='lyrics', browse_id=listing['lyrics'], locale='zh_CN'), cache,
                             lambda: music.get_lyrics(listing['lyrics'])) if listing.get('lyrics') else None)
+                        if not (result or {}).get('lyrics') and song.get('title') and song.get('artist'):
+                            # An MV/live upload may lack the lyrics tab even
+                            # though the same work's album track has it. Read
+                            # that published text, retaining the release change.
+                            music = YTMusic(language='en', requests_session=session)
+                            query = ' '.join(lookup.song_names(song, key)[-1] for key in ('title', 'artist'))
+                            rows = lookup.cached_lyric_request(provider,
+                                dict(method='search', query=query, locale='en'), cache,
+                                lambda: music.search(query, filter='songs', limit=20))
+                            matching = []
+                            for row in rows:
+                                if not isinstance(row, dict):
+                                    continue
+                                artists = [a.get('name') for a in row.get('artists') or [] if isinstance(a, dict)]
+                                title_match = any(lookup.identity(name, title=True) & lookup.identity(row.get('title'), title=True)
+                                                  for name in lookup.song_names(song, 'title'))
+                                artist_match = any(lookup.artist_credit_matches(name, artists)
+                                                   for name in lookup.song_names(song, 'artist'))
+                                album = row.get('album') if isinstance(row.get('album'), dict) else {}
+                                mismatch = lookup.recording_mismatches(song, metadata.get('title'), row.get('title'), album.get('name'))
+                                if title_match and artist_match and mismatch is not None and row.get('videoId') and row['videoId'] != video:
+                                    matching.append(row)
+                            for row in matching[:5]:
+                                candidate_video = row['videoId']
+                                candidate = lookup.cached_lyric_request(provider,
+                                    dict(video_id=candidate_video, method='watch', locale='en'), cache,
+                                    lambda: music.get_watch_playlist(videoId=candidate_video, limit=1))
+                                if (not candidate.get('tracks') or candidate['tracks'][0].get('videoId') != candidate_video
+                                        or not candidate.get('lyrics')):
+                                    continue
+                                alternative = lookup.cached_lyric_request(provider,
+                                    dict(video_id=candidate_video, method='lyrics', browse_id=candidate['lyrics'], locale='en'), cache,
+                                    lambda: music.get_lyrics(candidate['lyrics']))
+                                if (alternative or {}).get('lyrics'):
+                                    result, lyric_video, release = alternative, candidate_video, row
+                                    break
                     text = (result or {}).get('lyrics')
                     if text is not None and (not isinstance(text, str) or len(text) > 30000):
                         raise ValueError('Invalid Music lyric text')
@@ -119,11 +156,18 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
                         raise ValueError('Invalid Music lyric lines')
                     report = dict(status='candidate' if lines else 'unavailable', language=language,
                         recording_identity=recording_identity,
-                        url='https://music.youtube.com/watch?v='+video, source_credit=(result or {}).get('source'),
+                        url='https://music.youtube.com/watch?v='+lyric_video, source_credit=(result or {}).get('source'),
                         text_sha256=hashlib.sha256((text or '').encode()).hexdigest(), excluded_credit_lines=excluded,
                         provider_timestamps_used=False)
                     credit = (report['source_credit'] or '').casefold()
                     report['publisher'] = next((p for p in ('lyricfind','musixmatch') if p in credit), 'youtube')
+                    if release:
+                        report['release_fallback'] = dict(requested_video_id=video, selected_video_id=lyric_video,
+                            title=release.get('title'), artists=release.get('artists'),
+                            duration_seconds=release.get('duration_seconds'))
+                        album = release.get('album') if isinstance(release.get('album'), dict) else {}
+                        report['recording_mismatches'] = lookup.recording_mismatches(song, metadata.get('title'),
+                            release.get('title'), album.get('name'))
                 result = dict(lines=lines, report=dict(report, provider=provider))
             except Exception as error:
                 report = lookup.lyric_request_error(error)
@@ -322,8 +366,11 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
         except Exception as error:
             return None, dict(provider=name, status='unavailable', error=type(error).__name__)
     raw_title = not preserve_title and not metadata.get('track') and song.get('title') == metadata.get('title')
+    upload_artist = (not metadata.get('artist') and not metadata.get('artists') and
+                     song.get('artist') == lookup.video_song_info(metadata).get('artist'))
     recording = {}
-    if not song.get('artist') or not song.get('title') or raw_title:
+    source_title_preferred = False
+    if not song.get('artist') or not song.get('title') or raw_title or upload_artist:
         source = next(source for source in sources if source[0] == 'youtube_music')
         prefetched['youtube_music'] = fetch(source)
         # Identity remains useful when this provider has no lyrics. Reuse the
@@ -331,10 +378,18 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
         recording = prefetched['youtube_music'][1].get('recording_identity') or {}
         if not recording.get('video_id') or recording['video_id'] != metadata.get('id'):
             recording = {}
+        source_title_preferred = bool(not preserve_title and recording.get('title') and
+            len(recording['title']) < len(song.get('title') or '') and
+            lookup.identity(recording['title'], title=True) & lookup.identity(song.get('title'), title=True))
         for key in ('title', 'artist'):
-            if recording.get(key) and (not song.get(key) or key == 'title' and raw_title):
+            replace = (not song.get(key) or key == 'title' and (raw_title or source_title_preferred) or key == 'artist' and
+                       upload_artist and recording.get('title') != metadata.get('title'))
+            if recording.get(key) and replace:
+                if key == 'artist' and song.get(key) and song[key] != recording[key]:
+                    song.setdefault(key+'_aliases', []).append(song[key])
                 song[key] = recording[key]
     missing_identity = [key for key in ('title', 'artist') if not song.get(key) or
+        key == 'artist' and upload_artist and source_title_preferred and not recording.get('artist') or
         key == 'title' and raw_title and song[key] == metadata.get('title') and not recording.get('title')]
     if callable(description) and missing_identity:
         # Only unresolved identity needs the model before name-based queries.
@@ -347,6 +402,12 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
     if description:
         results.append(description)
     reference = next((lines for lines, _ in results if lines), None)
+    if not description or not description[0]:
+        source_text = lookup.description_lyrics(metadata, reference or ())
+        if source_text:
+            results = [result for result in results if result[1].get('provider') != 'video_description']
+            results.append(source_text)
+            reference = reference or source_text[0]
     if reference:
         # Search engines may return a native/translated title that does not
         # share characters with ours. Confirm that alias from another source's
@@ -374,22 +435,36 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
     review['unavailable_sources'] = [report for text, report in results if not text]
     rejected = {i: issue for i, (text, _) in enumerate(candidates)
                 if (issue := lookup.short_lyric_text(text, duration))}
+    supported = set()
+    for comparison in review['comparisons']:
+        a, b = comparison['sources']
+        left, right = candidates[a][1], candidates[b][1]
+        if (comparison['similarity'] >= .9 and a not in rejected and b not in rejected and
+                (left.get('publisher') or left['provider']) != (right.get('publisher') or right['provider'])):
+            supported.update((a, b))
     for comparison in review['comparisons']:
         for i, j in (comparison['sources'], comparison['sources'][::-1]):
             short, long = review['text_units'][i], review['text_units'][j]
             left, right = candidates[i][1], candidates[j][1]
-            if (i not in rejected and j not in rejected and short < long * .5 and
+            side, other = ('left', 'right') if i == comparison['sources'][0] else ('right', 'left')
+            # A full original interleaved with translations is not an excerpt.
+            # Require the extra body to be outside the short source, and never
+            # discard independently corroborated text merely for being shorter.
+            internal_extra = sum(d[other][1]-d[other][0] for d in comparison['differences']
+                                 if 0 < d[side][0] < short)
+            if (i not in supported and i not in rejected and j not in rejected and short < long * .5 and
                     comparison['matched_units'] >= short * .9 and
+                    internal_extra <= short * .1 and
                     not left.get('recording_mismatches') and not right.get('recording_mismatches') and
                     (left.get('publisher') or left['provider']) != (right.get('publisher') or right['provider'])):
                 rejected[i] = dict(reason='lyrics_fragment', units=short, fuller_source=j, fuller_units=long)
     review['rejected_sources'] = [dict(issue, source=i) for i, issue in sorted(rejected.items())]
     usable = set(range(len(candidates))) - rejected.keys()
     if usable:
-        # A majority from another performance must not outrank text attached
-        # to this recording. Compare agreement within the eligible versions.
+        # A known different performance remains a weaker fallback. Duration
+        # alone cannot establish that: music videos add intros and credits.
         preferred = ('line_music', 'youtube_music', 'netease', 'video_description', 'lrclib')
-        eligible = {i for i in usable if not candidates[i][1].get('recording_mismatches')}
+        eligible = {i for i in usable if not set(candidates[i][1].get('recording_mismatches') or []) - {'duration'}}
         eligible = eligible or usable
         review['eligible_sources'] = sorted(eligible)
         index = min(eligible, key=lambda i: preferred.index(candidates[i][1]['provider']))

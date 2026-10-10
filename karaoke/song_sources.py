@@ -351,13 +351,24 @@ def video_song_info(metadata):
     if thumbnail:
         info['thumbnail'] = thumbnail
     # Explicit credits in a video title are usable even when the metadata API is down.
+    video_label = r'(?:(?:Official\s+)?(?:Live\s+)?(?:Music\s+(?:Video|Clip)|MV)|Official\s+Video|官方(?:完整版)?\s*MV)'
     credit = re.fullmatch(r'\s*([^【】「」『』《》“”"]+?)\s*([【「『《“"])([^【】「」『』《》“”"]+)([】」』》”"])\s*[-–—|]?\s*'
-                         r'(?:(?:Official\s+)?(?:Music\s+Video|MV)|Official\s+Video|官方(?:完整版)?\s*MV)\s*',
+                         + video_label + r'\s*',
                          metadata.get('title') or '', re.I)
     if (credit and dict(zip('【「『《“"', '】」』》”"'))[credit[2]] == credit[4]
             and credit[1].strip() and credit[3].strip()):
         info.update(artist=info['artist'] or credit[1].strip(),
                     title=metadata.get('track') or credit[3].strip())
+    elif not metadata.get('track'):
+        # The common "artist - title" upload grammar is explicit too. Keep
+        # the credited text, including bilingual names; never infer a singer
+        # from the channel. Unseparated prose remains unresolved.
+        parts = re.split(r'\s+[-–—]\s+', metadata.get('title') or '', maxsplit=1)
+        if len(parts) == 2 and all(part.strip() for part in parts):
+            title = re.sub(r'\s*[(（][^()（）\n]*(?:' + video_label + r')[^()（）\n]*[)）]\s*$',
+                           '', parts[1], flags=re.I).strip()
+            if title:
+                info.update(artist=info['artist'] or parts[0].strip(), title=title)
     audio_languages = {song_language(f.get('language')) for f in (metadata.get('requested_formats') or [])
                        if f.get('acodec') not in (None, 'none')}
     audio_languages.discard(None)
