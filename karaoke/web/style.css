@@ -93,3 +93,17 @@ html{scroll-padding-top:calc(var(--header-height,80px) + 20px)}
 .transport{box-shadow:0 -6px 24px #25252b06}.screen-cover{color:#fff}.screen-cover p{color:#d8d8df}.player-stage:fullscreen{color-scheme:dark;--bg:#17171c;--panel:#25252c;--panel-raised:#303038;--text:#f4f4f6;--muted:#b0b0ba;--line:#393943;--gold:#f06b7d;--on-accent:#17171c;--accent-hover:#fa91a0;color:var(--text)}
 @media(max-width:1100px){.queue-panel{border-left:0}.recent-songs{gap:16px}}
 @media(max-width:760px){.home-discovery{margin:24px 0 30px}.home-discovery h2{font-size:19px}.recent-songs{grid-template-columns:none;grid-auto-flow:column;grid-auto-columns:140px;gap:16px;overflow-x:auto;padding-bottom:8px;scroll-snap-type:x proximity;scrollbar-width:thin}.recent-song{scroll-snap-align:start;min-height:0;padding:0}.recent-preview{min-height:0}.recent-song>.music-add{min-height:44px}.recent-info strong{font-size:14px}.brand strong{font-size:23px}}
+
+/* On desktop, the library is primary; recent songs stay a compact shortcut shelf. */
+@media(min-width:1101px){
+  .topbar{padding-inline:max(32px,calc((100vw - 1416px)/2))}
+  .workspace{max-width:1480px;grid-template-columns:minmax(0,1fr) 300px;gap:40px;padding-top:32px}
+  .transport-layout{max-width:1416px}
+  .home-discovery{margin:24px 0 30px}.home-discovery h2{font-size:18px}.home-discovery .section-heading{margin-bottom:8px}
+  .recent-songs{grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 32px}
+  .recent-song{padding:8px 52px 8px 0}.recent-preview{flex-direction:row;gap:14px;min-height:64px}
+  .recent-preview>img,.recent-initial{width:64px;height:64px;flex:none;border-radius:8px}
+  .recent-info{padding:0}.recent-info strong{font-size:14px}
+  .recent-song>.music-add{top:50%;bottom:auto;transform:translateY(-50%)}
+  #local-library h1{font-size:21px;font-weight:650}.queue-tabs button[aria-selected=true]{font-weight:600}
+}
