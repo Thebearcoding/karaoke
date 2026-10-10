@@ -63,6 +63,21 @@ test('a restored page resumes its released session without undoing pause or taki
   }
 });
 
+test('automatic resume rechecks ownership when another tab claims between storage reads', () => {
+  const values=new Map();
+  let interleave;
+  const storage={getItem(key) {
+    const value=values.get(key), action=interleave;
+    interleave=null; action?.(); return value;
+  },setItem:(key,value)=>values.set(key,value)};
+  const first=new PlaybackTabs(storage,'first'), other=new PlaybackTabs(storage,'other');
+  first.write({playing:true},{claim:true}); first.suspend(first.record.playback);
+  interleave=()=>other.write({playing:true,position:10},{claim:true});
+  assert.equal(first.resume(),false);
+  assert.equal(other.owns(),true);
+  assert.equal(first.read().playback.position,10);
+});
+
 test('late HTTP replies cannot undo a newer room command or same-revision progress update', () => {
   const current = {revision:4,server_time:100,entries:[{status:'completed'}]};
   assert.equal(isStaleRoomSnapshot({revision:3,server_time:101},current),true);

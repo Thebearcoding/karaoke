@@ -87,9 +87,10 @@ export class PlaybackTabs {
     const current = this.read();
     return current.owner === this.id && (session === undefined || current.session === session);
   }
-  write(playback, {claim = false, release = false} = {}) {
+  write(playback, {claim = false, release = false, expectedSession} = {}) {
     if (!this.enabled) return false;
     const previous = this.record.change, current = this.read();
+    if (expectedSession !== undefined && (current.owner || current.session !== expectedSession)) return false;
     if (!claim && (current.owner !== this.id || current.change !== previous)) return false;
     const change = `${this.id}:${++this.sequence}`;
     this.record = {revision:current.revision+1, change, session:claim ? change : current.session,
@@ -114,7 +115,7 @@ export class PlaybackTabs {
     // A restored page can resume only its own released session. Never steal
     // audio back after another tab has played, even if that tab is now closed.
     return Boolean(session && current.session === session && !current.owner &&
-      this.write(current.playback, {claim:true}));
+      this.write(current.playback, {claim:true, expectedSession:session}));
   }
 }
 
