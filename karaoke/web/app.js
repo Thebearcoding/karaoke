@@ -905,7 +905,7 @@ $('song-grid').onclick = async event => {
 };
 $('library-view').addEventListener('click', async event => {
   const homeArtist = event.target.closest('[data-home-artist]');
-  if (homeArtist) { changeSearchMode('songs', homeArtist.dataset.homeArtist); return; }
+  if (homeArtist) { changeSearchMode('artists', homeArtist.dataset.homeArtist); return; }
   const artist = event.target.closest('[data-search-artist]');
   if (artist) { changeSearchMode('artists', artist.dataset.searchArtist); return; }
   const button = event.target.closest('[data-preview-song], [data-find-mv-song]');
