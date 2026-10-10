@@ -1432,6 +1432,56 @@ def test_cantonese_language_detection_is_cached_without_replacing_lyric_text(tmp
     assert len(calls) == 2 and (folder/'song-language-error.json').is_file()
 
 
+
+@pytest.mark.parametrize('detected', ['Japanese', 'Korean', None])
+@pytest.mark.parametrize('first_fails', [False, True])
+def test_audio_language_orders_existing_lyric_versions_without_vetoing_fallback(tmp_path, monkeypatch, detected, first_fails):
+    from karaoke import pipeline as module
+    runtime = tmp_path/'runtime'
+    (runtime/'models/alignment/sensevoice').mkdir(parents=True)
+    for name in ('local_asr.py', 'job_schema.py', 'models/alignment/sensevoice/model.int8.onnx',
+                 'models/alignment/sensevoice/tokens.txt'):
+        (runtime/name).write_bytes(b'fixture')
+    monkeypatch.setattr(module, 'ROOT', runtime)
+    folder = tmp_path/'song'; folder.mkdir()
+    (folder/'vocals-16k.wav').write_bytes(b'audio')
+    bodies = [['夜空に小さな星が光る'], ['오늘 밤 별들이 빛나고 있어요']]
+    packet = dict(provider='primary', candidate_texts=bodies, crosscheck=dict(selected_source=0,
+        sources=[dict(provider=p, language=l) for p,l in [('primary','Japanese'),('alternate','Korean')]],
+        eligible_sources=[0,1], rejected_sources=[]))
+    lyrics = dict(title='Evening', artist='Singer', language='Japanese', lines=bodies[0],
+                  provenance=dict(kind='online_lyric_text', lyric_lookup=packet))
+    original = json.dumps(lyrics, ensure_ascii=False)
+    (folder/'lyrics.json').write_text(original)
+    pipeline = Pipeline(dict(url=URL), folder)
+    detections = []
+    def detect(stage, command):
+        detections.append(stage)
+        command[-1].write_text(json.dumps(dict(language=detected, probes=[])))
+    monkeypatch.setattr(pipeline, 'run', detect)
+    assert pipeline.resolve_lyric_language(lyrics) == lyrics
+    assert pipeline.resolve_lyric_language(lyrics) == lyrics
+    assert detections == ['detect_language']
+    calls, validated = [], []
+    def align(candidate, duration):
+        calls.append(candidate['language'])
+        (pipeline.checkpoints.directory/'align_words.json').write_text('{}')
+        (folder/'cues.json').write_text('[]')
+        (folder/'quality.json').write_text('{}')
+    def validate(candidate, *args, **kwargs):
+        validated.append(candidate['language'])
+        if first_fails and len(validated) == 1:
+            raise StageFailure('subtitles', 'Measured evidence rejects this candidate')
+    monkeypatch.setattr(pipeline, 'align', align)
+    monkeypatch.setattr(pipeline, 'validate_alignment', validate)
+    result, error = pipeline.align_candidates(lyrics, {}, 10.)
+    order = ['Korean','Japanese'] if detected == 'Korean' else ['Japanese','Korean']
+    assert calls == validated == (order if first_fails else order[:1])
+    assert result['language'] == calls[-1] and error is None
+    assert json.dumps(lyrics, ensure_ascii=False) == original
+    assert result['lines'] in bodies
+
+
 def test_cantonese_source_tag_survives_han_script_detection(tmp_path, monkeypatch):
     from karaoke import lyric_lookup, lyric_consensus
     from karaoke.stage_cache import StageCache

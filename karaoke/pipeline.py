@@ -215,6 +215,7 @@ class Pipeline:
         self.audio_first = False
         self.source_announced = False
         self.fresh_source_metadata = False
+        self.recording_language = None
         self.stage_progress = {}
         self.song_info = {}
         try:
@@ -893,8 +894,12 @@ class Pipeline:
             raise StageFailure('prepare_lyrics', '歌词未覆盖完整演唱；遗漏唱段的识别证据已保留')
 
     def resolve_lyric_language(self, lyrics):
-        """A Han-script guess needs audio evidence before selecting a pronunciation."""
-        if lyrics['language'] != 'Chinese':
+        """Use optional audio evidence for pronunciation and conflicting versions."""
+        self.recording_language = None
+        from .lyric_lookup import text_language
+        texts = lyrics.get('provenance', {}).get('lyric_lookup', {}).get('candidate_texts', [])
+        languages = {text_language(''.join(text)) for text in texts}
+        if lyrics['language'] != 'Chinese' and len(languages - {None}) <= 1:
             return lyrics
         audio, path = self.output/'vocals-16k.wav', self.output/'song-language.json'
         weights = [ROOT/'models/alignment/sensevoice'/name for name in ('model.int8.onnx', 'tokens.txt')]
@@ -913,7 +918,8 @@ class Pipeline:
             # discard known lyrics or become another preparation failure.
             write_json(self.output/'song-language-error.json', dict(error=str(error)))
             return lyrics
-        if evidence.get('language') != 'Cantonese':
+        self.recording_language = evidence.get('language')
+        if self.recording_language != 'Cantonese' or lyrics['language'] != 'Chinese':
             return lyrics
         lyrics = dict(lyrics, language='Cantonese', provenance=dict(lyrics['provenance'],
             language_detection=evidence))
@@ -1049,11 +1055,23 @@ class Pipeline:
                 seen.add(key)
         if not candidates:
             raise StageFailure('lyrics', '未找到可用的歌词正文')
+        # A catalogue can attach another language version even to the right
+        # video ID. Audio evidence orders existing candidates; it never deletes
+        # text, changes the supplied words or relaxes their alignment checks.
+        before = [c['language'] for c in candidates]
+        if self.recording_language:
+            matches = lambda language: language == self.recording_language or (
+                self.recording_language == 'Cantonese' and language == 'Chinese')
+            candidates.sort(key=lambda c: not matches(c['language']))
+        source_order = dict(recording_language=self.recording_language, before=before,
+                            after=[c['language'] for c in candidates])
         attempts, previous, recording_observations = [], None, {}
         candidate_reports = ('playback-warning.json', 'lyric-source-support.json',
             'lyric-repeat-validation.json', 'localization-validation.json',
             'timing-context-recovery.json', 'timing-recovery.json')
         for index, candidate in enumerate(candidates):
+            if candidate is not lyrics and self.recording_language == 'Cantonese':
+                candidate = self.resolve_lyric_language(candidate)
             for name in candidate_reports:
                 (self.output/name).unlink(missing_ok=True)
             if index or candidate is not lyrics:
@@ -1135,8 +1153,10 @@ class Pipeline:
                         'timing-checked/cues.json', 'timing-checked/report.json')):
                     previous = folder
                 continue
-            if attempts or candidate.get('provenance', {}).get('repetitions'):
+            if attempts or candidate.get('provenance', {}).get('repetitions') or before != source_order['after']:
                 quality = json.loads((self.output/'quality.json').read_text())
+                if before != source_order['after']:
+                    quality['lyric_source_order'] = source_order
                 if attempts:
                     quality['lyric_source_fallback'] = dict(rejected=attempts,
                         selected=candidate['provenance']['lyric_lookup'])
