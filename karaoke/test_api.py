@@ -2571,10 +2571,13 @@ def test_published_lyrics_strip_only_leading_metadata_identity(title, artist, he
 
 
 @pytest.mark.parametrize('byline', ['by Singer', 'by Singer Play', 'by SingerPlay'])
-def test_published_lyrics_require_matching_title_and_artist_for_a_two_line_header(byline):
+@pytest.mark.parametrize('credits', [[], ['Lyrics: Writer'], ['作词: Writer', 'Music: Composer']])
+def test_published_lyrics_require_matching_title_and_artist_for_a_two_line_header(byline, credits):
     from karaoke.lyric_lookup import published_lyric_lines
     body = ['We keep singing through the night', 'Evening', byline]
-    assert published_lyric_lines('\n'.join(['Evening', byline, *body]), 'Evening', ['Singer']) == (body, [1, 2])
+    raw = '\n'.join([*credits, 'Evening', byline, *body])
+    assert published_lyric_lines(raw, 'Evening', ['Singer']) == (body, list(range(1, len(credits)+3)))
+    assert published_lyric_lines('\n'.join(body), 'Evening', ['Singer']) == (body, [])
     for prefix in (['Evening'], [byline], ['Other song', byline], ['Evening', 'by Someone Else'],
                    ['Evening', 'By the river we sing']):
         assert published_lyric_lines('\n'.join([*prefix, *body]), 'Evening', ['Singer']) == ([*prefix, *body], [])

@@ -348,14 +348,6 @@ def published_lyric_lines(text, title, artists=()):
             rows.append((i, line))
     is_credit = lambda line: bool(credit.match(canonical_script(line.replace('︰', ':'))) or
                                  re.fullmatch(r'credits?(?:\s+list)?\s*[:：]?', line, re.I))
-    # Copied page headers can put the title and its byline on separate rows.
-    # Both must match known metadata; a sung title or a name alone is not a header.
-    if len(rows) > 1 and identity(rows[0][1], title=True) & identity(title, title=True):
-        byline = re.fullmatch(r'by\s+(.+)', rows[1][1], re.I)
-        if byline and any(artist_credit_matches(name, artists) for name in
-                (byline[1], re.sub(r'\s*Play$', '', byline[1], flags=re.I))):
-            metadata.extend(i for i, _ in rows[:2])
-            rows = rows[2:]
     def title_artist(line):
         return any(identity(candidate_title, title=True) & identity(title, title=True) and
                    any(artist_credit_matches(name, artists) for name in
@@ -366,6 +358,14 @@ def published_lyric_lines(text, title, artists=()):
     first = 0
     while first < len(rows):
         line = rows[first][1]
+        # Credits and copied page headers may appear in either order. A title
+        # and its matching byline form one header; either alone may be sung.
+        if first+1 < len(rows) and identity(line, title=True) & identity(title, title=True):
+            byline = re.fullmatch(r'by\s+(.+)', rows[first+1][1], re.I)
+            if byline and any(artist_credit_matches(name, artists) for name in
+                    (byline[1], re.sub(r'\s*Play$', '', byline[1], flags=re.I))):
+                first += 2
+                continue
         note = canonical_script(line).strip('()').strip()
         heading_note = first and (_soundtrack_credit.fullmatch(note) or re.fullmatch(
             r'(?:又名|别名|also known as|a\.?k\.?a\.?)\s*[:：].+', note, re.I))
