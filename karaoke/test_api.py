@@ -2929,7 +2929,7 @@ def test_explicit_recording_version_keeps_work_identity_and_release_preference(e
 @pytest.mark.parametrize('source,matching,other', [('國', '国语版', '粤语版'),
     ('粵', 'Cantonese Version', 'Mandarin Version'), ('日本語版', 'Japanese Ver.', 'English Version')])
 def test_language_edition_aliases_match_without_merging_other_languages(source, matching, other):
-    from karaoke.lyric_lookup import published_candidate
+    from karaoke.lyric_lookup import published_candidate, lyric_candidate
     song = dict(title=f'Evening ({source})', artist='Singer')
     row = dict(trackId=1, trackTitle=f'Evening ({matching})', artists=[dict(artistName='Singer')],
                album={}, lyrics='We sing through the night\nUntil the morning comes')
@@ -2938,6 +2938,11 @@ def test_language_edition_aliases_match_without_merging_other_languages(source, 
     assert published_candidate([alternate], song, song['title'])[0] is None
     _, report = published_candidate([alternate, row], song, song['title'], allow_recording_mismatch=True)
     assert report['url'].endswith('/1') and report['recording_mismatches'] == []
+    lyric_row = dict(id=1, trackName=row['trackTitle'], artistName='Singer', albumName='',
+                     plainLyrics=row['lyrics'], duration=30., instrumental=False)
+    assert lyric_candidate(dict(status='ok', results=[lyric_row]), song, None, 30.)[0]
+    assert lyric_candidate(dict(status='ok', results=[dict(lyric_row, trackName=alternate['trackTitle'])]),
+                           song, None, 30.)[0] is None
 
 
 @pytest.mark.parametrize('traditional,simplified', [('什麼時候', '什么时候'), ('乾杯以後', '干杯以后'), ('臺灣', '台湾')])

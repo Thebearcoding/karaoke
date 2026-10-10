@@ -1084,11 +1084,8 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
         if (not any(identity(name, title=True) & identity(row.get('trackName'), title=True) for name in song_names(song, 'title')) or
                 not (full_credit or partial_credit) or row.get('instrumental') is not False):
             continue
-        if not allow_recording_mismatch and version_tags(song['title']) != version_tags(row.get('trackName')):
-            continue
-        mismatch = (recording_mismatches(song, source_title, row.get('trackName'), row.get('albumName'))
-                    if allow_recording_mismatch else ['live_performance'] if performance and performance not in
-                    {live_performance(row.get(field)) for field in ('trackName', 'albumName')} else [])
+        basis = source_title if allow_recording_mismatch or performance else song['title']
+        mismatch = recording_mismatches(song, basis, row.get('trackName'), row.get('albumName'))
         if mismatch is None or mismatch and not allow_recording_mismatch:
             continue
         if not full_credit:
