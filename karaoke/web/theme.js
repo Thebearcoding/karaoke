@@ -1,15 +1,16 @@
-// Apply before the page paints; remember a choice, otherwise start in night mode.
+// Apply before the page paints; follow the system unless a theme was chosen.
 (() => {
   const key = 'karaokeTheme';
+  const system = window.matchMedia('(prefers-color-scheme: dark)');
   const read = () => {
     try {
       const value = localStorage.getItem(key);
-      return value === 'light' ? 'light' : 'dark';
-    } catch { return 'dark'; }
+      return value === 'light' || value === 'dark' ? value : null;
+    } catch { return null; }
   };
   let preference = read();
   function apply() {
-    const dark = preference === 'dark';
+    const dark = preference ? preference === 'dark' : system.matches;
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
     document.querySelector('meta[name="theme-color"]').content = dark ? '#202022' : '#ffffff';
     const button = document.getElementById('theme-toggle');
@@ -30,4 +31,5 @@
   window.addEventListener('storage', event => {
     if (event.key === key || event.key === null) { preference = read(); apply(); }
   });
+  system.addEventListener('change', () => { if (!preference) apply(); });
 })();

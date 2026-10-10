@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions} from './web/search.js';
+import {readFileSync} from 'node:fs';
+import {runInNewContext} from 'node:vm';
+import {createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, libraryArtists, historySuggestions} from './web/search.js';
 
 function setup() {
   const requests = [], snapshots = [];
@@ -86,6 +88,28 @@ test('recent songs use the latest performance of each source', () => {
   assert.deepEqual(result.recent.map(s => s.id), ['latest','other','cover','unknown']);
   assert.deepEqual(songs, original);
   assert.deepEqual(historySuggestions([]), {recent:[]});
+});
+
+test('artist shelf groups ready-library credits and keeps six without requiring history', () => {
+  const songs = [
+    {title:'A', artist:'ＴＫ', status:'completed'},
+    {title:'B', artist:' TK ', poster:'/cover.jpg', status:'completed'},
+    {title:'C', artist:'Solo & Band', status:'completed'},
+    {title:'D', artist:'Solo', status:'completed'},
+    {title:'E', artist:'Unavailable', status:'video_evicted'},
+    {title:'F', artist:'Unavailable', status:'running'},
+    {title:'G', artist:'', status:'completed'},
+    ...['One','Two','Three','Four','Five'].map(artist => ({artist,status:'completed'})),
+  ];
+  const original = structuredClone(songs);
+  const artists = libraryArtists(songs);
+  assert.deepEqual(artists.map(a => a.name), ['ＴＫ','Solo & Band','Solo','One','Two','Three']);
+  assert.equal(artists[0].count, 2);
+  assert.equal(artists[0].poster, '/cover.jpg');
+  assert.equal(artists[1].count, 1);
+  assert.deepEqual(libraryArtists(songs.slice(4,7)), []);
+  assert.deepEqual(libraryArtists([]), []);
+  assert.deepEqual(songs, original);
 });
 
 test('search calls only YouTube and preserves every returned result in order', async () => {
@@ -539,4 +563,34 @@ test('artist pages keep their metadata and expired cursors leave existing songs 
   assert.equal(snapshots.at(-1).artist.expired, true);
   assert.equal(snapshots.at(-1).artist.metadata.title, 'Singer');
   assert.equal(snapshots.at(-1).artist.results[0].url, 'song');
+});
+
+test('theme follows system changes until chosen, and resumes after the saved choice is cleared', () => {
+  const script = readFileSync(new URL('./web/theme.js', import.meta.url), 'utf8');
+  for (const startsDark of [false,true]) {
+    const events = {}, storage = new Map(), root = {dataset:{}}, meta = {};
+    const system = {matches:startsDark, addEventListener:(_, fn) => { events.system = fn; }};
+    const button = {addEventListener:(_, fn) => { events.click = fn; }, setAttribute:() => {}};
+    const document = {documentElement:root, querySelector:() => meta, getElementById:() => button,
+      addEventListener:(_, fn) => { events.ready = fn; }};
+    const window = {matchMedia:() => system, addEventListener:(_, fn) => { events.storage = fn; }};
+    const localStorage = {getItem:key => storage.get(key), setItem:(key,value) => storage.set(key,value)};
+    runInNewContext(script, {document, window, localStorage});
+    assert.equal(root.dataset.theme, startsDark ? 'dark' : 'light');
+    assert.equal(storage.size, 0);
+    events.ready();
+    system.matches = !startsDark; events.system();
+    assert.equal(root.dataset.theme, startsDark ? 'light' : 'dark');
+    events.click();
+    const choice = root.dataset.theme;
+    assert.equal(storage.get('karaokeTheme'), choice);
+    system.matches = !system.matches; events.system();
+    system.matches = !system.matches; events.system();
+    assert.equal(root.dataset.theme, choice);
+    runInNewContext(script, {document, window, localStorage});
+    assert.equal(root.dataset.theme, choice);
+    storage.clear(); events.storage({key:'karaokeTheme'});
+    assert.equal(root.dataset.theme, system.matches ? 'dark' : 'light');
+    assert.equal(meta.content, system.matches ? '#202022' : '#ffffff');
+  }
 });

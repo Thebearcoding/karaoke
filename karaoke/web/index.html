@@ -27,7 +27,7 @@
   </svg>
 
   <header class="topbar">
-    <a class="brand" href="/" aria-label="退学 KTV 首页"><span class="brand-mark"><i></i><i></i><i></i><i></i></span><strong>退学 KTV</strong></a>
+    <a class="brand" href="/" aria-label="退学 KTV 首页"><span class="brand-mark"><i></i><i></i><i></i><i></i></span><span class="brand-wordmark"><span class="brand-name">退学</span><span class="brand-type">KTV</span></span></a>
     <nav class="navigation" aria-label="主要导航">
       <button data-view="library" class="selected">点歌台</button>
       <button data-view="player">正在播放 <span id="playing-dot" hidden></span></button>
@@ -43,9 +43,9 @@
         <div class="search-box"><svg class="icon"><use href="#i-search"/></svg><input id="song-input" type="text" autocomplete="off" maxlength="2048" enterkeyhint="search" aria-label="搜索歌名、歌手或粘贴视频链接" placeholder="搜索歌名或歌手"><button id="submit-song" type="submit">搜索 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
         <label class="optional-title" id="title-row" hidden>歌名 <input id="title-input" maxlength="200" placeholder="可选"></label>
       </form>
-      <section id="home-discovery" class="home-discovery" aria-label="从演唱记录选歌" hidden>
-        <div class="section-heading"><h2>最近唱过</h2><button id="show-history" class="text-button">全部已唱 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
-        <div id="recent-songs" class="recent-songs"></div>
+      <section id="home-discovery" class="home-discovery" aria-label="按歌手选歌" hidden>
+        <div class="section-heading"><h2>歌手</h2></div>
+        <div id="home-artists" class="home-artists"></div>
       </section>
       <section id="local-library">
       <div class="section-heading library-heading"><h1 id="library-heading">曲库</h1><span id="library-count"></span>

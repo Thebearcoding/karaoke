@@ -1,7 +1,7 @@
 import { Player } from './player.js';
 import { mountPreview } from './preview.js';
 import { isStaleRoomSnapshot, LocalPlayback, PlaybackTabs, RoomEvents, queueToTop, preparationRetry } from './room-state.js';
-import { createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
+import { createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, libraryArtists, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
 
 const $ = id => document.getElementById(id);
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -227,21 +227,14 @@ function renderLibrary() {
 }
 
 function renderDiscovery() {
-  const recent = historySuggestions(state.history || []).recent.slice(0,4);
-  $('home-discovery').hidden = !recent.length || Boolean($('song-input').value.trim() || searchQuery);
-  const cached = new Map(library.map(song => [queueKey(song), song]));
-  const signature = JSON.stringify([tabs.enabled, recent, recent.map(song => {
-    return cached.get(queueKey(song))?.poster;
-  })]);
+  const artists = libraryArtists(library);
+  $('home-discovery').hidden = !artists.length || Boolean($('song-input').value.trim() || searchQuery);
+  const signature = JSON.stringify(artists);
   if (signature === discoverySignature) return;
   discoverySignature = signature;
-  $('recent-songs').innerHTML = recent.map(song => {
-    const local = cached.get(queueKey(song));
-    return `<div class="recent-song"><button class="recent-preview" data-preview-history="${escape(song.id)}" aria-label="${tabs.enabled ? '预览' : '点歌'}：${escape(song.title)}">
-      ${local?.poster ? `<img src="${escape(local.poster)}" alt="" loading="lazy">` : `<span class="recent-initial">${escape(song.title.slice(0,1))}</span>`}
-      <span class="recent-info"><strong>${escape(song.title)}</strong><span>${escape(song.artist)}</span></span></button>
-      <button class="music-add" data-recent-song="${escape(song.id)}" aria-label="再点：${escape(song.title)}">${icon('plus')}<span>再点</span></button></div>`;
-  }).join('');
+  $('home-artists').innerHTML = artists.map(artist => `<button class="home-artist" data-home-artist="${escape(artist.name)}" aria-label="查看${escape(artist.name)}的歌曲" title="${escape(artist.name)}">
+    ${artist.poster ? `<img src="${escape(artist.poster)}" alt="" loading="lazy">` : `<span class="artist-initial" aria-hidden="true">${escape([...artist.name][0])}</span>`}
+    <strong>${escape(artist.name)}</strong><span>${artist.count} 首</span></button>`).join('');
 }
 
 function renderVideoResults(providers, mode = videoSource) {
@@ -905,30 +898,16 @@ $('song-grid').onclick = async event => {
   await addVideo(song, {title:song.title});
 };
 $('library-view').addEventListener('click', async event => {
+  const homeArtist = event.target.closest('[data-home-artist]');
+  if (homeArtist) { changeSearchMode('songs', homeArtist.dataset.homeArtist); return; }
   const artist = event.target.closest('[data-search-artist]');
   if (artist) { changeSearchMode('artists', artist.dataset.searchArtist); return; }
-  const historyPreview = event.target.closest('[data-preview-history]');
-  if (historyPreview) {
-    const song = state.history.find(item => item.id === historyPreview.dataset.previewHistory);
-    if (song) previewVideo({...song, provider:'local'});
-    return;
-  }
-  const repeat = event.target.closest('[data-recent-song]');
-  if (repeat && !repeat.disabled) {
-    repeat.disabled = true;
-    try { await addVideo(state.history.find(song => song.id === repeat.dataset.recentSong), {repeat:true}); }
-    finally { repeat.disabled = false; }
-    return;
-  }
   const button = event.target.closest('[data-preview-song], [data-find-mv-song]');
   if (!button) return;
   const song = library.find(song => song.id === (button.dataset.previewSong || button.dataset.findMvSong));
   if (button.hasAttribute('data-preview-song')) previewVideo({...song, provider:'local'});
   else changeSearchMode('youtube', `${song.artist} ${song.title}`.trim());
 });
-$('show-history').onclick = () => {
-  queueTab = 'history'; renderQueue(); switchView('queue'); $('history-tab').focus();
-};
 $('queue-list').onclick = async event => {
   const button = event.target.closest('[data-action]');
   if (!button || button.disabled) return;

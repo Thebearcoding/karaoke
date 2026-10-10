@@ -172,6 +172,20 @@ export function historySuggestions(history) {
   return {recent:[...recent.values()]};
 }
 
+export function libraryArtists(library) {
+  const artists = new Map();
+  for (const song of librarySongs(library)) {
+    const name = (song.artist || '').trim().replace(/\s+/g, ' ');
+    if (!name) continue;
+    const key = name.normalize('NFKC').toLocaleLowerCase();
+    if (!artists.has(key)) artists.set(key, {name, poster:song.poster, count:0});
+    const artist = artists.get(key);
+    artist.count++;
+    artist.poster ||= song.poster;
+  }
+  return [...artists.values()].sort((a,b) => b.count-a.count).slice(0,6);
+}
+
 export function searchLibrary(library, query) {
   return librarySongs(library, 'all', query)
     .map(song => ({...song, provider:'local', thumbnail:song.poster, uploader:song.artist}));
