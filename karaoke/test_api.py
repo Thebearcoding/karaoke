@@ -6024,7 +6024,8 @@ def test_intro_fits_long_metadata_without_truncating_lyrics(monkeypatch, long_cr
 
 
 @pytest.mark.parametrize('info', ['{invalid', '{}', json.dumps(dict(title='\U0010ffff')), 'font_failure'])
-def test_auxiliary_intro_and_long_preview_cannot_abort_valid_lyric_video(tmp_path, info, monkeypatch):
+@pytest.mark.parametrize('language', ['Japanese', 'Cantonese'])
+def test_auxiliary_intro_and_long_preview_cannot_abort_valid_lyric_video(tmp_path, info, language, monkeypatch):
     from pathlib import Path
     source, output = tmp_path/'source.mp4', tmp_path/'output.mp4'
     subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=320x180:r=30:d=0.4',
@@ -6045,11 +6046,12 @@ def test_auxiliary_intro_and_long_preview_cannot_abort_valid_lyric_video(tmp_pat
     (tmp_path/'info.json').write_text(info)
     monkeypatch.setattr(sys, 'argv', [str(Path(__file__).with_name('render_lyric_progress.py')),
         '--video', str(source), '--cues', str(tmp_path/'cues.json'), '--song-info', str(tmp_path/'info.json'),
-        '--language', 'Japanese', '--duration', '0.4', '--bottom-margin', '32', '--output', str(output)])
+        '--language', language, '--duration', '0.4', '--bottom-margin', '32', '--output', str(output)])
     renderer.main()
     report = json.loads(output.with_suffix('.render.json').read_text())
     assert report['song_intro']['status'] == 'omitted' and report['song_intro']['reason']
     assert report['shown_lines'] == [1, 2] and report['decode_check'] == 'passed'
+    assert set(report['furigana']) == {'1', '2'}
     assert json.loads((tmp_path/'cues.json').read_text()) == cues
 
 

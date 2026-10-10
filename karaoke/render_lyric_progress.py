@@ -283,7 +283,7 @@ def main():
                         caption = Caption(cues[index], args.style, args.language, readings[index])
                         if caption.pages:
                             pagination[index+1] = [dict(text=p.cue['text'], start=p.starts[0]) for p in caption.pages]
-                        if args.language == 'Japanese':
+                        if args.language in ('Japanese', 'Cantonese'):
                             readings_report[index+1] = dict(spans=caption.readings, warnings=caption.reading_warnings)
                         previous = index
                     current = caption.frame(instant, args.mode, page_at=entry['onset'] if entry is not None else None)
