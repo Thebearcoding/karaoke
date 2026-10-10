@@ -213,7 +213,9 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
                     # names, which may differ from the UI's localized labels.
                     title = track.get('title') or song.get('title') or ''
                     artists = [a['name'] for a in track.get('artists') or [] if a.get('name')]
-                    lines, excluded = lookup.published_lyric_lines(text or '', title, artists or [song.get('artist')])
+                    album = track.get('album')
+                    lines, excluded = lookup.published_lyric_lines(text or '', title, artists or [song.get('artist')],
+                        album=album.get('name') if isinstance(album, dict) else None)
                     language = song.get('language') or lookup.text_language('\n'.join(lines))
                     if lines and (len(lines) > 1000 or any(len(line) > 200 for line in lines)):
                         raise ValueError('Invalid Music lyric lines')

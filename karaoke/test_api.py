@@ -2595,6 +2595,24 @@ def test_published_lyrics_require_matching_title_and_artist_for_a_two_line_heade
         assert published_lyric_lines('\n'.join([*prefix, *body]), 'Evening', ['Singer']) == ([*prefix, *body], [])
 
 
+@pytest.mark.parametrize('reverse', [False, True])
+def test_published_lrc_header_keeps_album_metadata_out_of_repeated_lyrics(reverse):
+    from karaoke.lyric_lookup import published_candidate, published_lyric_lines
+    body = ['We keep singing through the night', 'Together we will find the light']
+    header = ['[02:00][00:05]Concert Album', '[01:45][00:01]Singer - Evening']
+    if reverse: header.reverse()
+    raw = '\n'.join([*header, '[00:10]'+body[0], '[00:20]'+body[1]])
+    row = dict(trackId=123, trackTitle='Evening (Live)', artists=[dict(artistName='Singer')],
+               album=dict(albumTitle='Concert Album'), lyrics=raw)
+    lines, report = published_candidate([row], dict(title='Evening',artist='Singer'), 'Evening',
+                                        allow_recording_mismatch=True)
+    assert lines==body and report['excluded_credit_lines']==[1,2]
+    # An album title can also be sung. It needs the adjoining work/artist
+    # header, and only the opening header block is metadata.
+    for text in ['Concert Album\n'+body[0], body[0]+'\nSinger - Evening\nConcert Album']:
+        assert published_lyric_lines(text, 'Evening', ['Singer'], album='Concert Album')[0]==text.splitlines()
+
+
 @pytest.mark.parametrize('credit', ['音频助理', '音頻工程師', '录音助理', 'Audio Engineer', 'Assistant Engineer',
     '配唱制作人', '人聲錄音師', '童声', '合唱', '和音', '伴唱编配', '主唱指导',
     '編曲 Arrangement', '编曲 Arranger', '和音 Backing Vocals', '制作人 Producer', '和声编写 Backing Vocal Arrangement',

@@ -1042,10 +1042,10 @@ class Pipeline:
         candidates, seen = [], set()
         for candidate in [lyrics, *alternative_lyric_candidates(lyrics, packet)]:
             if candidate.get('provenance', {}).get('kind') == 'online_lyric_text':
+                provenance = candidate['provenance']
                 lines, excluded = published_lyric_lines('\n'.join(candidate['lines']),
-                                                       candidate['title'], [candidate['artist']])
+                    candidate['title'], [candidate['artist']], album=provenance.get('lyric_lookup', {}).get('album'))
                 if excluded:
-                    provenance = candidate['provenance']
                     candidate = dict(candidate, lines=lines, provenance=dict(provenance,
                         lyric_lookup=dict(provenance.get('lyric_lookup', {}),
                             excluded_cached_credit_lines=excluded)))

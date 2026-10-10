@@ -300,7 +300,7 @@ def text_language(text):
     return None
 
 
-def published_lyric_lines(text, title, artists=()):
+def published_lyric_lines(text, title, artists=(), *, album=None):
     """Keep published phrases intact; remove only explicit credit metadata."""
     instrument = (r'(?:钢琴|键盘|(?:低音)?吉他|贝斯|鼓|打击乐|二胡|'
         r'(?:第[一二三四\d]+)?(?:小提琴|中提琴|大提琴))(?:手|独奏|\d+)?')
@@ -371,9 +371,11 @@ def published_lyric_lines(text, title, artists=()):
                 first += 2
                 continue
         note = canonical_script(line).strip('()').strip()
+        album_header = identity(line) & identity(album) and any(
+            title_artist(rows[i][1]) for i in (first-1, first+1) if 0 <= i < len(rows))
         heading_note = first and (_soundtrack_credit.fullmatch(note) or re.fullmatch(
             r'(?:又名|别名|also known as|a\.?k\.?a\.?)\s*[:：].+', note, re.I))
-        if is_credit(line) or title_artist(line) or heading_note or (identity(line) & identity(title) and
+        if is_credit(line) or title_artist(line) or album_header or heading_note or (identity(line) & identity(title) and
                 first+1 < len(rows) and is_credit(rows[first+1][1])):
             first += 1
         else:
@@ -427,7 +429,7 @@ def description_lyrics(metadata, reference_lines=()):
             section = section[first:last+1]
         selected = [(n, line) for n, line in section if line]
         text, excluded = published_lyric_lines('\n'.join(line for _, line in selected),
-            song['title'], [song['artist']])
+            song['title'], [song['artist']], album=song.get('album'))
         body = normalize(''.join(text))
         overlap = sum(b.size for b in SequenceMatcher(None, body, reference, autojunk=False).get_matching_blocks())
         if not body or (not labelled and overlap < max(len(reference), len(body))*.7):
@@ -542,7 +544,7 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
                 text = read_lyrics(row)
             if not isinstance(text, str) or not text.strip() or len(text) > 30000:
                 continue
-            lines, excluded = published_lyric_lines(text, title, artists)
+            lines, excluded = published_lyric_lines(text, title, artists, album=album)
         except Exception as error:
             failure = lyric_request_error(error)
             if failure.get('requires_access') or failure.get('http_status') in (401, 403, 429):
@@ -1061,7 +1063,8 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
             raw_text = row['plainLyrics']
             if not isinstance(raw_text, str) or not raw_text.strip() or len(raw_text) > 30000:
                 continue
-            clean_lines, excluded = published_lyric_lines(raw_text, row['trackName'], [row['artistName']])
+            clean_lines, excluded = published_lyric_lines(raw_text, row['trackName'], [row['artistName']],
+                                                       album=row.get('albumName'))
             text = '\n'.join(clean_lines)
             if not text:
                 report['rejected_candidates'].append(dict(reason='empty_lyric_body', id=row.get('id'),
