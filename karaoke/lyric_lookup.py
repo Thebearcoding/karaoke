@@ -960,7 +960,12 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
             a.get('id') and a['id'] == metadata.get('channel_id') for a in recording.get('artists') or []) and (
             identity(channel_name) & identity(recording.get('artist'))) and not (
             identity(channel_name) <= identity(song.get('artist'))) else None
-        if not lines or ((parsed or artist_alias) and review.get('status') == 'insufficient_sources'):
+        confirmed_names = dict(title=recording.get('title'), artist=artist_alias or recording.get('artist'))
+        unused_alias = any(name and not request.get(key) and not
+            identity(name, title=key == 'title') <= identity(song.get(key), title=key == 'title')
+            for key, name in confirmed_names.items())
+        needs_support = review.get('status') != 'corroborated' and review.get('selection') != 'similarity_support'
+        if not lines or (unused_alias and needs_support) or (parsed and review.get('status') == 'insufficient_sources'):
             retained_lines, retained_report, retained_song = lines, report, dict(song)
             original = {key: song.get(key) for key in ('title', 'artist')}
             previous, attempts, accepted = report, [], False
@@ -972,16 +977,18 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                     continue
                 before = dict(song)
                 review = report.get('crosscheck', {})
-                confirmed_alias = artist_alias if key == 'artist' and artist_alias else recording.get(key)
+                confirmed_alias = confirmed_names.get(key)
                 if key == 'artist' and not artist_alias and not retained_lines and recording.get('artists'):
                     confirmed_alias, artist_resolution = resolve_recording_artists(recording, cache)
                 if confirmed_alias and not identity(confirmed_alias, title=key == 'title') <= identity(song.get(key), title=key == 'title'):
                     song[key] = confirmed_alias
                     description_text = None
-                else:
+                elif not retained_lines or parsed:
                     description_text = read_description([key], retry=True)
                     if parsed is None and metadata_failure and not metadata_retries:
                         description_text = read_description([key], retry=True)
+                else:
+                    continue
                 if song == before:
                     continue
                 blocked = {r['provider']: (None, r) for r in report.get('crosscheck', {}).get('unavailable_sources', [])

@@ -16,25 +16,28 @@ def hiragana(text):
 
 
 def separate_inline_readings(lines, evidence):
-    """Separate quoted ruby only when a publisher confirms the exact pair."""
+    """Separate parenthetical ruby only when a publisher confirms the exact pair."""
     from .lyric_lookup import comparison_key
     pairs = {(comparison_key(p['text']), hiragana(p['reading'])): source['url']
              for source in evidence for p in source['pairs']}
     if not pairs:
         return lines, []
-    pattern = re.compile(r'([《≪「『])([^《》≪≫「」『』\n]+)([》≫」』])\s*[（(]([ぁ-ゖァ-ヶー]+)[）)]')
+    pattern = re.compile(r'(?:(?P<opening>[《≪「『])(?P<quoted>[^《》≪≫「」『』\n]+)(?P<closing>[》≫」』])'
+                         r'|(?P<plain>[\u3400-\u9fff]+))(?P<gap>\s*)[（(](?P<reading>[ぁ-ゖァ-ヶー]+)[）)]')
     cleaned, annotations = [], []
     for line in lines:
         parts, spans, cursor = [], [], 0
         for match in pattern.finditer(line):
-            base, reading = match[2], hiragana(match[4])
+            group = 'quoted' if match['opening'] else 'plain'
+            base, reading = match[group], hiragana(match['reading'])
             source = pairs.get((comparison_key(base), reading))
-            if (dict(zip('《≪「『', '》≫」』'))[match[1]] != match[3]
+            if ((match['opening'] and dict(zip('《≪「『', '》≫」』'))[match['opening']] != match['closing'])
+                    or (group == 'plain' and match['gap'])
                     or not re.search('[\u3400-\u9fff]', base) or not source):
                 continue
-            parts.append(line[cursor:match.start(2)])
+            parts.append(line[cursor:match.start(group)])
             first = sum(map(len, parts))
-            parts.append(base + match[3])
+            parts.append(base + (match['closing'] or ''))
             spans.append(dict(first=first, stop=first+len(base), text=base, reading=reading, url=source))
             cursor = match.end()
         parts.append(line[cursor:])

@@ -1397,7 +1397,8 @@ def test_lyric_identity_reuses_platform_native_alias_without_model(tmp_path, mon
 
 @pytest.mark.parametrize('scenario', ['recover', 'explicit', 'other_video', 'other_channel',
                                     'other_artist', 'no_corroboration', 'already_corroborated'])
-def test_single_lyric_source_recovers_linked_channel_bilingual_artist(tmp_path, monkeypatch, scenario):
+@pytest.mark.parametrize('initial_status', ['insufficient_sources', 'conflicting'])
+def test_unconfirmed_lyrics_recover_linked_channel_bilingual_artist(tmp_path, monkeypatch, scenario, initial_status):
     from karaoke import lyric_lookup, lyric_consensus
     from karaoke.stage_cache import StageCache
     from openai import OpenAIError
@@ -1409,7 +1410,7 @@ def test_single_lyric_source_recovers_linked_channel_bilingual_artist(tmp_path, 
         recovered = song['artist'] == 'Hikari Ray 光レイ' and scenario != 'no_corroboration'
         return (native if recovered else romanized), dict(
             provider='utaten' if recovered else 'lrclib', language='Japanese' if recovered else 'Swahili',
-            crosscheck=dict(status='corroborated' if recovered or scenario == 'already_corroborated' else 'insufficient_sources',
+            crosscheck=dict(status='corroborated' if recovered or scenario == 'already_corroborated' else initial_status,
                 unavailable_sources=[dict(provider='youtube_music', recording_identity=dict(
                     title='Evening', artist='Hikari Ray',
                     video_id='bbbbbbbbbbb' if scenario == 'other_video' else 'aaaaaaaaaaa',
@@ -1429,6 +1430,33 @@ def test_single_lyric_source_recovers_linked_channel_bilingual_artist(tmp_path, 
     assert calls == ['Hikari Ray'] + (['Hikari Ray 光レイ'] if scenario in ('recover', 'no_corroboration') else [])
     if scenario == 'recover':
         assert result['provenance']['lyric_lookup']['identity_recovery']['recovered']
+
+
+@pytest.mark.parametrize('scenario', ['recover', 'explicit', 'other_video', 'no_corroboration', 'similarity_support'])
+def test_conflicting_lyrics_query_recording_native_credit_before_accepting_outlier(tmp_path, monkeypatch, scenario):
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    original = ['The first source disagrees with the second']
+    native = ['微風裡慢慢歌唱', '星光下靜靜傾聽']
+    calls = []
+    def fetch(song, *args, **kwargs):
+        calls.append(song['artist'])
+        recovered = song['artist'] == '林林' and scenario != 'no_corroboration'
+        if len(calls) > 1:
+            assert 'youtube_music' in kwargs['prefetched']
+        return (native if recovered else original), dict(provider='netease', language='Chinese',
+            crosscheck=dict(status='corroborated' if recovered else 'conflicting',
+                selection='similarity_support' if scenario == 'similarity_support' else 'published_source',
+                unavailable_sources=[dict(provider='youtube_music', recording_identity=dict(
+                    title='Evening', artist='林林', video_id='bbbbbbbbbbb' if scenario == 'other_video' else 'aaaaaaaaaaa'))]))
+    monkeypatch.setattr(lyric_consensus, 'fetch_lyric_consensus', fetch)
+    monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', lambda *a: pytest.fail('No description requires no model'))
+    request = dict(url=URL, **({'artist':'Lin Lin'} if scenario == 'explicit' else {}))
+    result = lyric_lookup.prepare_online_lyrics(request,
+        dict(id='aaaaaaaaaaa', track='Evening', artist='Lin Lin'), 30, StageCache(tmp_path), 'unused', None)
+    assert calls == ['Lin Lin'] + (['林林'] if scenario in ('recover', 'no_corroboration') else [])
+    assert result['lines'] == (native if scenario == 'recover' else original)
+    assert result['artist'] == ('林林' if scenario == 'recover' else 'Lin Lin')
 
 
 @pytest.mark.parametrize('scenario', ['recover', 'explicit', 'other_video', 'subscription_channel', 'usable', 'artist_error'])
@@ -7302,8 +7330,11 @@ def test_explicit_source_readings_do_not_outvote_plain_lyrics_or_remove_sung_res
         (annotated, dict(provider=provider, language='Japanese')))
     lines, report = module.fetch_lyric_consensus(dict(title='帰り道', artist='夕灯'), {}, 60, StageCache(tmp_path))
     assert lines == (plain if extra == 'ふるさと' else annotated)
-    assert bool(report['crosscheck']['serialized_reading_variants']) == (extra == 'ふるさと')
-    assert plain in report['candidate_texts'] and annotated in report['candidate_texts']
+    assert plain in report['candidate_texts']
+    if extra == 'ふるさと':
+        assert report['inline_readings'][0]['source_text'] == annotated[0]
+    else:
+        assert annotated in report['candidate_texts']
     assert report['crosscheck']['rejected_sources'] == []
 
 
@@ -7357,6 +7388,51 @@ def test_inline_reading_offsets_and_unconfirmed_responses_remain_intact():
     assert [lines[0][s['first']:s['stop']] for s in annotations[0]['spans']] == ['明日の景色', '帰る場所']
     assert annotations[0]['source_text'] == text
     assert separate_inline_readings(['《明日の景色」（あす）'], evidence)[0] == ['《明日の景色」（あす）']
+
+
+def test_inline_furigana_cannot_make_a_different_ending_win_consensus(tmp_path, monkeypatch):
+    from karaoke import lyric_consensus as module
+    from karaoke.stage_cache import StageCache
+    plain = ['夜空を見上げて明日の朝まで一緒に歌う', '今日も故郷へ向かって長い道を歩いている',
+             'Until we meet again']
+    annotated = [line.replace('故郷', '故郷（ふるさと）').replace('明日', '明日（あした）') for line in plain]
+    different = plain[:-1] + ['あの日の歌を忘れない']
+    pairs = [dict(text='故郷', reading='ふるさと'), dict(text='明日', reading='あした')]
+    monkeypatch.setattr(module.lookup, 'fetch_published_lyrics', lambda *a: (None, dict(provider='line_music')))
+    monkeypatch.setattr(module.lookup, 'fetch_structured_lyrics', lambda *a, **kw: (None, dict(provider='lyricsweb')))
+    monkeypatch.setattr(module.lookup, 'fetch_lyrics', lambda *a: {})
+    monkeypatch.setattr(module.lookup, 'lyric_candidate', lambda *a, **kw: (plain, dict(provider='lrclib')))
+    def additional(provider, *args, **kwargs):
+        if provider == 'netease':
+            return annotated, dict(provider=provider, language='Japanese')
+        if provider == 'utaten':
+            return different, dict(provider=provider, language='Japanese',
+                reading_evidence=[dict(url='https://utaten.com/lyric/example/', pairs=pairs)])
+        return None, dict(provider=provider)
+    monkeypatch.setattr(module, 'fetch_additional_lyrics', additional)
+    result, report = module.fetch_lyric_consensus(dict(title='帰り道', artist='夕灯'), {}, 120, StageCache(tmp_path))
+    assert result == plain
+    assert report['crosscheck']['selection'] == 'agreement'
+    assert different in report['candidate_texts']
+    assert report['crosscheck']['sources'][1]['inline_readings'][1]['source_text'] == annotated[1]
+
+
+@pytest.mark.parametrize('text,expected', [
+    ('故郷（ふるさと）へ帰ろう', '故郷へ帰ろう'),
+    ('故郷（フルサト）へ帰ろう', '故郷へ帰ろう'),
+    ('故郷（またね）へ帰ろう', '故郷（またね）へ帰ろう'),
+    ('故郷 （ふるさと）へ帰ろう', '故郷 （ふるさと）へ帰ろう'),
+    ('新故郷（ふるさと）へ帰ろう', '新故郷（ふるさと）へ帰ろう'),
+])
+def test_unquoted_reading_requires_adjacent_exact_published_pair(text, expected):
+    from karaoke.lyric_readings import separate_inline_readings
+    evidence = [dict(url='https://example.com', pairs=[dict(text='故郷', reading='ふるさと')])]
+    lines, annotations = separate_inline_readings([text], evidence)
+    assert lines == [expected]
+    if text != expected:
+        span = annotations[0]['spans'][0]
+        assert expected[span['first']:span['stop']] == '故郷'
+        assert annotations[0]['source_text'] == text
 
 
 def test_changed_published_readings_invalidate_both_render_caches(tmp_path, monkeypatch):
