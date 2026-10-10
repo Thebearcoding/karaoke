@@ -165,7 +165,7 @@ def identity(value, *, title=False):
     return {''.join(c for c in name if c.isalnum()) for name in aliases} - {''}
 
 
-def artist_credit_matches(credit, artists):
+def artist_credit_matches(credit, artists, *, partial=False):
     """Match whole credited names, including reordered multi-artist credits."""
     expected = identity(credit)
     if not expected:
@@ -175,6 +175,8 @@ def artist_credit_matches(credit, artists):
     separators = r'\s*[&,/×+、;]\s*|\s+·\s+|\s+\b(?:feat\.?|featuring|ft\.?|with)\s+'
     members = [identity(part) for artist in artists if isinstance(artist, str)
                for part in re.split(separators, artist, flags=re.I) if part.strip()]
+    if partial:
+        return any(identity(part) & member for part in re.split(separators, credit, flags=re.I) for member in members)
     if len(members) < 2 or not all(members):
         return False
     expected |= identity(''.join(re.split(separators, credit, flags=re.I)))
@@ -291,7 +293,7 @@ def published_lyric_lines(text, title, artists=()):
         r'(?:第[一二三四\d]+)?(?:小提琴|中提琴|大提琴)|录音(?:师|助理|(?:工作)?室)?|混音(?:师|(?:工作)?室)?|母带(?:后期(?:处理|制作))?(?:人|工程师|录音室)?|音频(?:助理|工程师)|'
         r'(?:song )?title|song name|artist|album|composer|lyricist|producer|lyrics|music(?: production)?|written by|produced by|'
         r'guitar|bass|drums|piano|strings|instrumental|recorded by|mixed by|mastered by|audio engineer|assistant engineer|'
-        r'arrange(?:ment|r)|(?:backing |lead )?vocals?(?: arrangement)?|(?:recording|mixing|mastering)(?: engineer| studio)?(?: \(vocals\))?|'
+        r'乐团|乐队|orchestra|band|arrange(?:ment|r)|(?:backing |lead )?vocals?(?: arrangement)?|(?:recording|mixing|mastering)(?: engineer| studio)?(?: \(vocals\))?|'
         r'production assistant|[OS]P|O[AC](?:\s*/\s*O[AC])?|publisher|copyright')
     # A translated role is still metadata: "编曲 Arrangement: ...".
     # Require complete recognized labels before the colon, not arbitrary prose.
@@ -304,9 +306,9 @@ def published_lyric_lines(text, title, artists=()):
             continue
         # Provider timestamps describe text order/repetitions, never our onsets.
         # Defer repeated LRC rows until they can be ordered with the other rows.
-        prefix = re.match(r'^(?:\[\d{1,3}:\d{2}(?:[.:]\d{1,3})?\]\s*)+', line)
+        prefix = re.match(r'^(?:\[\d{1,3}:\d{2}(?:[.:]\d{1,3})?(?:-\d+)?\]\s*)+', line)
         if prefix:
-            stamps = re.findall(r'\[(\d{1,3}):(\d{2}(?:[.:]\d{1,3})?)\]', prefix[0])
+            stamps = re.findall(r'\[(\d{1,3}):(\d{2}(?:[.:]\d{1,3})?)(?:-\d+)?\]', prefix[0])
             timestamps[i] = [60*int(m)+float(s.replace(':', '.')) for m,s in stamps]
             line = line[prefix.end():]
         if re.fullmatch(r'\[(?:verse|chorus|pre[- ]?chorus|post[- ]?chorus|bridge|intro|outro|instrumental|interlude|refrain)(?:\s+\d+)?\]', line, re.I):
@@ -314,7 +316,7 @@ def published_lyric_lines(text, title, artists=()):
             continue
         if line:
             rows.append((i, line))
-    is_credit = lambda line: bool(credit.match(converter.convert(unicodedata.normalize('NFKC', line))) or
+    is_credit = lambda line: bool(credit.match(converter.convert(unicodedata.normalize('NFKC', line.replace('︰', ':')))) or
                                  re.fullmatch(r'credits?(?:\s+list)?\s*[:：]?', line, re.I))
     artist_ids = set().union(*(identity(artist) for artist in artists))
     def title_artist(line):
@@ -452,8 +454,11 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
         album = row['album'].get('albumTitle', '')
         if not isinstance(album, str):
             continue
-        if not any(artist_credit_matches(credit, artists) or artist_credit_matches(credit, artist_aliases)
-                   for credit in song_names(song, 'artist')):
+        full_credit = any(artist_credit_matches(credit, artists) or artist_credit_matches(credit, artist_aliases)
+                          for credit in song_names(song, 'artist'))
+        partial_credit = allow_recording_mismatch and any(artist_credit_matches(credit, artists+artist_aliases, partial=True)
+                                                          for credit in song_names(song, 'artist'))
+        if not (full_credit or partial_credit):
             continue
         title_aliases = [title, *(name for name in row.get('trackAliases') or [] if isinstance(name, str))]
         title_match = any(identity(name, title=True) & identity(alias, title=True)
@@ -465,6 +470,8 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
         mismatch = recording_mismatches(song, source_title, title, album)
         if mismatch is None:
             continue
+        if not full_credit:
+            mismatch.append('performers')
         seconds = row.get('duration_seconds')
         seconds = seconds if isinstance(seconds, (int, float)) and math.isfinite(seconds) and seconds > 0 else None
         difference = abs(seconds-duration) if seconds is not None and duration is not None else math.inf
@@ -639,6 +646,7 @@ def fetch_reading_lyrics(song, cache, duration=None, reference_lines=(), source_
             title_match = any(identity(name, title=True) & identity(actual.get('title'), title=True)
                               for name in song_names(song, 'title'))
             artist_match = any(artist_credit_matches(name, [actual.get('artist')]) for name in song_names(song, 'artist'))
+            partial_credit = any(artist_credit_matches(name, [actual.get('artist')], partial=True) for name in song_names(song, 'artist'))
             mismatch = recording_mismatches(song, source_title, actual.get('title'), None)
             text, excluded = published_lyric_lines(page.text, actual.get('title') or '', [actual.get('artist')])
             left, right = text_units(''.join(text), 'Japanese'), text_units(reference, 'Japanese')
@@ -647,7 +655,9 @@ def fetch_reading_lyrics(song, cache, duration=None, reference_lines=(), source_
                             matched >= min(len(left), len(right))*.9 and matched >= max(len(left), len(right))*.65)
             attempts.append(dict(url=url, identity=actual, title_match=title_match, artist_match=artist_match,
                                  corroborated=corroborated))
-            if text and mismatch is not None and (title_match and artist_match or corroborated) and not short_lyric_text(text, duration):
+            if text and mismatch is not None and (title_match and (artist_match or partial_credit) or corroborated) and not short_lyric_text(text, duration):
+                if partial_credit and not artist_match:
+                    mismatch.append('performers')
                 return text, dict(status='candidate', provider='utaten', publisher='utaten', language=text_language('\n'.join(text)),
                     url=url, track=actual.get('title'), artist=actual.get('artist'), attempts=attempts,
                     text_sha256=hashlib.sha256(page.text.encode()).hexdigest(), excluded_credit_lines=excluded,
@@ -846,8 +856,11 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
     for row in packet['results']:
         # A text search can return covers, live cuts and unrelated recordings.
         # Identity and duration must agree before using any audio-text score.
+        full_credit = any(artist_credit_matches(name, [row.get('artistName')]) for name in song_names(song, 'artist'))
+        partial_credit = allow_recording_mismatch and any(artist_credit_matches(name, [row.get('artistName')], partial=True)
+                                                          for name in song_names(song, 'artist'))
         if (not any(identity(name, title=True) & identity(row.get('trackName'), title=True) for name in song_names(song, 'title')) or
-                not any(artist_credit_matches(name, [row.get('artistName')]) for name in song_names(song, 'artist')) or row.get('instrumental') is not False):
+                not (full_credit or partial_credit) or row.get('instrumental') is not False):
             continue
         if not allow_recording_mismatch and version_tags(song['title']) != version_tags(row.get('trackName')):
             continue
@@ -856,6 +869,8 @@ def lyric_candidate(packet, song, transcription, duration, *, audio_path=None, s
                     {live_performance(row.get(field)) for field in ('trackName', 'albumName')} else [])
         if mismatch is None or mismatch and not allow_recording_mismatch:
             continue
+        if not full_credit:
+            mismatch.append('performers')
         try:
             reference_duration, basis = duration, None
             difference = abs(float(row['duration'])-reference_duration)

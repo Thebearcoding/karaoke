@@ -2355,7 +2355,7 @@ def test_published_lyrics_strip_only_leading_metadata_identity(title, artist, he
     '配唱制作人', '人聲錄音師', '童声', '合唱', '和音', '伴唱编配', '主唱指导',
     '編曲 Arrangement', '编曲 Arranger', '和音 Backing Vocals', '制作人 Producer', '和声编写 Backing Vocal Arrangement',
     '配唱录音师 Recording Engineer (Vocals)', '母带后期处理工程师 Mastering Engineer', 'Music Production 音乐制作', '音乐制作 Music Production',
-    '低音吉他', '器樂', 'Instrumental', '音乐制作助理', '录音工作室', '混音工作室', '母带后期制作人', '编曲协力'])
+    '低音吉他', '器樂', 'Instrumental', '音乐制作助理', '录音工作室', '混音工作室', '母带后期制作人', '编曲协力', '乐团', 'Orchestra'])
 def test_translated_production_footer_cannot_change_the_lyric_language(credit):
     from karaoke.lyric_lookup import published_candidate
     body = ['Stars above the quiet shore', 'I will sing once more']
@@ -2390,7 +2390,8 @@ def test_description_extracts_published_block_without_a_metadata_model(labelled)
     assert description_lyrics(dict(description='We met the artist to discuss the night\nVisit our site'), body) is None
 
 
-def test_music_album_lyrics_are_a_fallback_for_same_work_not_another_artists_song(tmp_path, monkeypatch):
+@pytest.mark.parametrize('credits', ['Singer', 'Singer · Guest'])
+def test_music_album_lyrics_are_a_fallback_for_same_work_not_another_artists_song(tmp_path, monkeypatch, credits):
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
     import ytmusicapi
@@ -2405,15 +2406,17 @@ def test_music_album_lyrics_are_a_fallback_for_same_work_not_another_artists_son
         def search(self, query, **kwargs):
             return [dict(videoId='ccccccccccc', title='Evening', artists=[dict(name='Other singer')]),
                     dict(videoId='ddddddddddd', title='Evening', artists=[dict(name='Singer')], album=dict(name='Remix')),
-                    dict(videoId='bbbbbbbbbbb', title='Evening', artists=[dict(name='Singer')], album=dict(name='Album'))]
+                    dict(videoId='eeeeeeeeeee', title='Evening', artists=[dict(name='Singer')], album=dict(name='Album')),
+                    dict(videoId='bbbbbbbbbbb', title='Evening', artists=[dict(name=credits)], album=dict(name='Album'))]
         def get_lyrics(self, browseId):
             return dict(lyrics='\n'.join(body), source='LyricFind')
     monkeypatch.setattr(ytmusicapi, 'YTMusic', Music)
-    lines, report = module.fetch_additional_lyrics('youtube_music', dict(title='Evening (Live)', artist='Singer'),
+    lines, report = module.fetch_additional_lyrics('youtube_music', dict(title='Evening (Live)', artist=credits),
         dict(id='aaaaaaaaaaa', title='Evening (Live)'), StageCache(tmp_path), 30)
-    assert lines == body and calls == ['aaaaaaaaaaa', 'bbbbbbbbbbb']
+    selected = 'bbbbbbbbbbb' if 'Guest' in credits else 'eeeeeeeeeee'
+    assert lines == body and calls == ['aaaaaaaaaaa', selected]
     assert report['recording_identity']['video_id'] == 'aaaaaaaaaaa'
-    assert report['release_fallback']['selected_video_id'] == 'bbbbbbbbbbb'
+    assert report['release_fallback']['selected_video_id'] == selected
     assert report['recording_mismatches'] == ['version'] and report['publisher'] == 'lyricfind'
 
 
@@ -2472,6 +2475,17 @@ def test_published_lyrics_parse_lrc_repetitions_without_reusing_their_timestamps
     # Do not guess the positions of missing timestamped repetitions.
     with pytest.raises(ValueError, match='fully timed'):
         published_lyric_lines('[00:01][00:03]First\nUnplaced verse', 'Evening')
+
+
+@pytest.mark.parametrize('prefix', ['[00:00.00]', '[00:00.00-1]'])
+@pytest.mark.parametrize('colon', [':', '：', '︰'])
+def test_lrc_credit_flags_and_unicode_colons_cannot_become_lyrics(prefix, colon):
+    from karaoke.lyric_lookup import published_lyric_lines
+    credits = prefix+' 作詞'+colon+' A Writer\n'+prefix+' 作曲'+colon+' A Composer'
+    assert published_lyric_lines(credits, 'Evening')[0] == []
+    body = ['Stars above the quiet shore', 'We sing until the morning comes']
+    text = credits+'\n[00:01.00]'+body[0]+'\n[00:05.00]'+body[1]
+    assert published_lyric_lines(text, 'Evening') == (body, [1, 2])
 
 
 @pytest.mark.parametrize('provider', ['line_music','lrclib'])
@@ -2669,6 +2683,23 @@ def test_lyric_search_preserves_provider_declared_title_and_artist_aliases():
     lines, report = published_candidate([row], dict(title='Way Home', artist='Evening Light'), '')
     assert lines == body.splitlines() and report['artists'] == ['夕灯']
     assert published_candidate([dict(row, trackAliases=[])], dict(title='Another song', artist='Evening Light'), '')[0] is None
+
+
+@pytest.mark.parametrize('allow_fallback', [False, True])
+@pytest.mark.parametrize('singer', ['Singer', 'Unrelated singer'])
+def test_composer_or_featured_credits_do_not_block_same_performer_lyric_fallback(allow_fallback, singer):
+    from karaoke.lyric_lookup import published_candidate, lyric_candidate
+    song = dict(title='Evening', artist='Singer · Composer · Pianist')
+    row = dict(trackId=123, trackTitle='Evening', artists=[dict(artistName=singer)], album={},
+               lyrics='Stars above the quiet shore\nWe sing until the morning comes')
+    calls = [published_candidate([row], song, '', allow_recording_mismatch=allow_fallback),
+             lyric_candidate(dict(status='ok', results=[dict(id=123, trackName='Evening', artistName=singer,
+                 duration=60, instrumental=False, plainLyrics=row['lyrics'])]), song, None, 60,
+                 allow_recording_mismatch=allow_fallback)]
+    for lines, report in calls:
+        assert bool(lines) == (allow_fallback and singer == 'Singer')
+        if lines:
+            assert report['recording_mismatches'] == ['performers']
 
 
 @pytest.mark.parametrize('first_hit', ['yes', 'wrong_identity', 'short', 'header'])

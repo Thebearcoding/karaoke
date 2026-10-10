@@ -131,13 +131,15 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
                                 artists = [a.get('name') for a in row.get('artists') or [] if isinstance(a, dict)]
                                 title_match = any(lookup.identity(name, title=True) & lookup.identity(row.get('title'), title=True)
                                                   for name in lookup.song_names(song, 'title'))
-                                artist_match = any(lookup.artist_credit_matches(name, artists)
+                                artist_match = any(lookup.artist_credit_matches(name, artists, partial=True)
                                                    for name in lookup.song_names(song, 'artist'))
                                 album = row.get('album') if isinstance(row.get('album'), dict) else {}
                                 mismatch = lookup.recording_mismatches(song, metadata.get('title'), row.get('title'), album.get('name'))
                                 if title_match and artist_match and mismatch is not None and row.get('videoId') and row['videoId'] != video:
-                                    matching.append(row)
-                            for row in matching[:5]:
+                                    if not any(lookup.artist_credit_matches(name, artists) for name in lookup.song_names(song, 'artist')):
+                                        mismatch.append('performers')
+                                    matching.append((mismatch, row))
+                            for mismatch, row in sorted(matching, key=lambda item: len(item[0]))[:5]:
                                 candidate_video = row['videoId']
                                 candidate = lookup.cached_lyric_request(provider,
                                     dict(video_id=candidate_video, method='watch', locale='en'), cache,
@@ -150,6 +152,7 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
                                     lambda: music.get_lyrics(candidate['lyrics']))
                                 if (alternative or {}).get('lyrics'):
                                     result, lyric_video, release = alternative, candidate_video, row
+                                    release_mismatches = mismatch
                                     break
                     text = (result or {}).get('lyrics')
                     if text is not None and (not isinstance(text, str) or len(text) > 30000):
@@ -171,9 +174,7 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
                         report['release_fallback'] = dict(requested_video_id=video, selected_video_id=lyric_video,
                             title=release.get('title'), artists=release.get('artists'),
                             duration_seconds=release.get('duration_seconds'))
-                        album = release.get('album') if isinstance(release.get('album'), dict) else {}
-                        report['recording_mismatches'] = lookup.recording_mismatches(song, metadata.get('title'),
-                            release.get('title'), album.get('name'))
+                        report['recording_mismatches'] = release_mismatches
                 result = dict(lines=lines, report=dict(report, provider=provider))
             except Exception as error:
                 report = lookup.lyric_request_error(error)
