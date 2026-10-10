@@ -322,7 +322,8 @@ def published_lyric_lines(text, title, artists=()):
             stamps = re.findall(r'\[(\d{1,3}):(\d{2}(?:[.:]\d{1,3})?)(?:-\d+)?\]', prefix[0])
             timestamps[i] = [60*int(m)+float(s.replace(':', '.')) for m,s in stamps]
             line = line[prefix.end():]
-        if re.fullmatch(r'\[(?:verse|chorus|pre[- ]?chorus|post[- ]?chorus|bridge|intro|outro|instrumental|interlude|refrain)(?:\s+\d+)?\]', line, re.I):
+        if re.fullmatch(r'\[\s*(?:verse|chorus|pre[- ]?chorus|post[- ]?chorus|bridge|intro|outro|instrumental|interlude|refrain|solo)'
+                        r'(?:\s+\d+)?(?:\s*[:：][^\]\n]+)?\s*\]', line, re.I):
             metadata.append(i)
             continue
         if line:
@@ -707,6 +708,27 @@ def structured_recordings(document):
     return page.recordings
 
 
+def read_lyric_catalogue(url):
+    """Discard repeated biographies/editorial data before caching search metadata."""
+    with httpx.stream('GET', url, timeout=20, headers={'User-Agent': 'Mozilla/5.0'}) as response:
+        response.raise_for_status()
+        body = bytearray()
+        for chunk in response.iter_bytes():
+            body.extend(chunk)
+            if len(body) > 16*1024*1024:
+                raise ValueError('Lyric catalogue response exceeds 16 MiB')
+    data = json.loads(body).get('data') or {}
+    rows = []
+    for row in (data.get('global_song_matches') or []) + (data.get('artist_songs') or []):
+        if not isinstance(row, dict):
+            continue
+        credit = row.get('artist')
+        artists = [credit] if isinstance(credit, dict) else credit if isinstance(credit, list) else []
+        rows.append(dict(id=row.get('_id'), title=row.get('song_name'), path=row.get('public_song_url'),
+                         artists=[a.get('artist_name') for a in artists if isinstance(a, dict)]))
+    return dict(rows=rows, response_sha256=hashlib.sha256(body).hexdigest(), response_bytes=len(body))
+
+
 def fetch_structured_lyrics(song, cache, duration=None, source_title=None):
     """Read a publisher's explicit lyric field with the existing identity matcher."""
     from .lyric_readings import read_page
@@ -714,20 +736,19 @@ def fetch_structured_lyrics(song, cache, duration=None, source_title=None):
         return None, dict(status='missing_identity', provider='lyricsweb')
     query = ' '.join(song_names(song, key)[-1] for key in ('title', 'artist'))
     url = 'https://lyricsweb.com/api/v1/user/search-result?'+urlencode(dict(query=query))
-    packet = cached_lyric_request('lyricsweb', url, cache, lambda: read_document(url))
-    data = packet.get('data') or {}
+    packet = cached_lyric_request('lyricsweb', dict(url=url, representation='candidate_metadata_v1'), cache,
+                                  lambda: read_lyric_catalogue(url))
     rows, links, publishers = [], {}, {}
-    for row in (data.get('global_song_matches') or []) + (data.get('artist_songs') or []):
-        if not isinstance(row, dict) or not row.get('_id') or not isinstance(row.get('artist'), dict):
+    for row in packet['rows']:
+        if not row.get('id'):
             continue
-        path = row.get('public_song_url') or ''
+        path = row.get('path') or ''
         if not isinstance(path, str) or not re.fullmatch(r'/song/[\w%/-]+', path):
             continue
-        key = str(row.get('_id'))
+        key = str(row['id'])
         links[key] = 'https://lyricsweb.com'+path
-        artist = row.get('artist') or {}
-        rows.append(dict(trackId=key, trackTitle=row.get('song_name'),
-            artists=[dict(artistName=artist.get('artist_name'))], album={}))
+        rows.append(dict(trackId=key, trackTitle=row.get('title'),
+            artists=[dict(artistName=a) for a in row['artists']], album={}))
     def lyrics(row):
         url = links[row['trackId']]
         document = cached_lyric_request('lyricsweb', url, cache, lambda: read_page(url))

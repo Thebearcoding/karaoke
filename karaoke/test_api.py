@@ -2483,12 +2483,17 @@ def test_music_album_lyrics_are_a_fallback_for_same_work_not_another_artists_son
 
 
 @pytest.mark.parametrize('page_identity', ['valid', 'wrong_title', 'wrong_artist'])
-def test_structured_publisher_reads_only_matching_recording_lyrics(tmp_path, monkeypatch, structured_lyrics_source, page_identity):
+@pytest.mark.parametrize('artist_list', [False, True])
+def test_structured_publisher_reads_only_matching_recording_lyrics(tmp_path, monkeypatch, structured_lyrics_source, page_identity, artist_list):
+    from contextlib import contextmanager
+    import httpx
     from karaoke import lyric_lookup, lyric_readings
     from karaoke.stage_cache import StageCache
     body = ['Stars above the quiet shore', 'We sing until the morning comes']
     row = dict(_id='recording-id', song_name='Evening', artist=dict(artist_name='Singer'),
                public_song_url='/song/singer/evening')
+    if artist_list:
+        row['artist'] = [dict(row['artist'], biography='x'*(3*1024*1024))]
     recording = dict(**{'@type':'MusicRecording'}, name='Another work' if page_identity == 'wrong_title' else 'Evening',
         byArtist=dict(name='Unrelated singer' if page_identity == 'wrong_artist' else 'Singer'),
         recordingOf=dict(lyrics=dict(text='\\n'.join(['Composer: A Person',*body]), provider=dict(name='LyricFind'))))
@@ -2499,14 +2504,16 @@ def test_structured_publisher_reads_only_matching_recording_lyrics(tmp_path, mon
             dict(recording, recordingOf=dict(lyrics='invalid structure')),
             recording]}) + '</script>')
     calls = []
-    def read(url, **kwargs):
+    @contextmanager
+    def read(method, url, **kwargs):
         calls.append(url)
-        return dict(data=dict(global_song_matches=[None,dict(row,public_song_url='https://other.test/song'),row]))
+        yield httpx.Response(200, json=dict(data=dict(global_song_matches=[None,
+            dict(row,public_song_url='https://other.test/song'),row])), request=httpx.Request(method,url))
     def page(url):
         calls.append(url)
         assert url == 'https://lyricsweb.com/song/singer/evening'
         return document
-    monkeypatch.setattr(lyric_lookup, 'read_document', read)
+    monkeypatch.setattr(lyric_lookup.httpx, 'stream', read)
     monkeypatch.setattr(lyric_readings, 'read_page', page)
     for _ in range(2):
         lines, report = structured_lyrics_source(dict(title='Evening',artist='Singer'), StageCache(tmp_path), 60)
@@ -2516,6 +2523,10 @@ def test_structured_publisher_reads_only_matching_recording_lyrics(tmp_path, mon
             assert report['url'] == 'https://lyricsweb.com/song/singer/evening'
             assert report['excluded_credit_lines'] == [1]
     assert len(calls) == 2
+    catalogue = next(json.loads(p.read_text())['data'] for p in (tmp_path/'lyric-responses').glob('*.json')
+                     if isinstance(json.loads(p.read_text()).get('data'), dict))
+    assert catalogue['rows'][-1]['artists'] == ['Singer']
+    assert 'biography' not in json.dumps(catalogue)
 
 
 @pytest.mark.parametrize('placeholder', ['[00:00.00]纯音乐，请欣赏', '純音樂，請您欣賞',
@@ -2584,6 +2595,15 @@ def test_lrc_credit_flags_and_unicode_colons_cannot_become_lyrics(prefix, colon)
     body = ['Stars above the quiet shore', 'We sing until the morning comes']
     text = credits+'\n[00:01.00]'+body[0]+'\n[00:05.00]'+body[1]
     assert published_lyric_lines(text, 'Evening') == (body, [1, 2])
+
+
+@pytest.mark.parametrize('label', ['[Verse 2: First singer]', '[ Solo: Guitarist / Harmony: Second guitarist ]',
+    '[Chorus: Singer & Guest]', '[Instrumental]', '[Bridge：Guest]'])
+def test_credited_section_labels_are_not_sung_and_do_not_truncate_the_following_verse(label):
+    from karaoke.lyric_lookup import published_lyric_lines
+    body = ['We keep singing (oh, oh)', 'And then we sing another verse', '[Oh!]', 'A solo voice tonight']
+    lines, excluded = published_lyric_lines('\n'.join([body[0], label, *body[1:]]), 'Evening')
+    assert lines == body and excluded == [2]
 
 
 @pytest.mark.parametrize('provider', ['line_music','lrclib'])
