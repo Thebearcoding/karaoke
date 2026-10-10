@@ -487,6 +487,9 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
                                                          reference_lines=reference)
                 elif provider == 'netease':
                     retry = fetch_additional_lyrics(provider, song, metadata, cache, duration, reference_lines=reference)
+                elif provider == 'lyricsweb':
+                    retry = lookup.fetch_structured_lyrics(song, cache, duration, metadata.get('title'),
+                                                          reference_lines=reference)
                 else:
                     continue
             except Exception as error:

@@ -1264,6 +1264,29 @@ def test_online_lyric_candidate_skips_asr_only_for_interactive_playback(tmp_path
         assert 'transcribe' not in stages
 
 
+@pytest.mark.parametrize('first_found', [False, True])
+@pytest.mark.parametrize('wrong_artist', [False, True])
+def test_empty_lyric_search_broadens_query_without_weakening_identity(tmp_path, monkeypatch, first_found, wrong_artist):
+    from urllib.parse import parse_qs, urlsplit
+    from karaoke import lyric_lookup
+    from karaoke.stage_cache import StageCache
+    song = dict(title='Evening', artist='Singer')
+    metadata = tmp_path/'source.info.json'; metadata.write_text('{}')
+    row = dict(id=1, trackName='Evening', artistName='Other' if wrong_artist else 'Singer',
+        duration=30., instrumental=False, plainLyrics='Stars above the quiet shore\nWe keep singing once more')
+    calls = []
+    def fetch(url):
+        query = parse_qs(urlsplit(url).query); calls.append(query)
+        return [row] if first_found or 'artist_name' not in query else []
+    monkeypatch.setattr(lyric_lookup, 'read_document', fetch)
+    for _ in range(2):
+        packet = lyric_lookup.fetch_lyrics(song, metadata, StageCache(tmp_path))
+        lines, _ = lyric_lookup.lyric_candidate(packet, song, None, 30., allow_recording_mismatch=True)
+        assert lines == (None if wrong_artist else row['plainLyrics'].splitlines())
+    assert len(calls) == (1 if first_found else 2)
+    if not first_found:assert calls[-1] == dict(track_name=['Evening'])
+
+
 @pytest.mark.parametrize('title', ['晚風', '晚風 (Official Music Video)', '晚風 [Official Audio]'])
 def test_lyrics_first_search_uses_metadata_duration_and_retains_review_status(tmp_path, monkeypatch, title):
     from karaoke import lyric_lookup, lyric_consensus
@@ -2516,7 +2539,7 @@ def test_published_lyrics_remove_credit_blocks_but_keep_sung_titles_and_colons(c
 
 def test_recording_notes_inside_credit_header_do_not_truncate_the_lyric_body():
     from karaoke.lyric_lookup import published_lyric_lines
-    notes = ['电影《远山》人物主题曲', '（又名：另一首名字）']
+    notes = ['电影《远山》人物主题曲', '（又名：另一首名字）', '【未经著作权人许可 不得翻唱 翻录或使用】']
     body = ['晚風', '我说：继续往前走', '晚風']
     header = ['作词：林林', '出品：唱片公司', '歌曲营销：唱片公司', 'SP：发行公司', *notes]
     raw = '\n'.join([*header, *body, '二胡：乐手', '混音/母带工程师：制作人'])
@@ -2613,12 +2636,26 @@ def test_published_lrc_header_keeps_album_metadata_out_of_repeated_lyrics(revers
         assert published_lyric_lines(text, 'Evening', ['Singer'], album='Concert Album')[0]==text.splitlines()
 
 
+def test_serialized_lrc_headers_preserve_payload_repetition_and_literal_escapes():
+    from karaoke.lyric_lookup import published_lyric_lines
+    first, second = 'We keep singing tonight', r'I sing\nwith you'
+    raw = (r'[00:10][00:30]Evening - Singer\nConcert Album\n'+first+'\n'+
+           '[00:20]'+second)
+    assert published_lyric_lines(raw, 'Evening', ['Singer'], album='Concert Album') == ([first, second, first], [])
+    for text in (r'Other song - Singer\nConcert Album\n'+first,
+                 r'Evening - Someone Else\nConcert Album\n'+first,
+                 r'Evening - Singer\nAnother Album\n'+first,
+                 first+r'\nEvening - Singer\nConcert Album'):
+        assert published_lyric_lines(text, 'Evening', ['Singer'], album='Concert Album')[0] == [text]
+
+
 @pytest.mark.parametrize('credit', ['音频助理', '音頻工程師', '录音助理', 'Audio Engineer', 'Assistant Engineer',
     '配唱制作人', '人聲錄音師', '童声', '合唱', '和音', '伴唱编配', '主唱指导',
     '編曲 Arrangement', '编曲 Arranger', '和音 Backing Vocals', '制作人 Producer', '和声编写 Backing Vocal Arrangement',
     '配唱录音师 Recording Engineer (Vocals)', '母带后期处理工程师 Mastering Engineer', 'Music Production 音乐制作', '音乐制作 Music Production',
     '音乐制作人Music Producer', '首席制作人 Executive Producer', '联合制作人Co-producer', 'Chief Producer首席制作人',
-    '低音吉他', '器樂', 'Instrumental', '音乐制作助理', '录音工作室', '混音工作室', '母带后期制作人', '编曲协力', '乐团', 'Orchestra'])
+    '低音吉他', '器樂', 'Instrumental', '音乐制作助理', '录音工作室', '混音工作室', '母带后期制作人', '编曲协力', '乐团', 'Orchestra',
+    '出品 Production', '音乐发行 Music Distributed by'])
 def test_translated_production_footer_cannot_change_the_lyric_language(credit):
     from karaoke.lyric_lookup import published_candidate
     body = ['Stars above the quiet shore', 'I will sing once more']
@@ -2808,12 +2845,23 @@ def test_lrc_credit_flags_and_unicode_colons_cannot_become_lyrics(prefix, colon)
 
 
 @pytest.mark.parametrize('label', ['[Verse 2: First singer]', '[ Solo: Guitarist / Harmony: Second guitarist ]',
-    '[Chorus: Singer & Guest]', '[Instrumental]', '[Bridge：Guest]'])
+    '[Chorus: Singer & Guest]', '[Instrumental]', '[Bridge：Guest]', '[主歌2：Singer]', '[後副歌]',
+    '[Couplet 1 : Singer, Guest, ensemble]', '[Strophe 2]', '[المقطع الأول]', '[بعد اللازمة]'])
 def test_credited_section_labels_are_not_sung_and_do_not_truncate_the_following_verse(label):
     from karaoke.lyric_lookup import published_lyric_lines
     body = ['We keep singing (oh, oh)', 'And then we sing another verse', '[Oh!]', 'A solo voice tonight']
     lines, excluded = published_lyric_lines('\n'.join([body[0], label, *body[1:]]), 'Evening')
     assert lines == body and excluded == [2]
+
+
+@pytest.mark.parametrize('header', ['[Singer《Evening》歌词]', '[Singer "Evening" 가사]',
+    '[Paroles de "Evening"]', '[Songtext zu „Evening“]', '["Evening" Lyrics]'])
+def test_localized_lyric_headers_require_the_quoted_work_name(header):
+    from karaoke.lyric_lookup import published_lyric_lines
+    body = ['We keep singing [with you]', '[Oh!]', 'Paroles de ma vie']
+    assert published_lyric_lines('\n'.join([header, *body]), 'Evening', ['Singer']) == (body, [1])
+    other = header.replace('Evening', 'Another song')
+    assert published_lyric_lines('\n'.join([other, *body]), 'Evening', ['Singer']) == ([other, *body], [])
 
 
 @pytest.mark.parametrize('provider', ['line_music','lrclib'])
@@ -2915,6 +2963,28 @@ def test_published_lyrics_match_both_languages_of_bilingual_credits(title, artis
         assert published_candidate([dict(row, **change)], dict(title='Evening Wind', artist='Lin Lin'), '')[0] is None
 
 
+@pytest.mark.parametrize('title', ['Evening (feat. Guest)', 'Evening feat. Guest (feat. Guest)', 'Evening（合作音乐人：Guest）',
+                                   'Evening [with Guest]', 'Evening I - Evening Ⅰ'])
+def test_work_title_aliases_preserve_performer_and_recording_checks(title):
+    from karaoke.lyric_lookup import published_candidate, names
+    base = 'Evening I' if 'Evening I' in title else 'Evening'
+    row = dict(trackId=123, trackTitle=base, artists=[dict(artistName='Singer')],
+               album={}, lyrics='Stars above the quiet shore\nWe sing until the morning comes')
+    song = dict(title=title, artist='Singer')
+    assert published_candidate([row], song, title)[0] == row['lyrics'].splitlines()
+    assert published_candidate([dict(row, artists=[dict(artistName='Guest')])], song, title)[0] is None
+    assert published_candidate([dict(row, trackTitle=base+' (Remix)')], song, title,
+                               allow_recording_mismatch=True)[0] is None
+    if base == 'Evening':
+        same = dict(row, trackTitle=base+' (feat. Guest)')
+        assert published_candidate([same], song, title)[0] == row['lyrics'].splitlines()
+        other = dict(row, trackTitle=base+' (feat. Another guest)')
+        assert published_candidate([other], song, title)[0] is None
+        assert 'featured_performers' in published_candidate([other], song, title,
+            allow_recording_mismatch=True)[1]['recording_mismatches']
+    assert names('Evening - Morning', title=True) == ['Evening - Morning']
+
+
 @pytest.mark.parametrize('problem', [None, 'artist', 'text', 'short', 'repetitive', 'version'])
 def test_alternate_titles_require_independent_lyric_body_support(problem):
     from karaoke.lyric_lookup import published_candidate
@@ -2939,8 +3009,9 @@ def test_alternate_titles_require_independent_lyric_body_support(problem):
         assert published_candidate([row, exact], song, '', reference_lines=reference)[1]['url'].endswith('/124')
 
 
+@pytest.mark.parametrize('provider_name', ['netease', 'lyricsweb'])
 @pytest.mark.parametrize('unavailable', [False, True])
-def test_name_mismatch_reuses_source_results_and_keeps_reference_when_recovery_fails(tmp_path, monkeypatch, unavailable):
+def test_name_mismatch_reuses_source_results_and_keeps_reference_when_recovery_fails(tmp_path, monkeypatch, unavailable, provider_name):
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
     body = ['微風吹過山谷看見遠方河流我們牽手走過漫長季節',
@@ -2952,7 +3023,7 @@ def test_name_mismatch_reuses_source_results_and_keeps_reference_when_recovery_f
     monkeypatch.setattr(module.lookup, 'fetch_lyrics', lambda *a:dict(status='unavailable'))
     def additional(provider, *args, reference_lines=()):
         calls.append((provider, reference_lines))
-        if provider != 'netease':return None, dict(provider=provider,status='unavailable')
+        if provider != provider_name:return None, dict(provider=provider,status='unavailable')
         if not reference_lines:
             return None, dict(provider=provider,status='no_matching_published_text',
                               identity_candidates=[dict(title='遠方之歌',track_id='123')])
@@ -2960,12 +3031,13 @@ def test_name_mismatch_reuses_source_results_and_keeps_reference_when_recovery_f
         if unavailable:raise OSError('provider unavailable')
         return alternate, dict(provider=provider,language='Chinese',title_match='corroborated_lyric_text')
     monkeypatch.setattr(module, 'fetch_additional_lyrics', additional)
+    monkeypatch.setattr(module.lookup, 'fetch_structured_lyrics', lambda *args, **kwargs: additional('lyricsweb', *args, **kwargs))
     lines, report = module.fetch_lyric_consensus(dict(title='Distant song',artist='Singer'),{},60,StageCache(tmp_path))
     assert lines == body
     assert report['candidate_texts'] == ([body] if unavailable else [body,alternate])
-    assert calls.count(('netease',body)) == 1
+    assert calls.count((provider_name,body)) == 1
     if unavailable:
-        failed = next(r for r in report['crosscheck']['unavailable_sources'] if r['provider']=='netease')
+        failed = next(r for r in report['crosscheck']['unavailable_sources'] if r['provider']==provider_name)
         assert failed['error'] == 'OSError' and failed['status'] == 'unavailable'
 
 
@@ -7048,7 +7120,7 @@ def test_published_readings_preserve_occurrences_text_and_dictionary_fallback(tm
     calls = []
     def fetch(url):
         calls.append(url)
-        return '<a href="/lyric/example/">result</a>' if '/search?' in url else html
+        return '<table class="searchResult artistLyricList"><tr><td><a href="/lyric/example/">result</a></td></tr></table>' if '/search?' in url else html
     monkeypatch.setattr(readings, 'read_page', fetch)
     cache = StageCache(tmp_path)
     path = readings.prepare_readings(lines, URL, cache)
@@ -7058,6 +7130,34 @@ def test_published_readings_preserve_occurrences_text_and_dictionary_fallback(tm
     assert len(calls) == 2
     assert readings.load_readings(path, [dict(text=t) for t in lines])[0] == rows
     assert readings.load_readings(path, [dict(text='新しい歌詞')])[0] == []
+
+
+@pytest.mark.parametrize('found', [False, True])
+def test_ruby_search_uses_body_alias_but_never_newest_or_recommended_links(tmp_path, monkeypatch, found):
+    from urllib.parse import parse_qs, urlsplit
+    from karaoke import lyric_readings, lyric_lookup
+    from karaoke.stage_cache import StageCache
+    body = ['故郷へ向かう長い道を今も歩いている', '明日の朝には会えるから今日は一緒に歌おう',
+            'あの日の星を見上げながら夜の海を渡ってゆこう']
+    recommendations = '<table class="newestList"><tr><td><a href="/lyric/unrelated/">New song</a></td></tr></table>'
+    calls = []
+    def fetch(url):
+        calls.append(url)
+        assert '/unrelated/' not in url
+        if '/search?' in url:
+            query = parse_qs(urlsplit(url).query)
+            if found and query.get('body') == [body[0]]:
+                return (recommendations + '<table class="searchResult"><tr><td>'
+                        '<a href="/lyric/example/">Song</a></td></tr></table>'+recommendations)
+            return '<p class="noItem">No lyrics found</p>'+recommendations
+        return ('<meta property="og:title" content="帰り道 歌詞 夕灯 ふりがな付">'
+                '<div class="hiragana">'+'<br>'.join(body)+'</div>')
+    monkeypatch.setattr(lyric_readings, 'read_page', fetch)
+    lines, report = lyric_lookup.fetch_reading_lyrics(dict(title='Way Home',artist='Evening Light'),
+        StageCache(tmp_path), 180, reference_lines=body)
+    assert lines == (body if found else None)
+    assert len(calls) == (4 if found else 3)
+    assert len(report['attempts']) == int(found)
 
 
 def test_unavailable_published_readings_do_not_fail_valid_lyrics(tmp_path, monkeypatch):
@@ -7107,7 +7207,7 @@ def test_published_ruby_source_supplies_lyrics_without_singing_the_readings(tmp_
                  '<script type="application/ld+json">'+payload+'</script>')
     def read(url):
         calls.append(url)
-        return '<a href="/lyric/example/">result</a>' if '/search?' in url else html
+        return '<table class="searchResult artistLyricList"><tr><td><a href="/lyric/example/">result</a></td></tr></table>' if '/search?' in url else html
     monkeypatch.setattr(lyric_readings, 'read_page', read)
     for _ in range(2):
         lines, report = lyric_consensus.fetch_additional_lyrics('utaten', song, {}, StageCache(tmp_path), 180,
@@ -7119,7 +7219,7 @@ def test_published_ruby_source_supplies_lyrics_without_singing_the_readings(tmp_
         if lines:
             assert report['recording_mismatches'] == (['version'] if case == 'live' else [])
             assert report['url'] == 'https://utaten.com/lyric/example/'
-    assert len(calls) == (3 if rejected else 2)
+    assert len(calls) == (3 + int(case == 'alias') if rejected else 2)
 
 
 @pytest.mark.parametrize('extra', ['ふるさと', 'また会おう'])
@@ -7132,7 +7232,7 @@ def test_explicit_source_readings_do_not_outvote_plain_lyrics_or_remove_sung_res
         '<div class="hiragana">' + '<br>'.join(plain).replace('故郷',
         '<span class="ruby"><span class="rb">故郷</span><span class="rt">ふるさと</span></span>') + '</div>')
     monkeypatch.setattr(lyric_readings, 'read_page', lambda url:
-        '<a href="/lyric/example/">result</a>' if '/search?' in url else page)
+        '<table class="searchResult artistLyricList"><tr><td><a href="/lyric/example/">result</a></td></tr></table>' if '/search?' in url else page)
     monkeypatch.setattr(module.lookup, 'fetch_published_lyrics', lambda *a:
         (annotated, dict(provider='line_music', language='Japanese')))
     monkeypatch.setattr(module.lookup, 'fetch_lyrics', lambda *a: dict(status='unavailable'))

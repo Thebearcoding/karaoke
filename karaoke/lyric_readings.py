@@ -22,6 +22,7 @@ class ReadingPage(HTMLParser):
         self.text, self.spans, self.links, self.identity = '', [], [], {}
         self.depth, self.stack, self.ruby, self.in_reading = 0, [], None, False
         self.page_url, self.script, self.compositions = None, None, []
+        self.search_depth = 0
         self.includes_translation = False
         self.feed(html)
         # The display title mixes artist and soundtrack credits. Use the
@@ -48,6 +49,8 @@ class ReadingPage(HTMLParser):
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         classes = attrs.get('class', '').split()
+        if tag == 'table' and (self.search_depth or 'searchResult' in classes):
+            self.search_depth += 1
         if tag == 'script' and attrs.get('type') == 'application/ld+json':
             self.script = ''
         if tag == 'meta' and attrs.get('property') == 'og:url':
@@ -57,7 +60,7 @@ class ReadingPage(HTMLParser):
             match = re.fullmatch(r'(.+?) 歌詞 (.+?) ふりがな付(?: - .+)?', attrs.get('content', ''))
             if match:
                 self.identity = dict(title=match[1].strip(), artist=match[2].strip())
-        if tag == 'a' and re.fullmatch(r'/lyric/[A-Za-z0-9]+/', attrs.get('href', '')):
+        if self.search_depth and tag == 'a' and re.fullmatch(r'/lyric/[A-Za-z0-9]+/', attrs.get('href', '')):
             if attrs['href'] not in self.links:
                 self.links.append(attrs['href'])
         if tag == 'div':
@@ -78,6 +81,8 @@ class ReadingPage(HTMLParser):
                 self.in_reading = True
 
     def handle_endtag(self, tag):
+        if tag == 'table' and self.search_depth:
+            self.search_depth -= 1
         if tag == 'script' and self.script is not None:
             try:
                 data = json.loads(self.script)
@@ -167,6 +172,8 @@ def prepare_readings(lines, source_url, cache, language='Japanese'):
     from .lyric_lookup import cached_lyric_request, lyric_request_error
     path = cache.root/'lyric-readings.json'
     identity = dict(lines=lines, source_url=source_url)
+    if language == 'Japanese':
+        identity['parser_sha256'] = hashlib.sha256(inspect.getsource(ReadingPage).encode()).hexdigest()
     if language == 'Cantonese':
         from subtitle_style import cantonese_readings
         from importlib.metadata import PackageNotFoundError, version

@@ -31,6 +31,15 @@ _versioned_title = re.compile(r'(.+?)\s*\(([^()]*\b(?:version|ver\.?))\)\s*$', r
 _soundtrack_credit = re.compile(r'(?:大型)?(?:纪录片|电影|电视剧|动画片|网络剧|网剧|剧集)?'
     r'\s*《[^《》]+》\s*(?:人物)?(?:主题[歌曲]|片[头尾]曲|插曲)|from\s+["“][^"“”]+["”]', re.I)
 _credit_separators = r'\s*[&,/×+、;]\s*|\s+·\s+|\s+\b(?:feat\.?|featuring|ft\.?|with)\s+'
+_featured_title = re.compile(
+    r'(.+?)\s*(?:[\[(](?:(?:feat\.?|featuring|ft\.?|with)\s+|合作音乐人\s*[:：]\s*)([^\])]+)[\])]|'
+    r'\s+(?:feat\.?|featuring|ft\.?)\s+(.+))', re.I)
+_section_label = re.compile(
+    r'\[\s*(?:verse|chorus|pre[- ]?chorus|post[- ]?chorus|bridge|intro|outro|instrumental|interlude|refrain|solo|'
+    r'主歌|副歌|前副歌|後副歌|后副歌|前奏|間奏|间奏|尾奏|橋段|桥段|'
+    r'couplet|pr[ée][- ]?refrain|post[- ]?refrain|pont|ch(?:œ|oe)ur|strophe|'
+    r'المقطع(?:\s+\S+)?|(?:بعد\s+)?اللازمة)'
+    r'(?:\s*\d+)?(?:\s*[:：][^\]\n]+)?\s*\]', re.I)
 
 
 def canonical_script(text):
@@ -131,11 +140,17 @@ def names(value, *, title=False):
     pair = re.fullmatch(r'(.+?)\s+[-–—]\s+(.+)', value)
     if pair:
         native_side = lambda text: any(c.isalpha() and 'LATIN' not in unicodedata.name(c, '') for c in text)
-        if native_side(pair[1]) != native_side(pair[2]) and version_tags(pair[1]) == version_tags(pair[2]):
+        if (native_side(pair[1]) != native_side(pair[2]) or
+                comparison_key(pair[1]) == comparison_key(pair[2])) and version_tags(pair[1]) == version_tags(pair[2]):
             for part in ((pair[2], pair[1]) if native_side(pair[1]) else (pair[1], pair[2])):
                 result.extend(names(part, title=title))
             return list(dict.fromkeys(result))
     if title:
+        # Featured-performer credits belong to recording metadata, not the
+        # work name. Retain the full spelling alongside its title-only alias.
+        featured = _featured_title.fullmatch(value)
+        if featured:
+            return result + names(featured[1].strip(), title=True)
         edition = _versioned_title.fullmatch(value)
         if edition:
             return result + names(edition[1], title=True)
@@ -226,6 +241,10 @@ def fetch_lyrics(song, metadata_path, cache):
     simplified = {key: canonical_script(value) for key, value in native.items()}
     if simplified not in queries:
         queries.append(simplified)
+    # Search indexing may omit a combined performer credit. A broader query
+    # still goes through the same title/performer/recording checks below.
+    title_only = dict(track_name=simplified['track_name'])
+    queries.append(title_only)
     path, stage = cache.root/'lyric-lookup.json', 'fetch_lyric_text'
     try:
         old = json.loads(path.read_text())
@@ -240,6 +259,8 @@ def fetch_lyrics(song, metadata_path, cache):
             try:
                 for query in queries:
                     if query == simplified and simplified != native and packet['results']:
+                        break
+                    if query == title_only and packet['results']:
                         break
                     url = 'https://lrclib.net/api/search?'+urlencode(query)
                     response = cached_lyric_request('lrclib', url, cache, lambda: read_document(url), 300)
@@ -309,7 +330,7 @@ def published_lyric_lines(text, title, artists=(), *, album=None):
     role = (rf'{instrument}|{production}|歌名|歌曲|(?:中文|英文)?词|曲|词曲|作词|作曲|(?:改编)?编曲(?:协力)?|原唱|演唱|专辑|发行(?:日|公司)|出品人?|音乐制作(?:人|助理)?|(?:定位)?制作人|制作助理|监制|'
         r'弦乐(?:编写|编曲|监制|录音)?|(?:人声|配唱|伴唱|主唱|合唱|童声|合声|合音|和声|和音)(?:编写|编曲|编配|制作|录音)?(?:人|师|指导)?|器乐|'
         r'录音(?:师|助理|(?:工作)?室)?|(?:前置)?混音(?:师|(?:工作)?室)?|母带(?:后期(?:处理|制作))?(?:人|工程师|录音室)?|音频(?:助理|工程师|编辑)|'
-        r'(?:song )?title|song name|artist|album|composer|lyricist|producer|lyrics|music(?: production)?|written by|produced by|'
+        r'(?:song )?title|song name|artist|album|composer|lyricist|producer|production|lyrics|music(?: production| distributed by)?|written by|produced by|'
         r'guitar|bass|drums|piano|strings|instrumental|recorded by|mixed by|mastered by|audio engineer|assistant engineer|'
         r'乐团|乐队|orchestra|band|arrange(?:ment|r)|(?:backing |lead )?vocals?(?: arrangement)?|(?:recording|mixing|mastering)(?: engineer| studio)?(?: \(vocals\))?|'
         r'production assistant|program(?:ming)?|PGM|[OS]P|O[AC](?:\s*/\s*O[AC])?|publisher|copyright')
@@ -334,6 +355,14 @@ def published_lyric_lines(text, title, artists=(), *, album=None):
             stamps = re.findall(r'\[(\d{1,3}):(\d{2}(?:[.:]\d{1,3})?)(?:-\d+)?\]', prefix[0])
             timestamps[i] = [60*int(m)+float(s.replace(':', '.')) for m,s in stamps]
             line = line[prefix.end():]
+        # Some LRC publishers copy a serialized credit header into each
+        # payload. Decode only a recognized prefix followed by one lyric;
+        # ordinary escapes and multi-line bodies must remain untouched.
+        if r'\n' in line:
+            parts = line.split(r'\n')
+            cleaned, excluded = published_lyric_lines('\n'.join(parts), title, artists, album=album)
+            if len(cleaned) == 1 and excluded == list(range(1, len(parts))):
+                line = cleaned[0]
         # An empty attribution row is a cue to the credited performers, not a
         # sung name. Resolve abbreviations only when one credited name fits.
         speaker = re.fullmatch(r'([^:：]+)[:：]\s*', line)
@@ -344,8 +373,13 @@ def published_lyric_lines(text, title, artists=(), *, album=None):
                     len(people) > 1 and labels & {'合', '合唱', 'all'}):
                 metadata.append(i)
                 continue
-        if re.fullmatch(r'\[\s*(?:verse|chorus|pre[- ]?chorus|post[- ]?chorus|bridge|intro|outro|instrumental|interlude|refrain|solo)'
-                        r'(?:\s+\d+)?(?:\s*[:：][^\]\n]+)?\s*\]', line, re.I):
+        # These are publisher section headings, not inferred content. Retain
+        # unrecognized brackets and all inline backing-vocal responses.
+        quoted_titles = re.findall(r'["“„《]([^"“”》]+)["“”》]', line)
+        lyric_header = (line.startswith('[') and line.endswith(']') and
+            re.search(r'lyrics?|歌詞|歌词|가사|paroles|songtext', line, re.I) and any(
+                identity(name, title=True) & identity(title, title=True) for name in quoted_titles))
+        if _section_label.fullmatch(line) or lyric_header:
             metadata.append(i)
             continue
         if line:
@@ -374,7 +408,8 @@ def published_lyric_lines(text, title, artists=(), *, album=None):
         album_header = identity(line) & identity(album) and any(
             title_artist(rows[i][1]) for i in (first-1, first+1) if 0 <= i < len(rows))
         heading_note = first and (_soundtrack_credit.fullmatch(note) or re.fullmatch(
-            r'(?:又名|别名|also known as|a\.?k\.?a\.?)\s*[:：].+', note, re.I))
+            r'(?:又名|别名|also known as|a\.?k\.?a\.?)\s*[:：].+', note, re.I) or re.fullmatch(
+            r'【未经[^【】]*(?:许可|授权)[^【】]*不得[^【】]+】', note))
         if is_credit(line) or title_artist(line) or album_header or heading_note or (identity(line) & identity(title) and
                 first+1 < len(rows) and is_credit(rows[first+1][1])):
             first += 1
@@ -464,6 +499,12 @@ def recording_mismatches(song, source_title, title, album):
     editions = lambda values: {canonical_script(m[2]).casefold() for value in values
         if (m := _versioned_title.fullmatch(unicodedata.normalize('NFKC', value or '')))}
     mismatch = ['version'] if expected != actual or editions((source_title, song['title'])) != editions((title, album)) else []
+    features = lambda values: {name for value in values
+        if (match := _featured_title.fullmatch(unicodedata.normalize('NFKC', value or '')))
+        for name in identity(match[2] or match[3], title=True)}
+    expected_features, actual_features = features((source_title, song['title'])), features((title,))
+    if expected_features and actual_features and not expected_features & actual_features:
+        mismatch.append('featured_performers')
     performance = live_performance(source_title)
     if performance and performance not in (live_performance(title), live_performance(album)):
         mismatch.append('live_performance')
@@ -682,7 +723,11 @@ def fetch_reading_lyrics(song, cache, duration=None, reference_lines=(), source_
     fetch = lambda url: cached_lyric_request('utaten_readings', url, cache, lambda: read_page(url))
     attempts, seen = [], set()
     reference = ''.join(reference_lines)
-    for query in (dict(title=title, artist_name=artist), dict(title=title)):
+    queries = [dict(title=title, artist_name=artist), dict(title=title)]
+    phrase = next((line.strip() for line in reference_lines if re.search('[\u3400-\u9fff]', line)), '')
+    if phrase:
+        queries.append(dict(body=phrase))
+    for query in queries:
         url = 'https://utaten.com/search?'+urlencode(query)
         listing = ReadingPage(fetch(url))
         for link in listing.links[:5]:
@@ -773,7 +818,7 @@ def read_lyric_catalogue(url):
     return dict(rows=rows, response_sha256=hashlib.sha256(body).hexdigest(), response_bytes=len(body))
 
 
-def fetch_structured_lyrics(song, cache, duration=None, source_title=None):
+def fetch_structured_lyrics(song, cache, duration=None, source_title=None, *, reference_lines=()):
     """Read a publisher's explicit lyric field with the existing identity matcher."""
     from .lyric_readings import read_page
     if not song.get('title') or not song.get('artist'):
@@ -824,7 +869,7 @@ def fetch_structured_lyrics(song, cache, duration=None, source_title=None):
             return text.replace('\\n', '\n')
         return None
     lines, report = published_candidate(rows, song, source_title, read_lyrics=lyrics,
-        allow_recording_mismatch=True, duration=duration, source_url=links.get)
+        allow_recording_mismatch=True, duration=duration, source_url=links.get, reference_lines=reference_lines)
     if lines:
         report.update(publisher=publishers[report['url']],
                       text_transform='schema.org.lyrics_text_credit_metadata_removed')
