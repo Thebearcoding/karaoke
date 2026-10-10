@@ -9,9 +9,7 @@ from pathlib import Path
 import threading
 import time
 import traceback
-import unicodedata
 
-from opencc import OpenCC
 from rapidfuzz.distance import Levenshtein
 
 from .. import lyric_lookup
@@ -30,7 +28,7 @@ def write(path, value):
 
 
 def text_key(lines):
-    text = OpenCC('tw2s').convert(unicodedata.normalize('NFKC', '\n'.join(lines)).casefold())
+    text = lyric_lookup.canonical_script('\n'.join(lines)).casefold()
     return ''.join(c for c in text if c.isalnum())
 
 

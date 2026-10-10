@@ -8,10 +8,8 @@ import json
 from pathlib import Path
 import re
 import time
-import unicodedata
 from urllib.parse import urlencode
 
-from opencc import OpenCC
 import requests
 
 from . import lyric_lookup as lookup
@@ -20,10 +18,8 @@ from .source_captions import read_document
 
 def compare_lyrics(candidates):
     """One vote per publisher; choose a complete source, never splice lyrics."""
-    traditional, simplified = OpenCC('s2t'), OpenCC('tw2s')
     texts = [tuple(re.findall(r"[a-z\u00c0-\u024f]+(?:'[a-z\u00c0-\u024f]+)*|\d+|[^\W_]",
-        simplified.convert(traditional.convert(unicodedata.normalize('NFKC',
-            ' '.join(lines)))).casefold().replace('’', "'"))) for lines, _ in candidates]
+        lookup.canonical_script(' '.join(lines)).casefold().replace('’', "'"))) for lines, _ in candidates]
     groups = {}
     for i, text in enumerate(texts):
         if text:
@@ -81,8 +77,8 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
                     packet = lookup.cached_lyric_request(provider, url, cache, lambda: read_document(url, timeout=10))
                     if packet.get('code') != 200:
                         raise ValueError('NetEase lyric search rejected the request')
-                    rows = [dict(trackId=r.get('id'), trackTitle=r.get('name'), trackAliases=r.get('alia') or r.get('tns') or [],
-                        artists=[dict(artistName=a.get('name'), artistAliases=a.get('alias') or a.get('tns') or [])
+                    rows = [dict(trackId=r.get('id'), trackTitle=r.get('name'), trackAliases=(r.get('alia') or []) + (r.get('tns') or []),
+                        artists=[dict(artistName=a.get('name'), artistAliases=(a.get('alias') or []) + (a.get('tns') or []))
                                  for a in r.get('ar') or [] if isinstance(a, dict)],
                         album=dict(albumTitle=(r['al'].get('name') or '') if isinstance(r.get('al'), dict) else ''),
                         duration_seconds=r['dt']/1000 if isinstance(r.get('dt'), (int, float)) else None)

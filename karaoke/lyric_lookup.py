@@ -25,6 +25,14 @@ from .song_sources import (SongText, extract_song_metadata, find_verified_lyrics
 from .source_captions import read_document
 
 
+_traditional, _simplified = OpenCC('s2t'), OpenCC('tw2s')
+
+
+def canonical_script(text):
+    """Compare mixed Han scripts consistently; never rewrite the published body."""
+    return _simplified.convert(_traditional.convert(unicodedata.normalize('NFKC', text)))
+
+
 class LyricRequestError(httpx.HTTPError):
     def __init__(self, report):
         super().__init__(report.get('error', 'Lyric provider is unavailable'))
@@ -140,8 +148,7 @@ def song_names(song, key):
 
 
 def identity(value, *, title=False):
-    converter = OpenCC('tw2s')
-    aliases = [converter.convert(name).casefold() for name in names(value, title=title)]
+    aliases = [canonical_script(name).casefold() for name in names(value, title=title)]
     if not title:
         if aliases and re.search(r'[&,/×+]|\b(?:feat\.?|featuring|ft\.?|with)\s', aliases[0]):
             aliases = aliases[:1]  # A collaborator is not an alias for the whole credit.
@@ -212,7 +219,7 @@ def fetch_lyrics(song, metadata_path, cache):
     native = dict(track_name=titles[-1], artist_name=artists[-1])
     if native != queries[0]:
         queries.append(native)
-    simplified = {key: OpenCC('tw2s').convert(value) for key, value in native.items()}
+    simplified = {key: canonical_script(value) for key, value in native.items()}
     if simplified not in queries:
         queries.append(simplified)
     path, stage = cache.root/'lyric-lookup.json', 'fetch_lyric_text'
@@ -288,7 +295,6 @@ def text_language(text):
 
 def published_lyric_lines(text, title, artists=()):
     """Keep published phrases intact; remove only explicit credit metadata."""
-    converter = OpenCC('t2s')
     role = (r'歌名|歌曲|词|曲|词曲|作词|作曲|编曲(?:协力)?|演唱|专辑|发行日|音乐制作(?:人|助理)?|制作人|制作助理|监制|'
         r'弦乐(?:编写|编曲)?|(?:人声|配唱|伴唱|主唱|合唱|童声|合声|和声|和音)(?:编写|编曲|编配|制作|录音)?(?:人|师|指导)?|钢琴|(?:低音)?吉他|贝斯|鼓|器乐|'
         r'(?:第[一二三四\d]+)?(?:小提琴|中提琴|大提琴)|录音(?:师|助理|(?:工作)?室)?|混音(?:师|(?:工作)?室)?|母带(?:后期(?:处理|制作))?(?:人|工程师|录音室)?|音频(?:助理|工程师)|'
@@ -317,7 +323,7 @@ def published_lyric_lines(text, title, artists=()):
             continue
         if line:
             rows.append((i, line))
-    is_credit = lambda line: bool(credit.match(converter.convert(unicodedata.normalize('NFKC', line.replace('︰', ':')))) or
+    is_credit = lambda line: bool(credit.match(canonical_script(line.replace('︰', ':'))) or
                                  re.fullmatch(r'credits?(?:\s+list)?\s*[:：]?', line, re.I))
     artist_ids = set().union(*(identity(artist) for artist in artists))
     def title_artist(line):
@@ -336,7 +342,7 @@ def published_lyric_lines(text, title, artists=()):
             break
     stop = next((i for i in range(first, len(rows)) if is_credit(rows[i][1])), len(rows))
     body = rows[first:stop]
-    marker = re.sub(r'[^\w]', '', converter.convert(''.join(line for _, line in body))).casefold()
+    marker = re.sub(r'[^\w]', '', canonical_script(''.join(line for _, line in body))).casefold()
     if marker in {'纯音乐请欣赏', '纯音乐请您欣赏', '此歌曲为没有填词的纯音乐请您欣赏',
                   '暂无歌词', '暂无该歌曲歌词', '歌词暂未提供', 'nolyricsavailable',
                   'lyricsnotavailable', 'instrumental'}:
@@ -353,8 +359,7 @@ def description_lyrics(metadata, reference_lines=()):
     from rapidfuzz.fuzz import partial_ratio
     description = (metadata.get('description') or '')[:30000]
     rows = list(enumerate(description.splitlines(), 1))
-    converter = OpenCC('tw2s')
-    normalize = lambda text: ''.join(c for c in converter.convert(text).casefold() if c.isalnum())
+    normalize = lambda text: ''.join(c for c in canonical_script(text).casefold() if c.isalnum())
     reference = normalize(''.join(reference_lines))
     song = video_song_info(metadata)
     sections, section, labelled = [], [], False
@@ -402,7 +407,7 @@ def description_lyrics(metadata, reference_lines=()):
 
 
 def version_tags(text):
-    text = OpenCC('tw2s').convert(text or '').casefold()
+    text = canonical_script(text or '').casefold()
     return {kind for kind, pattern in (
         ('live', r'\blive\b|演唱会|现场'), ('remix', r'\bremix\b|混音'),
         ('acoustic', r'\bacoustic\b'), ('instrumental', r'\binstrumental\b|纯音乐'),

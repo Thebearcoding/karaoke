@@ -2620,6 +2620,25 @@ def test_published_lyrics_reject_wrong_credits_versions_and_empty_text(change):
     assert published_candidate([dict(row, **change)], song, 'Official Music Video')[0] is None
 
 
+@pytest.mark.parametrize('traditional,simplified', [('什麼時候', '什么时候'), ('乾杯以後', '干杯以后'), ('臺灣', '台湾')])
+def test_mixed_script_identity_is_stable_without_rewriting_lyrics(traditional, simplified):
+    from karaoke.lyric_lookup import canonical_script, identity, published_candidate
+    from karaoke.lyric_consensus import compare_lyrics
+    from karaoke.tools.lyric_audit import assess
+    body = ['我們一直歌唱', '你在遠方聽見']
+    row = dict(trackId=123, trackTitle=simplified, artists=[dict(artistName='林林')], album={}, lyrics='\n'.join(body))
+    for title in (traditional, simplified, canonical_script(simplified)):
+        assert published_candidate([row], dict(title=title, artist='林林'), '')[0] == body
+        assert identity(title, title=True) == identity(canonical_script(title), title=True)
+    variants = [([traditional], dict(provider='one')), ([simplified], dict(provider='two'))]
+    lines, review = compare_lyrics(variants)
+    assert lines == [traditional] and review['status'] == 'corroborated'
+    lookup = dict(crosscheck=review, candidate_texts=[[traditional], [simplified]])
+    assert assess(dict(lines=lines), lookup)['status'] == 'corroborated_text'
+    assert not identity('老幺', title=True) & identity('老么', title=True)
+    assert not identity('乾坤', title=True) & identity('干坤', title=True)
+
+
 @pytest.mark.parametrize('script', ['Chinese', 'Korean', 'Russian'])
 @pytest.mark.parametrize('title,artist', [
     ('晚風 Evening Wind', '林林 Lin Lin'), ('Evening Wind 晚風', 'Lin Lin 林林'),
@@ -2781,6 +2800,23 @@ def test_lyric_search_preserves_provider_declared_title_and_artist_aliases():
     lines, report = published_candidate([row], dict(title='Way Home', artist='Evening Light'), '')
     assert lines == body.splitlines() and report['artists'] == ['夕灯']
     assert published_candidate([dict(row, trackAliases=[])], dict(title='Another song', artist='Evening Light'), '')[0] is None
+
+
+@pytest.mark.parametrize('other_aliases', [False, True])
+def test_netease_translated_credits_are_not_lost_when_other_aliases_exist(tmp_path, monkeypatch, other_aliases):
+    from karaoke import lyric_consensus as module
+    from karaoke.stage_cache import StageCache
+    body = '夜の向こうに光が見える\n一緒に歩いて明日を探そう'
+    def read(url, **kwargs):
+        if 'cloudsearch' in url:
+            return dict(code=200, result=dict(songs=[dict(id=123, name='帰り道', tns=['Way Home'],
+                alia=['Movie soundtrack'] if other_aliases else [],
+                ar=[dict(name='夕灯', tns=['Evening Light'], alias=['Yuhi'] if other_aliases else [])])]))
+        assert 'id=123&' in url
+        return dict(lrc=dict(lyric=body))
+    monkeypatch.setattr(module, 'read_document', read)
+    lines, report = module.fetch_additional_lyrics('netease', dict(title='Way Home', artist='Evening Light'), {}, StageCache(tmp_path))
+    assert lines == body.splitlines() and report['url'].endswith('id=123')
 
 
 @pytest.mark.parametrize('allow_fallback', [False, True])
