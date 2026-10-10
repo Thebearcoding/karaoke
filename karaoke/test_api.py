@@ -1880,7 +1880,8 @@ def test_description_failure_keeps_other_published_lyrics(tmp_path, monkeypatch,
     song = dict(title='Evening', artist='' if missing_identity else 'Singer')
     lines, report = module.fetch_lyric_consensus(song, {}, 30, StageCache(tmp_path), broken_description)
     assert lines == body and report['provider'] == 'line_music'
-    assert dict(provider='video_description', status='unavailable', error='TypeError') in report['crosscheck']['unavailable_sources']
+    failure = next(r for r in report['crosscheck']['unavailable_sources'] if r['provider'] == 'video_description')
+    assert failure['status'] == 'unavailable' and failure['error'] == 'TypeError'
 
 
 def test_source_disagreements_keep_published_text_and_full_diagnostics(tmp_path, monkeypatch):
@@ -1899,6 +1900,19 @@ def test_source_disagreements_keep_published_text_and_full_diagnostics(tmp_path,
     assert report['crosscheck']['comparisons'][0]['differences']
     evidence = json.loads((tmp_path/'lyric-crosscheck.json').read_text())
     assert evidence['candidate_texts'] == [published,published[:-1]]
+
+
+def test_consensus_preserves_provider_retry_evidence(tmp_path, monkeypatch):
+    from karaoke import lyric_consensus as module
+    from karaoke.stage_cache import StageCache
+    failure = dict(status='unavailable', error='HTTPStatusError', http_status=429, retry_at=130.)
+    def limited(*args):
+        raise module.lookup.LyricRequestError(failure)
+    monkeypatch.setattr(module.lookup, 'fetch_published_lyrics', limited)
+    monkeypatch.setattr(module.lookup, 'fetch_lyrics', lambda *a:dict(status='unavailable'))
+    monkeypatch.setattr(module, 'fetch_additional_lyrics', lambda provider,*a:(None,dict(provider=provider,status='unavailable')))
+    _, report = module.fetch_lyric_consensus(dict(title='Evening',artist='Singer'), {}, 30, StageCache(tmp_path))
+    assert dict(failure, provider='line_music') in report['crosscheck']['unavailable_sources']
 
 
 @pytest.mark.parametrize('fragment', ['林林 - 晚風', '晚風 / 林林', '這是僅有的一句', 'Singer — Evening'])
@@ -4298,6 +4312,38 @@ def test_online_lyric_fetch_retries_after_backoff_and_invalidates_changed_source
     clock[0] = 2802.
     lyric_lookup.fetch_lyrics(song, info, cache)
     assert len(calls) == 3
+
+
+@pytest.mark.parametrize('failure', ['transient', 'persistent', 'authentication'])
+def test_lyric_audit_waits_for_provider_backoff_and_keeps_success_cached(tmp_path, monkeypatch, failure):
+    import httpx
+    from karaoke import lyric_lookup
+    from karaoke.stage_cache import StageCache
+    from karaoke.tools.lyric_audit import paced_requests
+    clock, calls = [1000.], []
+    monkeypatch.setattr(lyric_lookup.time, 'time', lambda:clock[0])
+    monkeypatch.setattr(lyric_lookup.time, 'monotonic', lambda:clock[0])
+    def sleep(delay):
+        clock[0] += delay
+    monkeypatch.setattr(lyric_lookup.time, 'sleep', sleep)
+    def fetch():
+        calls.append(clock[0])
+        if len(calls) == 1 or failure != 'transient':
+            response = httpx.Response(401 if failure == 'authentication' else 429,
+                headers={'Retry-After':'60'}, request=httpx.Request('GET','https://example.test/lyrics'))
+            response.raise_for_status()
+        return dict(lyrics='Published body')
+    (tmp_path/'song').mkdir()
+    cache = StageCache(tmp_path/'song')
+    with paced_requests(2):
+        if failure == 'transient':
+            for _ in range(2):
+                assert lyric_lookup.cached_lyric_request('test','same-query',cache,fetch) == dict(lyrics='Published body')
+            assert calls == [1000.,1060.]
+        else:
+            with pytest.raises(lyric_lookup.LyricRequestError):
+                lyric_lookup.cached_lyric_request('test','same-query',cache,fetch)
+            assert calls == ([1000.] if failure == 'authentication' else [1000.,1060.,1120.])
 
 
 def test_soak_retries_changed_code_not_unchanged_failures_or_finished_cases():

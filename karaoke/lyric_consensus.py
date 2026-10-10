@@ -388,7 +388,7 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
             lines, report = result
             return lines, dict(report, provider=name)
         except Exception as error:
-            return None, dict(provider=name, status='unavailable', error=type(error).__name__)
+            return None, dict(lookup.lyric_request_error(error), provider=name)
     raw_title = not preserve_title and not metadata.get('track') and song.get('title') == metadata.get('title')
     upload_artist = (not metadata.get('artist') and not metadata.get('artists') and
                      song.get('artist') == lookup.video_song_info(metadata).get('artist'))
