@@ -26,6 +26,7 @@ from .source_captions import read_document
 
 
 _traditional, _simplified = OpenCC('s2t'), OpenCC('tw2s')
+_versioned_title = re.compile(r'(.+?)\s*\(([^()]*\b(?:version|ver\.?))\)\s*$', re.I)
 
 
 def canonical_script(text):
@@ -118,6 +119,9 @@ def names(value, *, title=False):
     value = unicodedata.normalize('NFKC', value if isinstance(value, str) else '').strip()
     result = [value] if value else []
     if title:
+        edition = _versioned_title.fullmatch(value)
+        if edition:
+            result.extend(names(edition[1], title=True))
         clean = re.sub(r'\s*[\[(](?:official\s+(?:music\s+video|video|mv|audio|visualizer)|'
                        r'(?:official\s+)?lyrics?\s+video)(?:\s+(?:hd|4k))?[\])]\s*$', '', value, flags=re.I)
         if clean and clean != value:
@@ -433,7 +437,9 @@ def recording_mismatches(song, source_title, title, album):
     # Instrumentals, karaoke edits and remixes are not interchangeable lyrics.
     if (expected ^ actual) - {'live', 'acoustic'}:
         return None
-    mismatch = ['version'] if expected != actual else []
+    editions = lambda values: {canonical_script(m[2]).casefold() for value in values
+        if (m := _versioned_title.fullmatch(unicodedata.normalize('NFKC', value or '')))}
+    mismatch = ['version'] if expected != actual or editions((source_title, song['title'])) != editions((title, album)) else []
     performance = live_performance(source_title)
     if performance and performance not in (live_performance(title), live_performance(album)):
         mismatch.append('live_performance')

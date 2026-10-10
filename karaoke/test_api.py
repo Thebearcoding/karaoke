@@ -2506,9 +2506,10 @@ def test_music_album_lyrics_are_a_fallback_for_same_work_not_another_artists_son
 
 
 
+@pytest.mark.parametrize('edition', ['', ' (Edited Version)'])
 @pytest.mark.parametrize('page_identity', ['valid', 'wrong_title', 'wrong_artist'])
 @pytest.mark.parametrize('artist_list', [False, True])
-def test_structured_publisher_reads_only_matching_recording_lyrics(tmp_path, monkeypatch, structured_lyrics_source, page_identity, artist_list):
+def test_structured_publisher_reads_only_matching_recording_lyrics(tmp_path, monkeypatch, structured_lyrics_source, page_identity, artist_list, edition):
     from contextlib import contextmanager
     import httpx
     from karaoke import lyric_lookup, lyric_readings
@@ -2543,12 +2544,13 @@ def test_structured_publisher_reads_only_matching_recording_lyrics(tmp_path, mon
     monkeypatch.setattr(lyric_lookup.httpx, 'stream', read)
     monkeypatch.setattr(lyric_readings, 'read_page', page)
     for _ in range(2):
-        lines, report = structured_lyrics_source(dict(title='Evening',artist='Singer'), StageCache(tmp_path), 60)
+        lines, report = structured_lyrics_source(dict(title='Evening'+edition,artist='Singer'), StageCache(tmp_path), 60)
         assert lines == (body if page_identity == 'valid' else None)
         if lines:
             assert report['provider'] == 'lyricsweb' and report['publisher'] == 'lyricfind'
             assert report['url'] == 'https://lyricsweb.com/song/singer/evening'
             assert report['excluded_credit_lines'] == [1]
+            assert report['recording_mismatches'] == (['version'] if edition else [])
     assert len(calls) == 2
     catalogue = next(json.loads(p.read_text())['data'] for p in (tmp_path/'lyric-responses').glob('*.json')
                      if isinstance(json.loads(p.read_text()).get('data'), dict))
@@ -2665,6 +2667,24 @@ def test_published_lyrics_reject_wrong_credits_versions_and_empty_text(change):
     song = dict(title='晚風', artist='林林')
     assert published_candidate([row], song, 'Official Music Video')[0]
     assert published_candidate([dict(row, **change)], song, 'Official Music Video')[0] is None
+
+
+@pytest.mark.parametrize('edition', ['Edited Version', 'Album Version', 'Live Version', 'Acoustic Ver.'])
+def test_explicit_recording_version_keeps_work_identity_and_release_preference(edition):
+    from karaoke.lyric_lookup import published_candidate, identity
+    title = 'Evening ('+edition+')'
+    song = dict(title=title, artist='Singer')
+    row = dict(trackId=1, trackTitle='Evening', artists=[dict(artistName='Singer')], album={},
+               lyrics='We sing through the night\nUntil the morning comes')
+    exact = dict(row, trackId=2, trackTitle=title)
+    _, report = published_candidate([row, exact], song, title, allow_recording_mismatch=True)
+    assert report['url'].endswith('/2') and report['recording_mismatches'] == []
+    lines, report = published_candidate([row], song, title, allow_recording_mismatch=True)
+    assert lines and report['recording_mismatches'] == ['version']
+    assert published_candidate([dict(row, trackTitle='Another song')], song, title, allow_recording_mismatch=True)[0] is None
+    for real_subtitle in ('Part II', 'Conversion', 'A Story'):
+        assert not identity('Evening ('+real_subtitle+')', title=True) & identity('Evening', title=True)
+    assert published_candidate([row], dict(song, title='Evening (Instrumental Version)'), '', allow_recording_mismatch=True)[0] is None
 
 
 @pytest.mark.parametrize('traditional,simplified', [('什麼時候', '什么时候'), ('乾杯以後', '干杯以后'), ('臺灣', '台湾')])
