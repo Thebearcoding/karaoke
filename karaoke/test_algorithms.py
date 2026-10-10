@@ -22,6 +22,56 @@ from transcribe_lyrics import filter_silent_transcription
 from word_onset_metrics import score_onsets, word_events
 
 
+class LyricRetrievalAudit(unittest.TestCase):
+    def test_publisher_duplicates_do_not_count_as_independent_agreement(self):
+        from karaoke.tools.lyric_audit import assess
+        lyrics = dict(lines=['The same words'])
+        lookup = dict(candidate_texts=[lyrics['lines'], lyrics['lines']], crosscheck=dict(sources=[
+            dict(provider='a', publisher='same'), dict(provider='b', publisher='same')]))
+        report = assess(lyrics, lookup)
+        self.assertEqual(report['status'], 'single_source')
+        self.assertEqual(report['independent_reference']['status'], 'not_reviewed')
+
+    def test_agreement_preserves_missing_verses_and_repetitions(self):
+        from karaoke.tools.lyric_audit import assess
+        lines = ['獨自走過這一條街', '再次相遇在遠方']
+        lookup = dict(candidate_texts=[lines, ['独自走过这一条街。 再次相遇在远方']],
+                      crosscheck=dict(sources=[dict(provider='a'), dict(provider='b')]))
+        self.assertEqual(assess(dict(lines=lines), lookup)['status'], 'corroborated_text')
+        lookup['candidate_texts'][1] = lines * 2
+        report = assess(dict(lines=lines), lookup)
+        self.assertEqual(report['status'], 'conflicting_text')
+        self.assertTrue(report['source_disagreement'])
+        self.assertEqual(assess(None, lookup)['status'], 'no_lyrics')
+
+    def test_reference_from_an_input_publisher_is_not_independent(self):
+        from karaoke.tools.lyric_audit import assess
+        lines = ['First line', 'Second line']
+        lookup = dict(candidate_texts=[lines], crosscheck=dict(sources=[dict(provider='a', publisher='publisher')]))
+        same = assess(dict(lines=lines), lookup, dict(lines=lines, publisher='publisher'))
+        self.assertEqual(same['independent_reference']['status'], 'not_independent')
+        separate = assess(dict(lines=lines), lookup, dict(lines=lines, publisher='manual-reference'))
+        self.assertEqual(separate['independent_reference']['status'], 'exact')
+
+    def test_resume_and_reference_do_not_change_retrieval_inputs(self):
+        from unittest.mock import patch
+        from karaoke.tools.lyric_audit import run_case
+        case = dict(case_id='case', url='https://www.youtube.com/watch?v=abcdefghijk',
+                    metadata=dict(id='abcdefghijk', title='Original title'), duration=180,
+                    reference=dict(lines=['Secret reference'], publisher='manual-reference'))
+        with tempfile.TemporaryDirectory() as directory, patch(
+                'karaoke.tools.lyric_audit.lyric_lookup.prepare_online_lyrics', return_value=dict(lines=['Retrieved text'])) as lookup:
+            first = run_case(case, Path(directory), 'model')
+            second = run_case(case, Path(directory), 'model')
+            self.assertEqual(first, second)
+            self.assertEqual(lookup.call_count, 1)
+            self.assertEqual(lookup.call_args.args[:2], (dict(url=case['url']), case['metadata']))
+            self.assertIsNone(lookup.call_args.args[-1])
+            changed = dict(case, metadata=dict(case['metadata'], title='Different title'))
+            with self.assertRaises(ValueError):
+                run_case(changed, Path(directory), 'model')
+
+
 class SignalIntegrity(unittest.TestCase):
     def test_nested_three_stems_preserve_estimates_after_storage(self):
         rng = np.random.default_rng(53)
