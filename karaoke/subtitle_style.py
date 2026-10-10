@@ -158,8 +158,45 @@ def japanese_readings(text):
     return tuple(spans), unresolved
 
 
+@lru_cache(maxsize=4096)
+def cantonese_readings(text):
+    """Resolve whole-phrase Jyutping, then map syllables to the original characters."""
+    if not re.search(KANJI, text):
+        return (), ()
+    try:
+        import pycantonese
+        from opencc import OpenCC
+        normalized, positions = '', []
+        for i, character in enumerate(text):
+            part = unicodedata.normalize('NFKC', character)
+            normalized += part
+            positions.extend([i]*len(part))
+        traditional = OpenCC('s2hk').convert(normalized)
+        if len(traditional) != len(normalized):
+            return (), ('Cantonese spelling conversion changed character boundaries',)
+        words = pycantonese.characters_to_jyutping(traditional)
+    except Exception as error:
+        return (), (f'{type(error).__name__}: {error}',)
+    spans, warnings, cursor = [], [], 0
+    for written, reading in words:
+        first = traditional.find(written, cursor)
+        if first < 0 or not written:
+            continue
+        cursor = first+len(written)
+        syllables = (reading or '').split()
+        for i, character in enumerate(written):
+            if not re.fullmatch(KANJI, character):
+                continue
+            index = positions[first+i]
+            if len(syllables) == len(written) and re.fullmatch('[a-z]+[1-6]', syllables[i]):
+                spans.append((index, index+1, syllables[i]))
+            else:
+                warnings.append(f'No Cantonese dictionary reading for {text[index]!r} at {index}')
+    return tuple(spans), tuple(warnings)
+
+
 def caption_height(language):
-    return TOKENS['strip_height']+(TOKENS['furigana']['extra_height'] if language == 'Japanese' else 0)
+    return TOKENS['strip_height']+(TOKENS['furigana']['extra_height'] if language in ('Japanese', 'Cantonese') else 0)
 
 
 def annotated_lines(text, readings, font, ruby_font, tracking, maximum, balanced):
@@ -172,7 +209,8 @@ def annotated_lines(text, readings, font, ruby_font, tracking, maximum, balanced
             token = re.match(r"[A-Za-z0-9’'\-]+|[^\S\n]+|[^\n]|\n", text[cursor:])[0]
             stop = cursor+len(token)
         token = text[cursor:stop]
-        width = max(line_width(token, font, tracking), ruby_font.getlength(reading) if reading else 0)
+        width = max(line_width(token, font, tracking),
+                    ruby_font.getlength(reading)+2*ruby_font.size*TOKENS['furigana']['side_padding_em'] if reading else 0)
         items.append(dict(text=token, first=cursor, stop=stop, reading=reading, width=width))
         cursor = stop
 
@@ -390,8 +428,9 @@ def caption_image(text, width=1280, height=None, font_file=None,
                     'top': (y-size*font_scale)/supersample, 'baseline': y/supersample})
                 glyph_x += font.getlength(character)+tracking
             if item['reading']:
+                descent = max(0, ruby_font.getbbox(item['reading'], anchor='ls')[3])
                 position = (round(x+(item['width']-ruby_font.getlength(item['reading']))/2),
-                            round(y-size*font_scale-TOKENS['furigana']['gap']*font_scale))
+                            round(y-size*font_scale-TOKENS['furigana']['gap']*font_scale-descent))
                 ruby_draw.text(position, item['reading'], font=ruby_font, fill=255, anchor='ls')
                 box = ruby_draw.textbbox(position, item['reading'], font=ruby_font, anchor='ls')
                 ruby_boxes.append(dict(first=item['first'], stop=item['stop'], reading=item['reading'], line=i,

@@ -9,7 +9,7 @@ import time
 from PIL import Image, ImageChops, ImageColor, ImageDraw
 
 from subtitle_style import (TOKENS, STYLES, CaptionOverflow, caption_height, caption_image,
-                            compact_caption_image, japanese_readings, song_intro_image, static_video_scrim)
+                            compact_caption_image, song_intro_image, static_video_scrim)
 from subtitles import countdown_events, countdown_state, normalized, read_ahead_state
 from stage_progress import progress_items, report_progress
 from lyric_readings import load_readings, resolve_readings
@@ -20,7 +20,7 @@ class Caption:
     def __init__(self, cue, style, language, readings=None):
         self.cue = cue
         self.readings, self.reading_warnings = (readings if readings is not None else
-            japanese_readings(cue['text']) if language == 'Japanese' else ((), ()))
+            resolve_readings(cue['text'], language=language))
         self.layout = {}
         self.color = ImageColor.getrgb(STYLES[style].get('progress_color', '#efd29a'))
         self.pages = []
@@ -163,7 +163,7 @@ def main():
     parser.add_argument('--audio', type=Path)
     parser.add_argument('--video-only', action='store_true', help='Render the picture before final audio is ready')
     parser.add_argument('--cues', type=Path, required=True)
-    parser.add_argument('--readings', type=Path, help='Source-bound published Japanese readings')
+    parser.add_argument('--readings', type=Path, help='Source-bound lyric pronunciation annotations')
     parser.add_argument('--song-info', type=Path,
                         help='JSON with title, optional artist and version for opening credits')
     parser.add_argument('--start', type=float, default=0.)
@@ -182,17 +182,16 @@ def main():
     if args.output.exists():
         raise FileExistsError(args.output)
     cues = json.loads(args.cues.read_text())
-    annotations, reading_source = load_readings(args.readings, cues) if args.readings else ([], None)
+    annotations, reading_source = load_readings(args.readings, cues, args.language) if args.readings else ([], None)
     readings = [resolve_readings(cue['text'], annotations[i]['spans'] if i < len(annotations)
-                and annotations[i]['text'] == cue['text'] else ())
-                if args.language == 'Japanese' else ((), ()) for i, cue in enumerate(cues)]
+                and annotations[i]['text'] == cue['text'] else (), args.language) for i, cue in enumerate(cues)]
     # A held tail can overlap the next entrance. Rendering advances by starts;
     # overlap does not invalidate the measured acoustic intervals.
     if any(c['end'] <= c['start'] for c in cues) or any(a['start'] >= b['start'] for a, b in zip(cues, cues[1:])):
         raise ValueError('Invalid display intervals')
     args.output.parent.mkdir(parents=True, exist_ok=True)
     main_height = caption_height(args.language)
-    preview_height = (64+(TOKENS['furigana']['preview_extra_height'] if args.language == 'Japanese' else 0)
+    preview_height = (64+(TOKENS['furigana']['preview_extra_height'] if args.language in ('Japanese', 'Cantonese') else 0)
                       if args.next_line else 0)
     args.bottom_margin = max(args.bottom_margin, preview_height)
     width, height = 1280, main_height+preview_height

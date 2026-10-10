@@ -1,4 +1,4 @@
-"""Published Japanese readings, bound to the lyric body rather than a word list."""
+"""Source-bound Japanese readings and cached Cantonese dictionary readings."""
 from difflib import SequenceMatcher
 import hashlib
 from html.parser import HTMLParser
@@ -119,11 +119,18 @@ def read_page(url):
     return body.decode('utf-8')
 
 
-def prepare_readings(lines, source_url, cache):
+def prepare_readings(lines, source_url, cache, language='Japanese'):
     """Optional, cached presentation evidence; unavailable readings never lose lyrics."""
     from .lyric_lookup import cached_lyric_request, lyric_request_error
     path = cache.root/'lyric-readings.json'
     identity = dict(lines=lines, source_url=source_url)
+    if language == 'Cantonese':
+        from importlib.metadata import PackageNotFoundError, version
+        try:
+            installed = version('pycantonese')
+        except PackageNotFoundError:
+            installed = None
+        identity.update(language=language, dictionary='pycantonese', version=installed)
     try:
         old = json.loads(path.read_text())
         if old['identity'] == identity and (old.get('error', {}).get('retry_at') or float('inf')) > time.time():
@@ -132,7 +139,14 @@ def prepare_readings(lines, source_url, cache):
         pass
     packet = dict(identity=identity, status='unavailable', lines=[], attempts=[])
     try:
-        query = next((line.strip() for line in lines if re.search('[\u3400-\u9fff]', line)), '')
+        if language == 'Cantonese':
+            from subtitle_style import cantonese_readings
+            for text in lines:
+                spans, warnings = cantonese_readings(text)
+                packet['lines'].append(dict(text=text, spans=[dict(first=a, stop=b, text=text[a:b], reading=r)
+                    for a, b, r in spans], warnings=list(warnings)))
+            packet['status'] = 'dictionary'
+        query = next((line.strip() for line in lines if re.search('[\u3400-\u9fff]', line)), '') if language == 'Japanese' else ''
         if query:
             url = 'https://utaten.com/search?'+urlencode(dict(body=query))
             fetch = lambda url: cached_lyric_request('utaten_readings', url, cache, lambda: read_page(url))
@@ -154,15 +168,19 @@ def prepare_readings(lines, source_url, cache):
     return path
 
 
-def resolve_readings(text, annotations=()):
-    from subtitle_style import japanese_readings
-    fallback, warnings = japanese_readings(text)
+def resolve_readings(text, annotations=(), language='Japanese'):
+    from subtitle_style import japanese_readings, cantonese_readings
+    if language not in ('Japanese', 'Cantonese'):
+        return (), ()
+    fallback, warnings = (japanese_readings if language == 'Japanese' else cantonese_readings)(text)
     supplied = []
     for item in annotations:
         try:
-            first, stop, reading = item['first'], item['stop'], hiragana(item['reading'])
+            first, stop = item['first'], item['stop']
+            reading = hiragana(item['reading']) if language == 'Japanese' else item['reading']
+            pattern = '[ぁ-ゖー]+' if language == 'Japanese' else r'[a-z]+[1-6](?: [a-z]+[1-6])*'
             if (not isinstance(first, int) or not isinstance(stop, int) or not 0 <= first < stop <= len(text)
-                    or text[first:stop] != item['text'] or not re.fullmatch('[ぁ-ゖー]+', reading)
+                    or text[first:stop] != item['text'] or not re.fullmatch(pattern, reading)
                     or supplied and first < supplied[-1][1]):
                 raise ValueError('Reading does not match lyric span')
             supplied.append((first, stop, reading))
@@ -172,13 +190,14 @@ def resolve_readings(text, annotations=()):
         s[0] < stop and first < s[1] for first, stop, _ in supplied))])), warnings
 
 
-def load_readings(path, cues):
+def load_readings(path, cues, language='Japanese'):
     """Refuse stale annotations without changing any lyric or timing data."""
     try:
         packet = json.loads(path.read_text())
-        if packet['identity']['lines'] == [cue['text'] for cue in cues] and isinstance(packet['lines'], list) and all(
+        if (packet['identity'].get('language', 'Japanese') == language
+                and packet['identity']['lines'] == [cue['text'] for cue in cues] and isinstance(packet['lines'], list) and all(
                 isinstance(row, dict) and isinstance(row.get('text'), str) and isinstance(row.get('spans'), list)
-                for row in packet['lines']):
+                for row in packet['lines'])):
             return packet['lines'], packet
         return [], dict(status='stale_lyric_body')
     except (OSError, ValueError, KeyError, TypeError):

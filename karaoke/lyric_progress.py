@@ -13,7 +13,7 @@ CHINESE = OpenCC('t2s')
 def canonical_positions(text, language):
     chars, positions = [], []
     for i, char in enumerate(latin_word_text(text)):
-        if language == 'Chinese':
+        if language in ('Chinese', 'Cantonese'):
             char = CHINESE.convert(char).replace('妳', '你')
         for value in unicodedata.normalize('NFKC', char).casefold():
             if value.isalnum():

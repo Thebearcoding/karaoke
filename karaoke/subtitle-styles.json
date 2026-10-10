@@ -8,6 +8,7 @@
   "minimum_font_size": 34,
   "furigana": {
     "size_em": 0.5,
+    "side_padding_em": 0.15,
     "gap": 3,
     "line_gap": 4,
     "extra_height": 56,

@@ -31,6 +31,12 @@ test('ready library contains only playable songs; unfinished songs remain in all
   assert.deepEqual(librarySongs(songs, 'Japanese').map(song => song.id), [1,3,5]);
   assert.deepEqual(librarySongs(songs, 'ready', 'Song 1'), []);
   assert.deepEqual(librarySongs(songs, 'all', 'Song 1').map(song => song.id), [1]);
+  const languages = ['Chinese', 'Cantonese', 'English', 'Japanese', 'Korean', 'French', null];
+  const multilingual = languages.map(language => ({title:'Song', language, status:'completed'}));
+  assert.deepEqual(librarySongs(multilingual, 'Cantonese').map(s => s.language), ['Cantonese']);
+  assert.deepEqual(librarySongs(multilingual, 'Chinese').map(s => s.language), ['Chinese']);
+  assert.deepEqual(librarySongs(multilingual, 'other').map(s => s.language), ['French']);
+  assert.equal(librarySongs(multilingual, 'all').length, languages.length);
 });
 
 test('queued feedback follows source identity and room order, including unprepared songs', () => {

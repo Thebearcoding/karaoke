@@ -271,6 +271,8 @@ class Pipeline:
         if name not in specs:
             return None
         inputs, outputs, code = specs[name]
+        if name in ('align_words', 'validate_timing') and json.loads((self.output/'lyrics.json').read_text())['language'] == 'Cantonese':
+            code = code+[ROOT/'subtitle_style.py', ROOT/'subtitle-styles.json', ROOT/'requirements-subtitles.txt']
         config = dict(command=[str(a) for a in command], compute_concurrency=self.compute_concurrency)
         if name == 'validate_timing':
             from .timing_validation import acoustic_model_files
@@ -399,7 +401,7 @@ class Pipeline:
         """Bound simultaneous compute while retaining a single download/render lane."""
         directory = os.getenv('KARAOKE_STAGE_LOCK_DIR')
         lane = ('separation' if name.startswith('separate_') else
-                'alignment' if name in ('transcribe', 'validate_timing') or name.startswith('align_') else
+                'alignment' if name in ('transcribe', 'detect_language', 'validate_timing') or name.startswith('align_') else
                 'render' if name == 'render' else
                 'mux' if name in ('mux_video', 'verify_video') else
                 'packaging' if name.startswith('package_') else
@@ -890,6 +892,34 @@ class Pipeline:
         if coverage['status'] != 'complete':
             raise StageFailure('prepare_lyrics', '歌词未覆盖完整演唱；遗漏唱段的识别证据已保留')
 
+    def resolve_lyric_language(self, lyrics):
+        """A Han-script guess needs audio evidence before selecting a pronunciation."""
+        if lyrics['language'] != 'Chinese':
+            return lyrics
+        audio, path = self.output/'vocals-16k.wav', self.output/'song-language.json'
+        weights = ROOT/'models/alignment/whisper/large-v3-turbo.pt'
+        try:
+            stat = weights.stat()
+            with self.checkpoints.stage('detect_language', inputs=[audio], outputs=[path],
+                    config=dict(device=self.device, weights=[str(weights), stat.st_size, stat.st_mtime_ns]),
+                    code=[ROOT/'local_asr.py', ROOT/'job_schema.py']) as reused:
+                if not reused:
+                    self.run('detect_language', [sys.executable, ROOT/'local_asr.py', '--detect-language',
+                             self.device, audio, path])
+            evidence = json.loads(path.read_text())
+        except (OSError, ValueError, StageFailure) as error:
+            # Classification is optional; an unavailable detector must not
+            # discard known lyrics or become another preparation failure.
+            write_json(self.output/'song-language-error.json', dict(error=str(error)))
+            return lyrics
+        if evidence.get('language') != 'Cantonese':
+            return lyrics
+        lyrics = dict(lyrics, language='Cantonese', provenance=dict(lyrics['provenance'],
+            language_detection=evidence))
+        write_json(self.output/'lyrics.json', lyrics)
+        self.phase(song_info=dict(language='Cantonese'))
+        return lyrics
+
     def align(self, lyrics, duration):
         from lyric_progress import build
         from subtitles import presentation_cues, countdown_events, normalized, highlight_coverage_errors, collapsed_phrase
@@ -1197,6 +1227,7 @@ class Pipeline:
                 text_error = error
                 lyrics = None
             if text_error is None:
+                lyrics = self.resolve_lyric_language(lyrics)
                 lyrics, text_error = self.align_candidates(lyrics, metadata, duration, packaging)
             else:
                 lyrics = self.playback_fallback(metadata, duration, text_error)
@@ -1561,11 +1592,11 @@ class Pipeline:
         return lyrics
 
     def reading_inputs(self, result, subtitles):
-        if result['language'] != 'Japanese':
+        if result['language'] not in ('Japanese', 'Cantonese'):
             return []
         from .lyric_readings import prepare_readings
         return [prepare_readings([c['text'] for c in json.loads(subtitles.read_text())],
-                                 self.request['url'], self.checkpoints)]
+                                 self.request['url'], self.checkpoints, result['language'])]
 
     def render_picture(self, result):
         subtitles = self.output/result.get('artifacts', {}).get('subtitles', {}).get('path', 'cues.json')

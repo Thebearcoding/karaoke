@@ -57,7 +57,7 @@ def highlight_spans(text, language=None):
                 else:
                     break
             yield first, index
-        elif language == 'Chinese' and unicodedata.name(char, '').startswith(
+        elif language in ('Chinese', 'Cantonese') and unicodedata.name(char, '').startswith(
                 ('CJK UNIFIED IDEOGRAPH', 'CJK COMPATIBILITY IDEOGRAPH')):
             yield first, index
         elif word_letter(char):

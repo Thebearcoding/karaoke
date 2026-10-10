@@ -17,7 +17,7 @@ if (!tabs.record.owner) tabs.write(playback.save(), {claim:true});
 let tabChange = tabs.record.change;
 let finishRetry, finishSending, finishDelay = 1000, queueSyncError = false, connected = false;
 let roomState = {entries:[], revision:0}, receivedRoom = false, viewRevision = 0, lastPlaybackSave = 0;
-const stages = {download:'下载音频', download_video:'下载视频', verify_video:'校验视频', decode_audio:'提取音频', decode_native:'准备音频母版', separate_music:'分离伴奏', separate_lead:'分离主唱', package_two_stems:'整理音轨', package_three_stems:'整理音轨', resample_vocals:'整理人声', transcribe:'识别歌词', prepare_lyrics:'整理歌词', align_words:'对齐歌词', align_phonemes:'对齐起唱时间', align_repeats:'检查重复段落', align_context:'校准字幕', validate_timing:'核对起唱时间', render:'生成字幕画面', mux_video:'合成字幕 MV'};
+const stages = {download:'下载音频', download_video:'下载视频', verify_video:'校验视频', decode_audio:'提取音频', decode_native:'准备音频母版', separate_music:'分离伴奏', separate_lead:'分离主唱', package_two_stems:'整理音轨', package_three_stems:'整理音轨', resample_vocals:'整理人声', transcribe:'识别歌词', prepare_lyrics:'整理歌词', detect_language:'确认演唱语言', align_words:'对齐歌词', align_phonemes:'对齐起唱时间', align_repeats:'检查重复段落', align_context:'校准字幕', validate_timing:'核对起唱时间', render:'生成字幕画面', mux_video:'合成字幕 MV'};
 let state = {entries:[], current_id:null, playing:false, position:0, started_at:null, levels:{instrumental:1,backing_vocals:1,lead_vocals:0}, revision:0};
 let library = [], filter = 'ready', view = 'library', clockOffset = 0, readySent = null, loading = false, loadError = '', seeking = false;
 let toastTimer, librarySignature = '', queueSignature = '', historySignature = '', discoverySignature = '';

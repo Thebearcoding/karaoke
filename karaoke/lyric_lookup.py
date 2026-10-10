@@ -667,6 +667,8 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                           catalogue=recovery, recovered=bool(lines), previous_lookup=original_report,
                           original={k:original_song.get(k) for k in ('title','artist')},
                           resolved={k:song.get(k) for k in ('title','artist')}))
+        if report.get('language') == 'Chinese' and metadata_language == 'Cantonese' and not request.get('language'):
+            report = dict(report, language='Cantonese')
         if metadata_language and report.get('language') and metadata_language != report['language']:
             report = dict(report, metadata_language_corrected=dict(original=metadata_language, resolved=report['language']))
         if metadata_error:
@@ -680,6 +682,10 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
         provenance = dict(kind='online_lyric_text', lyric_lookup=report,
                           text_transform=report.get('text_transform', 'whitespace_only'))
     language = song.get('language') or text_language(''.join(lines))
+    # Han script does not distinguish Mandarin from Cantonese. Retain a
+    # specific recording tag when it is compatible with the published text.
+    if language == 'Chinese' and metadata_language == 'Cantonese' and not request.get('language'):
+        language = 'Cantonese'
     if len(lines) > 1000 or any(not line.strip() or len(line) > 200 for line in lines):
         return None
     return dict(song, id='song', source_url=request['url'], language=language, lines=lines,

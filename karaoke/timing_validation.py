@@ -1117,6 +1117,8 @@ def main():
     if lyrics['language'] not in ('Chinese','Japanese','English'):
         paths.extend(code_root/name for name in ('align_lyrics_whisper.py','lyric_progress.py',
                                                 'local_asr.py','job_schema.py','requirements-subtitles.txt'))
+    if lyrics['language'] == 'Cantonese':
+        paths.extend(code_root/name for name in ('subtitle_style.py', 'subtitle-styles.json'))
     models=acoustic_model_files(ROOT, lyrics['language'])
     identity=dict(source=source,protocol=protocol,code={str(p):sha(p) for p in paths},
                   models={str(p):sha(p) for p in models if p.is_file()})

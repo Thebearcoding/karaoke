@@ -159,7 +159,7 @@ class Room:
             stage_progress=job.get('stage_progress', {}) if job['status'] == 'running' else {},
             preparation_started_at=job.get('started_at') if job['status'] == 'running' else None,
             next_retry_at=(job.get('download_retry') or {}).get('next_retry_at') if job['status'] == 'queued' else None,
-            language=inputs.get('language') or result.get('language') or song_info.get('language') or featured.get('language', ''),
+            language=result.get('language') or song_info.get('language') or inputs.get('language') or featured.get('language', ''),
             error=job.get('error'), duration=result.get('duration_seconds') or song_info.get('duration_seconds', 0),
             poster=(artifacts['poster']
                     if (job['status'] == 'completed' or job.get('restore_video')) and 'poster' in artifacts

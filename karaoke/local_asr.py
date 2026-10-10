@@ -149,6 +149,26 @@ def alignment_language(model, samples, hint=None, *, detect=False):
     return selected or max(probes, key=lambda p:p['probability'])['language'], probes
 
 
+def detect_recording_language(audio, output, device):
+    """Identify the sung language without transcribing or changing lyric text."""
+    import time
+    import torch
+    import whisper
+    started = time.perf_counter()
+    torch.set_num_threads(4)
+    if device == 'auto':
+        device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+    weights = Path(__file__).resolve().parent/'models/alignment/whisper/large-v3-turbo.pt'
+    model = whisper.load_model(str(weights), device='cpu')
+    # Language detection does not use the sparse alignment-head mask, which
+    # cannot be moved to MPS. Match the aligner's CPU-first loading policy.
+    model._buffers.pop('alignment_heads')
+    model.to(device)
+    language, probes = detect_whisper_language(model, whisper.load_audio(str(audio)))
+    Path(output).write_text(json.dumps(dict(language=song_language(language), probes=probes,
+        audio_sha256=digest(audio), seconds=time.perf_counter()-started), ensure_ascii=False)+'\n')
+
+
 @contextmanager
 def isolated_recognizer(config, device, scratch):
     """Keep CTranslate2's CUDA libraries out of the PyTorch alignment process."""
@@ -221,6 +241,9 @@ def cached_recognition(audio, language, output):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 4 or sys.argv[1] != '--worker':
+    if len(sys.argv) == 5 and sys.argv[1] == '--detect-language':
+        detect_recording_language(sys.argv[3], sys.argv[4], sys.argv[2])
+    elif len(sys.argv) == 4 and sys.argv[1] == '--worker':
+        recognition_worker(sys.argv[2], json.loads(sys.argv[3]))
+    else:
         raise SystemExit('Use --worker DEVICE CONFIG for isolated recognition')
-    recognition_worker(sys.argv[2], json.loads(sys.argv[3]))

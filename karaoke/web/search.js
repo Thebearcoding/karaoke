@@ -181,7 +181,7 @@ export function searchLibrary(library, query) {
 export function librarySongs(library, filter = 'ready', query = '') {
   return filterSongs(library, query).filter(song => filter === 'all' ||
     (filter === 'ready' ? song.status === 'completed' :
-     filter === 'other' ? song.language && !['Chinese','English','Japanese','Korean'].includes(song.language) :
+     filter === 'other' ? song.language && !['Chinese','Cantonese','English','Japanese','Korean'].includes(song.language) :
      song.language === filter));
 }
 

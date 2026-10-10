@@ -160,7 +160,10 @@ def alternative_lyric_candidates(lyrics, packet):
         if review.get('status') == 'corroborated' and index not in review.get('agreeing_sources', []):
             selected_review.update(status='conflicting', agreeing_sources=[], independent_sources=0)
         report = dict(sources[index], crosscheck=selected_review)
-        yield dict(lyrics, lines=texts[index], language=report.get('language') or lyrics['language'], provenance=dict(
+        language = report.get('language') or lyrics['language']
+        if lyrics['language'] == 'Cantonese' and language == 'Chinese':
+            language = 'Cantonese'
+        yield dict(lyrics, lines=texts[index], language=language, provenance=dict(
             lyrics['provenance'], lyric_lookup=report, text_transform=report.get('text_transform', 'whitespace_only')))
 
 

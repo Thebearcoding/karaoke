@@ -759,23 +759,25 @@ artifacts={name:{'path':'alignment.bin','bytes':len(aligned.read_bytes())}
     asyncio.run(scenario())
 
 
-def test_library_lists_queued_and_running_songs_and_reuses_their_jobs(tmp_path):
+@pytest.mark.parametrize('hint,initial,resolved', [('en','English','English'), ('zh','Chinese','Cantonese')])
+def test_library_lists_queued_and_running_songs_and_reuses_their_jobs(tmp_path, hint, initial, resolved):
     app = create_app(tmp_path, version='test')
     store, room, worker = app.state.store, app.state.room, app.state.worker
-    job, _ = store.create(JobRequest(url=URL, language='en'), 'test')
+    job, _ = store.create(JobRequest(url=URL, language=hint), 'test')
     worker.queue.put_nowait(job['id'])
     room.add(AddSong(job_id=job['id']))
     snapshot = room.add(AddSong(job_id=job['id']))
     song = next(s for s in snapshot['library'] if s['url'] == URL)
-    assert song['status'] == 'queued' and song['language'] == 'English'
+    assert song['status'] == 'queued' and song['language'] == initial
     assert song['job_id'] == job['id'] and worker.queue.qsize() == 1
     assert len(store.list()) == 1 and len(snapshot['entries']) == 2
     counters = {'download': dict(completed=50, total=100, unit='bytes')}
     store.update(job['id'], status='running', active_stages=['download'], stage_progress=counters,
-                 song_info=dict(title='Video title', artist='Artist'))
+                 song_info=dict(title='Video title', artist='Artist', language=resolved))
     song = next(s for s in room.library() if s['url'] == URL)
     assert song['title'] == 'Video title' and song['stage_progress'] == counters
     assert song['status'] == 'running'  # Reusable job ID does not mean ready to play.
+    assert song['language'] == resolved and room.snapshot()['entries'][0]['language'] == resolved
     room.add(AddSong(job_id=song['job_id']))
     assert len(store.list()) == 1
 

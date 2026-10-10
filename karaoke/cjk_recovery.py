@@ -48,6 +48,13 @@ class AcousticWitness:
             if len(syllables) != len(cue['text']):
                 raise ValueError('Independent pronunciation changes character positions')
             tokens = [re.sub("[^a-z']", '', ''.join(syllables[a:b]).lower()) for a, b in spans]
+        elif language == 'Cantonese':
+            from subtitle_style import cantonese_readings
+            readings, _ = cantonese_readings(cue['text'])
+            pronunciations = {(a, b): reading for a, b, reading in readings}
+            spans = list(highlight_spans(cue['text'], language))
+            tokens = [re.sub("[^a-z']", '', pronunciations.get((a, b), cue['text'][a:b]).lower())
+                      for a, b in spans]
         elif language == 'English':
             import unicodedata
             spans = list(latin_word_spans(cue['text']))

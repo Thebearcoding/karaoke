@@ -82,6 +82,8 @@
 
 ## 美学验收
 
+曲库语言分类在「华语」后独立显示「粤语」，不把粤语重复归入其他语言。分类依据保存的演唱语言，不能用繁体字或歌手籍贯猜测；汉字文本无法细分时，在歌曲准备阶段补充音频语言证据。手机仍沿用筛选栏的横向滚动，按钮大小与其余语言保持一致。
+
 每次 UI 修改都需按 `AGENTS.md` 完成美学检查，保留整页和局部的实际截图，并写明判断依据；自动化功能测试不能代替这个步骤。当前底栏参考 [Refactoring UI 的公开留白章节](https://refactoring-ui.nyc3.cdn.digitaloceanspaces.com/Refactoring%20UI%20-%20Start%20with%20too%20much%20white%20space.pdf)及 [The Non-Designer’s Design Book 的公开样章](https://www.peachpit.com/content/images/9780133966152/samplepages/9780133966152.pdf)，落实相关元素分组、重复样式的一致性、明确视觉焦点和克制的边框使用。
 
 ## 信息层级与元数据

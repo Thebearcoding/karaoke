@@ -1361,13 +1361,57 @@ def test_lyric_identity_reuses_platform_native_alias_without_model(tmp_path, mon
 
 
 @pytest.mark.parametrize('tag,canonical,model_code', [('ko-KR','Korean','ko'),
-    ('iw','Hebrew','he'),('jw','Javanese','jw'),('cmn','Chinese','zh')])
+    ('iw','Hebrew','he'),('jw','Javanese','jw'),('cmn','Chinese','zh'),
+    ('yue','Cantonese','yue'),('粤语','Cantonese','yue'),('zh-yue','Cantonese','yue')])
 def test_model_language_aliases_survive_metadata_and_request_round_trip(tag, canonical, model_code):
     from karaoke.job_schema import song_language
     from karaoke.local_asr import whisper_language
     request=JobRequest(url=URL,language=tag)
     assert request.language==canonical==song_language(model_code)
     assert whisper_language(request.language)==model_code
+
+
+@pytest.mark.parametrize('detected', ['Cantonese', 'Chinese', None, 'English'])
+def test_cantonese_language_detection_is_cached_without_replacing_lyric_text(tmp_path, monkeypatch, detected):
+    from karaoke import pipeline as module
+    runtime = tmp_path/'runtime'
+    (runtime/'models/alignment/whisper').mkdir(parents=True)
+    for name in ('local_asr.py', 'job_schema.py', 'models/alignment/whisper/large-v3-turbo.pt'):
+        (runtime/name).write_bytes(b'fixture')
+    monkeypatch.setattr(module, 'ROOT', runtime)
+    folder = tmp_path/'song'
+    folder.mkdir()
+    (folder/'vocals-16k.wav').write_bytes(b'audio')
+    pipeline = Pipeline(dict(url=URL), folder, device='cpu')
+    lyrics = dict(title='晚風', artist='歌手', language='Chinese', lines=['我哋一齊唱歌'], provenance={})
+    calls = []
+    def run(stage, command):
+        calls.append(stage)
+        command[-1].write_text(json.dumps(dict(language=detected, probes=[])))
+    monkeypatch.setattr(pipeline, 'run', run)
+    for _ in range(2):
+        result = pipeline.resolve_lyric_language(lyrics)
+        assert result['language'] == ('Cantonese' if detected == 'Cantonese' else 'Chinese')
+        assert result['lines'] == lyrics['lines']
+    assert calls == ['detect_language'] and lyrics['language'] == 'Chinese'
+    specific = dict(lyrics, language='Cantonese')
+    assert pipeline.resolve_lyric_language(specific) == specific and len(calls) == 1
+    (folder/'vocals-16k.wav').write_bytes(b'new audio')
+    pipeline.resolve_lyric_language(lyrics)
+    assert len(calls) == 2
+
+
+def test_cantonese_source_tag_survives_han_script_detection(tmp_path, monkeypatch):
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    text = ['晚風吹過我哋一齊唱歌']
+    monkeypatch.setattr(lyric_consensus, 'fetch_lyric_consensus', lambda *a, **kw:
+        (text, dict(language='Chinese', provider='fixture')))
+    result = lyric_lookup.prepare_online_lyrics(dict(url=URL),
+        dict(track='晚風', artist='歌手', requested_formats=[dict(acodec='opus', language='yue')]),
+        30, StageCache(tmp_path), 'unused', None)
+    assert result['language'] == 'Cantonese' and result['lines'] == text
+    assert result['provenance']['lyric_lookup']['language'] == 'Cantonese'
 
 
 @pytest.mark.parametrize('hint,detected,expected', [(None,'ko','ko'),('unrecognized', 'fr','fr'),
@@ -6179,15 +6223,60 @@ def test_furigana_preserves_compound_readings_okurigana_and_source_offsets(text,
     assert japanese_readings('ひらがな カタカナ English')[0] == ()
 
 
-def test_furigana_layout_preserves_timing_and_keeps_readings_out_of_sweep():
+def test_cantonese_readings_keep_phrase_pronunciation_and_original_offsets(tmp_path, monkeypatch):
+    from karaoke import lyric_readings
+    from karaoke.stage_cache import StageCache
+    from karaoke.subtitle_style import cantonese_readings
+    from karaoke.subtitles import highlight_spans
+    text = '银行，蛋和蛋糕；我爱你 LOVE！'
+    spans, warnings = cantonese_readings(text)
+    assert not warnings
+    assert [(text[a:b], r) for a,b,r in spans] == [
+        ('银','ngan4'),('行','hong4'),('蛋','daan2'),('和','wo4'),('蛋','daan6'),('糕','gou1'),
+        ('我','ngo5'),('爱','oi3'),('你','nei5')]
+    mixed = '我愛你 LOVE'
+    assert [mixed[a:b] for a,b in highlight_spans(mixed, 'Cantonese')] == ['我','愛','你','LOVE']
+    monkeypatch.setattr(lyric_readings, 'read_page', lambda *a: pytest.fail('Local Jyutping needs no page fetch'))
+    path = lyric_readings.prepare_readings([text], URL, StageCache(tmp_path), 'Cantonese')
+    original = path.read_bytes()
+    assert lyric_readings.prepare_readings([text], URL, StageCache(tmp_path), 'Cantonese') == path
+    assert path.read_bytes() == original
+    rows, report = lyric_readings.load_readings(path, [dict(text=text)], 'Cantonese')
+    assert report['status'] == 'dictionary' and len(rows[0]['spans']) == len(spans)
+    assert lyric_readings.load_readings(path, [dict(text=text)], 'Japanese')[0] == []
+    assert lyric_readings.load_readings(path, [dict(text=text+'改')], 'Cantonese')[0] == []
+    supplied = [dict(first=1, stop=2, text='行', reading='haang4')]
+    resolved, _ = lyric_readings.resolve_readings(text, supplied, 'Cantonese')
+    assert (1,2,'haang4') in resolved and (1,2,'hong4') not in resolved
+
+
+def test_cantonese_dictionary_failure_keeps_timed_subtitles(monkeypatch):
+    import pycantonese
+    from karaoke.render_lyric_progress import Caption
+    from subtitle_style import cantonese_readings
+    def unavailable(*args):
+        raise RuntimeError('Dictionary unavailable')
+    monkeypatch.setattr(pycantonese, 'characters_to_jyutping', unavailable)
+    cantonese_readings.cache_clear()
+    try:
+        caption = Caption(dict(text='晚風', units=[]), 'cinema_focus', 'Cantonese')
+        assert caption.readings == () and caption.base.getbbox() is not None
+        assert 'Dictionary unavailable' in caption.reading_warnings[0]
+    finally:
+        cantonese_readings.cache_clear()
+
+
+@pytest.mark.parametrize('language,text', [
+    ('Japanese', '貴方から承った物語を今日も思い出す\n明日は君と同じ空を見上げたい'),
+    ('Cantonese', '晚風輕輕吹過窗邊\n我哋一齊望住星空唱歌')])
+def test_furigana_layout_preserves_timing_and_keeps_readings_out_of_sweep(language, text):
     import copy
     from PIL import ImageChops
     from karaoke.render_lyric_progress import Caption
-    text = '貴方から承った物語を今日も思い出す\n明日は君と同じ空を見上げたい'
     cue = dict(text=text, units=[dict(first=i, stop=i+1, start=i+1., end=i+1.8)
                                 for i,c in enumerate(text) if not c.isspace()])
     before = copy.deepcopy(cue)
-    caption = Caption(cue, 'cinema_focus', 'Japanese')
+    caption = Caption(cue, 'cinema_focus', language)
     assert cue == before and not caption.pages
     assert len(caption.layout['lines']) == 2
     assert caption.frame(.5, 'word').tobytes() == caption.base.tobytes()
