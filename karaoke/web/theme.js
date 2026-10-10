@@ -1,16 +1,15 @@
-// Apply before the page paints; a saved choice takes precedence over the OS.
+// Apply before the page paints; remember a choice, otherwise start in night mode.
 (() => {
   const key = 'karaokeTheme';
-  const system = matchMedia('(prefers-color-scheme: dark)');
   const read = () => {
     try {
       const value = localStorage.getItem(key);
-      return value === 'dark' || value === 'light' ? value : null;
-    } catch { return null; }
+      return value === 'light' ? 'light' : 'dark';
+    } catch { return 'dark'; }
   };
   let preference = read();
   function apply() {
-    const dark = preference ? preference === 'dark' : system.matches;
+    const dark = preference === 'dark';
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
     document.querySelector('meta[name="theme-color"]').content = dark ? '#202022' : '#ffffff';
     const button = document.getElementById('theme-toggle');
@@ -28,7 +27,6 @@
       apply();
     });
   }, {once:true});
-  system.addEventListener('change', apply);
   window.addEventListener('storage', event => {
     if (event.key === key || event.key === null) { preference = read(); apply(); }
   });
