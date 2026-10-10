@@ -1560,7 +1560,15 @@ def test_missing_lyrics_retry_transient_metadata_and_keep_confirmed_artist(tmp_p
     assert report['metadata_retries'][0]['attempted'] == recovered
 
 
-def test_published_lyrics_use_explicit_video_credits_without_a_text_model(tmp_path, monkeypatch):
+@pytest.mark.parametrize('video_title', [
+    '林林 Lin Lin【晚風 Evening Wind】-Official Music Video',
+    '林林 Lin Lin「晚風 Evening Wind」Music Video',
+    '林林 Lin Lin『晚風 Evening Wind』Official Video',
+    '林林 Lin Lin《晚風 Evening Wind》官方完整版 MV',
+    '林林 Lin Lin“晚風 Evening Wind”Official MV',
+    '林林 Lin Lin"晚風 Evening Wind"Music Video',
+])
+def test_published_lyrics_use_explicit_video_credits_without_a_text_model(tmp_path, monkeypatch, video_title):
     from karaoke import lyric_lookup, lyric_consensus
     from karaoke.stage_cache import StageCache
     row = dict(trackId=123, trackTitle='晚風', artists=[dict(artistName='林林')],
@@ -1577,7 +1585,7 @@ def test_published_lyrics_use_explicit_video_credits_without_a_text_model(tmp_pa
         (['微風裡慢慢歌唱', '星光下靜靜傾聽'] if provider == 'youtube_music' else None,
          dict(provider=provider, language='Chinese')))
     monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', lambda *a: pytest.fail('Explicit credits need no model'))
-    metadata = dict(title='林林 Lin Lin【晚風 Evening Wind】-Official Music Video', uploader='Unrelated channel')
+    metadata = dict(title=video_title, uploader='Unrelated channel')
     for _ in range(2):
         result = lyric_lookup.prepare_online_lyrics(dict(url=URL), metadata, 30,
                                                    StageCache(tmp_path), 'unused', None)
@@ -1587,6 +1595,18 @@ def test_published_lyrics_use_explicit_video_credits_without_a_text_model(tmp_pa
     assert report['provider'] == 'line_music' and report['excluded_credit_lines'] == [1, 2]
     assert report['url'].endswith('/123') and not report['provider_timestamps_used']
     assert result['provenance']['independent_asr_coverage'] is None
+
+
+def test_quoted_video_credits_fill_missing_fields_without_overwriting_music_tags():
+    metadata = dict(title='歌手「夜の歌」Music Video', uploader='Unrelated channel')
+    assert video_song_info(metadata) == dict(title='夜の歌', artist='歌手', duration_seconds=0)
+    assert video_song_info(dict(metadata, artist='Credited singer')) == dict(
+        title='夜の歌', artist='Credited singer', duration_seconds=0)
+    assert video_song_info(dict(metadata, track='Tagged title')) == dict(
+        title='Tagged title', artist='歌手', duration_seconds=0)
+    for title in ('歌手「夜の歌】Music Video', '「夜の歌」Music Video',
+                  '歌手「夜の歌」について語る', '歌手 夜の歌 Music Video'):
+        assert video_song_info(dict(metadata, title=title)) == dict(title=title, artist='', duration_seconds=0)
 
 
 def test_known_video_credits_do_not_skip_lyrics_in_its_description(tmp_path, monkeypatch):

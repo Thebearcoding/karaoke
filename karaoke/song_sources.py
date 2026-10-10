@@ -351,11 +351,13 @@ def video_song_info(metadata):
     if thumbnail:
         info['thumbnail'] = thumbnail
     # Explicit credits in a video title are usable even when the metadata API is down.
-    credit = re.fullmatch(r'\s*([^【】]+?)\s*【([^【】]+)】\s*[-–—|]?\s*'
-                         r'(?:Official\s+(?:Music\s+)?Video|Official\s+MV|官方(?:完整版)?\s*MV)\s*',
+    credit = re.fullmatch(r'\s*([^【】「」『』《》“”"]+?)\s*([【「『《“"])([^【】「」『』《》“”"]+)([】」』》”"])\s*[-–—|]?\s*'
+                         r'(?:(?:Official\s+)?(?:Music\s+Video|MV)|Official\s+Video|官方(?:完整版)?\s*MV)\s*',
                          metadata.get('title') or '', re.I)
-    if credit and not metadata.get('track') and not info['artist']:
-        info.update(artist=credit[1].strip(), title=credit[2].strip())
+    if (credit and dict(zip('【「『《“"', '】」』》”"'))[credit[2]] == credit[4]
+            and credit[1].strip() and credit[3].strip()):
+        info.update(artist=info['artist'] or credit[1].strip(),
+                    title=metadata.get('track') or credit[3].strip())
     audio_languages = {song_language(f.get('language')) for f in (metadata.get('requested_formats') or [])
                        if f.get('acodec') not in (None, 'none')}
     audio_languages.discard(None)
