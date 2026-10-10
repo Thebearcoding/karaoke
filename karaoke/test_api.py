@@ -7027,11 +7027,12 @@ def test_unavailable_published_readings_do_not_fail_valid_lyrics(tmp_path, monke
 
 
 @pytest.mark.parametrize('case', ['native', 'alias', 'wrong_work', 'wrong_title', 'live'])
-@pytest.mark.parametrize('structured', ['absent', 'linked', 'unrelated', 'malformed'])
+@pytest.mark.parametrize('structured', ['absent', 'linked', 'unrelated', 'malformed', 'translated'])
 def test_published_ruby_source_supplies_lyrics_without_singing_the_readings(tmp_path, monkeypatch, case, structured):
     from karaoke import lyric_readings, lyric_consensus
     from karaoke.stage_cache import StageCache
-    body = ['故郷へ向かう長い道を今も歩いている', '明日の朝には会えるから今日は一緒に歌おう', 'あの日の星を見上げながら夜の海を渡ってゆこう']
+    body = ['故郷へ向かう長い道を今も歩いている', '明日の朝には会えるから今日は一緒に歌おう',
+            'あの日の星を見上げながら夜の海を渡ってゆこう', 'We sing together, we will find our way']
     song = dict(title='帰り道', artist='夕灯')
     if case == 'alias':song = dict(title='Way Home', artist='Evening Light')
     if case == 'live':song['title'] += ' (Live)'
@@ -7051,6 +7052,8 @@ def test_published_ruby_source_supplies_lyrics_without_singing_the_readings(tmp_
             record['recordedAs']['byArtist']['name'] = 'Another singer'
         if structured == 'linked':
             html = html.replace('夕灯 ふりがな付', '夕灯 映画の主題歌 ふりがな付')
+        if structured == 'translated':
+            html = html.replace('夕灯 ふりがな付', '夕灯【和訳・カナルビ】ふりがな付')
         payload = json.dumps({'@graph':[{'@type':'WebPage'},record]}) if structured != 'malformed' else '{invalid json'
         html += ('<meta property="og:url" content="https://utaten.com/lyric/example/">'
                  '<script type="application/ld+json">'+payload+'</script>')
@@ -7061,11 +7064,14 @@ def test_published_ruby_source_supplies_lyrics_without_singing_the_readings(tmp_
     for _ in range(2):
         lines, report = lyric_consensus.fetch_additional_lyrics('utaten', song, {}, StageCache(tmp_path), 180,
             reference_lines=body if case == 'alias' and structured != 'linked' else ())
-        assert lines == (None if case in ('wrong_work', 'wrong_title') else body)
+        rejected = case in ('wrong_work', 'wrong_title') or structured == 'translated'
+        assert lines == (None if rejected else body)
+        if structured == 'translated':
+            assert report['attempts'][0]['reason'] == 'published_translation_included'
         if lines:
             assert report['recording_mismatches'] == (['version'] if case == 'live' else [])
             assert report['url'] == 'https://utaten.com/lyric/example/'
-    assert len(calls) == (3 if case in ('wrong_work', 'wrong_title') else 2)
+    assert len(calls) == (3 if rejected else 2)
 
 
 @pytest.mark.parametrize('extra', ['ふるさと', 'また会おう'])

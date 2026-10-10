@@ -22,6 +22,7 @@ class ReadingPage(HTMLParser):
         self.text, self.spans, self.links, self.identity = '', [], [], {}
         self.depth, self.stack, self.ruby, self.in_reading = 0, [], None, False
         self.page_url, self.script, self.compositions = None, None, []
+        self.includes_translation = False
         self.feed(html)
         # The display title mixes artist and soundtrack credits. Use the
         # composition explicitly attached to this lyric page when available.
@@ -52,6 +53,7 @@ class ReadingPage(HTMLParser):
         if tag == 'meta' and attrs.get('property') == 'og:url':
             self.page_url = attrs.get('content')
         if tag == 'meta' and attrs.get('property') == 'og:title':
+            self.includes_translation = bool(re.search(r'【[^】]*和訳[^】]*】\s*ふりがな付', attrs.get('content', '')))
             match = re.fullmatch(r'(.+?) 歌詞 (.+?) ふりがな付(?: - .+)?', attrs.get('content', ''))
             if match:
                 self.identity = dict(title=match[1].strip(), artist=match[2].strip())

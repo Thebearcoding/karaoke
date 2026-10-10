@@ -686,6 +686,11 @@ def fetch_reading_lyrics(song, cache, duration=None, reference_lines=(), source_
             url = 'https://utaten.com'+link
             page = ReadingPage(fetch(url))
             actual = page.identity
+            if page.includes_translation:
+                # This publisher labels combined originals/translations in
+                # the page metadata, but does not mark their body boundaries.
+                attempts.append(dict(url=url, identity=actual, reason='published_translation_included'))
+                continue
             title_match = any(identity(name, title=True) & identity(alias, title=True)
                               for name in song_names(song, 'title') for alias in song_names(actual, 'title'))
             artist_match = any(artist_credit_matches(name, [alias]) for name in song_names(song, 'artist')
