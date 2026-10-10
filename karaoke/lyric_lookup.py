@@ -14,6 +14,7 @@ import unicodedata
 from urllib.parse import urlencode
 
 import httpx
+import regex
 import requests
 from opencc import OpenCC
 from rapidfuzz.distance import Levenshtein
@@ -284,6 +285,9 @@ def unpadded_duration(audio_path, duration):
 
 @lru_cache(maxsize=128)
 def text_language(text):
+    # Formatting placeholders (including Hangul fillers) are not language
+    # evidence. Keep the source text intact; only normalize this probe.
+    text = regex.sub(r'\p{Default_Ignorable_Code_Point}', '', text)
     if re.search(r'[\u1100-\u11ff\u3130-\u318f\uac00-\ud7a3]', text):
         return 'Korean'
     if re.search(r'[\u3040-\u30ff]', text):

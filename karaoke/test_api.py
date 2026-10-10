@@ -1577,6 +1577,18 @@ def test_audio_language_supplies_the_real_alignment_tokenizer(monkeypatch, hint,
     assert evidence==(probes if calls else [])
 
 
+@pytest.mark.parametrize('decoration', ['', '\u115f', '\u1160', '\u3164', '\uffa0', '\u200b', '\u200d', '\ufe0f'])
+@pytest.mark.parametrize('text,expected', [
+    ('We walk together in the light and sing this song for all our friends', 'English'),
+    ('우리 함께 노래해 밤하늘 별을 바라보며 함께 걸어가', 'Korean'),
+    ('君と一緒に歩いて歌う', 'Japanese'),
+    ('一起看着天空歌唱', 'Chinese'),
+    ('', None)])
+def test_lyric_language_ignores_invisible_formatting(text, expected, decoration):
+    from karaoke.lyric_lookup import text_language
+    assert text_language(decoration+text+decoration)==expected
+
+
 @pytest.mark.parametrize('code,name,text', [
     ('ko-KR','Korean','우리 함께 노래해 밤하늘 별을 바라보며 함께 걸어가'),
     ('fr','French','Nous marchons ensemble dans la lumière et nous chantons cette chanson pour nos amis'),
