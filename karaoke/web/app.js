@@ -185,6 +185,7 @@ function restoreView(saved) {
 
 function renderLibrary() {
   const query = $('song-input').value.trim();
+  $('song-input').placeholder = ['artists','artist'].includes(videoSource) ? '搜索歌手' : '搜索歌名或歌手';
   const isURL = /^https?:\/\//i.test(query);
   $('title-row').hidden = !isURL;
   $('submit-song').innerHTML = `${isURL ? '点歌' : '搜索'} ${icon('arrow')}`;
@@ -194,7 +195,7 @@ function renderLibrary() {
   if (receivedRoom) libraryPage = page.page;
   const preparedView = filter === 'all' && !search;
   $('library-count').textContent = `${songs.length} 首`;
-  $('library-heading').textContent = search ? '曲库里的歌' : preparedView ? '现在就能唱' : '曲库';
+  $('library-heading').textContent = search ? '曲库里的歌' : '本地曲库';
   document.querySelectorAll('[data-filter]').forEach(button => {
     button.classList.toggle('selected', button.dataset.filter === filter);
     button.setAttribute('aria-pressed', String(button.dataset.filter === filter));
@@ -234,7 +235,7 @@ function renderDiscovery() {
   discoverySignature = signature;
   $('home-artists').innerHTML = artists.map(artist => `<button class="home-artist" data-home-artist="${escape(artist.name)}" aria-label="查看${escape(artist.name)}的歌曲" title="${escape(artist.name)}">
     ${artist.poster ? `<img src="${escape(artist.poster)}" alt="" loading="lazy">` : `<span class="artist-initial" aria-hidden="true">${escape([...artist.name][0])}</span>`}
-    <strong>${escape(artist.name)}</strong><span>${artist.count} 首</span></button>`).join('');
+    <strong>${escape(artist.name)}</strong></button>`).join('');
 }
 
 function renderVideoResults(providers, mode = videoSource) {
@@ -252,7 +253,7 @@ function renderVideoResults(providers, mode = videoSource) {
     status:library.find(item => item.url === song.url)?.status || song.status}));
   const metadata = info.metadata || catalogueSelection || {};
   const catalogueHeading = metadata.catalogue_section === 'videos' ? '歌手视频' : metadata.catalogue_section === 'releases' ? '歌手作品' : '热门歌曲';
-  $('clear-search').textContent = catalogue || (artists && providers.artist?.selection) ? '返回上一级' : '返回曲库';
+  $('clear-search').textContent = catalogue || (artists && providers.artist?.selection) ? '返回上一级' : '返回本地曲库';
   const popularityAvailable = results.some(song => playCount(song.views) !== null);
   if (searchOrder === 'popular' && !popularityAvailable) searchOrder = 'relevance';
   searchSongs = orderResults(results, album && searchOrder === 'relevance' ? 'album' : searchOrder);
@@ -837,6 +838,11 @@ document.querySelectorAll('[data-library-step]').forEach(button => button.onclic
 document.querySelectorAll('.library-pagination select').forEach(select => select.onchange = () =>
   changeLibraryPage(Number(select.value)));
 $('song-input').oninput = () => { if (view !== 'library') switchView('library'); editSearch(); };
+$('more-artists').onclick = () => {
+  changeSearchMode('artists', '');
+  renderLibrary();
+  $('song-input').focus({preventScroll:true});
+};
 document.querySelectorAll('[data-video-source]').forEach(button => button.onclick = () => changeSearchMode(button.dataset.videoSource));
 $('search-order').onchange = () => { searchOrder = $('search-order').value; if (searchSnapshot) renderVideoResults(searchSnapshot); };
 $('song-input').oncompositionstart = () => { composing = true; clearVideoSearch(); };

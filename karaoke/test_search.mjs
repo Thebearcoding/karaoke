@@ -90,7 +90,7 @@ test('recent songs use the latest performance of each source', () => {
   assert.deepEqual(historySuggestions([]), {recent:[]});
 });
 
-test('artist shelf groups ready-library credits and keeps six without requiring history', () => {
+test('artist shelf dynamically selects twelve ready-library credits without requiring history', () => {
   const songs = [
     {title:'A', artist:'ＴＫ', status:'completed'},
     {title:'B', artist:' TK ', poster:'/cover.jpg', status:'completed'},
@@ -99,17 +99,37 @@ test('artist shelf groups ready-library credits and keeps six without requiring 
     {title:'E', artist:'Unavailable', status:'video_evicted'},
     {title:'F', artist:'Unavailable', status:'running'},
     {title:'G', artist:'', status:'completed'},
-    ...['One','Two','Three','Four','Five'].map(artist => ({artist,status:'completed'})),
+    ...Array.from({length:13}, (_,i) => ({artist:`Artist ${i}`,status:'completed'})),
   ];
   const original = structuredClone(songs);
   const artists = libraryArtists(songs);
-  assert.deepEqual(artists.map(a => a.name), ['ＴＫ','Solo & Band','Solo','One','Two','Three']);
+  assert.deepEqual(artists.map(a => a.name), ['ＴＫ','Solo & Band','Solo', ...Array.from({length:9}, (_,i) => `Artist ${i}`)]);
+  const added = [...songs, ...Array.from({length:3}, () => ({artist:'New artist',status:'completed'}))];
+  assert.equal(libraryArtists(added)[0].name, 'New artist');
+  assert.equal(libraryArtists(added.filter(s => s.artist !== 'New artist'))[0].name, 'ＴＫ');
   assert.equal(artists[0].count, 2);
   assert.equal(artists[0].poster, '/cover.jpg');
   assert.equal(artists[1].count, 1);
   assert.deepEqual(libraryArtists(songs.slice(4,7)), []);
   assert.deepEqual(libraryArtists([]), []);
   assert.deepEqual(songs, original);
+});
+
+test('artist shelf starts with eight Chinese and four English credits using song language', () => {
+  const songs = [
+    ...Array.from({length:10}, (_,i) => ({artist:`Chinese ${i}`,language:'Chinese',status:'completed'})),
+    ...Array.from({length:6}, (_,i) => ({artist:`英文 ${i}`,language:'English',status:'completed'})),
+    ...Array.from({length:20}, () => ({artist:'Other',language:'Japanese',status:'completed'})),
+    {artist:'Chinese 0',language:'English',status:'completed'},
+    {artist:'Unavailable',language:'English',status:'running'},
+  ];
+  assert.deepEqual(libraryArtists(songs).map(a => a.name), [
+    ...Array.from({length:8}, (_,i) => `Chinese ${i}`),
+    ...Array.from({length:4}, (_,i) => `英文 ${i}`),
+  ]);
+  const sparse = [songs[0],songs[10],songs[16]];
+  assert.deepEqual(libraryArtists(sparse).map(a => a.name), ['Chinese 0','英文 0','Other']);
+  assert.deepEqual(libraryArtists([...songs, ...Array.from({length:3}, () => songs[9])])[0].name, 'Chinese 9');
 });
 
 test('search calls only YouTube and preserves every returned result in order', async () => {

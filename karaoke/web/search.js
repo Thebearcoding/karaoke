@@ -178,12 +178,19 @@ export function libraryArtists(library) {
     const name = (song.artist || '').trim().replace(/\s+/g, ' ');
     if (!name) continue;
     const key = name.normalize('NFKC').toLocaleLowerCase();
-    if (!artists.has(key)) artists.set(key, {name, poster:song.poster, count:0});
+    if (!artists.has(key)) artists.set(key, {name, poster:song.poster, count:0, languages:new Set()});
     const artist = artists.get(key);
     artist.count++;
     artist.poster ||= song.poster;
+    artist.languages.add(song.language);
   }
-  return [...artists.values()].sort((a,b) => b.count-a.count).slice(0,6);
+  const ranked = [...artists.values()].sort((a,b) => b.count-a.count);
+  const selected = new Set();
+  for (const [language, count] of [['Chinese',8], ['English',4]]) {
+    ranked.filter(artist => artist.languages.has(language) && !selected.has(artist))
+      .slice(0,count).forEach(artist => selected.add(artist));
+  }
+  return [...selected, ...ranked.filter(artist => !selected.has(artist))].slice(0,12);
 }
 
 export function searchLibrary(library, query) {

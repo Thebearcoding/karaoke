@@ -44,14 +44,14 @@
         <label class="optional-title" id="title-row" hidden>歌名 <input id="title-input" maxlength="200" placeholder="可选"></label>
       </form>
       <section id="home-discovery" class="home-discovery" aria-label="按歌手选歌" hidden>
-        <div class="section-heading"><h2>歌手</h2></div>
+        <div class="section-heading"><h2>歌手</h2><button id="more-artists" class="text-button">更多 <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button></div>
         <div id="home-artists" class="home-artists"></div>
       </section>
       <section id="local-library">
-      <div class="section-heading library-heading"><h1 id="library-heading">曲库</h1><span id="library-count"></span>
-        <nav class="library-pagination" aria-label="曲库分页" hidden>
+      <div class="section-heading library-heading"><h1 id="library-heading">本地曲库</h1><span id="library-count"></span>
+        <nav class="library-pagination" aria-label="本地曲库分页" hidden>
           <button data-library-step="-1" aria-label="上一页" title="上一页"><svg class="icon"><use href="#i-up"/></svg></button>
-          <select aria-label="曲库页码"></select>
+          <select aria-label="本地曲库页码"></select>
           <button data-library-step="1" aria-label="下一页" title="下一页"><svg class="icon"><use href="#i-up"/></svg></button>
         </nav>
       </div>
@@ -60,15 +60,15 @@
         <div class="music-columns" role="row"><span class="music-rank" role="columnheader">#</span><span class="music-song" role="columnheader">歌曲</span><span class="music-credits" role="columnheader">歌手</span><span class="music-album" role="columnheader">专辑</span><span class="music-plays" role="columnheader">播放量</span><span class="music-duration" role="columnheader">时长</span><span class="music-actions" role="columnheader">点歌</span><span class="music-alternative" role="columnheader">找 MV</span></div>
         <div class="music-list" id="song-grid" role="rowgroup"></div>
       </div>
-      <nav class="library-pagination library-pagination-bottom" aria-label="曲库底部分页" hidden>
+      <nav class="library-pagination library-pagination-bottom" aria-label="本地曲库底部分页" hidden>
         <button data-library-step="-1" aria-label="上一页" title="上一页"><svg class="icon"><use href="#i-up"/></svg></button>
-        <select aria-label="曲库页码"></select>
+        <select aria-label="本地曲库页码"></select>
         <button data-library-step="1" aria-label="下一页" title="下一页"><svg class="icon"><use href="#i-up"/></svg></button>
       </nav>
       <div class="search-empty" id="search-empty" hidden><h3>还没有歌曲</h3><p>搜一首喜欢的歌，开始唱。</p></div>
       </section>
       <section id="video-results" class="video-results" aria-label="选歌结果" hidden>
-        <div class="section-heading search-heading"><div><h2 id="search-heading">搜索结果</h2><div id="search-status" class="search-status" role="status"></div></div><button class="text-button" id="clear-search">返回曲库</button></div>
+        <div class="section-heading search-heading"><div><h2 id="search-heading">搜索结果</h2><div id="search-status" class="search-status" role="status"></div></div><button class="text-button" id="clear-search">返回本地曲库</button></div>
         <div class="search-controls">
           <div class="search-modes"><div class="filters video-sources" role="group" aria-label="搜索内容"><button data-video-source="songs" class="selected">综合</button><button data-video-source="artists">歌手</button></div><div class="search-sources" role="group" aria-label="其他搜索来源"><button data-video-source="youtube">YouTube 视频</button><button data-video-source="local">本地曲库</button></div></div>
           <label id="search-order-label"><select id="search-order" aria-label="搜索结果排序"><option value="relevance">默认排序</option><option value="popular">按播放量</option><option value="ready">可直接唱优先</option><option value="title">按歌名</option></select></label>
