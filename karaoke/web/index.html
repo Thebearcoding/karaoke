@@ -39,20 +39,6 @@
         <div class="search-box"><svg class="icon"><use href="#i-search"/></svg><input id="song-input" type="text" autocomplete="off" maxlength="2048" enterkeyhint="search" aria-label="搜索歌名、歌手或粘贴视频链接" placeholder="搜索歌名或歌手"><button id="submit-song" type="submit">搜索 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
         <label class="optional-title" id="title-row" hidden>歌名 <input id="title-input" maxlength="200" placeholder="可选"></label>
       </form>
-      <section id="video-results" class="video-results" aria-label="选歌结果" hidden>
-        <div class="section-heading search-heading"><div><h2 id="search-heading">搜索结果</h2><div id="search-status" class="search-status" role="status"></div></div><button class="text-button" id="clear-search">返回曲库</button></div>
-        <div class="search-controls">
-          <div class="search-modes"><div class="filters video-sources" role="group" aria-label="搜索内容"><button data-video-source="songs" class="selected">综合</button><button data-video-source="artists">歌手</button></div><div class="search-sources" role="group" aria-label="其他搜索来源"><button data-video-source="youtube">YouTube 视频</button><button data-video-source="local">本地曲库</button></div></div>
-          <label id="search-order-label"><select id="search-order" aria-label="搜索结果排序"><option value="relevance">默认排序</option><option value="popular">按播放量</option><option value="ready">可直接唱优先</option><option value="title">按歌名</option></select></label>
-        </div>
-        <div id="artist-summary" class="artist-summary" hidden></div>
-        <p id="search-order-note" class="search-order-note"></p>
-        <div id="search-list">
-          <div id="music-columns" class="music-columns" role="row" hidden><span class="music-rank" role="columnheader">#</span><span id="music-title-heading" class="music-song" role="columnheader">歌曲</span><span id="music-artist-heading" class="music-credits" role="columnheader">歌手</span><span class="music-album" role="columnheader">专辑</span><span class="music-plays" role="columnheader">播放量</span><span class="music-duration" role="columnheader">时长</span><span class="music-actions" role="columnheader">点歌</span><span id="music-alternative-heading" class="music-alternative" role="columnheader">找 MV</span></div>
-          <div id="video-grid"></div>
-        </div>
-        <div id="search-more" class="search-more" hidden><p id="search-more-status" role="status"></p><button id="search-more-button" class="text-button" hidden>加载更多</button></div>
-      </section>
       <section id="home-discovery" class="home-discovery" aria-label="从演唱记录选歌" hidden>
         <div class="section-heading"><h2>最近唱过</h2><button id="show-history" class="text-button">全部已唱 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
         <div id="recent-songs" class="recent-songs"></div>
@@ -76,6 +62,20 @@
         <button data-library-step="1" aria-label="下一页" title="下一页"><svg class="icon"><use href="#i-up"/></svg></button>
       </nav>
       <div class="search-empty" id="search-empty" hidden><h3>还没有歌曲</h3><p>搜一首喜欢的歌，开始唱。</p></div>
+      </section>
+      <section id="video-results" class="video-results" aria-label="选歌结果" hidden>
+        <div class="section-heading search-heading"><div><h2 id="search-heading">搜索结果</h2><div id="search-status" class="search-status" role="status"></div></div><button class="text-button" id="clear-search">返回曲库</button></div>
+        <div class="search-controls">
+          <div class="search-modes"><div class="filters video-sources" role="group" aria-label="搜索内容"><button data-video-source="songs" class="selected">综合</button><button data-video-source="artists">歌手</button></div><div class="search-sources" role="group" aria-label="其他搜索来源"><button data-video-source="youtube">YouTube 视频</button><button data-video-source="local">本地曲库</button></div></div>
+          <label id="search-order-label"><select id="search-order" aria-label="搜索结果排序"><option value="relevance">默认排序</option><option value="popular">按播放量</option><option value="ready">可直接唱优先</option><option value="title">按歌名</option></select></label>
+        </div>
+        <div id="artist-summary" class="artist-summary" hidden></div>
+        <p id="search-order-note" class="search-order-note"></p>
+        <div id="search-list">
+          <div id="music-columns" class="music-columns" role="row" hidden><span class="music-rank" role="columnheader">#</span><span id="music-title-heading" class="music-song" role="columnheader">歌曲</span><span id="music-artist-heading" class="music-credits" role="columnheader">歌手</span><span class="music-album" role="columnheader">专辑</span><span class="music-plays" role="columnheader">播放量</span><span class="music-duration" role="columnheader">时长</span><span class="music-actions" role="columnheader">点歌</span><span id="music-alternative-heading" class="music-alternative" role="columnheader">找 MV</span></div>
+          <div id="video-grid"></div>
+        </div>
+        <div id="search-more" class="search-more" hidden><p id="search-more-status" role="status"></p><button id="search-more-button" class="text-button" hidden>加载更多</button></div>
       </section>
 
     </section>
