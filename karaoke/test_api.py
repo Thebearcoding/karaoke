@@ -309,7 +309,8 @@ def test_two_track_export_preserves_the_mix_and_streams_only_two_tracks(tmp_path
 
 
 @pytest.mark.parametrize('bad_input', [False, True])
-def test_storage_migration_keeps_identity_and_subtitles_and_releases_intermediates(tmp_path, bad_input):
+@pytest.mark.parametrize('video_only', [False, True])
+def test_storage_migration_keeps_identity_and_subtitles_and_releases_intermediates(tmp_path, bad_input, video_only):
     import soundfile as sf
     from karaoke.exact_stems import compact_playback_audio
     from karaoke.tools.compact_storage import migrate, video_hash
@@ -323,7 +324,10 @@ def test_storage_migration_keeps_identity_and_subtitles_and_releases_intermediat
         sf.write(folder/result['artifacts'][name]['path'], wave, 48000, format='WAV', subtype='DOUBLE')
     result = compact_playback_audio(folder, result)
     subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i','color=c=blue:s=160x90:r=30:d=1',
-                    '-f','lavfi','-i','sine=duration=1','-c:v','libx264','-c:a','aac',str(folder/'mv.mp4')],check=True)
+                    '-f','lavfi','-i','sine=duration=1','-c:v','libx264','-c:a','aac',
+                    *(['-an'] if video_only else []), str(folder/'mv.mp4')],check=True)
+    if video_only:
+        result['video_only'] = True
     for artifact in result['artifacts'].values():
         path = folder/artifact['path']
         artifact.update(bytes=path.stat().st_size,sha256=file_hash(path))
@@ -347,6 +351,10 @@ def test_storage_migration_keeps_identity_and_subtitles_and_releases_intermediat
     assert set(fresh['result']['artifacts']) == {'mv','subtitles','poster','accompaniment','lead_vocals'}
     assert (folder/'subtitles').read_bytes() == before['subtitles']
     assert video_hash(folder/fresh['result']['artifacts']['mv']['path']) == video_before
+    assert fresh['result']['video_audio'] == 'silent_aac' and 'video_only' not in fresh['result']
+    silent = subprocess.check_output(['ffmpeg', '-v', 'error', '-i',
+        str(folder/fresh['result']['artifacts']['mv']['path']), '-map', '0:a:0', '-f', 'f32le', '-'])
+    assert silent and not np.frombuffer(silent, dtype='<f4').any()
     assert not list(folder.rglob('*.wav')) and not (folder/'music-separation').exists()
     assert not (folder/'instrumental_preview').exists()
     assert report['status']=='migrated'
@@ -6889,6 +6897,33 @@ def test_lyric_video_preserves_source_frames_and_fractional_cadence(tmp_path, mo
     assert json.loads(cue_path.read_text()) == cues
 
 
+@pytest.mark.parametrize('rate', ['24000/1001', '30'])
+@pytest.mark.parametrize('with_music', [False, True])
+def test_playback_mux_preserves_packets_and_timestamps_with_only_silent_audio(tmp_path, rate, with_music):
+    from karaoke.playback_video import mux_playback_video
+    source, output = tmp_path/'source.mp4', tmp_path/'output.mp4'
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
+        f'testsrc2=s=160x90:r={rate}:d=2.003', '-f', 'lavfi', '-i', 'sine=duration=2.003',
+        '-c:v', 'libx264', '-c:a', 'aac', *([] if with_music else ['-an']), str(source)], check=True)
+    before = source.read_bytes()
+    mux_playback_video(source, output)
+    packets = [json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+        '-show_packets', '-show_data_hash', 'sha256', '-show_entries',
+        'packet=pts_time,dts_time,duration_time,data_hash', '-of', 'json', str(path)]))
+        for path in (source, output)]
+    assert packets[0] == packets[1] and packets[0]['packets']
+    probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_streams',
+        '-of', 'json', str(output)]))['streams']
+    video, audio = probe
+    assert video['codec_type'] == 'video' and audio['codec_name'] == 'aac'
+    assert float(audio['start_time']) == float(video['start_time']) == 0
+    assert abs(float(audio['duration'])-float(video['duration'])) < .05
+    silent = subprocess.check_output(['ffmpeg', '-v', 'error', '-xerror', '-i', str(output),
+        '-map', '0:a:0', '-f', 'f32le', '-'])
+    assert silent and not np.frombuffer(silent, dtype='<f4').any()
+    assert source.read_bytes() == before
+
+
 @pytest.mark.parametrize('radius', [1, 3, 6])
 def test_caption_outline_preserves_antialiasing_and_canvas_edges(radius):
     from PIL import Image, ImageDraw, ImageFilter
@@ -9746,16 +9781,15 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
     monkeypatch.setattr(pipeline, 'download', download)
     if source_matches:
         restored = pipeline.restore_video()
-        assert set(restored['video_restore']['timings']) == {'verify_video', 'render'}
-        assert restored['video_only']
+        assert set(restored['video_restore']['timings']) == {'verify_video', 'render', 'mux_video'}
+        assert restored['video_audio'] == 'silent_aac'
         assert (folder/'mv.mp4').stat().st_size > 2048
         assert restored['artifacts']['mv']['sha256'] == file_hash(folder/'mv.mp4')
         assert not (folder/'render-mix.wav').exists()
         opening = restored['quality']['opening_countdown']
         assert opening['start'] == -3.5 and opening['onset'] == .5
         assert opening['dots'] == 3 and 0 < opening['y'] < opening['height']
-        # Splitting picture encoding from audio muxing must not change either
-        # decoded stream compared with the established all-at-once renderer.
+        # The compatibility track must not change the captioned picture.
         mixed = folder/'expected-mix.wav'
         samples, rate = sf.read(folder/result['artifacts']['instrumental']['path'], dtype='float32', always_2d=True)
         if result['mv_audio'] == 'instrumental_backing':
@@ -9773,7 +9807,10 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
             assert hashes[0] == hashes[1]
         probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_streams',
             '-of', 'json', str(folder/'mv.mp4')]))
-        assert [s['codec_type'] for s in probe['streams']] == ['video']
+        assert [s['codec_type'] for s in probe['streams']] == ['video', 'audio']
+        silent = subprocess.check_output(['ffmpeg', '-v', 'error', '-i', str(folder/'mv.mp4'),
+            '-map', '0:a:0', '-f', 'f32le', '-'])
+        assert silent and not np.frombuffer(silent, dtype='<f4').any()
     else:
         with pytest.raises(StageFailure, match='音频与缓存版本不同'):
             pipeline.restore_video()

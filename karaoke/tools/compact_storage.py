@@ -12,6 +12,7 @@ import subprocess
 from karaoke.api import Store
 from karaoke.exact_stems import compact_playback_audio, sha
 from karaoke.job_schema import playback_stems
+from karaoke.playback_video import mux_playback_video
 from karaoke.tools.soak import verify_stems
 
 
@@ -48,14 +49,14 @@ def migrate(store, job):
                  updated['duration_seconds'], storage=updated['audio_storage'])
     evidence = dict(id=job['id'], before_bytes=before, original_artifacts=original['artifacts'],
                     audio_storage=updated['audio_storage'])
-    if job['status'] == 'completed' and not original.get('video_only'):
+    if job['status'] == 'completed' and original.get('video_audio') != 'silent_aac':
         old = folder/original['artifacts']['mv']['path']
         target = folder/'mv-video.mp4'
         temporary = folder/'mv-video.tmp.mp4'
         try:
-            subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-y', '-i', str(old),
-                '-map', '0:v:0', '-c:v', 'copy', '-an', '-movflags', '+faststart', str(temporary)],
-                check=True, timeout=300)
+            mux_playback_video(old, temporary)
+            subprocess.run(['ffmpeg', '-v', 'error', '-xerror', '-nostdin', '-i', str(temporary),
+                '-f', 'null', '-'], check=True, timeout=300)
             evidence['video_before'] = video_hash(old)
             evidence['video_after'] = video_hash(temporary)
             if evidence['video_before'] != evidence['video_after']:
@@ -64,7 +65,8 @@ def migrate(store, job):
         finally:
             temporary.unlink(missing_ok=True)
         updated['artifacts']['mv'] = dict(path=target.name, bytes=target.stat().st_size, sha256=sha(target))
-        updated['video_only'] = True
+        updated.pop('video_only', None)
+        updated['video_audio'] = 'silent_aac'
     save(folder/'storage-migration.json', evidence)
     # Disk and DB publication both precede compaction. An interrupted migration
     # can be rerun from the DB's still-valid old media until this commit succeeds.

@@ -1642,13 +1642,14 @@ class Pipeline:
     def render_video(self, result, picture=None):
         paths = {name: self.output/a['path'] for name, a in result['artifacts'].items()}
         readings = self.reading_inputs(result, paths['subtitles'])
-        result['video_only'] = True
+        result.pop('video_only', None)
+        result['video_audio'] = 'silent_aac'
         with self.checkpoints.stage('render',
                 inputs=[self.video, paths['subtitles'], *readings],
                 outputs=[paths['mv']],
                 config={**{key: result[key] for key in ('title', 'artist', 'language', 'duration_seconds')},
                     'implementation': inspect.getsource(type(self).render_uncached)},
-                code=[ROOT/p for p in ('render_lyric_progress.py', 'render_subtitles.py', 'subtitles.py', 'lyric_progress.py',
+                code=[ROOT/p for p in ('playback_video.py', 'render_lyric_progress.py', 'render_subtitles.py', 'subtitles.py', 'lyric_progress.py',
                                       'subtitle_style.py', 'subtitle-styles.json', 'lyric_readings.py')]) as reused:
             if not reused:
                 self.render_uncached(result, picture)
@@ -1660,13 +1661,14 @@ class Pipeline:
             countdown_events=presentation['countdown']['events'],
             opening_countdown=presentation['opening_countdown'])
         paths = {name: self.output/a['path'] for name, a in result['artifacts'].items()}
-        self.run('verify_video', ['ffmpeg', '-v', 'error', '-xerror', '-nostdin', '-i', picture, '-f', 'null', '-'])
+        self.run('mux_video', [sys.executable, ROOT/'playback_video.py', picture, paths['mv']])
+        self.run('verify_video', ['ffmpeg', '-v', 'error', '-xerror', '-nostdin', '-i', paths['mv'], '-f', 'null', '-'])
         probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',
-            'format=duration:stream=codec_type', '-of', 'json', str(picture)]))
-        if ({s['codec_type'] for s in probe['streams']} != {'video'} or
+            'format=duration:stream=codec_type', '-of', 'json', str(paths['mv'])]))
+        if ({s['codec_type'] for s in probe['streams']} != {'video', 'audio'} or
                 abs(float(probe['format']['duration'])-result['duration_seconds']) > .1):
-            raise StageFailure('verify_video', '成品视频缺少画面或时长不符')
-        picture.replace(paths['mv'])
+            raise StageFailure('verify_video', '成品视频缺少画面、兼容音轨或时长不符')
+        picture.unlink()
 
     def restore_video(self):
         """Rebuild only the discarded video; never run a model or change cached audio/cues."""
