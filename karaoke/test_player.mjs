@@ -1,7 +1,67 @@
 import test, {beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import {Player} from './web/player.js';
-import {isStaleRoomSnapshot, LocalPlayback, PlaybackTabs, queueToTop, preparationRetry} from './web/room-state.js';
+import {isStaleRoomSnapshot, LocalPlayback, PlaybackTabs, RoomEvents, queueToTop, preparationRetry} from './web/room-state.js';
+
+test('room subscriptions recover closed and silent connections without polling or accepting old events', t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  const streams=[], received=[], connected=[];
+  class Stream extends EventTarget {
+    readyState=0;
+    close() { this.readyState=2; }
+    room(value) { this.dispatchEvent(new MessageEvent('room', {data:JSON.stringify(value)})); }
+  }
+  const events=new RoomEvents(value=>received.push(value), value=>connected.push(value), url=>{
+    const stream=new Stream(); stream.url=url; streams.push(stream); return stream;
+  });
+  try {
+    events.connect();
+    const first=streams[0]; first.readyState=1; first.onopen(); first.room({entries:[]});
+    for (let i=0;i<5;i++) {t.mock.timers.tick(15000); first.dispatchEvent(new Event('ping'));}
+    events.connect(); assert.equal(streams.length,1);
+    first.close(); first.onerror();
+    t.mock.timers.tick(1000);
+    assert.equal(streams.length,2);
+    first.room({entries:['stale']});
+    streams[1].room({entries:['new song']});
+    assert.deepEqual(received,[{entries:[]},{entries:['new song']}]);
+    // A half-open connection can stop delivering data without firing onerror.
+    t.mock.timers.tick(45000);
+    assert.equal(streams.length,3); assert.equal(streams[1].readyState,2);
+    events.connect('singing job');
+    assert.equal(streams[3].url,'/v1/room/events?job_id=singing%20job');
+    streams[2].room({entries:['old subscription']});
+    assert.equal(received.length,2);
+    streams[3].readyState=0; streams[3].onerror();
+    t.mock.timers.tick(1000); assert.equal(streams.length,4); // Native retry still owns CONNECTING.
+    events.close(); t.mock.timers.tick(60000);
+    assert.equal(streams.length,4); assert.equal(connected.at(-1),false);
+  } finally { events.close(); }
+});
+
+test('a restored page resumes its released session without undoing pause or taking audio from another tab', () => {
+  const values=new Map(), storage={getItem:key=>values.get(key),setItem:(key,value)=>values.set(key,value)};
+  for (const playing of [true,false]) {
+    values.clear();
+    const first=new PlaybackTabs(storage,'first'), other=new PlaybackTabs(storage,'other');
+    const waiting={entry:null,playing,position:0};
+    first.write(waiting,{claim:true});
+    assert.equal(first.suspend(waiting),true);
+    assert.equal(first.owns(),false);
+    assert.equal(first.resume(),true);
+    assert.equal(first.owns(),true);
+    assert.equal(first.record.playback.playing,playing);
+    assert.equal(first.resume(),false);
+    first.suspend(waiting);
+    other.write({playing:true,position:5},{claim:true});
+    assert.equal(first.resume(),false); assert.equal(other.owns(),true);
+    // Even a now-closed replacement session must not revive the old one.
+    first.write(waiting,{claim:true}); first.suspend(waiting);
+    other.write({playing:false,position:10},{claim:true}); other.suspend(other.record.playback);
+    assert.equal(first.resume(),false);
+    assert.equal(first.read().playback.position,10);
+  }
+});
 
 test('late HTTP replies cannot undo a newer room command or same-revision progress update', () => {
   const current = {revision:4,server_time:100,entries:[{status:'completed'}]};

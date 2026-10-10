@@ -886,12 +886,22 @@ def test_library_does_not_prefer_an_incomplete_old_result(tmp_path):
     assert card['job_id'] == newer['id'] and card['status'] == 'queued'
 
 
-def test_sse_initial_snapshot_push_coalescing_and_disconnect():
+def test_sse_initial_snapshot_push_coalescing_and_disconnect(monkeypatch):
     async def check():
         updates = Updates()
         data = {'revision':0}
         stream = updates.events(lambda: data.copy())
         assert '"revision": 0' in await anext(stream)
+        async def idle_timeout(awaitable, timeout):
+            awaitable.close()
+            raise asyncio.TimeoutError
+        with monkeypatch.context() as patch:
+            patch.setattr(asyncio, 'wait_for', idle_timeout)
+            # Heartbeats reach EventSource listeners without re-rendering a
+            # whole room or confusing a ping with an empty playlist.
+            heartbeat = await anext(stream)
+            assert heartbeat.startswith('event: ping\n')
+            assert json.loads(heartbeat.split('data: ', 1)[1]) == {}
         waiting = asyncio.create_task(anext(stream))
         await asyncio.sleep(0)
         data['revision'] = 1

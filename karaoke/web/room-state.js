@@ -4,6 +4,47 @@ export function isStaleRoomSnapshot(incoming, current) {
     (incoming.revision === current.revision && incoming.server_time < current.server_time);
 }
 
+// A quiet room still sends a heartbeat. Reopen a dead stream without polling
+// room state; the new subscription starts with the current complete snapshot.
+export class RoomEvents {
+  constructor(receive, connection, create = url => new EventSource(url)) {
+    this.receive = receive; this.connection = connection; this.create = create;
+  }
+  connect(job = '', force = false) {
+    if (this.source && job === this.job && !force) return;
+    this.close(); this.job = job;
+    const source = this.source = this.create('/v1/room/events' + (job ? `?job_id=${encodeURIComponent(job)}` : ''));
+    const alive = () => {
+      if (this.source !== source) return false;
+      this.schedule(source, 45000);
+      this.connection(true);
+      return true;
+    };
+    source.addEventListener('room', event => { if (alive()) this.receive(JSON.parse(event.data)); });
+    source.addEventListener('ping', alive);
+    source.onopen = alive;
+    source.onerror = () => {
+      if (this.source !== source) return;
+      this.connection(false);
+      // CONNECTING already has EventSource's own retry; CLOSED does not.
+      if (source.readyState === 2) this.schedule(source, 1000);
+    };
+    this.schedule(source, 45000);
+  }
+  schedule(source, delay) {
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      if (this.source !== source) return;
+      this.connection(false);
+      this.connect(this.job, true);
+    }, delay);
+  }
+  close() {
+    clearTimeout(this.timer);
+    this.source?.close(); this.source = null;
+  }
+}
+
 export function queueToTop(entries, id, playingId = null) {
   const ids = entries.map(entry => entry.id);
   if (!ids.includes(id) || id === playingId) return null;
@@ -60,6 +101,20 @@ export class PlaybackTabs {
     if (!enabled && this.owns())
       this.write({...this.record.playback, playing:false}, {release:true});
     this.enabled = enabled;
+  }
+  suspend(playback) {
+    this.suspendedSession = null;
+    if (!this.owns() || !this.write(playback, {release:true})) return false;
+    this.suspendedSession = this.record.session;
+    return true;
+  }
+  resume() {
+    const current = this.read(), session = this.suspendedSession;
+    this.suspendedSession = null;
+    // A restored page can resume only its own released session. Never steal
+    // audio back after another tab has played, even if that tab is now closed.
+    return Boolean(session && current.session === session && !current.owner &&
+      this.write(current.playback, {claim:true}));
   }
 }
 

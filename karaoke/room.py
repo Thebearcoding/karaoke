@@ -77,7 +77,7 @@ class Updates:
                         await asyncio.wait_for(queue.get(), 15)
                         break
                     except asyncio.TimeoutError:
-                        yield ': keepalive\n\n'
+                        yield 'event: ping\ndata: {}\n\n'
         finally:
             self.subscribers.discard(queue)
 

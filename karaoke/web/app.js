@@ -1,6 +1,6 @@
 import { Player } from './player.js';
 import { mountPreview } from './preview.js';
-import { isStaleRoomSnapshot, LocalPlayback, PlaybackTabs, queueToTop, preparationRetry } from './room-state.js';
+import { isStaleRoomSnapshot, LocalPlayback, PlaybackTabs, RoomEvents, queueToTop, preparationRetry } from './room-state.js';
 import { createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
 
 const $ = id => document.getElementById(id);
@@ -314,15 +314,16 @@ function songRow(song, index, {artists = false, videos = false, local = false, i
     `<${tag} class="music-add" ${open}>${song.kind === 'album' ? '查看专辑' : catalogueAction ? '查看歌曲' : '打开'} ${icon('arrow')}</${tag}>`;
   const credits = song.artists?.length ? song.artists.map(a => a.id ? `<button data-artist-id="${escape(a.id)}" data-artist-name="${escape(a.name)}">${escape(a.name)}</button>` : escape(a.name)).join(' · ') : local && song.uploader ? `<button data-search-artist="${escape(song.uploader)}">${escape(song.uploader)}</button>` : escape(song.uploader || '—');
   const artistText = escape(song.artists?.map(a => a.name).join(' · ') || song.uploader || '—');
+  const plays = playCount(song.views) === null ? null : formatPlays(song.views);
   const kind = song.kind === 'album' ? '专辑' : song.kind === 'artist' ? '歌手' : song.version || '';
   const status = inLibrary && song.status === 'failed' ? '<span class="library-status is-failed">准备失败</span>' : '';
   const meta = kind || status ? `<div class="music-meta">${kind ? `<span${song.kind === 'album' ? ' class="music-kind"' : ''}>${escape(kind)}</span>` : ''}${status}</div>` : '';
   return `<article class="music-row" ${inLibrary ? `data-card="${escape(song.id)}"` : `data-result="${index}"`} role="row"><span class="music-rank" role="cell">${String(index+1).padStart(2,'0')}</span>
     <div class="music-song" role="cell"><${tag} class="music-cover" ${open} aria-label="${playable ? tabs.enabled ? '预览' : '点歌' : '打开'}：${escape(song.title)}">${thumbnail}<span>${icon(playable ? tabs.enabled ? 'play' : 'plus' : 'arrow')}</span></${tag}>
-      <div class="music-title"><h3><${tag} ${open} title="${escape(song.title)}"><span class="music-name">${escape(song.title)}</span><span class="music-compact-artist"><span>${artistText}</span>${kind ? `<small>${escape(kind)}</small>` : ''}${song.duration ? `<span class="music-compact-duration" aria-label="时长 ${time(song.duration)}">${time(song.duration)}</span>` : ''}</span></${tag}></h3>${meta}${inLibrary && song.status === 'running' ? `<div class="preparation-slot">${preparationHTML(song)}</div>` : ''}</div></div>
+      <div class="music-title"><h3><${tag} ${open} title="${escape(song.title)}"><span class="music-name">${escape(song.title)}</span><span class="music-compact-artist"><span>${artistText}</span>${kind ? `<small>${escape(kind)}</small>` : ''}${plays !== null && !local ? `<span class="music-compact-plays" aria-label="播放量 ${plays}">${plays}次</span>` : ''}${song.duration ? `<span class="music-compact-duration" aria-label="时长 ${time(song.duration)}">${time(song.duration)}</span>` : ''}</span></${tag}></h3>${meta}${inLibrary && song.status === 'running' ? `<div class="preparation-slot">${preparationHTML(song)}</div>` : ''}</div></div>
     <div class="music-credits" role="cell" title="${escape(song.artists?.map(a => a.name).join(' · ') || song.uploader || '')}">${inLibrary ? `<div class="song-info-row">${credits}${preparationElapsedHTML(song)}</div>` : credits}</div>
     <div class="music-album" role="cell" title="${escape(song.album || '')}">${escape(song.album || '—')}</div>
-    <div class="music-facts"><div class="music-plays${playCount(song.views) === null ? ' is-empty' : ''}" role="cell">${playCount(song.views) !== null ? `${formatPlays(song.views)}<small>播放</small>` : '—'}</div>
+    <div class="music-facts"><div class="music-plays${plays === null ? ' is-empty' : ''}" role="cell">${plays !== null ? `${plays}<small>播放</small>` : '—'}</div>
     <div class="music-duration${!song.duration ? ' is-empty' : ''}" role="cell">${song.duration ? time(song.duration) : '—'}</div></div>
     <div class="music-actions" role="cell">${action}</div>
     <div class="music-alternative" role="cell">${(local || song.provider === 'youtube_music') && playable ? `<button class="find-mv" ${inLibrary ? `data-find-mv-song="${escape(song.id)}"` : `data-find-mv="${index}"`} aria-label="找 MV：${escape(song.title)}"><span class="find-mv-prefix">找 </span>MV</button>` : videos ? `<a class="find-mv" href="${escape(song.url)}" target="_blank" rel="noopener noreferrer" aria-label="在 YouTube 打开"><span class="find-mv-prefix">YouTube </span>↗</a>` : ''}</div></article>`;
@@ -611,7 +612,7 @@ function renderQueue() {
 }
 
 function renderHistory() {
-  const history = state.history || [];
+  const history = historySuggestions(state.history || []).recent;
   const songs = filterSongs(history, $('history-query').value);
   $('history-count').textContent = String(history.length).padStart(2,'0');
   $('history-empty').hidden = songs.length > 0;
@@ -1057,24 +1058,12 @@ window.addEventListener('popstate', event => navigation.restore(event.state));
 window.addEventListener('pagehide', () => navigation.save());
 let scrollSave;
 window.addEventListener('scroll', () => { clearTimeout(scrollSave); scrollSave = setTimeout(() => navigation.save(), 150); }, {passive:true});
-let events, watchedJob;
-function connectEvents() {
-  const job = playback.entry?.job_id || '';
-  if (events && job === watchedJob) return;
-  events?.close();
-  watchedJob = job;
-  const source = events = new EventSource('/v1/room/events' + (job ? `?job_id=${encodeURIComponent(job)}` : ''));
-  source.addEventListener('room', event => {
-    if (source !== events) return;
-    connected = true; renderConnection();
-    acceptState(JSON.parse(event.data));
-  });
-  source.onopen = () => { if (source === events) retryFinished(); };
-  source.onerror = () => {
-    if (source !== events) return;
-    connected = false; renderConnection();
-  };
-}
+const events = new RoomEvents(acceptState, online => {
+  if (connected === online) return;
+  connected = online; renderConnection();
+  if (online) retryFinished();
+});
+function connectEvents() { events.connect(playback.entry?.job_id || ''); }
 function savePlayback(position) {
   if (!tabs.enabled) return;
   lastPlaybackSave = Date.now();
@@ -1107,14 +1096,17 @@ function claimPlayback() {
   return true;
 }
 window.addEventListener('storage', event => { if (event.key === tabs.key) followPlayback(); });
-window.addEventListener('online', retryFinished);
+window.addEventListener('online', () => { events.close(); connectEvents(); retryFinished(); });
 window.addEventListener('pagehide', () => {
-  if (tabs.owns()) { tabs.write(playback.save(), {release:true}); player.stop(); }
-  events?.close();
+  if (tabs.suspend(playback.save())) player.stop();
+  events.close();
 });
 function resumePage() {
+  const resumed = tabs.resume();
   followPlayback();
-  events?.close(); events = null; connectEvents();
+  events.close(); connectEvents();
+  if (resumed && playback.state.playing)
+    player.unlock().then(() => renderState()).catch(() => updateTransport());
   retryFinished();
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) resumePage(); });

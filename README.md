@@ -1,4 +1,4 @@
-# 余音 · Karaoke
+# 退学 KTV · Karaoke
 
 把 YouTube / Bilibili 视频变成可以唱的卡拉 OK：网页点歌、后台预处理、共享歌单和自动播放下一首。
 
