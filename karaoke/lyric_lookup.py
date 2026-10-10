@@ -734,7 +734,9 @@ def fetch_structured_lyrics(song, cache, duration=None, source_title=None):
     from .lyric_readings import read_page
     if not song.get('title') or not song.get('artist'):
         return None, dict(status='missing_identity', provider='lyricsweb')
-    query = ' '.join(song_names(song, key)[-1] for key in ('title', 'artist'))
+    # This endpoint searches song names and artist names separately. Combining
+    # them returns an artist catalogue, which can omit the requested song.
+    query = song_names(song, 'title')[-1]
     url = 'https://lyricsweb.com/api/v1/user/search-result?'+urlencode(dict(query=query))
     packet = cached_lyric_request('lyricsweb', dict(url=url, representation='candidate_metadata_v1'), cache,
                                   lambda: read_lyric_catalogue(url))

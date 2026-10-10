@@ -2506,8 +2506,11 @@ def test_structured_publisher_reads_only_matching_recording_lyrics(tmp_path, mon
     calls = []
     @contextmanager
     def read(method, url, **kwargs):
+        from urllib.parse import parse_qs, urlsplit
+        assert parse_qs(urlsplit(url).query) == {'query': ['Evening']}
         calls.append(url)
         yield httpx.Response(200, json=dict(data=dict(global_song_matches=[None,
+            dict(row, artist={'artist_name':'Unrelated singer'}, public_song_url='/song/other/evening'),
             dict(row,public_song_url='https://other.test/song'),row])), request=httpx.Request(method,url))
     def page(url):
         calls.append(url)
