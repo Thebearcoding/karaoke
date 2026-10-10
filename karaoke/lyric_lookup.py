@@ -889,8 +889,9 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 if request.get(key):
                     continue
                 before = dict(song)
+                review = report.get('crosscheck', {})
                 recording = next((r.get('recording_identity') or {} for r in
-                    report.get('crosscheck', {}).get('unavailable_sources', [])
+                    [*review.get('sources', []), *review.get('unavailable_sources', [])]
                     if r.get('provider') == 'youtube_music' and
                     (r.get('recording_identity') or {}).get('video_id') == metadata.get('id')), {})
                 confirmed_alias = recording.get(key)
@@ -905,6 +906,8 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                     continue
                 blocked = {r['provider']: (None, r) for r in report.get('crosscheck', {}).get('unavailable_sources', [])
                            if r.get('provider') and (r.get('error') or r['provider'] == 'youtube_music')}
+                blocked.update({r['provider']: (text, r) for text, r in
+                    zip(report.get('candidate_texts', []), review.get('sources', [])) if r['provider'] == 'youtube_music'})
                 lines, report = fetch_lyric_consensus(song, metadata, duration, cache, description_text, True,
                                                       prefetched=blocked)
                 attempts.append(dict(identity={key: song.get(key) for key in original}, lookup=report))

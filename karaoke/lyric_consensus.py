@@ -168,14 +168,17 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
                                     lambda: music.get_lyrics(candidate['lyrics']))
                                 if (alternative or {}).get('lyrics'):
                                     result, lyric_video, release = alternative, candidate_video, row
+                                    track = candidate['tracks'][0]
                                     release_mismatches = mismatch
                                     break
                     text = (result or {}).get('lyrics')
                     if text is not None and (not isinstance(text, str) or len(text) > 30000):
                         raise ValueError('Invalid Music lyric text')
-                    title = song.get('title') or track.get('title') or ''
-                    artist = song.get('artist') or recording_identity['artist']
-                    lines, excluded = lookup.published_lyric_lines(text or '', title, [artist])
+                    # Parse a publisher's header using that same recording's
+                    # names, which may differ from the UI's localized labels.
+                    title = track.get('title') or song.get('title') or ''
+                    artists = [a['name'] for a in track.get('artists') or [] if a.get('name')]
+                    lines, excluded = lookup.published_lyric_lines(text or '', title, artists or [song.get('artist')])
                     language = song.get('language') or lookup.text_language('\n'.join(lines))
                     if lines and (len(lines) > 1000 or any(len(line) > 200 for line in lines)):
                         raise ValueError('Invalid Music lyric lines')

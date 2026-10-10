@@ -1340,7 +1340,8 @@ def test_unmatched_lyrics_retry_cached_native_identity_once_without_repeating_bl
 
 
 @pytest.mark.parametrize('same_recording,explicit', [(True,False),(False,False),(True,True)])
-def test_lyric_identity_reuses_platform_native_alias_without_model(tmp_path, monkeypatch, same_recording, explicit):
+@pytest.mark.parametrize('unusable_body', [False, True])
+def test_lyric_identity_reuses_platform_native_alias_without_model(tmp_path, monkeypatch, same_recording, explicit, unusable_body):
     from karaoke import lyric_lookup, lyric_consensus
     from karaoke.stage_cache import StageCache
     from openai import OpenAIError
@@ -1351,7 +1352,8 @@ def test_lyric_identity_reuses_platform_native_alias_without_model(tmp_path, mon
     def additional(provider, song, *args, **kwargs):
         calls.append((provider,song['artist']))
         if provider == 'youtube_music':
-            return None,dict(provider=provider,status='unavailable',recording_identity=dict(
+            return (['Hey'] if unusable_body else None),dict(provider=provider,
+                status='candidate' if unusable_body else 'unavailable',recording_identity=dict(
                 title='Evening Wind',artist='별빛',video_id='aaaaaaaaaaa' if same_recording else 'bbbbbbbbbbb'))
         return (body if song['artist']=='별빛' else None),dict(provider=provider,language='Korean')
     monkeypatch.setattr(lyric_lookup,'extract_song_metadata',extract)
@@ -2153,6 +2155,30 @@ def test_music_lyrics_are_bound_to_the_requested_video(tmp_path, monkeypatch, sa
         assert report['recording_identity']['artist'] == 'Confirmed singer'
     else:
         assert not report.get('recording_identity')
+
+
+@pytest.mark.parametrize('album_fallback', [False, True])
+def test_music_lyric_header_uses_the_body_recording_names(tmp_path, monkeypatch, album_fallback):
+    from karaoke import lyric_consensus as module
+    from karaoke.stage_cache import StageCache
+    import ytmusicapi
+    body = ['夜色落在窗边', '远方有人在唱']
+    class Music:
+        def __init__(self, **kwargs): pass
+        def get_watch_playlist(self, videoId, limit):
+            missing = album_fallback and videoId == 'aaaaaaaaaaa'
+            return dict(lyrics=None if missing else 'lyrics-id', tracks=[dict(videoId=videoId,
+                title='Evening' if missing else '晚風', artists=[dict(name='Singer' if missing else '林林')])])
+        def search(self, query, **kwargs):
+            return [dict(videoId='bbbbbbbbbbb',title='Evening',artists=[dict(name='Singer')],album={})]
+        def get_lyrics(self, key):
+            return dict(lyrics='晚風 - 林林\n作词：李明\n'+'\n'.join(body), source='LyricFind')
+    monkeypatch.setattr(ytmusicapi,'YTMusic',Music)
+    lines, report = module.fetch_additional_lyrics('youtube_music',dict(title='Evening',artist='Singer'),
+        dict(id='aaaaaaaaaaa'),StageCache(tmp_path),30)
+    assert lines == body
+    assert report['recording_identity']['video_id'] == 'aaaaaaaaaaa'
+    assert report['url'].endswith('bbbbbbbbbbb' if album_fallback else 'aaaaaaaaaaa')
 
 
 @pytest.mark.parametrize('language', ['English', None])
