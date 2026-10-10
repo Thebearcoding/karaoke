@@ -897,17 +897,18 @@ class Pipeline:
         if lyrics['language'] != 'Chinese':
             return lyrics
         audio, path = self.output/'vocals-16k.wav', self.output/'song-language.json'
-        weights = ROOT/'models/alignment/whisper/large-v3-turbo.pt'
+        weights = [ROOT/'models/alignment/sensevoice'/name for name in ('model.int8.onnx', 'tokens.txt')]
         try:
-            stat = weights.stat()
+            from importlib.metadata import version
+            identity = [[str(p), p.stat().st_size, p.stat().st_mtime_ns] for p in weights]
             with self.checkpoints.stage('detect_language', inputs=[audio], outputs=[path],
-                    config=dict(device=self.device, weights=[str(weights), stat.st_size, stat.st_mtime_ns]),
+                    config=dict(weights=identity, sherpa_onnx=version('sherpa-onnx')),
                     code=[ROOT/'local_asr.py', ROOT/'job_schema.py']) as reused:
                 if not reused:
                     self.run('detect_language', [sys.executable, ROOT/'local_asr.py', '--detect-language',
-                             self.device, audio, path])
+                             audio, path])
             evidence = json.loads(path.read_text())
-        except (OSError, ValueError, StageFailure) as error:
+        except (ImportError, OSError, ValueError, StageFailure) as error:
             # Classification is optional; an unavailable detector must not
             # discard known lyrics or become another preparation failure.
             write_json(self.output/'song-language-error.json', dict(error=str(error)))

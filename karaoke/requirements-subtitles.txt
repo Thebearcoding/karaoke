@@ -11,6 +11,7 @@ opencc-python-reimplemented==0.1.7
 rangehttpserver==1.4.0
 pykakasi==2.3.0
 pycantonese==5.0.0
+sherpa-onnx==1.13.8
 pyopenjtalk==0.4.1
 num2words==0.5.14
 lightning==2.6.1

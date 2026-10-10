@@ -428,8 +428,9 @@ def caption_image(text, width=1280, height=None, font_file=None,
                     'top': (y-size*font_scale)/supersample, 'baseline': y/supersample})
                 glyph_x += font.getlength(character)+tracking
             if item['reading']:
-                descent = max(0, ruby_font.getbbox(item['reading'], anchor='ls')[3])
-                position = (round(x+(item['width']-ruby_font.getlength(item['reading']))/2),
+                bounds = ruby_font.getbbox(item['reading'], anchor='ls')
+                descent = max(0, bounds[3])
+                position = (round(x+item['width']/2-(bounds[0]+bounds[2])/2),
                             round(y-size*font_scale-TOKENS['furigana']['gap']*font_scale-descent))
                 ruby_draw.text(position, item['reading'], font=ruby_font, fill=255, anchor='ls')
                 box = ruby_draw.textbbox(position, item['reading'], font=ruby_font, anchor='ls')

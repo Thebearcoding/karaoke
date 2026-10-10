@@ -1371,12 +1371,36 @@ def test_model_language_aliases_survive_metadata_and_request_round_trip(tag, can
     assert whisper_language(request.language)==model_code
 
 
+@pytest.mark.parametrize('observations,expected', [
+    ([('zh', 'BGM')]*8+[('yue', 'Speech')], 'Cantonese'),
+    ([('yue', 'BGM')]*8+[('zh', 'Speech')], 'Chinese'),
+    ([('yue', 'Speech'), ('zh', 'Speech')]+[('nospeech', 'BGM')]*7, None),
+    ([('yue', 'Speech')]*2+[('zh', 'Speech')]+[('nospeech', 'BGM')]*6, 'Cantonese'),
+    ([('yue', 'BGM')]*9, None),
+])
+def test_sung_language_uses_vocal_evidence_not_instrumental_guesses(observations, expected):
+    from karaoke.local_asr import detect_singing_language
+    answers = iter(observations)
+    def detect(clip):
+        assert len(clip) == 20
+        code, event = next(answers)
+        return dict(lang=f'<|{code}|>', event=f'<|{event}|>')
+    selected, probes = detect_singing_language(np.zeros(200), 1, detect)
+    assert selected == expected and len(probes) == 9
+    assert probes[0]['start'] == 10 and probes[-1]['end'] == 190
+    # A short recording is inspected once, rather than nine duplicate votes.
+    selected, probes = detect_singing_language(np.zeros(10), 1,
+        lambda clip: dict(lang='<|yue|>', event='<|Speech|>'))
+    assert selected == 'Cantonese' and len(probes) == 1
+
+
 @pytest.mark.parametrize('detected', ['Cantonese', 'Chinese', None, 'English'])
 def test_cantonese_language_detection_is_cached_without_replacing_lyric_text(tmp_path, monkeypatch, detected):
     from karaoke import pipeline as module
     runtime = tmp_path/'runtime'
-    (runtime/'models/alignment/whisper').mkdir(parents=True)
-    for name in ('local_asr.py', 'job_schema.py', 'models/alignment/whisper/large-v3-turbo.pt'):
+    (runtime/'models/alignment/sensevoice').mkdir(parents=True)
+    for name in ('local_asr.py', 'job_schema.py', 'models/alignment/sensevoice/model.int8.onnx',
+                 'models/alignment/sensevoice/tokens.txt'):
         (runtime/name).write_bytes(b'fixture')
     monkeypatch.setattr(module, 'ROOT', runtime)
     folder = tmp_path/'song'
@@ -1399,6 +1423,9 @@ def test_cantonese_language_detection_is_cached_without_replacing_lyric_text(tmp
     (folder/'vocals-16k.wav').write_bytes(b'new audio')
     pipeline.resolve_lyric_language(lyrics)
     assert len(calls) == 2
+    (runtime/'models/alignment/sensevoice/tokens.txt').unlink()
+    assert pipeline.resolve_lyric_language(lyrics) == lyrics
+    assert len(calls) == 2 and (folder/'song-language-error.json').is_file()
 
 
 def test_cantonese_source_tag_survives_han_script_detection(tmp_path, monkeypatch):

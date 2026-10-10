@@ -149,24 +149,49 @@ def alignment_language(model, samples, hint=None, *, detect=False):
     return selected or max(probes, key=lambda p:p['probability'])['language'], probes
 
 
-def detect_recording_language(audio, output, device):
-    """Identify the sung language without transcribing or changing lyric text."""
+def detect_singing_language(samples, rate, detect):
+    """Vote on recognized vocal windows; music/silence is not language evidence."""
+    if not len(samples):
+        raise ValueError('Language detection input is empty')
+    window = 20*rate
+    starts = sorted({round(max(0, min(len(samples)-window, len(samples)*i/10-window/2)))
+                     for i in range(1, 10)})
+    probes = []
+    for start in starts:
+        result = detect(samples[start:start+window])
+        code = result['lang'].removeprefix('<|').removesuffix('|>')
+        probes.append(dict(start=start/rate, end=min(start+window, len(samples))/rate,
+                           language=code, event=result['event']))
+    votes = Counter(p['language'] for p in probes
+                    if p['event'] == '<|Speech|>' and p['language'] != 'nospeech')
+    selected = None
+    if votes:
+        code, count = votes.most_common(1)[0]
+        if count > sum(votes.values())/2:
+            selected = song_language(code)
+    return selected, probes
+
+
+def detect_recording_language(audio, output):
+    """Use SenseVoice language labels only; never replace the supplied lyrics."""
     import time
-    import torch
-    import whisper
+    import sherpa_onnx
+    import soundfile as sf
     started = time.perf_counter()
-    torch.set_num_threads(4)
-    if device == 'auto':
-        device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
-    weights = Path(__file__).resolve().parent/'models/alignment/whisper/large-v3-turbo.pt'
-    model = whisper.load_model(str(weights), device='cpu')
-    # Language detection does not use the sparse alignment-head mask, which
-    # cannot be moved to MPS. Match the aligner's CPU-first loading policy.
-    model._buffers.pop('alignment_heads')
-    model.to(device)
-    language, probes = detect_whisper_language(model, whisper.load_audio(str(audio)))
-    Path(output).write_text(json.dumps(dict(language=song_language(language), probes=probes,
-        audio_sha256=digest(audio), seconds=time.perf_counter()-started), ensure_ascii=False)+'\n')
+    weights = Path(__file__).resolve().parent/'models/alignment/sensevoice'
+    model = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+        model=str(weights/'model.int8.onnx'), tokens=str(weights/'tokens.txt'),
+        num_threads=4, language='auto', use_itn=False)
+    samples, rate = sf.read(audio, dtype='float32', always_2d=True)
+    def detect(clip):
+        stream = model.create_stream()
+        stream.accept_waveform(rate, clip)
+        model.decode_stream(stream)
+        return json.loads(str(stream.result))
+    language, probes = detect_singing_language(samples.mean(axis=1), rate, detect)
+    Path(output).write_text(json.dumps(dict(language=language, probes=probes,
+        model='SenseVoiceSmall-int8', audio_sha256=digest(audio),
+        seconds=time.perf_counter()-started), ensure_ascii=False)+'\n')
 
 
 @contextmanager
@@ -241,8 +266,8 @@ def cached_recognition(audio, language, output):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) == 5 and sys.argv[1] == '--detect-language':
-        detect_recording_language(sys.argv[3], sys.argv[4], sys.argv[2])
+    if len(sys.argv) == 4 and sys.argv[1] == '--detect-language':
+        detect_recording_language(sys.argv[2], sys.argv[3])
     elif len(sys.argv) == 4 and sys.argv[1] == '--worker':
         recognition_worker(sys.argv[2], json.loads(sys.argv[3]))
     else:

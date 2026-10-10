@@ -75,6 +75,7 @@ cp karaoke/dependencies/english-alignment.json karaoke/research/word-onset-2026-
 | 日文音素对齐 | [SOFA Japanese](https://github.com/ariikamusic/SOFA_Models/releases/download/akm_ja_v001/akm_ja_v001.zip) | 解压到 `karaoke/models/alignment/sofa/japanese/`，保留压缩包子目录 |
 | 英文音素对齐 | 上一步的固定版本仓库 | `karaoke/research/word-onset-2026-09-18/lyrics-alignment-multilingual/checkpoints/checkpoint_Baseline` |
 | 中日文歌曲中英文词组的复核（可选） | [SOFA English tgm_en_v100](https://github.com/spicytigermeat/LabelMakr/releases/download/tgm_en_v100/tgm_en_v100.zip) | 解压到 `karaoke/models/alignment/sofa/english/`，保留 `tgm_en_v100/` 子目录及其字典、G2P 文件 |
+| 粤语语言分类 | [SenseVoice Small int8](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2) | 解压后将 `model.int8.onnx`、`tokens.txt` 和 `LICENSE` 放到 `karaoke/models/alignment/sensevoice/`，校验值见 [sensevoice.json](karaoke/dependencies/sensevoice.json) |
 | Whisper 粗对齐 | stable-whisper 自动下载 | `karaoke/models/alignment/whisper/` |
 | 可选本地批量 ASR | `Systran/faster-whisper-large-v3`（完整 CTranslate2 模型） | `KARAOKE_WHISPER_MODEL` |
 | 合并字组及中日文提前句首的独立声学复核（可选） | [MMS_FA](https://dl.fbaipublicfiles.com/mms/torchaudio/ctc_alignment_mling_uroman/model.pt) | `karaoke/models/alignment/mms/model.pt` |
