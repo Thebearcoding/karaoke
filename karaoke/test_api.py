@@ -2485,6 +2485,8 @@ def test_music_cached_body_survives_duration_changes_and_other_song_backoff(tmp_
     ('中文词：林林', '英文词：A Writer', '前置混音：制作人', '定位制作人：制作人'),
     ('出品：唱片公司', '歌曲营销：唱片公司', '二胡：乐手', '大提琴独奏：乐手'),
     ('乐队队长/键盘：乐手', '乐队总监/贝斯手：乐手', 'PGM：乐手', '合音编写：制作人'),
+    ('音乐制作人Music Producer : A Person', '首席制作人 Executive Producer：Another Person',
+     '联合制作人 Co-producer: A Person', '执行制作人 Executive Producer: Another Person'),
     ('OA/OC: A Writer / B Writer', 'ＯＰ：A Publisher', 'SP: B Publisher', 'Publisher: C Publisher')])
 @pytest.mark.parametrize('heading', ['晚風', '晚風-林林', '晚風 - 林林', '晚風—林林', '晚風 – 林林'])
 def test_published_lyrics_remove_credit_blocks_but_keep_sung_titles_and_colons(credits, heading):
@@ -2582,6 +2584,7 @@ def test_published_lyrics_require_matching_title_and_artist_for_a_two_line_heade
     '配唱制作人', '人聲錄音師', '童声', '合唱', '和音', '伴唱编配', '主唱指导',
     '編曲 Arrangement', '编曲 Arranger', '和音 Backing Vocals', '制作人 Producer', '和声编写 Backing Vocal Arrangement',
     '配唱录音师 Recording Engineer (Vocals)', '母带后期处理工程师 Mastering Engineer', 'Music Production 音乐制作', '音乐制作 Music Production',
+    '音乐制作人Music Producer', '首席制作人 Executive Producer', '联合制作人Co-producer', 'Chief Producer首席制作人',
     '低音吉他', '器樂', 'Instrumental', '音乐制作助理', '录音工作室', '混音工作室', '母带后期制作人', '编曲协力', '乐团', 'Orchestra'])
 def test_translated_production_footer_cannot_change_the_lyric_language(credit):
     from karaoke.lyric_lookup import published_candidate
@@ -2595,11 +2598,11 @@ def test_translated_production_footer_cannot_change_the_lyric_language(credit):
 
 def test_bilingual_credits_do_not_consume_lyric_prose_or_change_the_body():
     from karaoke.lyric_lookup import published_lyric_lines
-    body = ['Music keeps us moving: through the night', '鼓 beat tonight: 我们继续唱']
+    body = ['Music keeps us moving: through the night', '鼓beat tonight: 我们继续唱', 'Chief of my heart: stay with me']
     text = '\n'.join(['编曲 Arrangement：A Person', *body, '制作人 Producer：Someone'])
-    assert published_lyric_lines(text, 'Evening') == (body, [1, 4])
+    assert published_lyric_lines(text, 'Evening') == (body, [1, 5])
     text = '\n'.join([*body, 'Credit List', '歌名 Song Title：Evening', 'A Person'])
-    assert published_lyric_lines(text, 'Evening') == (body, [3, 4, 5])
+    assert published_lyric_lines(text, 'Evening') == (body, [4, 5, 6])
 
 
 @pytest.mark.parametrize('labelled', [False, True])

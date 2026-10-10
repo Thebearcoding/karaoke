@@ -311,7 +311,10 @@ def published_lyric_lines(text, title, artists=()):
         r'production assistant|program(?:ming)?|PGM|[OS]P|O[AC](?:\s*/\s*O[AC])?|publisher|copyright')
     # A translated role is still metadata: "编曲 Arrangement: ...".
     # Require complete recognized labels before the colon, not arbitrary prose.
-    credit = re.compile(rf'^(?:{role})(?:(?:\s+|\s*[/／]\s*)(?:{role}))*\s*[：:]', re.I)
+    label = rf'(?:首席|执行|联合|chief\s+|executive\s+|co[- ])?(?:{role})'
+    separator = (r'\s+|\s*[/／]\s*|(?<=[\u3400-\u9fff])(?=[A-Za-z])|'
+                 r'(?<=[A-Za-z])(?=[\u3400-\u9fff])')
+    credit = re.compile(rf'^{label}(?:(?:{separator}){label})*\s*[：:]', re.I)
     people = [identity(part) for artist in artists if isinstance(artist, str)
               for part in re.split(_credit_separators, artist, flags=re.I) if part.strip()]
     rows, metadata, timestamps = [], [], {}
