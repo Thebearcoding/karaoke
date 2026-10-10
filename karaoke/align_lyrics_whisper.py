@@ -789,12 +789,15 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                                        recognize_original=recognize_original,
                                        _revisited_conflicts=revisited | bad | newly_conflicting)
         reports.extend(followup.get('asr_localizations', []))
-        usable = lambda value: sum(c['status'] == 'candidate' for c in
-            partial_alignment_cues(lines, [value], duration, language))
-        if not global_recovery or usable(followup) > usable(result):
+        # Correcting an already drawable phrase need not add a lyric line.
+        # Keep validated timing repairs when every previously usable line
+        # survives; equal counts must not hide losing a different line either.
+        usable = lambda value: {i for i, c in enumerate(
+            partial_alignment_cues(lines, [value], duration, language)) if c['status'] == 'candidate'}
+        if not global_recovery or usable(followup) >= usable(result):
             result = followup
         else:
-            reports.append(dict(reason='followup_did_not_improve_coverage', accepted_lines=[]))
+            reports.append(dict(reason='followup_lost_coverage', accepted_lines=[]))
     result['asr_localizations'] = reports
     result['recovery_contexts'] = contexts
     return result

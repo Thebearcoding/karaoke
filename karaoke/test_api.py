@@ -3866,20 +3866,26 @@ def test_ambiguous_global_match_cannot_displace_aligned_neighbouring_phrases(mis
     assert result['asr_localizations'][0]['contradicted_lines'] == []
 
 
-@pytest.mark.parametrize('scenario', ['stable', 'stale_neighbour', 'cascading_conflicts', 'late_discovery'])
+@pytest.mark.parametrize('scenario', ['stable', 'stale_neighbour', 'cascading_conflicts', 'late_discovery', 'same_coverage'])
 def test_global_recovery_revisits_neighbours_newly_contradicted_by_repaired_phrases(scenario):
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines = ['Opening verse', 'Drink water', 'Fall asleep then dream', 'Drink water', 'Asleep and dream']
     actual = [0., 5., 12., 18., 24.]
     old = [0., 3., 6., 9., 10.] if scenario!='stable' else [0., 3., 6., 18., 24.]
     heard = [*lines[:4], 'Asleep dream']
-    if scenario in ('cascading_conflicts', 'late_discovery'):
+    if scenario in ('cascading_conflicts', 'late_discovery', 'same_coverage'):
         lines = ['Opening verse', 'Middle melody', 'Quiet morning light', 'Gentle evening star', 'Asleep and dream']
         heard = [*lines[:2], 'morning light', 'evening star', 'Asleep dream']
         actual, old = [0.,10.,14.,18.,24.], [0.,3.,4.,5.,12.]
+    if scenario == 'same_coverage':
+        lines.append('Closing voice')
+        heard.append(lines[-1])
+        actual.append(34.)
+        old.append(42.)
     segments = [dict(words=[dict(word=t, start=s, end=s+(0 if i==1 else 1))])
                 for i,(t,s) in enumerate(zip(lines, old))]
-    block = dict(range=[0,5], context=[0,5], source_range=[0.,30.], result=dict(segments=segments))
+    duration = 50. if scenario == 'same_coverage' else 30.
+    block = dict(range=[0,len(lines)], context=[0,len(lines)], source_range=[0.,duration], result=dict(segments=segments))
     def recognize(begin, end):
         # This partial match cannot itself invalidate a timed neighbour.
         return dict(segments=[dict(words=[dict(word=heard[i],
@@ -3891,11 +3897,20 @@ def test_global_recovery_revisits_neighbours_newly_contradicted_by_repaired_phra
                       and begin <= actual[i] < actual[i+len(selected)-1]+1 <= end), None)
         if first is None:
             return None
-        return dict(segments=[dict(words=[dict(word=lines[i], start=actual[i]-begin,
+        return dict(segments=[dict(words=[] if scenario == 'same_coverage' and i in (2,3) else
+            [dict(word=lines[i], start=actual[i]-begin,
             end=actual[i]+1-begin)]) for i in range(first, first+len(selected))])
-    result = recover_with_local_asr(block, lines, np.zeros(30*16000), 'English',
+    result = recover_with_local_asr(block, lines, np.zeros(int(duration*16000)), 'English',
                                     recognize, align, force_global=True,
-                                    max_alignment_attempts=1 if scenario=='late_discovery' else 24)
+                                    max_alignment_attempts=1 if scenario in ('late_discovery','same_coverage') else 24)
+    if scenario == 'same_coverage':
+        # The missing middle remains unresolved, but a validated correction to
+        # the already drawable closing line must survive the recursive return.
+        assert result['result']['segments'][-1]['words'] == [dict(word=lines[-1],start=34.,end=35.)]
+        assert not result['result']['segments'][2]['words'] and not result['result']['segments'][3]['words']
+        assert result['result']['segments'][0] == segments[0]
+        assert result['result']['segments'][4] == segments[4]
+        return
     assert [s['words'][0]['start'] for s in result['result']['segments']] == actual
     if scenario != 'stable':
         assert result['asr_localizations'][0]['unresolved_segments']
