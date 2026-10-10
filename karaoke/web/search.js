@@ -173,16 +173,15 @@ export function historySuggestions(history) {
 }
 
 export function searchLibrary(library, query) {
-  return filterSongs(library, query)
-    .sort((a,b) => Number(b.status === 'completed')-Number(a.status === 'completed'))
+  return librarySongs(library, 'all', query)
     .map(song => ({...song, provider:'local', thumbnail:song.poster, uploader:song.artist}));
 }
 
-export function librarySongs(library, filter = 'ready', query = '') {
-  return filterSongs(library, query).filter(song => filter === 'all' ||
-    (filter === 'ready' ? song.status === 'completed' :
-     filter === 'other' ? song.language && !['Chinese','Cantonese','English','Japanese','Korean'].includes(song.language) :
-     song.language === filter));
+export function librarySongs(library, filter = 'all', query = '') {
+  return filterSongs(library, query).filter(song => song.status === 'completed' &&
+    (filter === 'all' || (filter === 'other' ?
+      song.language && !['Chinese','Cantonese','English','Japanese','Korean'].includes(song.language) :
+      song.language === filter)));
 }
 
 export function paginateSongs(songs, requestedPage = 1) {

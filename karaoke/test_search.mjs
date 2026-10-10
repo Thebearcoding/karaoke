@@ -23,14 +23,15 @@ test('library pages keep every song in order and clamp after the filtered librar
   assert.equal(paginateSongs(songs,NaN).page,1);
 });
 
-test('ready library contains only playable songs; unfinished songs remain in all songs and language filters', () => {
-  const songs = ['completed','video_evicted','audio_ready','source_ready','running','queued','failed'].map((status,index) =>
+test('every local library view excludes missing or unfinished media, even when metadata is retained', () => {
+  const songs = ['completed','video_evicted','audio_ready','source_ready','running','queued','failed','evicted','cancelled'].map((status,index) =>
     ({id:index,title:`Song ${index}`,status,language:index % 2 ? 'Japanese' : 'Chinese'}));
   assert.deepEqual(librarySongs(songs).map(song => song.id), [0]);
-  assert.equal(librarySongs(songs, 'all').length, songs.length);
-  assert.deepEqual(librarySongs(songs, 'Japanese').map(song => song.id), [1,3,5]);
-  assert.deepEqual(librarySongs(songs, 'ready', 'Song 1'), []);
-  assert.deepEqual(librarySongs(songs, 'all', 'Song 1').map(song => song.id), [1]);
+  assert.deepEqual(librarySongs(songs, 'all').map(song => song.id), [0]);
+  assert.deepEqual(librarySongs(songs, 'Japanese'), []);
+  assert.deepEqual(librarySongs(songs, 'all', 'Song 1'), []);
+  assert.deepEqual(searchLibrary(songs, 'Song').map(song => song.id), [0]);
+  assert.deepEqual(searchLibrary(songs, 'Song 7'), []);
   const languages = ['Chinese', 'Cantonese', 'English', 'Japanese', 'Korean', 'French', null];
   const multilingual = languages.map(language => ({title:'Song', language, status:'completed'}));
   assert.deepEqual(librarySongs(multilingual, 'Cantonese').map(s => s.language), ['Cantonese']);
@@ -136,12 +137,12 @@ test('preview uses provider embeds, never arbitrary pages or autoplay', () => {
   assert.equal(previewURL({provider:'youtube', url:'https://www.youtube.com.attacker.test/watch?v=n5sjpCQhTDk'}, ''), '');
 });
 
-test('local matches appear immediately and update while online providers are pending', async () => {
+test('local matches appear only after completion and disappear on eviction or restore', async () => {
   let library = [{url:'local', title:'弯弯的月亮', artist:'刘欢', status:'running'}];
   const snapshots = [], requests = [];
   const search = createVideoSearch(value => snapshots.push(structuredClone(value)), () => new Promise(resolve => requests.push(resolve)), query => searchLibrary(library, query));
   const pending = search.search('刘欢 月亮', 'songs');
-  assert.equal(snapshots[0].local.results[0].title, '弯弯的月亮');
+  assert.deepEqual(snapshots[0].local.results, []);
   assert.equal(snapshots[0].songs.loading, true);
   assert.deepEqual(snapshots[0].songs.results, []);
   library[0].status = 'completed';
@@ -156,6 +157,11 @@ test('local matches appear immediately and update while online providers are pen
   library[0].poster = '/new-poster.jpg';
   assert.equal(restored.restore(search.snapshot()), true);
   assert.equal(restored.snapshot().providers.local.results[0].thumbnail, '/new-poster.jpg');
+  library[0].status = 'evicted';
+  search.refreshLocal();
+  assert.deepEqual(snapshots.at(-1).local.results, []);
+  assert.equal(restored.restore(restored.snapshot()), true);
+  assert.deepEqual(restored.snapshot().providers.local.results, []);
   search.cancel();
   const count = snapshots.length;
   search.refreshLocal();
