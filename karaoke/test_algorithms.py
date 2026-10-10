@@ -851,6 +851,31 @@ class SubtitleIntegrity(unittest.TestCase):
                     self.assertEqual(active,[retired[0]['replacement']])
                     self.assertFalse(timing_violations(valid,active))
 
+    def test_relocalized_clause_can_retire_an_interior_proof_without_moving_the_whole_line(self):
+        from copy import deepcopy
+        from timing_validation import localized_constraints
+        old = dict(line=1,text='甲乙 丙丁',first=3,stop=4,onset=2.5,start_min=2.1,start_max=2.9)
+        new = dict(old,onset=8.1,start_min=7.7,start_max=8.5)
+        for mode in ('complete','clause','no_new_proof','other_word','no_edge','ambiguous','fragment','nearby'):
+            with self.subTest(mode=mode):
+                anchor=dict(text=old['text'],status='candidate',start=1.,end=9.,
+                    match_basis='complete_phrase',observed_edges=[dict(first=3,stop=5,start=8.,end=9.)])
+                revised=deepcopy(new)
+                if mode=='clause': anchor['match_basis']='complete_clause'
+                if mode=='other_word': revised.update(first=4,stop=5)
+                if mode=='no_edge': anchor['observed_edges']=[]
+                if mode=='ambiguous': anchor['ambiguous_occurrences']=True
+                if mode=='fragment': anchor['match_basis']='exact_fragment'
+                if mode=='nearby': anchor['observed_edges'][0]['start']=2.
+                report=dict(constraints=[old],lines=[dict(proposed_constraints=[] if mode=='no_new_proof' else [revised])])
+                observation=dict(context=[0,1],source_range=[0.,10.],anchors=[anchor],accepted_lines=[])
+                active,retired=localized_constraints(report,[dict(asr_localizations=[observation])])
+                self.assertEqual(active,[new] if mode in ('complete','clause') else [old])
+                self.assertEqual(bool(retired),mode in ('complete','clause'))
+                if retired:
+                    self.assertEqual(retired[0]['proof'],old)
+                    self.assertEqual(retired[0]['anchor'],anchor)
+
     def test_contradicted_revision_retains_valid_input_without_losing_other_repairs(self):
         from copy import deepcopy
         from timing_validation import retain_consistent_input, timing_violations, validate_timeline

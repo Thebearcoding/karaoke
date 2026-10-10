@@ -2412,6 +2412,34 @@ def test_recording_notes_inside_credit_header_do_not_truncate_the_lyric_body():
     assert published_lyric_lines('\n'.join([*body, *notes]), '晚風', ['林林'])[0] == [*body, *notes]
 
 
+@pytest.mark.parametrize('artists,labels,group', [
+    (['黃綺珊', '張碧晨'], ['黄', '张'], '合'),
+    (['Alice', 'Bob'], ['Ali', 'B'], 'All'),
+    (['Alice · Bob'], ['Alice', 'Bob'], 'All')])
+def test_empty_performer_cues_resolve_only_against_credited_names(artists, labels, group):
+    from karaoke.lyric_lookup import published_lyric_lines
+    body = [artists[0], '我说：继续往前走', 'We keep singing']
+    raw = '\n'.join([labels[0]+':', body[0], labels[1]+'：', body[1], group+':', body[2]])
+    assert published_lyric_lines(raw, 'Evening', artists) == (body, [1, 3, 5])
+    for line in ('Unknown:', 'I said:', labels[0]+': actual words'):
+        assert published_lyric_lines(line+'\n'+body[2], 'Evening', artists)[0] == [line, body[2]]
+    assert published_lyric_lines('Al:\nWe keep singing', 'Evening', ['Alice', 'Albert'])[0] == ['Al:', 'We keep singing']
+    assert published_lyric_lines('All:\nWe keep singing', 'Evening', ['Alice'])[0] == ['All:', 'We keep singing']
+
+
+@pytest.mark.parametrize('credit', ['林林/李明', '林林, 李明', '林林 · 李明'])
+@pytest.mark.parametrize('heading', ['晚風 - {credit}', '{credit} - 晚風', '晚風\nby {credit} Play'])
+def test_lyric_headers_share_combined_performer_identity(credit, heading):
+    from karaoke.lyric_lookup import published_lyric_lines
+    body = ['夜色落在窗边', '远方有人在唱']
+    raw = heading.format(credit=credit)+'\n作词：张三\n'+'\n'.join(body)
+    assert published_lyric_lines(raw, '晚風', ['林林', '李明'])[0] == body
+    # A partial or different credit cannot remove a title/name from the text.
+    for artists in (['林林'], ['林林', '王五']):
+        text = heading.format(credit=credit)+'\n'+'\n'.join(body)
+        assert published_lyric_lines(text, '晚風', artists)[0] == text.splitlines()
+
+
 @pytest.mark.parametrize('heading', ['晚風-林林', '晚風 — 林林', '林林 - 晚風', '晚風-林林\n詞：林林\n曲：林林'])
 def test_title_artist_credit_is_not_a_lyric_candidate(heading):
     from karaoke.lyric_lookup import published_candidate, published_lyric_lines, lyric_candidate

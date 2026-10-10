@@ -10,8 +10,10 @@ from itertools import groupby
 import numpy as np
 
 if __package__:
+    from .anchors_from_asr import phrase_conflict
     from .subtitles import acoustic_end, collapsed_phrase, normalized, highlight_coverage_errors, latin_word_text
 else:
+    from anchors_from_asr import phrase_conflict
     from subtitles import acoustic_end, collapsed_phrase, normalized, highlight_coverage_errors, latin_word_text
 
 
@@ -49,11 +51,6 @@ def localized_constraints(report, blocks):
     for proof in report['constraints']:
         replacement = None
         for observed in observations:
-            # A stretched old phrase can overlap the right passage while
-            # one of its word proofs points elsewhere. Compare the proof
-            # itself with the newly located phrase, not the old envelope.
-            if proof['line'] not in observed.get('accepted_lines', []):
-                continue
             index = proof['line']-1-observed['context'][0]
             anchors = observed.get('anchors', [])
             if not 0 <= index < len(anchors):
@@ -61,10 +58,24 @@ def localized_constraints(report, blocks):
             anchor = anchors[index]
             if anchor['status']!='candidate' or anchor['text']!=proof['text']:
                 continue
-            if anchor['start']-2 <= proof['onset'] <= anchor['end']+2:
+            # Alignment acceptance and independent text localization are
+            # different evidence. A complete heard clause can contradict an
+            # interior word even when the enclosing line did not move.
+            if proof['line'] not in observed.get('accepted_lines', []) and (
+                    anchor.get('match_basis') not in ('complete_phrase', 'complete_clause')
+                    or anchor.get('ambiguous_occurrences') or not any(
+                    e['first'] <= proof['first'] < e['stop'] for e in anchor.get('observed_edges', []))):
+                continue
+            anchor = dict(anchor, match_basis=anchor.get('match_basis', 'complete_phrase'))
+            def contradicts(p):
+                unit = dict(first=p['first'], stop=p['stop'], text=p['text'][p['first']:p['stop']],
+                            start=p['onset'], end=p['onset'])
+                return phrase_conflict(dict(text=p['text'], start=p['onset'], end=p['onset'], units=[unit]),
+                                       anchor, fragments=False)
+            if not contradicts(proof):
                 continue
             revised = next((p for p in proposals if all(p[k]==proof[k] for k in ('line','text','first','stop'))
-                and anchor['start']-2 <= p['onset'] <= anchor['end']+2), None)
+                and not contradicts(p)), None)
             if revised is not None:
                 replacement = dict(proof=proof, replacement=revised, anchor=anchor,
                     source_range=observed['source_range'], reason='independently_relocalized_phrase')
@@ -1113,7 +1124,7 @@ def main():
     ledger_file=out.parent/'timing-constraints.json'
     ledger=read(ledger_file) if ledger_file.is_file() else {}
     paths=[code_root/name for name in ('timing_validation.py','cjk_recovery.py','align_lyric_phonemes.py',
-        'phoneme_progress.py','align_english_sofa.py','align_english_onsets.py','subtitles.py')]
+        'phoneme_progress.py','align_english_sofa.py','align_english_onsets.py','subtitles.py','anchors_from_asr.py')]
     if lyrics['language'] not in ('Chinese','Japanese','English'):
         paths.extend(code_root/name for name in ('align_lyrics_whisper.py','lyric_progress.py',
                                                 'local_asr.py','job_schema.py','requirements-subtitles.txt'))

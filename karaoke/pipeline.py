@@ -265,7 +265,7 @@ class Pipeline:
                               ['context'], alignment_code['align_context']),
             'validate_timing': (['music-separation/song/vocals.wav', 'source-44100.wav', 'timing-input.json', 'lyrics.json'],
                                 ['timing-checked'], [ROOT/p for p in common+phonemes+
-                                ['timing_validation.py', 'cjk_recovery.py', 'align_english_sofa.py',
+                                ['timing_validation.py', 'anchors_from_asr.py', 'cjk_recovery.py', 'align_english_sofa.py',
                                  'align_english_onsets.py',
                                  'experiments/cjk-onsets-v003/protocol.json']]),
         }

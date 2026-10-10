@@ -29,6 +29,7 @@ _traditional, _simplified = OpenCC('s2t'), OpenCC('tw2s')
 _versioned_title = re.compile(r'(.+?)\s*\(([^()]*\b(?:version|ver\.?))\)\s*$', re.I)
 _soundtrack_credit = re.compile(r'(?:大型)?(?:纪录片|电影|电视剧|动画片|网络剧|网剧|剧集)?'
     r'\s*《[^《》]+》\s*(?:人物)?(?:主题[歌曲]|片[头尾]曲|插曲)|from\s+["“][^"“”]+["”]', re.I)
+_credit_separators = r'\s*[&,/×+、;]\s*|\s+·\s+|\s+\b(?:feat\.?|featuring|ft\.?|with)\s+'
 
 
 def canonical_script(text):
@@ -183,14 +184,13 @@ def artist_credit_matches(credit, artists, *, partial=False):
         return False
     if any(expected & identity(artist) for artist in artists):
         return True
-    separators = r'\s*[&,/×+、;]\s*|\s+·\s+|\s+\b(?:feat\.?|featuring|ft\.?|with)\s+'
     members = [identity(part) for artist in artists if isinstance(artist, str)
-               for part in re.split(separators, artist, flags=re.I) if part.strip()]
+               for part in re.split(_credit_separators, artist, flags=re.I) if part.strip()]
     if partial:
-        return any(identity(part) & member for part in re.split(separators, credit, flags=re.I) for member in members)
+        return any(identity(part) & member for part in re.split(_credit_separators, credit, flags=re.I) for member in members)
     if len(members) < 2 or not all(members):
         return False
-    expected |= identity(''.join(re.split(separators, credit, flags=re.I)))
+    expected |= identity(''.join(re.split(_credit_separators, credit, flags=re.I)))
     expected.update(name for alias in names(credit) for name in identity(alias))
 
     @lru_cache(None)
@@ -312,6 +312,8 @@ def published_lyric_lines(text, title, artists=()):
     # A translated role is still metadata: "编曲 Arrangement: ...".
     # Require complete recognized labels before the colon, not arbitrary prose.
     credit = re.compile(rf'^(?:{role})(?:(?:\s+|\s*[/／]\s*)(?:{role}))*\s*[：:]', re.I)
+    people = [identity(part) for artist in artists if isinstance(artist, str)
+              for part in re.split(_credit_separators, artist, flags=re.I) if part.strip()]
     rows, metadata, timestamps = [], [], {}
     for i, line in enumerate(text.splitlines(), 1):
         line = html.unescape(line).strip()
@@ -325,6 +327,16 @@ def published_lyric_lines(text, title, artists=()):
             stamps = re.findall(r'\[(\d{1,3}):(\d{2}(?:[.:]\d{1,3})?)(?:-\d+)?\]', prefix[0])
             timestamps[i] = [60*int(m)+float(s.replace(':', '.')) for m,s in stamps]
             line = line[prefix.end():]
+        # An empty attribution row is a cue to the credited performers, not a
+        # sung name. Resolve abbreviations only when one credited name fits.
+        speaker = re.fullmatch(r'([^:：]+)[:：]\s*', line)
+        if speaker:
+            labels = identity(speaker[1])
+            matches = [person for person in people if any(name.startswith(label) for name in person for label in labels)]
+            if (any(labels & person for person in people) or len(matches) == 1 or
+                    len(people) > 1 and labels & {'合', '合唱', 'all'}):
+                metadata.append(i)
+                continue
         if re.fullmatch(r'\[\s*(?:verse|chorus|pre[- ]?chorus|post[- ]?chorus|bridge|intro|outro|instrumental|interlude|refrain|solo)'
                         r'(?:\s+\d+)?(?:\s*[:：][^\]\n]+)?\s*\]', line, re.I):
             metadata.append(i)
@@ -333,17 +345,18 @@ def published_lyric_lines(text, title, artists=()):
             rows.append((i, line))
     is_credit = lambda line: bool(credit.match(canonical_script(line.replace('︰', ':'))) or
                                  re.fullmatch(r'credits?(?:\s+list)?\s*[:：]?', line, re.I))
-    artist_ids = set().union(*(identity(artist) for artist in artists))
     # Copied page headers can put the title and its byline on separate rows.
     # Both must match known metadata; a sung title or a name alone is not a header.
     if len(rows) > 1 and identity(rows[0][1], title=True) & identity(title, title=True):
         byline = re.fullmatch(r'by\s+(.+)', rows[1][1], re.I)
-        if byline and artist_ids & (identity(byline[1]) | identity(re.sub(r'\s*Play$', '', byline[1], flags=re.I))):
+        if byline and any(artist_credit_matches(name, artists) for name in
+                (byline[1], re.sub(r'\s*Play$', '', byline[1], flags=re.I))):
             metadata.extend(i for i, _ in rows[:2])
             rows = rows[2:]
     def title_artist(line):
         return any(identity(candidate_title, title=True) & identity(title, title=True) and
-                   (identity(candidate_artist) | identity(re.split(r'[（(]', candidate_artist)[0])) & artist_ids
+                   any(artist_credit_matches(name, artists) for name in
+                       (candidate_artist, re.split(r'[（(]', candidate_artist)[0]))
                    for match in re.finditer(r'[-–—]', line)
                    for candidate_title, candidate_artist in (
                        (line[:match.start()], line[match.end():]), (line[match.end():], line[:match.start()])))
