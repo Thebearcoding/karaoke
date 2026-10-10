@@ -501,7 +501,17 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
             not reference and re.search(r'[\u3040-\u30ff\u3400-\u9fff]', song.get('title') or '')):
         results.append(fetch(('utaten', lambda: fetch_additional_lyrics('utaten', song, metadata, cache, duration,
                                                                        reference_lines=reference or ()))))
-    candidates = [(lines, report) for lines, report in results if lines]
+    from .lyric_readings import separate_inline_readings
+    reading_evidence = [source for _, report in results for source in report.get('reading_evidence', [])]
+    candidates = []
+    for lines, report in results:
+        if not lines:
+            continue
+        cleaned, annotations = separate_inline_readings(lines, reading_evidence)
+        if annotations:
+            report = dict(report, inline_readings=annotations,
+                          text_transform=(report.get('text_transform') or '')+'; separate_publisher_confirmed_ruby')
+        candidates.append((cleaned, report))
     _, review = compare_lyrics(candidates)
     lines = None
     review['unavailable_sources'] = [report for text, report in results if not text]

@@ -7307,6 +7307,58 @@ def test_explicit_source_readings_do_not_outvote_plain_lyrics_or_remove_sung_res
     assert report['crosscheck']['rejected_sources'] == []
 
 
+@pytest.mark.parametrize('reading', ['あす', 'またね'])
+@pytest.mark.parametrize('published', [True, False])
+def test_quoted_inline_reading_needs_published_pair_and_survives_rendering(tmp_path, monkeypatch, reading, published):
+    from karaoke import lyric_readings, lyric_consensus as module
+    from karaoke.stage_cache import StageCache
+    plain = ['《明日の景色》へ向かう長い道を歩いている', '夜空の星を見上げながら二人で一緒に歌おう']
+    annotated = [plain[0].replace('》', '》（'+reading+'）'), plain[1]]
+    page = ('<meta property="og:title" content="帰り道 歌詞 別の歌手 ふりがな付">'
+            '<div class="hiragana"><span class="ruby"><span class="rb">明日の景色</span>'
+            '<span class="rt">あす</span></span></div>')
+    monkeypatch.setattr(lyric_readings, 'read_page', lambda url:
+        ('<table class="searchResult"><tr><td><a href="/lyric/example/">result</a></td></tr></table>'
+         if published else '') if '/search?' in url else page)
+    monkeypatch.setattr(module.lookup, 'fetch_published_lyrics', lambda *a:
+        (annotated, dict(provider='line_music', language='Japanese')))
+    monkeypatch.setattr(module.lookup, 'fetch_lyrics', lambda *a: dict(status='unavailable'))
+    monkeypatch.setattr(module.lookup, 'fetch_structured_lyrics', lambda *a, **kw:
+        (None, dict(provider='lyricsweb', status='unavailable')))
+    additional = module.fetch_additional_lyrics
+    monkeypatch.setattr(module, 'fetch_additional_lyrics', lambda provider, *a, **kw:
+        additional(provider, *a, **kw) if provider == 'utaten' else
+        (annotated, dict(provider=provider, language='Japanese')))
+    cache = StageCache(tmp_path)
+    lines, report = module.fetch_lyric_consensus(dict(title='帰り道', artist='夕灯'), {}, 180, cache)
+    expected = published and reading == 'あす'
+    assert lines == (plain if expected else annotated)
+    assert bool(report.get('inline_readings')) == expected
+    # The partial other performance supplies only a matching pronunciation;
+    # it cannot become this recording's complete lyric body.
+    assert all(source['provider'] != 'utaten' for source in report['crosscheck']['sources'])
+    if expected:
+        (tmp_path/'lyrics.json').write_text(json.dumps(dict(source_url=URL, lines=lines,
+            provenance=dict(lyric_lookup=report))))
+        path = lyric_readings.prepare_readings(lines, URL, cache)
+        rows, _ = lyric_readings.load_readings(path, [dict(text=t) for t in lines])
+        resolved, _ = lyric_readings.resolve_readings(lines[0], rows[0]['spans'])
+        assert (1, 6, 'あす') in resolved
+        assert rows[0]['spans'][0]['url'] == 'https://utaten.com/lyric/example/'
+
+
+def test_inline_reading_offsets_and_unconfirmed_responses_remain_intact():
+    from karaoke.lyric_readings import separate_inline_readings
+    text = '《明日の景色》（あす）と「帰る場所」(ふるさと)へ（またね）'
+    evidence = [dict(url='https://example.com', pairs=[dict(text='明日の景色', reading='あす'),
+                                                    dict(text='帰る場所', reading='ふるさと')])]
+    lines, annotations = separate_inline_readings([text], evidence)
+    assert lines == ['《明日の景色》と「帰る場所」へ（またね）']
+    assert [lines[0][s['first']:s['stop']] for s in annotations[0]['spans']] == ['明日の景色', '帰る場所']
+    assert annotations[0]['source_text'] == text
+    assert separate_inline_readings(['《明日の景色」（あす）'], evidence)[0] == ['《明日の景色」（あす）']
+
+
 def test_changed_published_readings_invalidate_both_render_caches(tmp_path, monkeypatch):
     from karaoke import lyric_readings as readings
     from karaoke.pipeline import Pipeline

@@ -725,7 +725,7 @@ def fetch_reading_lyrics(song, cache, duration=None, reference_lines=(), source_
     from .lyric_readings import ReadingPage, read_page
     title, artist = song_names(song, 'title')[-1], song_names(song, 'artist')[-1]
     fetch = lambda url: cached_lyric_request('utaten_readings', url, cache, lambda: read_page(url))
-    attempts, seen = [], set()
+    attempts, seen, reading_evidence = [], set(), []
     reference = ''.join(reference_lines)
     queries = [dict(title=title, artist_name=artist), dict(title=title)]
     phrase = next((line.strip() for line in reference_lines if re.search('[\u3400-\u9fff]', line)), '')
@@ -760,6 +760,9 @@ def fetch_reading_lyrics(song, cache, duration=None, reference_lines=(), source_
                             matched >= min(len(left), len(right))*.9 and matched >= max(len(left), len(right))*.65)
             attempts.append(dict(url=url, identity=actual, title_match=title_match, artist_match=artist_match,
                                  corroborated=corroborated))
+            if title_match or corroborated:
+                reading_evidence.append(dict(url=url, pairs=[dict(text=page.text[s['first']:s['stop']],
+                    reading=s['reading']) for s in page.spans]))
             if text and mismatch is not None and (title_match and (artist_match or partial_credit) or corroborated) and not short_lyric_text(text, duration):
                 if partial_credit and not artist_match:
                     mismatch.append('performers')
@@ -770,8 +773,9 @@ def fetch_reading_lyrics(song, cache, duration=None, reference_lines=(), source_
                     url=url, track=actual.get('title'), artist=actual.get('artist'), attempts=attempts,
                     text_sha256=hashlib.sha256(page.text.encode()).hexdigest(), excluded_credit_lines=excluded,
                     text_transform='published_ruby_body_without_readings', recording_mismatches=mismatch,
-                    provider_timestamps_used=False, reading_annotations=readings)
-    return None, dict(status='no_matching_published_text', provider='utaten', attempts=attempts)
+                    provider_timestamps_used=False, reading_annotations=readings, reading_evidence=reading_evidence)
+    return None, dict(status='no_matching_published_text', provider='utaten', attempts=attempts,
+                      reading_evidence=reading_evidence)
 
 
 def structured_recordings(document):

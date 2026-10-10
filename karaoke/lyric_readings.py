@@ -15,6 +15,35 @@ def hiragana(text):
                    for c in unicodedata.normalize('NFKC', text))
 
 
+def separate_inline_readings(lines, evidence):
+    """Separate quoted ruby only when a publisher confirms the exact pair."""
+    from .lyric_lookup import comparison_key
+    pairs = {(comparison_key(p['text']), hiragana(p['reading'])): source['url']
+             for source in evidence for p in source['pairs']}
+    if not pairs:
+        return lines, []
+    pattern = re.compile(r'([《≪「『])([^《》≪≫「」『』\n]+)([》≫」』])\s*[（(]([ぁ-ゖァ-ヶー]+)[）)]')
+    cleaned, annotations = [], []
+    for line in lines:
+        parts, spans, cursor = [], [], 0
+        for match in pattern.finditer(line):
+            base, reading = match[2], hiragana(match[4])
+            source = pairs.get((comparison_key(base), reading))
+            if (dict(zip('《≪「『', '》≫」』'))[match[1]] != match[3]
+                    or not re.search('[\u3400-\u9fff]', base) or not source):
+                continue
+            parts.append(line[cursor:match.start(2)])
+            first = sum(map(len, parts))
+            parts.append(base + match[3])
+            spans.append(dict(first=first, stop=first+len(base), text=base, reading=reading, url=source))
+            cursor = match.end()
+        parts.append(line[cursor:])
+        cleaned.append(''.join(parts))
+        if spans:
+            annotations.append(dict(text=cleaned[-1], source_text=line, spans=spans))
+    return cleaned, annotations
+
+
 class ReadingPage(HTMLParser):
     """Read UtaTen's ruby body; navigation, romanization and comments are excluded."""
     def __init__(self, html):
@@ -172,6 +201,16 @@ def prepare_readings(lines, source_url, cache, language='Japanese'):
     from .lyric_lookup import cached_lyric_request, lyric_request_error
     path = cache.root/'lyric-readings.json'
     identity = dict(lines=lines, source_url=source_url)
+    inline = []
+    if language == 'Japanese':
+        try:
+            lyrics = json.loads((cache.root/'lyrics.json').read_text())
+            if lyrics.get('source_url') == source_url:
+                inline = lyrics.get('provenance', {}).get('lyric_lookup', {}).get('inline_readings', [])
+        except (OSError, ValueError):
+            pass
+        if inline:
+            identity['inline_readings'] = inline
     if language == 'Japanese':
         identity['parser_sha256'] = hashlib.sha256(inspect.getsource(ReadingPage).encode()).hexdigest()
     if language == 'Cantonese':
@@ -213,6 +252,16 @@ def prepare_readings(lines, source_url, cache, language='Japanese'):
                     break
     except Exception as error:
         packet['error'] = lyric_request_error(error)
+    if inline:
+        supplied = {row['text']: row['spans'] for row in inline}
+        if not packet['lines']:
+            packet['lines'] = [dict(text=text, spans=[]) for text in lines]
+        for row in packet['lines']:
+            additions = supplied.get(row['text'], [])
+            row['spans'] = sorted([*additions, *(s for s in row['spans'] if not any(
+                s['first'] < a['stop'] and a['first'] < s['stop'] for a in additions))], key=lambda s:s['first'])
+        if any(row['spans'] for row in packet['lines']):
+            packet['status'] = 'published'
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(packet, ensure_ascii=False, indent=2)+'\n')
     temporary.replace(path)
