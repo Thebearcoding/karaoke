@@ -87,27 +87,29 @@ def paced_requests(interval, protected_root=None):
             lock = locks.setdefault(provider, threading.Lock())
 
         def paced():
-            if protected_root:
-                path = Path(protected_root)/'lyric-provider-backoff'/f'{provider}.json'
-                if path.exists():
-                    packet = json.loads(path.read_text())
-                    if packet.get('requires_access') or (packet.get('retry_at') or 0) > time.time():
-                        raise lyric_lookup.LyricRequestError(packet)
-            time.sleep(max(0, next_calls.get(provider,0)-time.monotonic()))
-            next_calls[provider] = time.monotonic()+interval
-            return request()
+            with lock:
+                time.sleep(max(0, next_calls.get(provider,0)-time.monotonic()))
+                # Another request may have established a hold while this one
+                # waited. Cached successes never need this network admission.
+                for root in (cache.root.parent, protected_root):
+                    path = Path(root)/'lyric-provider-backoff'/f'{provider}.json' if root else None
+                    if path and path.exists():
+                        packet = json.loads(path.read_text())
+                        if packet.get('requires_access') or (packet.get('retry_at') or 0) > time.time():
+                            raise lyric_lookup.LyricRequestError(packet)
+                next_calls[provider] = time.monotonic()+interval
+                return request()
         # One unavailable provider must not turn the rest of a batch into
         # instant "no lyrics" results. Wait for its real retry deadline; other
         # providers continue independently and cached successes remain reusable.
-        with lock:
-            for attempt in range(3):
-                try:
-                    return original(provider,identity,cache,paced,minimum_delay)
-                except lyric_lookup.LyricRequestError as error:
-                    retry_at = error.report.get('retry_at')
-                    if attempt == 2 or retry_at is None or error.report.get('requires_access'):
-                        raise
-                    time.sleep(max(0, retry_at-time.time()))
+        for attempt in range(3):
+            try:
+                return original(provider,identity,cache,paced,minimum_delay)
+            except lyric_lookup.LyricRequestError as error:
+                retry_at = error.report.get('retry_at')
+                if attempt == 2 or retry_at is None or error.report.get('requires_access'):
+                    raise
+                time.sleep(max(0, retry_at-time.time()))
 
     lyric_lookup.cached_lyric_request = cached
     try:

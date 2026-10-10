@@ -4446,6 +4446,47 @@ def test_lyric_audit_waits_for_provider_backoff_and_keeps_success_cached(tmp_pat
             assert calls == ([1000.] if failure == 'authentication' else [1000.,1060.,1120.])
 
 
+@pytest.mark.parametrize('http_status', [429, 503])
+def test_lyric_audit_cached_success_is_available_during_another_queries_retry(tmp_path, monkeypatch, http_status):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import httpx
+    from karaoke import lyric_lookup
+    from karaoke.stage_cache import StageCache
+    from karaoke.tools.lyric_audit import paced_requests
+    clock, attempts = [1000.], []
+    waiting, release = threading.Event(), threading.Event()
+    monkeypatch.setattr(lyric_lookup.time, 'time', lambda:clock[0])
+    monkeypatch.setattr(lyric_lookup.time, 'monotonic', lambda:clock[0])
+    def sleep(delay):
+        if delay:
+            waiting.set()
+            assert release.wait(5)
+            clock[0] += delay
+    monkeypatch.setattr(lyric_lookup.time, 'sleep', sleep)
+    for name in ('cached', 'retrying'): (tmp_path/name).mkdir()
+    cached, retrying = StageCache(tmp_path/'cached'), StageCache(tmp_path/'retrying')
+    assert lyric_lookup.cached_lyric_request('test','old',cached,lambda:'available') == 'available'
+    def fetch():
+        attempts.append(clock[0])
+        if len(attempts) == 1:
+            httpx.Response(http_status,headers={'Retry-After':'60'},
+                request=httpx.Request('GET','https://example.test/new')).raise_for_status()
+        return 'recovered'
+    with ThreadPoolExecutor(max_workers=2) as pool, paced_requests(2):
+        pending = pool.submit(lyric_lookup.cached_lyric_request,'test','new',retrying,fetch)
+        try:
+            assert waiting.wait(5)
+            hit = pool.submit(lyric_lookup.cached_lyric_request,'test','old',cached,
+                lambda:pytest.fail('A cached response must not make another network request'))
+            assert hit.result(timeout=1) == 'available'
+            assert not pending.done()
+        finally:
+            release.set()
+        assert pending.result(timeout=5) == 'recovered'
+    assert attempts == [1000.,1060.]
+
+
 def test_soak_retries_changed_code_not_unchanged_failures_or_finished_cases():
     from karaoke.tools.soak import eligible
     assert eligible({'attempts': []}, 'v1', 100)
