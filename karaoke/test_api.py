@@ -2412,6 +2412,16 @@ def test_published_lyrics_strip_only_leading_metadata_identity(title, artist, he
         assert published_lyric_lines('\n'.join([line, *body]), title, [artist]) == ([line, *body], [])
 
 
+@pytest.mark.parametrize('byline', ['by Singer', 'by Singer Play', 'by SingerPlay'])
+def test_published_lyrics_require_matching_title_and_artist_for_a_two_line_header(byline):
+    from karaoke.lyric_lookup import published_lyric_lines
+    body = ['We keep singing through the night', 'Evening', byline]
+    assert published_lyric_lines('\n'.join(['Evening', byline, *body]), 'Evening', ['Singer']) == (body, [1, 2])
+    for prefix in (['Evening'], [byline], ['Other song', byline], ['Evening', 'by Someone Else'],
+                   ['Evening', 'By the river we sing']):
+        assert published_lyric_lines('\n'.join([*prefix, *body]), 'Evening', ['Singer']) == ([*prefix, *body], [])
+
+
 @pytest.mark.parametrize('credit', ['音频助理', '音頻工程師', '录音助理', 'Audio Engineer', 'Assistant Engineer',
     '配唱制作人', '人聲錄音師', '童声', '合唱', '和音', '伴唱编配', '主唱指导',
     '編曲 Arrangement', '编曲 Arranger', '和音 Backing Vocals', '制作人 Producer', '和声编写 Backing Vocal Arrangement',

@@ -331,6 +331,13 @@ def published_lyric_lines(text, title, artists=()):
     is_credit = lambda line: bool(credit.match(canonical_script(line.replace('︰', ':'))) or
                                  re.fullmatch(r'credits?(?:\s+list)?\s*[:：]?', line, re.I))
     artist_ids = set().union(*(identity(artist) for artist in artists))
+    # Copied page headers can put the title and its byline on separate rows.
+    # Both must match known metadata; a sung title or a name alone is not a header.
+    if len(rows) > 1 and identity(rows[0][1], title=True) & identity(title, title=True):
+        byline = re.fullmatch(r'by\s+(.+)', rows[1][1], re.I)
+        if byline and artist_ids & (identity(byline[1]) | identity(re.sub(r'\s*Play$', '', byline[1], flags=re.I))):
+            metadata.extend(i for i, _ in rows[:2])
+            rows = rows[2:]
     def title_artist(line):
         return any(identity(candidate_title, title=True) & identity(title, title=True) and
                    (identity(candidate_artist) | identity(re.split(r'[（(]', candidate_artist)[0])) & artist_ids
