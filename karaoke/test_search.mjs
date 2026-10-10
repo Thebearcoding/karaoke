@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, paginateSongs, filterSongs, visibleResults, playCount, orderResults, queueKey, queuePosition, historySuggestions} from './web/search.js';
+import {createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, paginateSongs, filterSongs, mergeLocalResults, playCount, orderResults, queueKey, queuePosition, historySuggestions} from './web/search.js';
 
 function setup() {
   const requests = [], snapshots = [];
@@ -140,27 +140,50 @@ test('local matches appear immediately and update while online providers are pen
   let library = [{url:'local', title:'弯弯的月亮', artist:'刘欢', status:'running'}];
   const snapshots = [], requests = [];
   const search = createVideoSearch(value => snapshots.push(structuredClone(value)), () => new Promise(resolve => requests.push(resolve)), query => searchLibrary(library, query));
-  const pending = search.search('刘欢 月亮');
+  const pending = search.search('刘欢 月亮', 'songs');
   assert.equal(snapshots[0].local.results[0].title, '弯弯的月亮');
-  assert.equal(snapshots[0].youtube.loading, true);
+  assert.equal(snapshots[0].songs.loading, true);
+  assert.equal(mergeLocalResults(snapshots[0].local.results, snapshots[0].songs.results)[0].title, '弯弯的月亮');
   library[0].status = 'completed';
   search.refreshLocal();
   assert.equal(snapshots.at(-1).local.results[0].status, 'completed');
-  requests.forEach(resolve => resolve({ok:true,json:async () => ({results:[]})}));
+  requests.forEach(resolve => resolve({ok:false,status:503,json:async () => ({detail:'暂时不可用'})}));
   await pending;
   assert.equal(snapshots.at(-1).local.results.length, 1);
+  assert.equal(snapshots.at(-1).songs.error, '暂时不可用');
+  assert.equal(mergeLocalResults(snapshots.at(-1).local.results, snapshots.at(-1).songs.results)[0].status, 'completed');
+  const restored = createVideoSearch(() => {}, () => assert.fail('Completed search should not refetch'), query => searchLibrary(library, query));
+  library[0].poster = '/new-poster.jpg';
+  assert.equal(restored.restore(search.snapshot()), true);
+  assert.equal(mergeLocalResults(restored.snapshot().providers.local.results, restored.snapshot().providers.songs.results)[0].thumbnail, '/new-poster.jpg');
   search.cancel();
   const count = snapshots.length;
   search.refreshLocal();
   assert.equal(snapshots.length, count);
 });
 
-test('YouTube view keeps provider order and has no result count or local deduplication filter', () => {
-  const videos = Array.from({length:35}, (_,i) => ({url:`v${i}`,provider:'youtube'}));
-  const local = {url:'v0',provider:'local'};
-  const songs = [local,...videos];
-  assert.deepEqual(visibleResults(songs,'youtube'), videos);
-  assert.deepEqual(visibleResults(songs,'local'), [local]);
+test('combined search puts local songs first and merges only the same recording without trimming online results', () => {
+  const local = {url:'https://youtu.be/abcdefghijk', title:'First Love', uploader:'宇多田光',
+    provider:'local', status:'completed', job_id:'cached', thumbnail:'/poster.jpg'};
+  const remote = [
+    {url:'https://www.youtube.com/watch?v=zyxwvutsrqp', title:'First Love', uploader:'Another artist', provider:'youtube_music'},
+    {url:'https://music.youtube.com/watch?v=abcdefghijk', title:'ファースト・ラヴ', provider:'youtube_music', views:'2M', available:false, browse_id:'online-navigation'},
+    {url:local.url, title:'First Love Album', kind:'album', provider:'youtube_music'},
+    {title:'No source supplied', provider:'youtube_music'},
+    ...Array.from({length:35}, (_,i) => ({url:`online-${i}`,title:`Result ${i}`,provider:'youtube_music'})),
+  ];
+  const original = structuredClone(remote);
+  const results = mergeLocalResults([local], remote);
+  assert.deepEqual(results[0], {...local,views:'2M'});
+  assert.deepEqual(results.slice(1), remote.filter((_,i) => i !== 1));
+  assert.equal(results.length, remote.length);
+  assert.deepEqual(remote, original); // Dedicated online views and cursors retain their original data.
+  assert.deepEqual(orderResults([...results.slice(1),results[0]],'relevance')[0],results[0]);
+  const laterPage = [...remote, {url:'https://www.youtube.com/watch?v=abcdefghijk', views:'2M'},
+    {url:'new-online-result',title:'Later result'}];
+  assert.equal(mergeLocalResults([local],laterPage).filter(song => queueKey(song) === queueKey(local) && song.kind !== 'album').length,1);
+  assert.equal(mergeLocalResults([local],laterPage).at(-1).title, 'Later result');
+  assert.deepEqual(mergeLocalResults([],remote),remote);
 });
 
 test('artist searches open the first provider result directly without matching its displayed name', async () => {

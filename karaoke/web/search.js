@@ -210,8 +210,20 @@ export function queuePosition(song, entries) {
     (song.job_id && entry.job_id === song.job_id)) + 1;
 }
 
-export function visibleResults(songs, source) {
-  return songs.filter(song => song.provider === source);
+export function mergeLocalResults(local, remote) {
+  const source = song => !song.kind || song.kind === 'song' ? queueKey(song) : null;
+  const remoteBySource = new Map(remote.map(song => [source(song), song]).filter(([key]) => key));
+  const localSources = new Set(local.map(source).filter(Boolean));
+  return [...local.map(song => {
+    const match = remoteBySource.get(source(song));
+    if (!match) return song;
+    // Fill display metadata without inheriting online availability or navigation state.
+    const merged = {...song};
+    for (const field of ['title','uploader','thumbnail','duration','views','album','artists','version']) {
+      if ((merged[field] == null || merged[field] === '') && match[field] != null) merged[field] = match[field];
+    }
+    return merged;
+  }), ...remote.filter(song => !localSources.has(source(song)))];
 }
 
 export function playCount(value) {
@@ -229,7 +241,8 @@ export function orderResults(songs, order) {
     const group = song => !song.kind || song.kind === 'song' ? 0 : song.kind === 'album' ? 1 : 2;
     const live = song => /(?:[\[(（【]\s*live\b|\blive(?:\s+(?:at|in|from|on|version|performance|\d{4})\b|\s*[|/·—–-]|[\s)\]）】]*$))|[现現][场場]|演唱[会會]|演奏[会會]|ライブ/i.test(song.title || '') &&
       group(song) === 0;
-    return [...songs].sort((a,b) => group(a)-group(b) || Number(live(a))-Number(live(b)));
+    return [...songs].sort((a,b) => Number(b.provider === 'local')-Number(a.provider === 'local') ||
+      group(a)-group(b) || Number(live(a))-Number(live(b)));
   }
   return songs;
 }

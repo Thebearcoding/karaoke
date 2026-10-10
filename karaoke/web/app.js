@@ -1,7 +1,7 @@
 import { Player } from './player.js';
 import { mountPreview } from './preview.js';
 import { isStaleRoomSnapshot, LocalPlayback, PlaybackTabs, queueToTop, preparationRetry } from './room-state.js';
-import { createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
+import { createVideoSearch, createViewHistory, previewURL, searchLibrary, librarySongs, paginateSongs, filterSongs, mergeLocalResults, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
 
 const $ = id => document.getElementById(id);
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -254,30 +254,33 @@ function renderVideoResults(providers, mode = videoSource) {
   const info = providers[videoSource];
   if (!info) return;
   const artists = videoSource === 'artists', album = videoSource === 'album', catalogue = album || videoSource === 'artist';
+  const providerResults = info.results.map(song => ({...song,
+    status:library.find(item => item.url === song.url)?.status || song.status}));
+  const results = videoSource === 'songs' ? mergeLocalResults(providers.local.results, providerResults) : providerResults;
   const metadata = info.metadata || catalogueSelection || {};
   const catalogueHeading = metadata.catalogue_section === 'videos' ? '歌手视频' : metadata.catalogue_section === 'releases' ? '歌手作品' : '热门歌曲';
   $('clear-search').textContent = catalogue || (artists && providers.artist?.selection) ? '返回上一级' : '返回曲库';
-  const popularityAvailable = info.results.some(song => playCount(song.views) !== null);
+  const popularityAvailable = results.some(song => playCount(song.views) !== null);
   if (searchOrder === 'popular' && !popularityAvailable) searchOrder = 'relevance';
+  searchSongs = orderResults(results, album && searchOrder === 'relevance' ? 'album' : searchOrder);
   $('search-order').value = searchOrder;
   $('search-order').querySelector('[value="popular"]').disabled = !popularityAvailable;
   $('search-order').querySelector('[value="relevance"]').textContent = album ? '专辑顺序' : '默认排序';
-  $('search-order-label').hidden = artists || info.loading || !info.results.length;
+  $('search-order-label').hidden = artists || !results.length;
   $('video-results').classList.toggle('is-catalogue', catalogue);
   $('search-heading').textContent = catalogue ? metadata.title || (album ? '专辑曲目' : catalogueHeading) : artists ? '找一位歌手' : '搜索结果';
   $('search-order-note').textContent = artists ? '选一位歌手，看看有哪些歌想唱' :
     searchOrder === 'popular' ? '已加载结果按播放量排序 · YouTube 提供' : searchOrder === 'ready' ? '已加载结果中，已准备歌曲排在前面' :
     searchOrder === 'title' ? '已加载结果按歌名排序' : album ? 'YouTube Music 专辑曲目顺序' :
-    videoSource === 'local' ? '本地曲库 · 现场版靠后' : videoSource === 'songs' ? '歌曲优先 · 现场版靠后' : 'YouTube 原顺序 · 现场版靠后';
+    videoSource === 'local' ? '本地曲库 · 现场版靠后' : videoSource === 'songs' ? '本地歌曲优先 · 现场版靠后' : 'YouTube 原顺序 · 现场版靠后';
   $('search-order-note').hidden = searchOrder !== 'popular';
   $('search-order').title = $('search-order-note').textContent;
-  $('search-status').innerHTML = `<span class="${info.error ? 'search-error' : ''}">${info.loading ? '正在查找…' : info.error ? escape(info.error) : info.results.length ? `${videoSource === 'local' ? '' : '已加载 '}${info.results.length} ${artists ? '位歌手' : videoSource === 'youtube' || metadata.catalogue_section === 'videos' ? '个视频' : videoSource === 'songs' || metadata.catalogue_section === 'releases' ? '项' : '首'}${catalogue && info.metadata?.complete === false ? ' · 歌手页精选' : ''}` : catalogue ? '这个页面暂未提供可点播作品' : '没有找到，试试另一个关键词或搜索类型'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`;
+  const localStatus = videoSource === 'songs' && results.length ? `已找到 ${results.length} 项 · ` : '';
+  $('search-status').innerHTML = `<span class="${info.error ? 'search-error' : ''}">${info.loading ? localStatus+'正在查找…' : info.error ? localStatus+escape(info.error) : results.length ? `${videoSource === 'local' ? '' : '已加载 '}${results.length} ${artists ? '位歌手' : videoSource === 'youtube' || metadata.catalogue_section === 'videos' ? '个视频' : videoSource === 'songs' || metadata.catalogue_section === 'releases' ? '项' : '首'}${catalogue && info.metadata?.complete === false ? ' · 歌手页精选' : ''}` : catalogue ? '这个页面暂未提供可点播作品' : '没有找到，试试另一个关键词或搜索类型'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`;
   $('artist-summary').hidden = !catalogue;
   const otherArtists = !album && (providers.artists?.results.length > 1 || providers.artists?.nextCursor);
   if (catalogue) $('artist-summary').innerHTML = `${metadata.thumbnail ? `<img src="${escape(metadata.thumbnail)}" alt="" referrerpolicy="no-referrer">` : ''}<div><p>${escape(metadata.monthly_listeners || metadata.artist || (album ? '专辑曲目' : catalogueHeading))} · YouTube Music</p>${otherArtists ? '<button class="text-button" data-other-artists>其他歌手 →</button>' : ''}</div>`;
   renderSearchMore(info);
-  searchSongs = orderResults(info.results.map(song => ({...song,
-    status:library.find(item => item.url === song.url)?.status || song.status})), album && searchOrder === 'relevance' ? 'album' : searchOrder);
   const videos = videoSource === 'youtube', local = videoSource === 'local';
   $('search-list').className = artists ? '' : `search-list${videos ? ' video-list' : local ? ' local-list' : ''}`;
   $('search-list').classList.toggle('has-albums', !videos && !local && searchSongs.some(song => song.album));
@@ -290,7 +293,7 @@ function renderVideoResults(providers, mode = videoSource) {
   $('video-grid').className = artists ? 'artist-grid' : 'music-list';
   if (artists) $('video-grid').removeAttribute('role');
   else $('video-grid').setAttribute('role', 'rowgroup');
-  const rows = searchSongs.map((song, index) => songRow(song, index, {artists, videos, local}));
+  const rows = searchSongs.map((song, index) => songRow(song, index, {artists, videos, local:local || song.provider === 'local'}));
   updateSearchRows(rows);
   document.querySelectorAll('[data-video-source]').forEach(button => {
     const selected = button.dataset.videoSource === (album ? 'songs' : catalogue ? 'artists' : videoSource);
@@ -334,7 +337,7 @@ function updateSearchRows(rows) {
     const occurrence = occurrences.get(source) || 0;
     occurrences.set(source, occurrence+1);
     const key = `${source}:${occurrence}`;
-    const content = JSON.stringify([song.kind, song.title, song.thumbnail, song.uploader, song.artists, song.version, song.album, song.views, song.duration]);
+    const content = JSON.stringify([song.provider, song.kind, song.title, song.thumbnail, song.uploader, song.artists, song.version, song.album, song.views, song.duration]);
     let node = existing.get(key);
     existing.delete(key);
     if (node && node.searchContent !== content) { node.remove(); node = null; }
