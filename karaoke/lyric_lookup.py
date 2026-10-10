@@ -1,6 +1,7 @@
 """Optional independent lyric text; provider timestamps never become onsets."""
 import hashlib
 import html
+from html.parser import HTMLParser
 from difflib import SequenceMatcher
 from functools import lru_cache
 import json
@@ -437,7 +438,7 @@ def short_lyric_text(lines, duration):
 
 
 def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_recording_mismatch=False,
-                        duration=None, reference_lines=()):
+                        duration=None, reference_lines=(), source_url=None):
     """Select published text; recording onsets still come entirely from our audio."""
     reference = text_units(''.join(reference_lines), text_language(''.join(reference_lines)) or 'English')
     usable_reference = len(reference) >= 40 and len(set(reference)) >= 10
@@ -521,13 +522,14 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
             identity_support = dict(matched_units=matched, candidate_units=len(left), reference_units=len(right),
                 reference_sha256=hashlib.sha256('\n'.join(reference_lines).encode()).hexdigest())
         track_id = str(row.get('trackId', ''))
-        if not track_id.isdigit() or len(lines) > 1000 or any(len(line) > 200 for line in lines):
+        url = source_url(track_id) if source_url else ('https://music-tw.line.me/track/'+track_id if track_id.isdigit() else None)
+        if not url or len(lines) > 1000 or any(len(line) > 200 for line in lines):
             continue
         if issue := short_lyric_text(lines, duration):
             rejected.append(dict(issue, track_id=track_id, text_sha256=hashlib.sha256(text.encode()).hexdigest()))
             continue
         return lines, dict(status='candidate', provider='line_music', language=language,
-            url='https://music-tw.line.me/track/'+track_id, track=title, artists=artists, album=album,
+            url=url, track=title, artists=artists, album=album,
             text_sha256=hashlib.sha256(text.encode()).hexdigest(), excluded_credit_lines=excluded,
             recording_mismatches=mismatch, duration_seconds=seconds,
             title_match='title' if title_match else 'corroborated_lyric_text', identity_support=identity_support,
@@ -664,6 +666,85 @@ def fetch_reading_lyrics(song, cache, duration=None, reference_lines=(), source_
                     text_transform='published_ruby_body_without_readings', recording_mismatches=mismatch,
                     provider_timestamps_used=False)
     return None, dict(status='no_matching_published_text', provider='utaten', attempts=attempts)
+
+
+def structured_recordings(document):
+    """Read schema.org recording data, never the surrounding editorial text."""
+    class Page(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.recordings, self.script = [], None
+        def handle_starttag(self, tag, attrs):
+            if tag == 'script' and dict(attrs).get('type') == 'application/ld+json':
+                self.script = ''
+        def handle_data(self, data):
+            if self.script is not None:
+                self.script += data
+        def handle_endtag(self, tag):
+            if tag != 'script' or self.script is None:
+                return
+            try:
+                data = json.loads(self.script)
+                records = data if isinstance(data, list) else data.get('@graph', [data])
+                self.recordings.extend(r for r in records if isinstance(r, dict) and r.get('@type') == 'MusicRecording')
+            except (ValueError, AttributeError, TypeError):
+                pass  # Another script may contain the recording's valid data.
+            self.script = None
+    page = Page()
+    page.feed(document)
+    return page.recordings
+
+
+def fetch_structured_lyrics(song, cache, duration=None, source_title=None):
+    """Read a publisher's explicit lyric field with the existing identity matcher."""
+    from .lyric_readings import read_page
+    if not song.get('title') or not song.get('artist'):
+        return None, dict(status='missing_identity', provider='lyricsweb')
+    query = ' '.join(song_names(song, key)[-1] for key in ('title', 'artist'))
+    url = 'https://lyricsweb.com/api/v1/user/search-result?'+urlencode(dict(query=query))
+    packet = cached_lyric_request('lyricsweb', url, cache, lambda: read_document(url))
+    data = packet.get('data') or {}
+    rows, links, publishers = [], {}, {}
+    for row in (data.get('global_song_matches') or []) + (data.get('artist_songs') or []):
+        if not isinstance(row, dict) or not row.get('_id') or not isinstance(row.get('artist'), dict):
+            continue
+        path = row.get('public_song_url') or ''
+        if not isinstance(path, str) or not re.fullmatch(r'/song/[\w%/-]+', path):
+            continue
+        key = str(row.get('_id'))
+        links[key] = 'https://lyricsweb.com'+path
+        artist = row.get('artist') or {}
+        rows.append(dict(trackId=key, trackTitle=row.get('song_name'),
+            artists=[dict(artistName=artist.get('artist_name'))], album={}))
+    def lyrics(row):
+        url = links[row['trackId']]
+        document = cached_lyric_request('lyricsweb', url, cache, lambda: read_page(url))
+        for recording in structured_recordings(document):
+            credit = recording.get('byArtist') or {}
+            credits = [credit] if isinstance(credit, dict) else credit if isinstance(credit, list) else []
+            artists = [a.get('name') for a in credits if isinstance(a, dict)]
+            if (not identity(recording.get('name'), title=True) & identity(row['trackTitle'], title=True) or
+                    not any(artist_credit_matches(a['artistName'], artists, partial=True) for a in row['artists'])):
+                continue
+            composition = recording.get('recordingOf')
+            body = composition.get('lyrics') if isinstance(composition, dict) else None
+            if not isinstance(body, dict):
+                continue
+            text = body.get('text')
+            if not isinstance(text, str) or len(text) > 30000:
+                continue
+            provider = body.get('provider')
+            publisher = provider.get('name') if isinstance(provider, dict) else None
+            publishers[url] = publisher.casefold() if isinstance(publisher, str) and publisher else 'lyricsweb'
+            # This publisher serializes line breaks inside the JSON text field.
+            return text.replace('\\n', '\n')
+        return None
+    lines, report = published_candidate(rows, song, source_title, read_lyrics=lyrics,
+        allow_recording_mismatch=True, duration=duration, source_url=links.get)
+    if lines:
+        report.update(publisher=publishers[report['url']],
+                      text_transform='schema.org.lyrics_text_credit_metadata_removed')
+    return lines, dict(report, provider='lyricsweb')
 
 
 def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_root):

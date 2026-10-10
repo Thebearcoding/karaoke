@@ -29,6 +29,16 @@ from karaoke.transcribe_lyrics import repetition_loop, transcribe
 URL = 'https://www.youtube.com/watch?v=n5sjpCQhTDk'
 
 
+@pytest.fixture(autouse=True)
+def structured_lyrics_source(monkeypatch):
+    """Keep unit tests offline unless they supply the new publisher's responses."""
+    from karaoke import lyric_lookup
+    fetch = lyric_lookup.fetch_structured_lyrics
+    monkeypatch.setattr(lyric_lookup, 'fetch_structured_lyrics',
+                        lambda *a: (None, dict(provider='lyricsweb', status='unavailable')))
+    return fetch
+
+
 def fake_worker(folder):
     code = '''import hashlib,json,pathlib,sys,time
 p=pathlib.Path(sys.argv[1])
@@ -1828,7 +1838,8 @@ def test_lyric_crosscheck_preserves_repetitions_and_requires_independent_agreeme
 def test_lyric_sources_run_concurrently_and_one_failure_does_not_erase_agreement(tmp_path, monkeypatch, provider_fails):
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
-    barrier = threading.Barrier(4)
+    providers = {'line_music', 'lrclib', 'netease', 'youtube_music', 'lyricsweb'}
+    barrier = threading.Barrier(len(providers))
     body = ['Stars above the quiet shore', 'Stars above the quiet shore']
     calls = []
     def published(*args):
@@ -1846,10 +1857,11 @@ def test_lyric_sources_run_concurrently_and_one_failure_does_not_erase_agreement
     monkeypatch.setattr(module.lookup, 'fetch_published_lyrics', published)
     monkeypatch.setattr(module.lookup, 'fetch_lyrics', lrclib)
     monkeypatch.setattr(module, 'fetch_additional_lyrics', additional)
+    monkeypatch.setattr(module.lookup, 'fetch_structured_lyrics', lambda *args: additional('lyricsweb', *args))
     lines, report = module.fetch_lyric_consensus(dict(title='Evening',artist='Singer'), {}, 30,
         StageCache(tmp_path), (body,dict(provider='video_description',publisher='youtube',language='English')))
-    assert lines == body and set(calls) == {'line_music','lrclib','netease','youtube_music'}
-    assert report['crosscheck']['independent_sources'] == (3 if provider_fails else 4)
+    assert lines == body and set(calls) == providers
+    assert report['crosscheck']['independent_sources'] == len(providers) - int(provider_fails)
     assert bool(report['crosscheck']['unavailable_sources']) == provider_fails
 
 
@@ -1917,7 +1929,7 @@ def test_short_lyrics_retry_other_sources_before_alignment(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize('other_performance', [False, True])
-def test_lyric_excerpt_yields_to_fuller_source_for_same_recording(tmp_path, monkeypatch, other_performance):
+def test_source_prefix_is_retained_until_recording_evidence_can_check_completeness(tmp_path, monkeypatch, other_performance):
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
     fragment = ['Stars above the quiet shore']
@@ -1929,22 +1941,21 @@ def test_lyric_excerpt_yields_to_fuller_source_for_same_recording(tmp_path, monk
         (body if provider == 'youtube_music' else None, dict(provider=provider, language='English',
             recording_mismatches=['live_performance'] if other_performance else [])))
     lines, report = module.fetch_lyric_consensus(dict(title='Evening', artist='Singer'), {}, 30, StageCache(tmp_path))
-    assert lines == (fragment if other_performance else body)
-    rejected = report['crosscheck']['rejected_sources']
-    assert len(rejected) == (0 if other_performance else 1)
-    if rejected:
-        assert rejected[0]['reason'] == 'lyrics_fragment' and rejected[0]['fuller_source'] == 1
+    assert lines == fragment
+    assert report['candidate_texts'] == [fragment, body]
+    assert report['crosscheck']['rejected_sources'] == []
 
 
 @pytest.mark.parametrize('bilingual', [False, True])
 @pytest.mark.parametrize('third_source', [False, True])
-def test_interleaved_extra_text_cannot_turn_a_complete_original_into_a_fragment(tmp_path, monkeypatch, bilingual, third_source):
+@pytest.mark.parametrize('placement', ['interleaved', 'appended'])
+def test_interleaved_extra_text_cannot_turn_a_complete_original_into_a_fragment(tmp_path, monkeypatch, bilingual, third_source, placement):
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
     body = ['夜空に小さな星が光る', 'We keep singing through the night' if bilingual else '遠くの海まで歌を届ける',
             '明日の道を一緒に歩こう']
     extra = ['A translated explanation with several words that were never sung'] * len(body)
-    contaminated = [line for pair in zip(body, extra) for line in pair]
+    contaminated = [line for pair in zip(body, extra) for line in pair] if placement == 'interleaved' else body + extra
     monkeypatch.setattr(module.lookup, 'fetch_published_lyrics', lambda *a:
         (body, dict(provider='line_music', language='Japanese')))
     monkeypatch.setattr(module.lookup, 'fetch_lyrics', lambda *a: dict(status='unavailable'))
@@ -2468,6 +2479,43 @@ def test_music_album_lyrics_are_a_fallback_for_same_work_not_another_artists_son
     assert report['recording_identity']['video_id'] == 'aaaaaaaaaaa'
     assert report['release_fallback']['selected_video_id'] == selected
     assert report['recording_mismatches'] == ['version'] and report['publisher'] == 'lyricfind'
+
+
+
+@pytest.mark.parametrize('page_identity', ['valid', 'wrong_title', 'wrong_artist'])
+def test_structured_publisher_reads_only_matching_recording_lyrics(tmp_path, monkeypatch, structured_lyrics_source, page_identity):
+    from karaoke import lyric_lookup, lyric_readings
+    from karaoke.stage_cache import StageCache
+    body = ['Stars above the quiet shore', 'We sing until the morning comes']
+    row = dict(_id='recording-id', song_name='Evening', artist=dict(artist_name='Singer'),
+               public_song_url='/song/singer/evening')
+    recording = dict(**{'@type':'MusicRecording'}, name='Another work' if page_identity == 'wrong_title' else 'Evening',
+        byArtist=dict(name='Unrelated singer' if page_identity == 'wrong_artist' else 'Singer'),
+        recordingOf=dict(lyrics=dict(text='\\n'.join(['Composer: A Person',*body]), provider=dict(name='LyricFind'))))
+    document = '<p>AI-generated meaning must never be sung</p><script type="application/ld+json">broken</script>' + (
+        '<script type="application/ld+json">' + json.dumps({'@graph':[
+            dict(**{'@type':'CreativeWork'}, text='Not lyrics'),
+            dict(recording, recordingOf='invalid structure'),
+            dict(recording, recordingOf=dict(lyrics='invalid structure')),
+            recording]}) + '</script>')
+    calls = []
+    def read(url, **kwargs):
+        calls.append(url)
+        return dict(data=dict(global_song_matches=[None,dict(row,public_song_url='https://other.test/song'),row]))
+    def page(url):
+        calls.append(url)
+        assert url == 'https://lyricsweb.com/song/singer/evening'
+        return document
+    monkeypatch.setattr(lyric_lookup, 'read_document', read)
+    monkeypatch.setattr(lyric_readings, 'read_page', page)
+    for _ in range(2):
+        lines, report = structured_lyrics_source(dict(title='Evening',artist='Singer'), StageCache(tmp_path), 60)
+        assert lines == (body if page_identity == 'valid' else None)
+        if lines:
+            assert report['provider'] == 'lyricsweb' and report['publisher'] == 'lyricfind'
+            assert report['url'] == 'https://lyricsweb.com/song/singer/evening'
+            assert report['excluded_credit_lines'] == [1]
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize('placeholder', ['[00:00.00]纯音乐，请欣赏', '純音樂，請您欣賞',

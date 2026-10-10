@@ -358,7 +358,8 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
         return lines, dict(report, provider='lrclib')
     sources = [('line_music', lambda: lookup.fetch_published_lyrics(song, metadata.get('title'), cache, duration)), ('lrclib', lrclib),
                ('netease', lambda: fetch_additional_lyrics('netease', song, metadata, cache, duration)),
-               ('youtube_music', lambda: fetch_additional_lyrics('youtube_music', song, metadata, cache, duration))]
+               ('youtube_music', lambda: fetch_additional_lyrics('youtube_music', song, metadata, cache, duration)),
+               ('lyricsweb', lambda: lookup.fetch_structured_lyrics(song, cache, duration, metadata.get('title')))]
     prefetched = dict(prefetched or {})
     def fetch(source):
         name, request = source
@@ -447,35 +448,12 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
     review['unavailable_sources'] = [report for text, report in results if not text]
     rejected = {i: issue for i, (text, _) in enumerate(candidates)
                 if (issue := lookup.short_lyric_text(text, duration))}
-    supported = set()
-    for comparison in review['comparisons']:
-        a, b = comparison['sources']
-        left, right = candidates[a][1], candidates[b][1]
-        if (comparison['similarity'] >= .9 and a not in rejected and b not in rejected and
-                (left.get('publisher') or left['provider']) != (right.get('publisher') or right['provider'])):
-            supported.update((a, b))
-    for comparison in review['comparisons']:
-        for i, j in (comparison['sources'], comparison['sources'][::-1]):
-            short, long = review['text_units'][i], review['text_units'][j]
-            left, right = candidates[i][1], candidates[j][1]
-            side, other = ('left', 'right') if i == comparison['sources'][0] else ('right', 'left')
-            # A full original interleaved with translations is not an excerpt.
-            # Require the extra body to be outside the short source, and never
-            # discard independently corroborated text merely for being shorter.
-            internal_extra = sum(d[other][1]-d[other][0] for d in comparison['differences']
-                                 if 0 < d[side][0] < short)
-            if (i not in supported and i not in rejected and j not in rejected and short < long * .5 and
-                    comparison['matched_units'] >= short * .9 and
-                    internal_extra <= short * .1 and
-                    not left.get('recording_mismatches') and not right.get('recording_mismatches') and
-                    (left.get('publisher') or left['provider']) != (right.get('publisher') or right['provider'])):
-                rejected[i] = dict(reason='lyrics_fragment', units=short, fuller_source=j, fuller_units=long)
     review['rejected_sources'] = [dict(issue, source=i) for i, issue in sorted(rejected.items())]
     usable = set(range(len(candidates))) - rejected.keys()
     if usable:
         # A known different performance remains a weaker fallback. Duration
         # alone cannot establish that: music videos add intros and credits.
-        preferred = ('utaten', 'line_music', 'youtube_music', 'netease', 'video_description', 'lrclib')
+        preferred = ('utaten', 'line_music', 'youtube_music', 'netease', 'lyricsweb', 'video_description', 'lrclib')
         eligible = {i for i in usable if not set(candidates[i][1].get('recording_mismatches') or []) - {'duration'}}
         eligible = eligible or usable
         review['eligible_sources'] = sorted(eligible)
