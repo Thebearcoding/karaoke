@@ -1,6 +1,7 @@
 """Source-bound Japanese readings and cached Cantonese dictionary readings."""
 from difflib import SequenceMatcher
 import hashlib
+import inspect
 from html.parser import HTMLParser
 import json
 import re
@@ -125,12 +126,14 @@ def prepare_readings(lines, source_url, cache, language='Japanese'):
     path = cache.root/'lyric-readings.json'
     identity = dict(lines=lines, source_url=source_url)
     if language == 'Cantonese':
+        from subtitle_style import cantonese_readings
         from importlib.metadata import PackageNotFoundError, version
         try:
             installed = version('pycantonese')
         except PackageNotFoundError:
             installed = None
-        identity.update(language=language, dictionary='pycantonese', version=installed)
+        identity.update(language=language, dictionary='pycantonese', version=installed,
+            mapper_sha256=hashlib.sha256(inspect.getsource(cantonese_readings).encode()).hexdigest())
     try:
         old = json.loads(path.read_text())
         if old['identity'] == identity and (old.get('error', {}).get('retry_at') or float('inf')) > time.time():
@@ -140,7 +143,6 @@ def prepare_readings(lines, source_url, cache, language='Japanese'):
     packet = dict(identity=identity, status='unavailable', lines=[], attempts=[])
     try:
         if language == 'Cantonese':
-            from subtitle_style import cantonese_readings
             for text in lines:
                 spans, warnings = cantonese_readings(text)
                 packet['lines'].append(dict(text=text, spans=[dict(first=a, stop=b, text=text[a:b], reading=r)

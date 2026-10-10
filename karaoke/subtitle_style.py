@@ -168,7 +168,9 @@ def cantonese_readings(text):
         from opencc import OpenCC
         normalized, positions = '', []
         for i, character in enumerate(text):
-            part = unicodedata.normalize('NFKC', character)
+            # PyCantonese joins tokens across whitespace; keep that same input
+            # while retaining offsets into the untouched lyric text.
+            part = ''.join(c for c in unicodedata.normalize('NFKC', character) if not c.isspace())
             normalized += part
             positions.extend([i]*len(part))
         traditional = OpenCC('s2hk').convert(normalized)

@@ -6299,6 +6299,11 @@ def test_cantonese_readings_keep_phrase_pronunciation_and_original_offsets(tmp_p
     original = path.read_bytes()
     assert lyric_readings.prepare_readings([text], URL, StageCache(tmp_path), 'Cantonese') == path
     assert path.read_bytes() == original
+    legacy = json.loads(original)
+    legacy['identity'].pop('mapper_sha256')
+    legacy['lines'][0]['spans'] = []
+    path.write_text(json.dumps(legacy))
+    lyric_readings.prepare_readings([text], URL, StageCache(tmp_path), 'Cantonese')
     rows, report = lyric_readings.load_readings(path, [dict(text=text)], 'Cantonese')
     assert report['status'] == 'dictionary' and len(rows[0]['spans']) == len(spans)
     assert lyric_readings.load_readings(path, [dict(text=text)], 'Japanese')[0] == []
@@ -6306,6 +6311,17 @@ def test_cantonese_readings_keep_phrase_pronunciation_and_original_offsets(tmp_p
     supplied = [dict(first=1, stop=2, text='行', reading='haang4')]
     resolved, _ = lyric_readings.resolve_readings(text, supplied, 'Cantonese')
     assert (1,2,'haang4') in resolved and (1,2,'hong4') not in resolved
+
+
+@pytest.mark.parametrize('gap', [' ', '\n', '\u3000'])
+def test_cantonese_readings_map_words_across_whitespace_to_original_glyphs(gap):
+    from karaoke.subtitle_style import cantonese_readings
+    text = '眼動人'+gap+'笑聲'
+    spans, warnings = cantonese_readings(text)
+    assert not warnings
+    assert [(text[a:b], reading) for a,b,reading in spans] == [
+        ('眼','ngaan5'), ('動','dung6'), ('人','jan4'), ('笑','siu3'), ('聲','sing1')]
+    assert [(a,b) for a,b,_ in spans] == [(0,1),(1,2),(2,3),(4,5),(5,6)]
 
 
 def test_cantonese_dictionary_failure_keeps_timed_subtitles(monkeypatch):
