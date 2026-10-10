@@ -27,6 +27,8 @@ from .source_captions import read_document
 
 _traditional, _simplified = OpenCC('s2t'), OpenCC('tw2s')
 _versioned_title = re.compile(r'(.+?)\s*\(([^()]*\b(?:version|ver\.?))\)\s*$', re.I)
+_soundtrack_credit = re.compile(r'(?:大型)?(?:纪录片|电影|电视剧|动画片|网络剧|网剧|剧集)?'
+    r'\s*《[^《》]+》\s*(?:人物)?(?:主题[歌曲]|片[头尾]曲|插曲)|from\s+["“][^"“”]+["”]', re.I)
 
 
 def canonical_script(text):
@@ -140,9 +142,7 @@ def names(value, *, title=False):
             label = canonical_script(annotation[2]).casefold()
             release = re.fullmatch(r'(?:live|现场)(?:版本?)?(?:[ |/].*)?|cover(?: version)?|'
                 r'(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?', label)
-            soundtrack = re.fullmatch(r'(?:大型)?(?:纪录片|电影|电视剧|动画片|网络剧|网剧|剧集)?'
-                r'\s*《[^《》]+》\s*(?:人物)?(?:主题[歌曲]|片[头尾]曲|插曲)|from\s+["“][^"“”]+["”]', label)
-            if release or soundtrack:
+            if release or _soundtrack_credit.fullmatch(label):
                 return result + names(annotation[1].strip(), title=True)
     # Platforms publish original names together with Latin-script aliases.
     # Version labels are not translations: never strip "Live", "Remix", etc.
@@ -298,16 +298,20 @@ def text_language(text):
 
 def published_lyric_lines(text, title, artists=()):
     """Keep published phrases intact; remove only explicit credit metadata."""
-    role = (r'歌名|歌曲|词|曲|词曲|作词|作曲|编曲(?:协力)?|演唱|专辑|发行日|音乐制作(?:人|助理)?|制作人|制作助理|监制|'
-        r'弦乐(?:编写|编曲)?|(?:人声|配唱|伴唱|主唱|合唱|童声|合声|和声|和音)(?:编写|编曲|编配|制作|录音)?(?:人|师|指导)?|钢琴|(?:低音)?吉他|贝斯|鼓|器乐|'
-        r'(?:第[一二三四\d]+)?(?:小提琴|中提琴|大提琴)|录音(?:师|助理|(?:工作)?室)?|混音(?:师|(?:工作)?室)?|母带(?:后期(?:处理|制作))?(?:人|工程师|录音室)?|音频(?:助理|工程师)|'
+    instrument = (r'(?:钢琴|键盘|(?:低音)?吉他|贝斯|鼓|打击乐|二胡|'
+        r'(?:第[一二三四\d]+)?(?:小提琴|中提琴|大提琴))(?:手|独奏|\d+)?')
+    production = (r'(?:音乐|音响|灯光|舞台秀?|乐队|声乐|演唱|歌曲)'
+        r'(?:总监|设计|指导|统筹|队长|混音|编辑|发行|营销|策划|导演团队)')
+    role = (rf'{instrument}|{production}|歌名|歌曲|(?:中文|英文)?词|曲|词曲|作词|作曲|(?:改编)?编曲(?:协力)?|原唱|演唱|专辑|发行(?:日|公司)|出品人?|音乐制作(?:人|助理)?|(?:定位)?制作人|制作助理|监制|'
+        r'弦乐(?:编写|编曲|监制|录音)?|(?:人声|配唱|伴唱|主唱|合唱|童声|合声|合音|和声|和音)(?:编写|编曲|编配|制作|录音)?(?:人|师|指导)?|器乐|'
+        r'录音(?:师|助理|(?:工作)?室)?|(?:前置)?混音(?:师|(?:工作)?室)?|母带(?:后期(?:处理|制作))?(?:人|工程师|录音室)?|音频(?:助理|工程师|编辑)|'
         r'(?:song )?title|song name|artist|album|composer|lyricist|producer|lyrics|music(?: production)?|written by|produced by|'
         r'guitar|bass|drums|piano|strings|instrumental|recorded by|mixed by|mastered by|audio engineer|assistant engineer|'
         r'乐团|乐队|orchestra|band|arrange(?:ment|r)|(?:backing |lead )?vocals?(?: arrangement)?|(?:recording|mixing|mastering)(?: engineer| studio)?(?: \(vocals\))?|'
-        r'production assistant|[OS]P|O[AC](?:\s*/\s*O[AC])?|publisher|copyright')
+        r'production assistant|program(?:ming)?|PGM|[OS]P|O[AC](?:\s*/\s*O[AC])?|publisher|copyright')
     # A translated role is still metadata: "编曲 Arrangement: ...".
     # Require complete recognized labels before the colon, not arbitrary prose.
-    credit = re.compile(rf'^(?:{role})(?:\s+(?:{role}))?\s*[：:]', re.I)
+    credit = re.compile(rf'^(?:{role})(?:(?:\s+|\s*[/／]\s*)(?:{role}))*\s*[：:]', re.I)
     rows, metadata, timestamps = [], [], {}
     for i, line in enumerate(text.splitlines(), 1):
         line = html.unescape(line).strip()
@@ -346,7 +350,10 @@ def published_lyric_lines(text, title, artists=()):
     first = 0
     while first < len(rows):
         line = rows[first][1]
-        if is_credit(line) or title_artist(line) or (identity(line) & identity(title) and
+        note = canonical_script(line).strip('()').strip()
+        heading_note = first and (_soundtrack_credit.fullmatch(note) or re.fullmatch(
+            r'(?:又名|别名|also known as|a\.?k\.?a\.?)\s*[:：].+', note, re.I))
+        if is_credit(line) or title_artist(line) or heading_note or (identity(line) & identity(title) and
                 first+1 < len(rows) and is_credit(rows[first+1][1])):
             first += 1
         else:

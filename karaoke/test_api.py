@@ -2382,6 +2382,10 @@ def test_music_cached_body_survives_duration_changes_and_other_song_backoff(tmp_
     ('词：林林', '曲：林林', '第一小提琴：乐手', '混音师：工程师'),
     ('Lyrics: Writer', 'Music: Composer', 'Guitar: Player', 'Mixed by: Engineer'),
     ('專輯：春天', '歌曲：晚風 (Album Version)', '作詞：林林', '作曲：林林'),
+    ('原唱：林林', '音乐总监：制作人', '演唱设计：制作人', '音响总监：制作人'),
+    ('中文词：林林', '英文词：A Writer', '前置混音：制作人', '定位制作人：制作人'),
+    ('出品：唱片公司', '歌曲营销：唱片公司', '二胡：乐手', '大提琴独奏：乐手'),
+    ('乐队队长/键盘：乐手', '乐队总监/贝斯手：乐手', 'PGM：乐手', '合音编写：制作人'),
     ('OA/OC: A Writer / B Writer', 'ＯＰ：A Publisher', 'SP: B Publisher', 'Publisher: C Publisher')])
 @pytest.mark.parametrize('heading', ['晚風', '晚風-林林', '晚風 - 林林', '晚風—林林', '晚風 – 林林'])
 def test_published_lyrics_remove_credit_blocks_but_keep_sung_titles_and_colons(credits, heading):
@@ -2395,6 +2399,17 @@ def test_published_lyrics_remove_credit_blocks_but_keep_sung_titles_and_colons(c
     assert report['excluded_credit_lines'] == [1, 2, 3, 7, 8, 9]
     assert report['text_sha256'] == hashlib.sha256(raw.encode()).hexdigest()
     assert published_lyric_lines('\n'.join(body), '晚風') == (body, [])
+
+
+def test_recording_notes_inside_credit_header_do_not_truncate_the_lyric_body():
+    from karaoke.lyric_lookup import published_lyric_lines
+    notes = ['电影《远山》人物主题曲', '（又名：另一首名字）']
+    body = ['晚風', '我说：继续往前走', '晚風']
+    header = ['作词：林林', '出品：唱片公司', '歌曲营销：唱片公司', 'SP：发行公司', *notes]
+    raw = '\n'.join([*header, *body, '二胡：乐手', '混音/母带工程师：制作人'])
+    lines, excluded = published_lyric_lines(raw, '晚風', ['林林'])
+    assert lines == body and len(excluded) == len(header)+2
+    assert published_lyric_lines('\n'.join([*body, *notes]), '晚風', ['林林'])[0] == [*body, *notes]
 
 
 @pytest.mark.parametrize('heading', ['晚風-林林', '晚風 — 林林', '林林 - 晚風', '晚風-林林\n詞：林林\n曲：林林'])
