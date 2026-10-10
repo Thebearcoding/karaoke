@@ -1373,12 +1373,16 @@ def test_model_language_aliases_survive_metadata_and_request_round_trip(tag, can
 
 @pytest.mark.parametrize('observations,expected', [
     ([('zh', 'BGM')]*8+[('yue', 'Speech')], 'Cantonese'),
-    ([('yue', 'BGM')]*8+[('zh', 'Speech')], 'Chinese'),
-    ([('yue', 'Speech'), ('zh', 'Speech')]+[('nospeech', 'BGM')]*7, None),
+    ([('yue', 'BGM')]*8+[('zh', 'Speech')], 'Cantonese'),
+    ([('yue', 'BGM')]*3+[('zh', 'BGM')]*6, 'Cantonese'),
+    ([('yue', 'Speech'), ('zh', 'Speech')]+[('nospeech', 'BGM')]*7, 'Cantonese'),
     ([('yue', 'Speech')]*2+[('zh', 'Speech')]+[('nospeech', 'BGM')]*6, 'Cantonese'),
-    ([('yue', 'BGM')]*9, None),
+    ([('yue', 'BGM')]*9, 'Cantonese'),
+    ([('zh', 'BGM')]*9, 'Chinese'),
+    ([('nospeech', 'BGM')]*9, None),
+    ([('en', 'Speech')]*8+[('yue', 'BGM')], 'English'),
 ])
-def test_sung_language_uses_vocal_evidence_not_instrumental_guesses(observations, expected):
+def test_sung_language_keeps_specific_evidence_in_musical_windows(observations, expected):
     from karaoke.local_asr import detect_singing_language
     answers = iter(observations)
     def detect(clip):
@@ -6194,7 +6198,7 @@ def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatc
         # squares so exact pixels distinguish gradual fill from a whole-word jump.
         layout_out.update(mask=Image.new('L', (60, 50), 255), characters=[
             dict(index=i, left=3+20*(i%2), right=13+20*(i%2), top=3+25*(i//2),
-                 baseline=13+25*(i//2), line=i//2, character=x) for i, x in enumerate(text)])
+                 baseline=13+25*(i//2), bottom=13+25*(i//2), line=i//2, character=x) for i, x in enumerate(text)])
         return Image.new('RGBA', (60, 50), (255, 255, 255, 255))
     monkeypatch.setattr(renderer, 'caption_image', caption)
     cue = dict(text='甲乙丙丁', units=[
@@ -6231,6 +6235,31 @@ def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatc
     assert overlapping.frame(4., 'word').getpixel((12, 5)) == white
     assert overlapping.frame(4.9, 'word').getpixel((12, 5)) == amber
     assert overlapping.frame(4., 'word').getpixel((12, 5)) == white
+
+
+@pytest.mark.parametrize('language,text', [
+    ('English', 'Quick happy gyp\njazz beneath'),
+    ('Chinese', '星光照亮夜空\n我們一起唱歌'),
+    ('Cantonese', '晚風吹過窗邊\n我哋一齊唱歌'),
+    ('Japanese', '静かな夜に\n僕は歌う'),
+    ('Korean', '우리 함께\n노래해'),
+])
+@pytest.mark.parametrize('style', ['cinema_focus', 'cinema', 'clear', 'stage'])
+def test_completed_sweep_colors_entire_real_glyph_without_touching_next_line(language, text, style):
+    from karaoke.render_lyric_progress import Caption
+    split = text.index('\n')
+    caption = Caption(dict(text=text, units=[
+        dict(first=0, stop=split, start=1., end=2.),
+        dict(first=split+1, stop=len(text), start=3., end=4.)]), style, language)
+    assert not caption.pages
+    before = np.asarray(caption.base)
+    first = np.asarray(caption.frame(2.5, 'word'))
+    second_top = min(c['top'] for c in caption.layout['characters'] if c['line'] == 1)
+    assert np.array_equal(first[int(second_top):], before[int(second_top):])
+    complete = np.asarray(caption.frame(4., 'word'))
+    body = np.asarray(caption.layout['mask']) > 250
+    assert body.any()
+    assert not np.any(body & np.all(complete == before, axis=2))
 
 
 @pytest.mark.parametrize('text,expected', [
@@ -6324,6 +6353,8 @@ def test_furigana_layout_preserves_timing_and_keeps_readings_out_of_sweep(langua
         assert swept.crop(bounds).tobytes() == caption.base.crop(bounds).tobytes()
     for a,b in zip(boxes, boxes[1:]):
         assert a['line'] != b['line'] or a['bounds'][2] < b['bounds'][0]
+    for line in {r['line'] for r in boxes}:
+        assert len({r['baseline'] for r in boxes if r['line'] == line}) == 1
     assert caption.countdown_geometry['y']+caption.countdown_geometry['radius'] < min(r['bounds'][1] for r in boxes)
 
 

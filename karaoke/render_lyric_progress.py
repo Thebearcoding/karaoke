@@ -137,7 +137,7 @@ class Caption:
             for char in chars:
                 right = right_edges.get(char['index'], char['right']+2)
                 if char['index'] < unit['stop'] and right > char['left']-2:
-                    draw.rectangle((char['left']-2, char['top']-2, right, char['baseline']+8), fill=255)
+                    draw.rectangle((char['left']-2, char['top']-2, right, char['bottom']+2), fill=255)
             tint = Image.new('RGBA', result.size, self.color+(0,))
             tint.putalpha(ImageChops.multiply(area, self.layout['mask']))
             result.alpha_composite(tint)

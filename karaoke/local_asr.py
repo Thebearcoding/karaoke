@@ -150,7 +150,7 @@ def alignment_language(model, samples, hint=None, *, detect=False):
 
 
 def detect_singing_language(samples, rate, detect):
-    """Vote on recognized vocal windows; music/silence is not language evidence."""
+    """Keep sung-language evidence even when the event classifier says music."""
     if not len(samples):
         raise ValueError('Language detection input is empty')
     window = 20*rate
@@ -162,8 +162,11 @@ def detect_singing_language(samples, rate, detect):
         code = result['lang'].removeprefix('<|').removesuffix('|>')
         probes.append(dict(start=start/rate, end=min(start+window, len(samples))/rate,
                            language=code, event=result['event']))
-    votes = Counter(p['language'] for p in probes
-                    if p['event'] == '<|Speech|>' and p['language'] != 'nospeech')
+    votes = Counter(p['language'] for p in probes if p['language'] != 'nospeech')
+    # Singing often gets generic zh even within a Cantonese recording. Keep
+    # an explicit yue observation instead of letting that broad label erase it.
+    if 'yue' in votes:
+        votes['yue'] += votes.pop('zh', 0)
     selected = None
     if votes:
         code, count = votes.most_common(1)[0]

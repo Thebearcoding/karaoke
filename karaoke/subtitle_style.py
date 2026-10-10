@@ -407,13 +407,18 @@ def caption_image(text, width=1280, height=None, font_file=None,
     baseline = (height-spec.get('baseline_inset', 36)*scale)*supersample
     characters, ruby_boxes = [], []
     cursor = 0
+    line_height = size*font_scale*spec['line_height']
+    if readings:
+        ruby_offset = size*font_scale+TOKENS['furigana']['gap']*font_scale+ruby_font.getmetrics()[1]
+        body_bottom = max(font.getbbox(line, anchor='ls')[3] for line in lines)
+        ruby_top = min(ruby_font.getbbox(item['reading'], anchor='ls')[1]
+                       for row in rows for item in row if item['reading'])
+        line_height = max(line_height+ruby_font.size, body_bottom+ruby_offset-ruby_top)
+        line_height += TOKENS['furigana']['line_gap']*font_scale
     for i, line in enumerate(lines):
         length = widths[i]
         x = ((width*supersample-length)/2 if spec['alignment'] == 'center'
              else width*TOKENS['safe_x']*supersample)
-        line_height = size*font_scale*spec['line_height']
-        if readings:
-            line_height += ruby_font.size+TOKENS['furigana']['line_gap']*font_scale
         y = baseline-(len(lines)-i-1)*line_height
         offset = text.find(line, cursor)
         if offset < 0:
@@ -422,20 +427,24 @@ def caption_image(text, width=1280, height=None, font_file=None,
         for item in row:
             glyph_x = x+(item['width']-line_width(item['text'], font, tracking))/2
             for j, character in enumerate(item['text']):
-                draw.text((round(glyph_x), round(y)), character, font=font, fill=255, anchor='ls')
+                position = (round(glyph_x), round(y))
+                draw.text(position, character, font=font, fill=255, anchor='ls')
+                bounds = draw.textbbox(position, character, font=font, anchor='ls')
                 characters.append({'index': item['first']+j, 'line': i, 'character': character,
-                    'left': glyph_x/supersample, 'right': (glyph_x+font.getlength(character))/supersample,
-                    'top': (y-size*font_scale)/supersample, 'baseline': y/supersample})
+                    'left': min(glyph_x, bounds[0])/supersample,
+                    'right': max(glyph_x+font.getlength(character), bounds[2])/supersample,
+                    'top': bounds[1]/supersample, 'bottom': bounds[3]/supersample,
+                    'baseline': y/supersample})
                 glyph_x += font.getlength(character)+tracking
             if item['reading']:
                 bounds = ruby_font.getbbox(item['reading'], anchor='ls')
-                descent = max(0, bounds[3])
                 position = (round(x+item['width']/2-(bounds[0]+bounds[2])/2),
-                            round(y-size*font_scale-TOKENS['furigana']['gap']*font_scale-descent))
+                            round(y-ruby_offset))
                 ruby_draw.text(position, item['reading'], font=ruby_font, fill=255, anchor='ls')
                 box = ruby_draw.textbbox(position, item['reading'], font=ruby_font, anchor='ls')
                 ruby_boxes.append(dict(first=item['first'], stop=item['stop'], reading=item['reading'], line=i,
-                                       bounds=tuple(value/supersample for value in box)))
+                                       bounds=tuple(value/supersample for value in box),
+                                       baseline=position[1]/supersample))
             x += item['width']+tracking
         cursor = offset+len(line)
     visible_mask = ImageChops.lighter(mask, ruby_mask)
