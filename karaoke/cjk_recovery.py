@@ -126,7 +126,7 @@ def audio_floor(wave, protocol):
 
 
 def label_events_support(start, event_end, secondary, localization_tolerance):
-    """Check word-localizing label events against a measured phonetic interval."""
+    """Check word-localizing label events against a measured acoustic interval."""
     if len(secondary) != 2 or any(u.get('timing_evidence') != 'ctc_label_event' for u in secondary):
         return False
     ends = [u.get('first_event_end', u['end']) for u in secondary]
@@ -177,14 +177,15 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *,
         start, end = float(np.median(starts)), min(bounds[1], float(np.median([u['end'] for u in primary])))
         if max(starts)-min(starts) > protocol['maximum_spread_seconds']:
             return None, 'context disagreement'
-        phonetic_spans = all(u.get('timing_evidence')=='phonetic_span' for u in primary)
-        label_events = (all(events) or phonetic_spans) and all(
+        measured_spans = {u.get('timing_evidence') for u in primary} in (
+            {'phonetic_span'}, {'attention_span'})
+        label_events = (all(events) or measured_spans) and all(
             u.get('timing_evidence')=='ctc_label_event' for u in secondary)
         if label_events:
             # Grapheme CTC spikes identify the word inside its acoustic event;
             # they are not estimates of the first audible phoneme. Compare
             # events, never the display hold until the following word. Dense
-            # phonetic intervals also provide a measured acoustic end.
+            # phonetic and attention intervals both provide a measured end.
             primary_ends = [u.get('first_event_end',u.get('emission_end') if all(events) else u['end'])
                             for u in primary]
             secondary_ends = [u.get('first_event_end',u['end']) for u in secondary]
