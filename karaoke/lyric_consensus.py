@@ -403,9 +403,9 @@ def fetch_lyric_consensus(song, metadata, duration, cache, description=None, pre
         if not recording.get('video_id') or recording['video_id'] != metadata.get('id'):
             recording = {}
         source_title_preferred = bool(not preserve_title and recording.get('title') and
-            len(lookup.names(song.get('title'), title=True)) == 1 and
             len(recording['title']) < len(song.get('title') or '') and
-            lookup.identity(recording['title'], title=True) & lookup.identity(song.get('title'), title=True))
+            lookup.identity(recording['title'], title=True) &
+            lookup.identity(lookup.names(song['title'], title=True)[-1], title=True))
         for key in ('title', 'artist'):
             replace = (not song.get(key) or key == 'title' and (raw_title or source_title_preferred) or key == 'artist' and
                        upload_artist and recording.get('title') != metadata.get('title'))

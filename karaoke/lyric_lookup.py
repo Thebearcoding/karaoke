@@ -119,22 +119,31 @@ def names(value, *, title=False):
     value = unicodedata.normalize('NFKC', value if isinstance(value, str) else '').strip()
     result = [value] if value else []
     if title:
-        edition = _versioned_title.fullmatch(value)
-        if edition:
-            return result + names(edition[1], title=True)
         clean = re.sub(r'\s*[\[(](?:official\s+(?:music\s+video|video|mv|audio|visualizer)|'
                        r'(?:official\s+)?lyrics?\s+video)(?:\s+(?:hd|4k))?[\])]\s*$', '', value, flags=re.I)
         if clean and clean != value:
             return result + names(clean, title=True)
-    # A bilingual title may contain punctuation and a version label on both
-    # sides ("日本語 (Live) - English (Live)"). Preserve those labels instead
-    # of requiring the entire native half to contain only non-Latin letters.
+    # Split explicit bilingual names before parsing either side's annotations.
     pair = re.fullmatch(r'(.+?)\s+[-–—]\s+(.+)', value)
     if pair:
         native_side = lambda text: any(c.isalpha() and 'LATIN' not in unicodedata.name(c, '') for c in text)
         if native_side(pair[1]) != native_side(pair[2]) and version_tags(pair[1]) == version_tags(pair[2]):
-            result.extend((pair[2], pair[1]) if native_side(pair[1]) else (pair[1], pair[2]))
+            for part in ((pair[2], pair[1]) if native_side(pair[1]) else (pair[1], pair[2])):
+                result.extend(names(part, title=title))
             return list(dict.fromkeys(result))
+    if title:
+        edition = _versioned_title.fullmatch(value)
+        if edition:
+            return result + names(edition[1], title=True)
+        annotation = re.fullmatch(r'(.+?)\s*\(([^()]*)\)', value)
+        if annotation:
+            label = canonical_script(annotation[2]).casefold()
+            release = re.fullmatch(r'(?:live|现场)(?:版本?)?(?:[ |/].*)?|cover(?: version)?|'
+                r'(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?', label)
+            soundtrack = re.fullmatch(r'(?:大型)?(?:纪录片|电影|电视剧|动画片|网络剧|网剧|剧集)?'
+                r'\s*《[^《》]+》\s*(?:人物)?(?:主题[歌曲]|片[头尾]曲|插曲)|from\s+["“][^"“”]+["”]', label)
+            if release or soundtrack:
+                return result + names(annotation[1].strip(), title=True)
     # Platforms publish original names together with Latin-script aliases.
     # Version labels are not translations: never strip "Live", "Remix", etc.
     native = r'[^\W\d_\x00-\x7f]+(?:[ ,·、&/]+[^\W\d_\x00-\x7f]+)*'
@@ -164,20 +173,6 @@ def identity(value, *, title=False):
                               aliases[0] if aliases else '')
         if joined and not version_tags(joined[1]):
             aliases.append(joined[2])
-    if title:
-        for name in list(aliases):
-            # A soundtrack credit describes its use, not another performance.
-            # Only strip this explicit grammar; keep live/remix/version labels.
-            match = re.fullmatch(r'(.+?)\s*\((?:大型)?(?:纪录片|电影|电视剧|动画片|网络剧|网剧|剧集)?'
-                                 r'\s*《[^《》()]+》\s*(?:主题[歌曲]|片[头尾]曲|插曲)\)', name)
-            if match:
-                aliases.append(match[1])
-            # Performance/release labels describe the recording, not the work
-            # title. recording_mismatches still records them separately.
-            base = re.sub(r'\s*\((?:(?:live|现场|現場)(?:\b|[ |/]).*?|cover(?: version)?|(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?)\)\s*$',
-                          '', name, flags=re.I).strip()
-            if base and base != name:
-                aliases.append(base)
     return {''.join(c for c in name if c.isalnum()) for name in aliases} - {''}
 
 
@@ -425,7 +420,7 @@ def description_lyrics(metadata, reference_lines=()):
 def version_tags(text):
     text = canonical_script(text or '').casefold()
     return {kind for kind, pattern in (
-        ('live', r'\blive\b|演唱会|现场'), ('remix', r'\bremix\b|混音'),
+        ('live', r'\blive(?:版本?)?\b|演唱会|现场'), ('remix', r'\bremix\b|混音'),
         ('acoustic', r'\bacoustic\b'), ('instrumental', r'\binstrumental\b|纯音乐'),
         ('karaoke', r'\bkaraoke\b|伴奏版')) if re.search(pattern, text)}
 

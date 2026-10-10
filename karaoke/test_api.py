@@ -2673,9 +2673,12 @@ def test_published_lyrics_reject_wrong_credits_versions_and_empty_text(change):
 
 
 @pytest.mark.parametrize('edition', ['Edited Version', 'Album Version', 'Live Version', 'Acoustic Ver.'])
-def test_explicit_recording_version_keeps_work_identity_and_release_preference(edition):
+@pytest.mark.parametrize('bilingual', [False, True])
+def test_explicit_recording_version_keeps_work_identity_and_release_preference(edition, bilingual):
     from karaoke.lyric_lookup import published_candidate, identity
     title = 'Evening ('+edition+')'
+    if bilingual:
+        title = '晚風 ('+edition+') - '+title
     song = dict(title=title, artist='Singer')
     row = dict(trackId=1, trackTitle='Evening', artists=[dict(artistName='Singer')], album={},
                lyrics='We sing through the night\nUntil the morning comes')
@@ -2684,8 +2687,10 @@ def test_explicit_recording_version_keeps_work_identity_and_release_preference(e
     assert report['url'].endswith('/2') and report['recording_mismatches'] == []
     lines, report = published_candidate([row], song, title, allow_recording_mismatch=True)
     assert lines and report['recording_mismatches'] == ['version']
+    if bilingual:
+        assert published_candidate([dict(row, trackTitle='晚風')], song, title, allow_recording_mismatch=True)[0]
     assert published_candidate([dict(row, trackTitle='Another song')], song, title, allow_recording_mismatch=True)[0] is None
-    for real_subtitle in ('Part II', 'Conversion', 'A Story'):
+    for real_subtitle in ('Part II', 'Conversion', 'A Story', 'From Home', 'We Live Here'):
         assert not identity('Evening ('+real_subtitle+')', title=True) & identity('Evening', title=True)
     assert published_candidate([row], dict(song, title='Evening (Instrumental Version)'), '', allow_recording_mismatch=True)[0] is None
 
@@ -2907,7 +2912,9 @@ def test_composer_or_featured_credits_do_not_block_same_performer_lyric_fallback
 
 
 @pytest.mark.parametrize('first_hit', ['yes', 'wrong_identity', 'short', 'header'])
-def test_published_lyric_search_uses_a_bounded_title_query_only_after_no_match(tmp_path, monkeypatch, first_hit):
+@pytest.mark.parametrize('label', ['', ' (Live)', ' (Live版)', '（电影《远山》人物主题曲）',
+    ' (From "Mountain")', ' (2020 Remastered)'])
+def test_published_lyric_search_uses_a_bounded_title_query_only_after_no_match(tmp_path, monkeypatch, first_hit, label):
     from urllib.parse import parse_qs, urlparse
     from karaoke import lyric_lookup
     from karaoke.stage_cache import StageCache
@@ -2922,11 +2929,12 @@ def test_published_lyric_search_uses_a_bounded_title_query_only_after_no_match(t
             if first_hit in ('short', 'header') else dict(row, trackTitle='無關歌曲'))
         return dict(response=dict(result=dict(tracks=[selected])))
     monkeypatch.setattr(lyric_lookup, 'read_document', read)
-    song = dict(title='晚風', artist='林林')
+    song = dict(title='晚風'+label, artist='林林')
     for _ in range(2):
         lines, report = lyric_lookup.fetch_published_lyrics(song, '', StageCache(tmp_path), 60)
         assert lines == [row['lyrics']] and report['url'].endswith('/123')
         assert bool(report['rejected_candidates']) == (first_hit in ('short', 'header'))
+        assert report['recording_mismatches'] == (['version'] if label.startswith(' (Live') else [])
     assert calls == (['晚風 林林'] if first_hit == 'yes' else ['晚風 林林', '晚風'])
 
 
