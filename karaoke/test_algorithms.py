@@ -607,12 +607,12 @@ class SubtitleIntegrity(unittest.TestCase):
                     self.assertEqual([u['start'] for u in result[0]['units']],[u['start'] for u in old])
                     self.assertFalse(report['constraints'])
 
-    def test_measured_word_span_can_contain_a_later_grapheme_event(self):
+    def test_only_phonetic_spans_can_contain_a_later_grapheme_event(self):
         from copy import deepcopy
         from timing_validation import reconcile_timing, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
         for evidence in ('phonetic_span', 'attention_span'):
-            for mode in ('valid', 'untyped', 'outside', 'unstable_end', 'quiet_phonetic_onset',
+            for mode in ('valid', 'aligned_labels', 'untyped', 'outside', 'unstable_end', 'quiet_phonetic_onset',
                          'silent_phonetic_span', 'quiet_ctc_event', 'wrong_text',
                          'unstable_onset', 'mixed_evidence'):
                 with self.subTest(mode=mode, evidence=evidence):
@@ -624,6 +624,8 @@ class SubtitleIntegrity(unittest.TestCase):
                     predictions = [deepcopy(measured) for _ in range(3)]
                     views = [[dict(measured[0], start=3.2, end=3.3, timing_evidence='ctc_label_event'),
                               dict(measured[1], timing_evidence='ctc_label_event')] for _ in range(2)]
+                    if mode == 'aligned_labels':
+                        for view in views: view[0].update(start=3.04, end=3.3)
                     if mode == 'untyped':
                         for view in predictions:
                             view[0].pop('timing_evidence')
@@ -647,7 +649,8 @@ class SubtitleIntegrity(unittest.TestCase):
                     result, report = reconcile_timing([cue], wave, lambda *a, **k: views,
                         lambda *a: predictions, protocol, 'English', _retry_context=False)
                     self.assertEqual(result[0]['units'][0]['start'],
-                                     3. if mode in ('valid', 'unstable_end', 'quiet_phonetic_onset') else 1.)
+                                     3. if mode == 'aligned_labels' or (evidence == 'phonetic_span' and
+                                         mode in ('valid', 'unstable_end', 'quiet_phonetic_onset')) else 1.)
                     if result[0]['units'][0]['start'] == 3.:
                         self.assertEqual(result[0]['units'][0]['timing_source'],
                                          'cross_model_attention' if evidence == 'attention_span' else 'cross_model_phonemes')
@@ -1778,6 +1781,39 @@ class SubtitleIntegrity(unittest.TestCase):
                 else:
                     self.assertEqual(result[0]['units'][0]['start'], 1.)
                 self.assertEqual(cue['units'][0]['start'], 1.)
+
+    def test_coarse_companion_uses_its_measured_interval_without_claiming_a_fine_onset(self):
+        from copy import deepcopy
+        from timing_validation import reconcile_timing, validate_timeline
+        protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
+        old = [dict(first=a, stop=b, text=word, start=t, end=t+.3, timing_source='prior_word_fallback')
+               for a,b,word,t in [(0,3,'one',3.),(4,7,'two',3.5),(8,13,'three',4.)]]
+        cue = dict(text='one two three',start=3.,end=4.3,units=old)
+        for mode in ('quiet_lead', 'silent_interval', 'next_word_only', 'untyped', 'view_disagreement'):
+            with self.subTest(mode=mode):
+                measured = [dict(u,start=t,end=t+.4,timing_evidence='ctc_label_event')
+                            for u,t in zip(old,[1.,1.5,4.])]
+                views = [deepcopy(measured),deepcopy(measured)]
+                predictions = [[dict(u,timing_evidence='phonetic_span') for u in measured] for _ in range(3)]
+                predictions[0][0]['start'] += .2  # The companion's fine onset is unconfirmed.
+                wave = np.full(5*44100,.1)
+                quiet_end = 1.07 if mode in ('quiet_lead','untyped','view_disagreement') else 1.5
+                wave[44100:round(quiet_end*44100)] = 0.
+                if mode == 'next_word_only':
+                    for view in views: view[0]['end'] = 2.
+                if mode == 'untyped':
+                    for view in views: view[0].pop('timing_evidence')
+                if mode == 'view_disagreement': views[1][0]['start'] += .2
+                result,report = reconcile_timing([cue],wave,lambda *a,**k:views,
+                    lambda *a:predictions,protocol,'English',_retry_context=False)
+                if mode == 'quiet_lead':
+                    self.assertEqual([u['start'] for u in result[0]['units']],[1.,1.5,4.])
+                    self.assertEqual(result[0]['units'][0]['timing_source'],'prior_word_fallback')
+                    self.assertTrue(all(p['first'] != 0 for p in report['constraints']))
+                    validate_timeline(result,[cue['text']],5.,report['constraints'],'English')
+                else:
+                    self.assertEqual([u['start'] for u in result[0]['units']],[3.,3.5,4.])
+                self.assertEqual(old[0]['start'],3.)
 
     def test_merged_timing_repair_reuses_corroborated_interior_onsets(self):
         from copy import deepcopy

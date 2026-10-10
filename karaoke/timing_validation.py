@@ -599,11 +599,13 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                     limit=units[hi]['start'] if hi<len(units) else bounds[1]
                     for member_index,(unit,following) in enumerate(zip(members,[*members[1:],dict(start=limit)])):
                         unit['end']=min(unit['end'],following['start'])
-                        # Recheck the clipped interval using the same support
-                        # contract as corroborated_group. A phonetic word can
-                        # begin with a quiet closure before its voiced part.
+                        # Fine predictions retain their onset support contract.
+                        # A coarse companion only localizes a word interval;
+                        # its first 35 ms need not contain the audible onset.
+                        # Clipping above prevents borrowing the following word.
                         support_end=min(unit['end'],unit['start']+.035)
-                        if unit['first'] in confirmed and unit.get('timing_evidence')!='ctc_event':
+                        if ((unit['first'] in confirmed and unit.get('timing_evidence')!='ctc_event') or
+                                (unit['first'] not in confirmed and unit.get('timing_evidence')=='ctc_label_event')):
                             support_end=unit['end']
                         piece=wave[round(unit['start']*44100):round(support_end*44100)]
                         if unit['end']<=unit['start'] or following['start']-unit['start']<.015:
