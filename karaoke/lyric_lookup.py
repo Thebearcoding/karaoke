@@ -121,7 +121,7 @@ def names(value, *, title=False):
     if title:
         edition = _versioned_title.fullmatch(value)
         if edition:
-            result.extend(names(edition[1], title=True))
+            return result + names(edition[1], title=True)
         clean = re.sub(r'\s*[\[(](?:official\s+(?:music\s+video|video|mv|audio|visualizer)|'
                        r'(?:official\s+)?lyrics?\s+video)(?:\s+(?:hd|4k))?[\])]\s*$', '', value, flags=re.I)
         if clean and clean != value:
@@ -749,7 +749,12 @@ def fetch_structured_lyrics(song, cache, duration=None, source_title=None):
         return None, dict(status='missing_identity', provider='lyricsweb')
     # This endpoint searches song names and artist names separately. Combining
     # them returns an artist catalogue, which can omit the requested song.
-    query = song_names(song, 'title')[-1]
+    # The provider accepts 2–120 characters. Keep short/long work names intact
+    # for matching; query a declared alias or the artist's catalogue instead.
+    query = next((name for key in ('title', 'artist') for name in reversed(song_names(song, key))
+                  if 2 <= len(name) <= 120), None)
+    if query is None:
+        return None, dict(status='unsupported_query', provider='lyricsweb')
     url = 'https://lyricsweb.com/api/v1/user/search-result?'+urlencode(dict(query=query))
     packet = cached_lyric_request('lyricsweb', dict(url=url, representation='candidate_metadata_v1'), cache,
                                   lambda: read_lyric_catalogue(url))

@@ -2507,19 +2507,22 @@ def test_music_album_lyrics_are_a_fallback_for_same_work_not_another_artists_son
 
 
 @pytest.mark.parametrize('edition', ['', ' (Edited Version)'])
+@pytest.mark.parametrize('title,aliases,query', [
+    ('Evening', [], ('Evening', 'Evening')), ('夕', [], ('Singer', '夕 (Edited Version)')),
+    ('E'*121, [], ('Singer', 'Singer')), ('夕', ['Dusk'], ('Dusk', 'Dusk'))])
 @pytest.mark.parametrize('page_identity', ['valid', 'wrong_title', 'wrong_artist'])
 @pytest.mark.parametrize('artist_list', [False, True])
-def test_structured_publisher_reads_only_matching_recording_lyrics(tmp_path, monkeypatch, structured_lyrics_source, page_identity, artist_list, edition):
+def test_structured_publisher_reads_only_matching_recording_lyrics(tmp_path, monkeypatch, structured_lyrics_source, page_identity, artist_list, edition, title, aliases, query):
     from contextlib import contextmanager
     import httpx
     from karaoke import lyric_lookup, lyric_readings
     from karaoke.stage_cache import StageCache
     body = ['Stars above the quiet shore', 'We sing until the morning comes']
-    row = dict(_id='recording-id', song_name='Evening', artist=dict(artist_name='Singer'),
+    row = dict(_id='recording-id', song_name=title, artist=dict(artist_name='Singer'),
                public_song_url='/song/singer/evening')
     if artist_list:
         row['artist'] = [dict(row['artist'], biography='x'*(3*1024*1024))]
-    recording = dict(**{'@type':'MusicRecording'}, name='Another work' if page_identity == 'wrong_title' else 'Evening',
+    recording = dict(**{'@type':'MusicRecording'}, name='Another work' if page_identity == 'wrong_title' else title,
         byArtist=dict(name='Unrelated singer' if page_identity == 'wrong_artist' else 'Singer'),
         recordingOf=dict(lyrics=dict(text='\\n'.join(['Composer: A Person',*body]), provider=dict(name='LyricFind'))))
     document = '<p>AI-generated meaning must never be sung</p><script type="application/ld+json">broken</script>' + (
@@ -2532,7 +2535,7 @@ def test_structured_publisher_reads_only_matching_recording_lyrics(tmp_path, mon
     @contextmanager
     def read(method, url, **kwargs):
         from urllib.parse import parse_qs, urlsplit
-        assert parse_qs(urlsplit(url).query) == {'query': ['Evening']}
+        assert parse_qs(urlsplit(url).query) == {'query': [query[bool(edition)]]}
         calls.append(url)
         yield httpx.Response(200, json=dict(data=dict(global_song_matches=[None,
             dict(row, artist={'artist_name':'Unrelated singer'}, public_song_url='/song/other/evening'),
@@ -2544,7 +2547,7 @@ def test_structured_publisher_reads_only_matching_recording_lyrics(tmp_path, mon
     monkeypatch.setattr(lyric_lookup.httpx, 'stream', read)
     monkeypatch.setattr(lyric_readings, 'read_page', page)
     for _ in range(2):
-        lines, report = structured_lyrics_source(dict(title='Evening'+edition,artist='Singer'), StageCache(tmp_path), 60)
+        lines, report = structured_lyrics_source(dict(title=title+edition, title_aliases=aliases, artist='Singer'), StageCache(tmp_path), 60)
         assert lines == (body if page_identity == 'valid' else None)
         if lines:
             assert report['provider'] == 'lyricsweb' and report['publisher'] == 'lyricfind'
