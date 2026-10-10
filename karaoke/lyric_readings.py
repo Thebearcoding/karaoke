@@ -21,11 +21,36 @@ class ReadingPage(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.text, self.spans, self.links, self.identity = '', [], [], {}
         self.depth, self.stack, self.ruby, self.in_reading = 0, [], None, False
+        self.page_url, self.script, self.compositions = None, None, []
         self.feed(html)
+        # The display title mixes artist and soundtrack credits. Use the
+        # composition explicitly attached to this lyric page when available.
+        for record in self.compositions:
+            lyric = record.get('Lyrics', record.get('lyrics'))
+            recording = record.get('recordedAs')
+            if not isinstance(lyric, dict) or not isinstance(recording, dict):
+                continue
+            page = lyric.get('mainEntityOfPage')
+            if not self.page_url or not isinstance(page, dict) or page.get('url') != self.page_url:
+                continue
+            artist = recording.get('byArtist')
+            if not isinstance(artist, dict) or not all(isinstance(v, str) and v.strip()
+                    for v in (record.get('name'), artist.get('name'))):
+                continue
+            aliases = lambda value: [s for s in (value if isinstance(value, list) else [value])
+                                     if isinstance(s, str) and s.strip()]
+            self.identity = dict(title=record['name'], artist=artist['name'],
+                title_aliases=aliases(record.get('alternateName')),
+                artist_aliases=aliases(artist.get('alternateName')))
+            break
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         classes = attrs.get('class', '').split()
+        if tag == 'script' and attrs.get('type') == 'application/ld+json':
+            self.script = ''
+        if tag == 'meta' and attrs.get('property') == 'og:url':
+            self.page_url = attrs.get('content')
         if tag == 'meta' and attrs.get('property') == 'og:title':
             match = re.fullmatch(r'(.+?) 歌詞 (.+?) ふりがな付(?: - .+)?', attrs.get('content', ''))
             if match:
@@ -51,6 +76,15 @@ class ReadingPage(HTMLParser):
                 self.in_reading = True
 
     def handle_endtag(self, tag):
+        if tag == 'script' and self.script is not None:
+            try:
+                data = json.loads(self.script)
+                records = data if isinstance(data, list) else data.get('@graph', [data])
+                self.compositions.extend(r for r in records
+                    if isinstance(r, dict) and r.get('@type') == 'MusicComposition')
+            except (ValueError, AttributeError, TypeError):
+                pass
+            self.script = None
         if not self.depth:
             return
         if tag == 'div':
@@ -64,6 +98,8 @@ class ReadingPage(HTMLParser):
                 self.ruby = None
 
     def handle_data(self, text):
+        if self.script is not None:
+            self.script += text
         if self.depth:
             if self.in_reading and self.ruby is not None:
                 self.ruby['reading'] += text

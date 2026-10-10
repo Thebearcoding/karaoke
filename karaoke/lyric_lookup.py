@@ -686,10 +686,12 @@ def fetch_reading_lyrics(song, cache, duration=None, reference_lines=(), source_
             url = 'https://utaten.com'+link
             page = ReadingPage(fetch(url))
             actual = page.identity
-            title_match = any(identity(name, title=True) & identity(actual.get('title'), title=True)
-                              for name in song_names(song, 'title'))
-            artist_match = any(artist_credit_matches(name, [actual.get('artist')]) for name in song_names(song, 'artist'))
-            partial_credit = any(artist_credit_matches(name, [actual.get('artist')], partial=True) for name in song_names(song, 'artist'))
+            title_match = any(identity(name, title=True) & identity(alias, title=True)
+                              for name in song_names(song, 'title') for alias in song_names(actual, 'title'))
+            artist_match = any(artist_credit_matches(name, [alias]) for name in song_names(song, 'artist')
+                               for alias in song_names(actual, 'artist'))
+            partial_credit = any(artist_credit_matches(name, [alias], partial=True) for name in song_names(song, 'artist')
+                                 for alias in song_names(actual, 'artist'))
             mismatch = recording_mismatches(song, source_title, actual.get('title'), None)
             text, excluded = published_lyric_lines(page.text, actual.get('title') or '', [actual.get('artist')])
             left, right = text_units(''.join(text), 'Japanese'), text_units(reference, 'Japanese')

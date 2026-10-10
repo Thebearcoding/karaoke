@@ -7026,8 +7026,9 @@ def test_unavailable_published_readings_do_not_fail_valid_lyrics(tmp_path, monke
     assert readings.resolve_readings(lines[0])[0] == ((0, 2, 'きょう'), (3, 4, 'そら'))
 
 
-@pytest.mark.parametrize('case', ['native', 'alias', 'wrong_work', 'live'])
-def test_published_ruby_source_supplies_lyrics_without_singing_the_readings(tmp_path, monkeypatch, case):
+@pytest.mark.parametrize('case', ['native', 'alias', 'wrong_work', 'wrong_title', 'live'])
+@pytest.mark.parametrize('structured', ['absent', 'linked', 'unrelated', 'malformed'])
+def test_published_ruby_source_supplies_lyrics_without_singing_the_readings(tmp_path, monkeypatch, case, structured):
     from karaoke import lyric_readings, lyric_consensus
     from karaoke.stage_cache import StageCache
     body = ['故郷へ向かう長い道を今も歩いている', '明日の朝には会えるから今日は一緒に歌おう', 'あの日の星を見上げながら夜の海を渡ってゆこう']
@@ -7035,23 +7036,36 @@ def test_published_ruby_source_supplies_lyrics_without_singing_the_readings(tmp_
     if case == 'alias':song = dict(title='Way Home', artist='Evening Light')
     if case == 'live':song['title'] += ' (Live)'
     if case == 'wrong_work':song['artist'] = 'Another singer'
+    if case == 'wrong_title':song['title'] = 'Another song'
     calls = []
     html = ('<meta property="og:title" content="帰り道 歌詞 夕灯 ふりがな付 - うたてん">'
             '<div class="comments">Wrong song</div><div class="hiragana">' +
             '<br>'.join(body).replace('故郷', '<span class="ruby"><span class="rb">故郷</span><span class="rt">ふるさと</span></span>') +
             '</div><div class="romaji">Never sing this</div>')
+    if structured != 'absent':
+        record = {'@type':'MusicComposition', 'name':'帰り道', 'alternateName':['Way Home'],
+            'recordedAs':{'byArtist':{'name':'夕灯', 'alternateName':['Evening Light']}},
+            'Lyrics':{'mainEntityOfPage':{'url':'https://utaten.com/lyric/example/'}}}
+        if structured == 'unrelated':
+            record.update(name='Another song', Lyrics={'mainEntityOfPage':{'url':'https://utaten.com/lyric/other/'}})
+            record['recordedAs']['byArtist']['name'] = 'Another singer'
+        if structured == 'linked':
+            html = html.replace('夕灯 ふりがな付', '夕灯 映画の主題歌 ふりがな付')
+        payload = json.dumps({'@graph':[{'@type':'WebPage'},record]}) if structured != 'malformed' else '{invalid json'
+        html += ('<meta property="og:url" content="https://utaten.com/lyric/example/">'
+                 '<script type="application/ld+json">'+payload+'</script>')
     def read(url):
         calls.append(url)
         return '<a href="/lyric/example/">result</a>' if '/search?' in url else html
     monkeypatch.setattr(lyric_readings, 'read_page', read)
     for _ in range(2):
         lines, report = lyric_consensus.fetch_additional_lyrics('utaten', song, {}, StageCache(tmp_path), 180,
-            reference_lines=body if case == 'alias' else ())
-        assert lines == (None if case == 'wrong_work' else body)
+            reference_lines=body if case == 'alias' and structured != 'linked' else ())
+        assert lines == (None if case in ('wrong_work', 'wrong_title') else body)
         if lines:
             assert report['recording_mismatches'] == (['version'] if case == 'live' else [])
             assert report['url'] == 'https://utaten.com/lyric/example/'
-    assert len(calls) == (3 if case == 'wrong_work' else 2)
+    assert len(calls) == (3 if case in ('wrong_work', 'wrong_title') else 2)
 
 
 @pytest.mark.parametrize('extra', ['ふるさと', 'また会おう'])
