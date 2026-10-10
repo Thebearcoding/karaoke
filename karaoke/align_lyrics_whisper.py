@@ -11,6 +11,7 @@ from pathlib import Path
 import time
 
 import numpy as np
+import regex
 from scipy.ndimage import binary_closing
 import soundfile as sf
 import stable_whisper
@@ -22,6 +23,11 @@ from lyric_progress import map_words
 from subtitles import lyric_cues, normalized, presentation_cues, write_captions
 from stage_progress import progress_items, report_progress
 from local_asr import alignment_language
+
+
+SCRIPT_BOUNDARY = regex.compile(
+    r'(?<=[\p{Han}\p{Hiragana}\p{Katakana}\p{Hangul}ー])(?=\p{Latin})|'
+    r'(?<=\p{Latin})(?=[\p{Han}\p{Hiragana}\p{Katakana}\p{Hangul}ー])')
 
 
 def sha(path):
@@ -1358,7 +1364,9 @@ def main():
                     detect=options.pop('detect_language', False))
                 if probes:
                     language_detections.append(dict(source_range=[start, stop], language=selected_language, probes=probes))
-                aligned = model.align(clip, text, language=selected_language,
+                # Space-prefixed Latin words have different Whisper tokens.
+                # Keep source text intact; only separate scripts in its prompt.
+                aligned = model.align(clip, SCRIPT_BOUNDARY.sub(' ', text), language=selected_language,
                     original_split=True, regroup=False, token_step=80, max_word_dur=options.pop('max_word_dur', 4.),
                     word_dur_factor=options.pop('word_dur_factor', 3.), nonspeech_skip=5., suppress_silence=True,
                     dynamic_heads=options.pop('dynamic_heads', args.dynamic_heads), verbose=None, **options)

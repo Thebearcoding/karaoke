@@ -3680,13 +3680,14 @@ class AlignmentIntegrity(unittest.TestCase):
         from unittest.mock import Mock, patch
         from align_lyrics_whisper import main
 
-        lines, starts = ['Guten Morgen', 'Komm zurück', 'あしたも歌おう'], [1., 4., 8.]
+        lines, starts = ['Guten Morgen', 'Komm zurück', 'あしたもLOVE歌おう'], [1., 4., 8.]
+        prompt_lines = ['Guten Morgen', 'Komm zurück', 'あしたも LOVE 歌おう']
         recognized = False
         def align(samples, text, **options):
             begin = float(samples[0])
             segments = []
             for line in text.splitlines():
-                start = starts[lines.index(line)]-begin
+                start = starts[prompt_lines.index(line)]-begin
                 words = [dict(word=word, start=start+i*.4, end=start+(i+1)*.4, probability=.9)
                          for i, word in enumerate(line.split())]
                 if line == lines[1] and not (recognized or options.get('language') == 'de'):
