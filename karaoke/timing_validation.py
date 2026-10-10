@@ -51,8 +51,10 @@ def localized_constraints(report, blocks):
     for proof in report['constraints']:
         replacement = None
         for observed in observations:
-            index = proof['line']-1-observed['context'][0]
             anchors = observed.get('anchors', [])
+            if not anchors:
+                continue  # Retry summaries contain no localization evidence.
+            index = proof['line']-1-observed['context'][0]
             if not 0 <= index < len(anchors):
                 continue
             anchor = anchors[index]

@@ -278,6 +278,19 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
     """Use recognition only to locate failed lyrics, never as replacement text."""
     from anchors_from_asr import anchors_from_words, observed_context, combine_anchor_views, phrase_conflict
     from lyric_progress import partial_alignment_cues
+    if localize is not None:
+        acoustic_cache, acoustic_request = {}, localize
+        def localize(begin, end, text):
+            key = (begin, end, text)
+            if key not in acoustic_cache:
+                try:
+                    acoustic_cache[key] = acoustic_request(begin, end, text)
+                except ValueError as error:
+                    acoustic_cache[key] = error
+            result = acoustic_cache[key]
+            if isinstance(result, ValueError):
+                raise result
+            return result
     duration = len(audio)/16000
     cues = partial_alignment_cues(lines, [block], duration, language)
     bad = {i for i in range(*block['range']) if cues[i]['status'] != 'candidate'}
@@ -505,6 +518,30 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                     attempt['error'] = str(error)
                     candidate = None
             attempt['result'] = candidate
+            if (localize is not None and budget >= 2 and
+                    any(anchors[i]['status'] != 'candidate' for i in range(start, stop_line)) and
+                    not valid_recovery(candidate, lines[cf+left:cs+left], ae-ab)):
+                # Missing recognition is not missing singing. Locate the known
+                # text in both audio views before repeated attention retries
+                # spend the budget. These bounds only schedule new alignment.
+                budget -= 2
+                try:
+                    evidence = localize(ab, ae, '\n'.join(lines[cf+left:cs+left]))
+                    attempt['acoustic_search'] = evidence
+                    located = acoustic_line_anchors(lines[cf+left:cs+left], evidence['views'], ab, ae)
+                    recovered = [i for i in range(start, stop_line)
+                        if anchors[i]['status'] != 'candidate' and located[i-cf]['status'] == 'candidate']
+                    if recovered:
+                        refined = list(anchors)
+                        for i in recovered:
+                            refined[i] = located[i-cf]
+                        narrowed = [b for b in alignment_blocks(refined, audio)
+                                    if b[0] < stop_line and b[1] > start]
+                        anchors[:] = refined
+                        blocks[block_index+1:] = sorted(narrowed+blocks[block_index+1:], key=priority)
+                        continue
+                except ValueError as error:
+                    attempt['acoustic_search_error'] = str(error)
             if (not valid_recovery(candidate, lines[cf+left:cs+left], ae-ab) and
                     any((a,b) not in tried_cores and targets.intersection(range(a+left,b+left))
                         and any(anchors[i]['status'] == 'candidate' for i in range(a,b))

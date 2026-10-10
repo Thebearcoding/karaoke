@@ -3610,7 +3610,8 @@ def test_local_unrecognized_phrase_uses_acoustic_evidence_without_repeating_reco
         assert result['result']==block['result']
 
 
-def test_narrowed_acoustic_search_finishes_before_unrelated_regions_spend_its_budget():
+@pytest.mark.parametrize('budget', [4, 5])
+def test_narrowed_acoustic_search_finishes_before_unrelated_regions_spend_its_budget(budget):
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines,starts=['alpha','bravo','charlie','delta','omega'],[1.,12.,25.,45.,60.]
     def segment(text,begin,collapsed=False):
@@ -3633,8 +3634,8 @@ def test_narrowed_acoustic_search_finishes_before_unrelated_regions_spend_its_bu
             offset+=len(t)+1
         return dict(views=[units,units])
     result=recover_with_local_asr(block,lines,np.zeros(65*16000),'English',recognize,align,
-        localize=localize,force_global=True,max_alignment_attempts=5)
-    assert calls==['\n'.join(lines[:3]),'bravo']
+        localize=localize,force_global=True,max_alignment_attempts=budget)
+    assert calls[:2]==['\n'.join(lines[:3]),'bravo']
     assert result['result']['segments'][1]['words']==segment('bravo',0.)['words']
     assert result['result']['segments'][3]==original[3]
     assert result['asr_localizations'][0]['accepted_lines']==[2]
@@ -4311,7 +4312,8 @@ def test_failed_long_recognition_uses_bounded_overlapping_context_without_duplic
         assert narrow and len(narrow)<=5
     assert all(a[1]>b[0] for a,b in zip(narrow,narrow[1:]))
     assert result['result']['segments'][0]==original[0]
-    assert len(acoustic_calls)==int(support.startswith('acoustic'))
+    assert bool(acoustic_calls)==support.startswith('acoustic')
+    assert len(acoustic_calls)==len(set(acoustic_calls))
     assert bool(original_calls)==(support.startswith('original') and support not in ('original_unneeded','original_budget'))
     assert len(original_calls)<=5
     if support in ('complete','partial','acoustic','acoustic_partial','acoustic_tail','acoustic_interior_disagrees',

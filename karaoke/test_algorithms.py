@@ -842,6 +842,12 @@ class SubtitleIntegrity(unittest.TestCase):
                     report['constraints'].append(report['lines'][0]['proposed_constraints'][0])
                     report['lines']=[]
                 active,retired=localized_constraints(report,[dict(asr_localizations=[observed])])
+                summaries=[dict(reason='followup_did_not_improve_coverage',accepted_lines=[1]),
+                           dict(context=[0,1],anchors=[],reason='insufficient_recognition_support')]
+                self.assertEqual(localized_constraints(report,[dict(asr_localizations=[
+                    summaries[0],observed,summaries[1]])]),(active,retired))
+                self.assertEqual(localized_constraints(report,[dict(asr_localizations=summaries)]),
+                                 (report['constraints'],[]))
                 self.assertEqual(proof['onset'],1.)
                 self.assertEqual(bool(retired),mode in ('complete','overlapping_old_phrase','wrong_candidate','cached_proof'))
                 self.assertEqual(bool(timing_violations(result,active)),mode not in ('complete','overlapping_old_phrase'))
