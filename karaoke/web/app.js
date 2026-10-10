@@ -7,12 +7,13 @@ const $ = id => document.getElementById(id);
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const time = seconds => `${Math.floor(Math.max(0, seconds || 0)/60)}:${String(Math.floor(Math.max(0, seconds || 0)%60)).padStart(2,'0')}`;
+const requestOnly = matchMedia('(max-width:760px), (max-width:1000px) and (max-height:500px)');
 let savedPlayback;
 try { savedPlayback = JSON.parse(sessionStorage.getItem('karaokePlayback')); } catch {}
 let tabStorage;
 try { tabStorage = localStorage; } catch {}
-const tabs = new PlaybackTabs(tabStorage, `${Date.now()}-${Math.random()}`, savedPlayback);
-let playback = new LocalPlayback(tabs.read().playback);
+const tabs = new PlaybackTabs(tabStorage, `${Date.now()}-${Math.random()}`, savedPlayback, !requestOnly.matches);
+let playback = new LocalPlayback(tabs.enabled ? tabs.read().playback : {});
 if (!tabs.record.owner) tabs.write(playback.save(), {claim:true});
 let tabChange = tabs.record.change;
 let finishRetry, finishSending, finishDelay = 1000, queueSyncError = false, connected = false;
@@ -31,7 +32,7 @@ const videoSearch = createVideoSearch(renderVideoResults, fetch, query => search
 const navigation = createViewHistory(history, () => ({query:$('song-input').value, title:$('title-input').value,
   filter, view, queueTab, libraryPage, historyQuery:$('history-query').value,
   videoSource, searchOrder, catalogueSelection, search:videoSearch.snapshot(), scroll:scrollY}), restoreView);
-const current = () => playback.entry;
+const current = () => tabs.enabled ? playback.entry : null;
 
 function renderRange(input) {
   const span = Number(input.max) - Number(input.min);
@@ -145,6 +146,7 @@ function retryFinished() {
 }
 
 function switchView(next, {scroll = true} = {}) {
+  if (next === 'player' && !tabs.enabled) next = 'library';
   view = next;
   const mobile = matchMedia('(max-width:1100px)').matches;
   $('library-view').hidden = next !== 'library';
@@ -228,14 +230,14 @@ function renderDiscovery() {
   const recent = historySuggestions(state.history || []).recent.slice(0,4);
   $('home-discovery').hidden = !recent.length || Boolean($('song-input').value.trim() || searchQuery);
   const cached = new Map(library.map(song => [queueKey(song), song]));
-  const signature = JSON.stringify([recent, recent.map(song => {
+  const signature = JSON.stringify([tabs.enabled, recent, recent.map(song => {
     return cached.get(queueKey(song))?.poster;
   })]);
   if (signature === discoverySignature) return;
   discoverySignature = signature;
   $('recent-songs').innerHTML = recent.map(song => {
     const local = cached.get(queueKey(song));
-    return `<div class="recent-song"><button class="recent-preview" data-preview-history="${escape(song.id)}" aria-label="预览：${escape(song.title)}">
+    return `<div class="recent-song"><button class="recent-preview" data-preview-history="${escape(song.id)}" aria-label="${tabs.enabled ? '预览' : '点歌'}：${escape(song.title)}">
       ${local?.poster ? `<img src="${escape(local.poster)}" alt="" loading="lazy">` : `<span class="recent-initial">${escape(song.title.slice(0,1))}</span>`}
       <span class="recent-info"><strong>${escape(song.title)}</strong><span>${escape(song.artist)}</span></span></button>
       <button class="music-add" data-recent-song="${escape(song.id)}" aria-label="再点：${escape(song.title)}">${icon('plus')}<span>再点</span></button></div>`;
@@ -311,18 +313,19 @@ function songRow(song, index, {artists = false, videos = false, local = false, i
   const action = playable ? `<button class="music-add" ${inLibrary ? `data-song="${escape(song.id)}"` : `data-add-video="${index}"`} aria-label="点歌：${escape(song.title)}">${icon('plus')}<span>点歌</span></button>` :
     `<${tag} class="music-add" ${open}>${song.kind === 'album' ? '查看专辑' : catalogueAction ? '查看歌曲' : '打开'} ${icon('arrow')}</${tag}>`;
   const credits = song.artists?.length ? song.artists.map(a => a.id ? `<button data-artist-id="${escape(a.id)}" data-artist-name="${escape(a.name)}">${escape(a.name)}</button>` : escape(a.name)).join(' · ') : local && song.uploader ? `<button data-search-artist="${escape(song.uploader)}">${escape(song.uploader)}</button>` : escape(song.uploader || '—');
+  const artistText = escape(song.artists?.map(a => a.name).join(' · ') || song.uploader || '—');
   const kind = song.kind === 'album' ? '专辑' : song.kind === 'artist' ? '歌手' : song.version || '';
   const status = inLibrary && song.status === 'failed' ? '<span class="library-status is-failed">准备失败</span>' : '';
   const meta = kind || status ? `<div class="music-meta">${kind ? `<span${song.kind === 'album' ? ' class="music-kind"' : ''}>${escape(kind)}</span>` : ''}${status}</div>` : '';
   return `<article class="music-row" ${inLibrary ? `data-card="${escape(song.id)}"` : `data-result="${index}"`} role="row"><span class="music-rank" role="cell">${String(index+1).padStart(2,'0')}</span>
-    <div class="music-song" role="cell"><${tag} class="music-cover" ${open} aria-label="${playable ? '预览' : '打开'}：${escape(song.title)}">${thumbnail}<span>${icon(playable ? 'play' : 'arrow')}</span></${tag}>
-      <div class="music-title"><h3><${tag} ${open} title="${escape(song.title)}">${escape(song.title)}</${tag}></h3>${meta}${inLibrary && song.status === 'running' ? `<div class="preparation-slot">${preparationHTML(song)}</div>` : ''}</div></div>
+    <div class="music-song" role="cell"><${tag} class="music-cover" ${open} aria-label="${playable ? tabs.enabled ? '预览' : '点歌' : '打开'}：${escape(song.title)}">${thumbnail}<span>${icon(playable ? tabs.enabled ? 'play' : 'plus' : 'arrow')}</span></${tag}>
+      <div class="music-title"><h3><${tag} ${open} title="${escape(song.title)}"><span class="music-name">${escape(song.title)}</span><span class="music-compact-artist"><span>${artistText}</span>${kind ? `<small>${escape(kind)}</small>` : ''}</span></${tag}></h3>${meta}${inLibrary && song.status === 'running' ? `<div class="preparation-slot">${preparationHTML(song)}</div>` : ''}</div></div>
     <div class="music-credits" role="cell" title="${escape(song.artists?.map(a => a.name).join(' · ') || song.uploader || '')}">${inLibrary ? `<div class="song-info-row">${credits}${preparationElapsedHTML(song)}</div>` : credits}</div>
     <div class="music-album" role="cell" title="${escape(song.album || '')}">${escape(song.album || '—')}</div>
     <div class="music-facts"><div class="music-plays${playCount(song.views) === null ? ' is-empty' : ''}" role="cell">${playCount(song.views) !== null ? `${formatPlays(song.views)}<small>播放</small>` : '—'}</div>
     <div class="music-duration${!song.duration ? ' is-empty' : ''}" role="cell">${song.duration ? time(song.duration) : '—'}</div></div>
     <div class="music-actions" role="cell">${action}</div>
-    <div class="music-alternative" role="cell">${(local || song.provider === 'youtube_music') && playable ? `<button class="find-mv" ${inLibrary ? `data-find-mv-song="${escape(song.id)}"` : `data-find-mv="${index}"`} aria-label="找 MV：${escape(song.title)}">找 MV</button>` : videos ? `<a class="find-mv" href="${escape(song.url)}" target="_blank" rel="noopener noreferrer">YouTube ↗</a>` : ''}</div></article>`;
+    <div class="music-alternative" role="cell">${(local || song.provider === 'youtube_music') && playable ? `<button class="find-mv" ${inLibrary ? `data-find-mv-song="${escape(song.id)}"` : `data-find-mv="${index}"`} aria-label="找 MV：${escape(song.title)}"><span class="find-mv-prefix">找 </span>MV</button>` : videos ? `<a class="find-mv" href="${escape(song.url)}" target="_blank" rel="noopener noreferrer" aria-label="在 YouTube 打开"><span class="find-mv-prefix">YouTube </span>↗</a>` : ''}</div></article>`;
 }
 
 function updateSearchRows(rows) {
@@ -334,7 +337,7 @@ function updateSearchRows(rows) {
     const occurrence = occurrences.get(source) || 0;
     occurrences.set(source, occurrence+1);
     const key = `${source}:${occurrence}`;
-    const content = JSON.stringify([song.provider, song.kind, song.title, song.thumbnail, song.uploader, song.artists, song.version, song.album, song.views, song.duration]);
+    const content = JSON.stringify([tabs.enabled, song.provider, song.kind, song.title, song.thumbnail, song.uploader, song.artists, song.version, song.album, song.views, song.duration]);
     let node = existing.get(key);
     existing.delete(key);
     if (node && node.searchContent !== content) { node.remove(); node = null; }
@@ -491,6 +494,12 @@ function showQueuedSong(id) {
 
 let closeCachedPreview = null;
 function previewVideo(song) {
+  if (!tabs.enabled) {
+    const position = queuePosition(song, state.entries);
+    if (position) showQueuedSong(state.entries[position-1].id);
+    else addVideo(song);
+    return;
+  }
   if (current() && queuePosition(song, [current()])) { switchView('player'); return; }
   previewSong = song;
   $('preview-title').textContent = song.title;
@@ -592,10 +601,11 @@ function renderQueue() {
     const active = entry.id === state.current_id;
     const finishing = playback.isFinished(entry.id);
     const retry = preparationRetry(entry);
+    const coverTag = tabs.enabled ? 'button' : 'span';
     const status = entry.status === 'running' || !statusText(entry) ? '' : `<span class="entry-status ${entry.status === 'queued' ? 'preparing' : ''}">${escape(statusText(entry))}</span>`;
     return `<article class="queue-entry ${active ? 'current' : ''}" data-entry="${escape(entry.id)}"><span class="entry-number">${active && state.playing ? '♫' : String(i+1).padStart(2,'0')}</span>
-      <button class="entry-cover" data-action="preview" aria-label="${active ? '查看播放' : '预览'}：${escape(entry.title)}">${entry.poster ? `<img class="entry-art" src="${escape(entry.poster)}" alt="">` : `<span class="entry-art">♪</span>`}</button>
-      <div class="entry-info"><h3 class="entry-title"><button data-action="preview">${escape(entry.title)}</button></h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || 'YouTube 视频')}</p>${finishing ? '<span class="entry-status">等待同步移除</span>' : entry.status === 'failed' ? '' : preparationElapsedHTML(entry) || status}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : entry.status === 'failed' ? `<p class="entry-error">${escape(statusText(entry))}</p>` : ''}</div>
+      <${coverTag} class="entry-cover" ${tabs.enabled ? `data-action="preview" aria-label="${active ? '查看播放' : '预览'}：${escape(entry.title)}"` : ''}>${entry.poster ? `<img class="entry-art" src="${escape(entry.poster)}" alt="">` : `<span class="entry-art">♪</span>`}</${coverTag}>
+      <div class="entry-info"><h3 class="entry-title">${tabs.enabled ? `<button data-action="preview">${escape(entry.title)}</button>` : escape(entry.title)}</h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || 'YouTube 视频')}</p>${finishing ? '<span class="entry-status">等待同步移除</span>' : entry.status === 'failed' ? '' : preparationElapsedHTML(entry) || status}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : entry.status === 'failed' ? `<p class="entry-error">${escape(statusText(entry))}</p>` : ''}</div>
       <div class="entry-tools">${retry && !finishing ? `<button data-action="${retry.action}" aria-label="${retry.label}：${escape(entry.title)}">${icon('restart')}${retry.label}</button>` : ''}<button data-action="top" aria-label="置顶：${escape(entry.title)}" ${!finishing && queueToTop(state.entries, entry.id, state.playing ? state.current_id : null) ? '' : 'disabled'}>${icon('up')}置顶</button><button data-action="remove" aria-label="移除：${escape(entry.title)}" ${finishing ? 'disabled' : ''}>${icon('trash')}移除</button></div></article>`;
   }).join('');
 }
@@ -773,7 +783,7 @@ function renderState() {
   if (!receivedRoom) return;
   const wasReady = current()?.status === 'completed';
   const previous = current()?.id;
-  state = {...playback.reconcile(roomState), revision:++viewRevision};
+  state = {...(tabs.enabled ? playback.reconcile(roomState) : {...roomState, ...playback.state, current_id:null}), revision:++viewRevision};
   if (current()?.id !== previous) savePlayback();
   connectEvents();
   library = roomState.library || [];
@@ -788,6 +798,7 @@ function renderState() {
 }
 
 async function activate() {
+  if (!tabs.enabled) return false;
   loadError = '';
   claimPlayback();
   const session = tabs.record.session;
@@ -993,6 +1004,7 @@ for (const [id, step] of [['lead-down', -5], ['lead-up', 5]]) {
 }
 $('storage-form').onsubmit = async event => {
   event.preventDefault();
+  if (!tabs.enabled) return;
   $('storage-save').disabled = true;
   try {
     acceptState(await request('/v1/storage', {limit_gib:Number($('storage-limit').value)}));
@@ -1004,6 +1016,7 @@ $('seek').oninput = () => { renderRange($('seek')); seeking = true; $('current-t
 $('seek').onchange = async () => { await command('seek', {position:Number($('seek').value)}); seeking = false; };
 try { sessionStorage.removeItem('karaokeVolume'); } catch {}
 async function fullscreen() {
+  if (!tabs.enabled) return;
   switchView('player');
   try { if (document.fullscreenElement) await document.exitFullscreen(); else await $('player-stage').requestFullscreen(); }
   catch { toast('当前浏览器不支持全屏播放'); }
@@ -1017,13 +1030,25 @@ document.addEventListener('fullscreenchange', () => {
   (fullscreen ? $('player-stage') : transportHome).append(transport);
 });
 document.addEventListener('keydown', event => {
-  if ($('video-preview').open) return;
+  if (!tabs.enabled || $('video-preview').open) return;
   if (['INPUT','TEXTAREA','BUTTON','SELECT','SUMMARY'].includes(event.target.tagName) || event.ctrlKey || event.metaKey || event.altKey) return;
   if (event.code === 'Space') { event.preventDefault(); togglePlay(); }
   if (event.key.toLowerCase() === 'n') nextSong();
   if (event.key.toLowerCase() === 'f') fullscreen();
 });
 window.addEventListener('resize', () => switchView(view, {scroll:false}));
+requestOnly.addEventListener('change', () => {
+  if (tabs.owns()) savePlayback();
+  tabs.setEnabled(!requestOnly.matches);
+  player.clear();
+  playback = new LocalPlayback(tabs.enabled ? {...tabs.read().playback, playing:false} : {});
+  if ($('video-preview').open) $('video-preview').close();
+  librarySignature = queueSignature = '';
+  // A resize must not restart audio or restore a hidden playback page.
+  renderState();
+  if (searchSnapshot) renderVideoResults(searchSnapshot);
+  switchView(view, {scroll:false});
+});
 for (const [selector, variable] of [['.topbar', '--header-height'], ['.transport', '--transport-height']]) {
   new ResizeObserver(([entry]) => document.documentElement.style.setProperty(variable, `${entry.target.getBoundingClientRect().height}px`)).observe(document.querySelector(selector));
 }
@@ -1051,6 +1076,7 @@ function connectEvents() {
   };
 }
 function savePlayback(position) {
+  if (!tabs.enabled) return;
   lastPlaybackSave = Date.now();
   const saved = playback.save(position);
   if (!tabs.write(saved)) { followPlayback(); return; }
@@ -1058,6 +1084,7 @@ function savePlayback(position) {
   try { sessionStorage.setItem('karaokePlayback', JSON.stringify(saved)); } catch {}
 }
 function followPlayback() {
+  if (!tabs.enabled) return;
   const record = tabs.read();
   if (record.change === tabChange) return;
   tabChange = record.change;
@@ -1068,6 +1095,7 @@ function followPlayback() {
   renderState(); renderConnection();
 }
 function claimPlayback() {
+  if (!tabs.enabled) return false;
   followPlayback();
   if (tabs.owns()) return false;
   playback.reconcile(roomState);

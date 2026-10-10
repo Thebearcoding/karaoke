@@ -23,8 +23,9 @@ const bounded = (value, min, max, fallback) => Number.isFinite(value) ? Math.max
 // One tab owns audio. Saved progress from an older owner cannot overwrite a
 // newer tab's commands; storage is scoped to this browser, never the room.
 export class PlaybackTabs {
-  constructor(storage, id, fallback = {}) {
+  constructor(storage, id, fallback = {}, enabled = true) {
     this.storage = storage; this.id = id; this.key = 'karaokeBrowserPlayback';
+    this.enabled = enabled;
     this.sequence = 0;
     this.record = {revision:0, change:null, session:null, owner:null, playback:fallback};
     this.read();
@@ -41,10 +42,12 @@ export class PlaybackTabs {
     return this.record;
   }
   owns(session) {
+    if (!this.enabled) return false;
     const current = this.read();
     return current.owner === this.id && (session === undefined || current.session === session);
   }
   write(playback, {claim = false, release = false} = {}) {
+    if (!this.enabled) return false;
     const previous = this.record.change, current = this.read();
     if (!claim && (current.owner !== this.id || current.change !== previous)) return false;
     const change = `${this.id}:${++this.sequence}`;
@@ -52,6 +55,11 @@ export class PlaybackTabs {
       owner:release ? null : this.id, playback};
     try { this.storage?.setItem(this.key, JSON.stringify(this.record)); } catch {}
     return this.read().change === change;
+  }
+  setEnabled(enabled) {
+    if (!enabled && this.owns())
+      this.write({...this.record.playback, playing:false}, {release:true});
+    this.enabled = enabled;
   }
 }
 

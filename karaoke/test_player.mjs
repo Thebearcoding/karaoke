@@ -36,6 +36,32 @@ test('browser tabs share a single audio owner and reject saves from the previous
   assert.equal(anotherBrowser.owns(),true);
 });
 
+test('song-request screens cannot claim audio, restore playback, or overwrite the playing tab', () => {
+  const values = new Map(), storage = {getItem:key=>values.get(key), setItem:(key,value)=>values.set(key,value)};
+  const desktop = new PlaybackTabs(storage, 'desktop');
+  const saved = {entry:{id:'song',job_id:'job'},position:12,playing:true};
+  desktop.write(saved, {claim:true});
+  const phone = new PlaybackTabs(storage, 'phone', saved, false);
+  assert.equal(phone.owns(), false);
+  assert.equal(phone.write(saved, {claim:true}), false);
+  assert.equal(phone.write({...saved,position:99}, {release:true}), false);
+  phone.setEnabled(false);
+  assert.equal(desktop.owns(), true);
+  assert.deepEqual(desktop.read().playback, saved);
+
+  // Shrinking the playing tab stops its session; enlarging does not autoplay.
+  const session = desktop.record.session;
+  desktop.setEnabled(false);
+  assert.equal(desktop.owns(session), false);
+  assert.equal(desktop.read().owner, null);
+  assert.equal(desktop.read().playback.playing, false);
+  assert.equal(desktop.read().playback.position, 12);
+  desktop.setEnabled(true);
+  assert.equal(desktop.owns(), false);
+  assert.equal(desktop.write(desktop.read().playback, {claim:true}), true);
+  assert.equal(desktop.owns(session), false);
+});
+
 test('interleaved tab claims and delayed writes cannot hide an ownership change behind a revision', () => {
   const values = new Map();
   let interleave;
