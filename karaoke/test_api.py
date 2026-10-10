@@ -2855,13 +2855,17 @@ def test_credited_section_labels_are_not_sung_and_do_not_truncate_the_following_
 
 
 @pytest.mark.parametrize('header', ['[Singer《Evening》歌词]', '[Singer "Evening" 가사]',
-    '[Paroles de "Evening"]', '[Songtext zu „Evening“]', '["Evening" Lyrics]'])
+    '[Paroles de "Evening"]', '[Songtext zu „Evening“]', '["Evening" Lyrics]',
+    '[Singer「Evening」歌詞]', '[Singer『Evening』歌詞]'])
 def test_localized_lyric_headers_require_the_quoted_work_name(header):
     from karaoke.lyric_lookup import published_lyric_lines
     body = ['We keep singing [with you]', '[Oh!]', 'Paroles de ma vie']
     assert published_lyric_lines('\n'.join([header, *body]), 'Evening', ['Singer']) == (body, [1])
     other = header.replace('Evening', 'Another song')
     assert published_lyric_lines('\n'.join([other, *body]), 'Evening', ['Singer']) == ([other, *body], [])
+    # Quoting the work inside a sung line is not a standalone lyric-page header.
+    sung = header.strip('[]')
+    assert published_lyric_lines('\n'.join([sung, *body]), 'Evening', ['Singer']) == ([sung, *body], [])
 
 
 @pytest.mark.parametrize('provider', ['line_music','lrclib'])

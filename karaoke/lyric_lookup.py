@@ -375,7 +375,7 @@ def published_lyric_lines(text, title, artists=(), *, album=None):
                 continue
         # These are publisher section headings, not inferred content. Retain
         # unrecognized brackets and all inline backing-vocal responses.
-        quoted_titles = re.findall(r'["“„《]([^"“”》]+)["“”》]', line)
+        quoted_titles = re.findall(r'["“„《「『]([^"“”》」』]+)["“”》」』]', line)
         lyric_header = (line.startswith('[') and line.endswith(']') and
             re.search(r'lyrics?|歌詞|歌词|가사|paroles|songtext', line, re.I) and any(
                 identity(name, title=True) & identity(title, title=True) for name in quoted_titles))
