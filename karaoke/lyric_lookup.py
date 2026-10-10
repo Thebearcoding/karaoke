@@ -944,7 +944,19 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 text_sha256=hashlib.sha256('\n'.join(text).encode()).hexdigest())
         from .lyric_consensus import fetch_lyric_consensus, resolve_recording_artists
         lines, report = fetch_lyric_consensus(song, metadata, duration, cache, read_description, preserve_title)
-        if not lines or (parsed and report.get('crosscheck', {}).get('status') == 'insufficient_sources'):
+        review = report.get('crosscheck', {})
+        recording = next((r.get('recording_identity') or {} for r in
+            [*review.get('sources', []), *review.get('unavailable_sources', [])]
+            if r.get('provider') == 'youtube_music' and
+            (r.get('recording_identity') or {}).get('video_id') == metadata.get('id')), {})
+        channel_name = metadata.get('channel') or metadata.get('uploader')
+        # A channel is not a performer credit. Only reuse its bilingual name
+        # when Music identifies that exact channel as this recording's artist.
+        artist_alias = channel_name if channel_name and any(
+            a.get('id') and a['id'] == metadata.get('channel_id') for a in recording.get('artists') or []) and (
+            identity(channel_name) & identity(recording.get('artist'))) and not (
+            identity(channel_name) <= identity(song.get('artist'))) else None
+        if not lines or ((parsed or artist_alias) and review.get('status') == 'insufficient_sources'):
             retained_lines, retained_report, retained_song = lines, report, dict(song)
             original = {key: song.get(key) for key in ('title', 'artist')}
             previous, attempts, accepted = report, [], False
@@ -956,14 +968,10 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                     continue
                 before = dict(song)
                 review = report.get('crosscheck', {})
-                recording = next((r.get('recording_identity') or {} for r in
-                    [*review.get('sources', []), *review.get('unavailable_sources', [])]
-                    if r.get('provider') == 'youtube_music' and
-                    (r.get('recording_identity') or {}).get('video_id') == metadata.get('id')), {})
-                confirmed_alias = recording.get(key)
-                if key == 'artist' and not retained_lines and recording.get('artists'):
+                confirmed_alias = artist_alias if key == 'artist' and artist_alias else recording.get(key)
+                if key == 'artist' and not artist_alias and not retained_lines and recording.get('artists'):
                     confirmed_alias, artist_resolution = resolve_recording_artists(recording, cache)
-                if confirmed_alias and not identity(confirmed_alias, title=key == 'title') & identity(song.get(key), title=key == 'title'):
+                if confirmed_alias and not identity(confirmed_alias, title=key == 'title') <= identity(song.get(key), title=key == 'title'):
                     song[key] = confirmed_alias
                     description_text = None
                 else:

@@ -1395,6 +1395,42 @@ def test_lyric_identity_reuses_platform_native_alias_without_model(tmp_path, mon
         assert result['provenance']['lyric_lookup']['identity_recovery']['recovered']
 
 
+@pytest.mark.parametrize('scenario', ['recover', 'explicit', 'other_video', 'other_channel',
+                                    'other_artist', 'no_corroboration', 'already_corroborated'])
+def test_single_lyric_source_recovers_linked_channel_bilingual_artist(tmp_path, monkeypatch, scenario):
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    from openai import OpenAIError
+    romanized = ['Yozora ni chiisana hoshi ga hikaru']
+    native = ['夜空に小さな星が光る']
+    calls = []
+    def fetch(song, *args, **kwargs):
+        calls.append(song['artist'])
+        recovered = song['artist'] == 'Hikari Ray 光レイ' and scenario != 'no_corroboration'
+        return (native if recovered else romanized), dict(
+            provider='utaten' if recovered else 'lrclib', language='Japanese' if recovered else 'Swahili',
+            crosscheck=dict(status='corroborated' if recovered or scenario == 'already_corroborated' else 'insufficient_sources',
+                unavailable_sources=[dict(provider='youtube_music', recording_identity=dict(
+                    title='Evening', artist='Hikari Ray',
+                    video_id='bbbbbbbbbbb' if scenario == 'other_video' else 'aaaaaaaaaaa',
+                    artists=[dict(name='Hikari Ray', id='artist-channel')]))]))
+    monkeypatch.setattr(lyric_consensus, 'fetch_lyric_consensus', fetch)
+    monkeypatch.setattr(lyric_lookup, 'extract_song_metadata',
+        lambda *a: (_ for _ in ()).throw(OpenAIError('metadata model unavailable')))
+    request = dict(url=URL)
+    if scenario == 'explicit':request['artist'] = 'Hikari Ray'
+    result = lyric_lookup.prepare_online_lyrics(request,
+        dict(id='aaaaaaaaaaa', track='Evening', artist='Hikari Ray', description='Album credits',
+             channel='Other Singer 別の歌手' if scenario == 'other_artist' else 'Hikari Ray 光レイ',
+             channel_id='other-channel' if scenario == 'other_channel' else 'artist-channel'),
+        30, StageCache(tmp_path), 'unused', None)
+    assert result['lines'] == (native if scenario == 'recover' else romanized)
+    assert result['language'] == ('Japanese' if scenario == 'recover' else 'Swahili')
+    assert calls == ['Hikari Ray'] + (['Hikari Ray 光レイ'] if scenario in ('recover', 'no_corroboration') else [])
+    if scenario == 'recover':
+        assert result['provenance']['lyric_lookup']['identity_recovery']['recovered']
+
+
 @pytest.mark.parametrize('scenario', ['recover', 'explicit', 'other_video', 'subscription_channel', 'usable', 'artist_error'])
 def test_lyric_identity_resolves_recording_artist_id_only_after_lookup_fails(tmp_path, monkeypatch, scenario):
     from urllib.parse import parse_qs, urlsplit
