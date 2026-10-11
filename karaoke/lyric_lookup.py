@@ -37,7 +37,7 @@ _featured_title = re.compile(
     r'(.+?)\s*(?:[\[(](?:(?:feat\.?|featuring|ft\.?|with)\s+|合作音乐人\s*[:：]\s*)([^\])]+)[\])]|'
     r'\s+(?:feat\.?|featuring|ft\.?)\s+(.+))', re.I)
 _section_label = re.compile(
-    r'\[\s*(?:verse|chorus|pre[- ]?chorus|post[- ]?chorus|bridge|intro|outro|instrumental|interlude|refrain|solo|'
+    r'\[\s*(?:verse|chorus|pre[- ]?chorus|post[- ]?chorus|bridge|intro|outro|instrumental|interlude|refrain|(?:(?:piano|guitar)\s+)?solo|'
     r'主歌|副歌|前副歌|後副歌|后副歌|前奏|間奏|间奏|尾奏|橋段|桥段|'
     r'couplet|pr[ée][- ]?refrain|post[- ]?refrain|pont|ch(?:œ|oe)ur|strophe|'
     r'المقطع(?:\s+\S+)?|(?:بعد\s+)?اللازمة)'

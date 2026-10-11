@@ -3157,11 +3157,11 @@ def test_lrc_credit_flags_and_unicode_colons_cannot_become_lyrics(prefix, colon)
 
 
 @pytest.mark.parametrize('label', ['[Verse 2: First singer]', '[ Solo: Guitarist / Harmony: Second guitarist ]',
-    '[Chorus: Singer & Guest]', '[Instrumental]', '[Bridge：Guest]', '[主歌2：Singer]', '[後副歌]',
+    '[Chorus: Singer & Guest]', '[Instrumental]', '[Piano Solo]', '[Guitar Solo: Guest]', '[Bridge：Guest]', '[主歌2：Singer]', '[後副歌]',
     '[Couplet 1 : Singer, Guest, ensemble]', '[Strophe 2]', '[المقطع الأول]', '[بعد اللازمة]'])
 def test_credited_section_labels_are_not_sung_and_do_not_truncate_the_following_verse(label):
     from karaoke.lyric_lookup import published_lyric_lines
-    body = ['We keep singing (oh, oh)', 'And then we sing another verse', '[Oh!]', 'A solo voice tonight']
+    body = ['We keep singing (oh, oh)', 'And then we sing another verse', '[Oh!]', '[A solo voice tonight]']
     lines, excluded = published_lyric_lines('\n'.join([body[0], label, *body[1:]]), 'Evening')
     assert lines == body and excluded == [2]
 
@@ -3946,30 +3946,32 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
         lambda *a:pytest.fail('A complete alignment ran ASR'),align) is good
 
 
-def test_partial_word_collapse_localizes_the_whole_phrase_before_merging_fallback():
+@pytest.mark.parametrize('offset', [0., 600.])
+def test_partial_word_collapse_localizes_the_whole_phrase_before_merging_fallback(offset):
     from copy import deepcopy
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines = ['earlier verse', 'we carry every dream', 'the next verse']
     def segment(text, start):
         return dict(words=[dict(word=word, start=start+j*.4, end=start+(j+1)*.4)
                            for j, word in enumerate(text.split())])
-    segments = [segment(text, start) for text, start in zip(lines, [1.,4.,18.])]
+    segments = [segment(text, start) for text, start in zip(lines, [1.+offset,4.+offset,18.+offset])]
     segments[1]['words'][2]['end'] = segments[1]['words'][2]['start']
-    block = dict(range=[0,3], context=[0,3], source_range=[0.,25.], result=dict(segments=segments))
+    block = dict(range=[0,3], context=[0,3], source_range=[0.,25.+offset], result=dict(segments=segments))
     original = deepcopy(block)
     observed = []
     def recognize(begin, end):
         observed.append((begin,end))
-        return dict(segments=[segment(text,start-begin) for text,start in zip(lines,[1.,13.,18.])])
+        return dict(segments=[segment(text,start-begin) for text,start in zip(lines,[1.+offset,13.+offset,18.+offset])])
     def align(begin, end, text, **kwargs):
-        return dict(segments=[segment(line,start-begin) for line,start in zip(lines,[1.,13.,18.])
+        return dict(segments=[segment(line,start-begin) for line,start in zip(lines,[1.+offset,13.+offset,18.+offset])
                               if line in text.splitlines()])
-    result = recover_with_local_asr(block, lines, np.zeros(25*16000), 'English', recognize, align)
+    result = recover_with_local_asr(block, lines, np.zeros(int((25.+offset)*16000)), 'English', recognize, align,
+                                    force_global=bool(offset))
     assert block == original and len(observed) == 1
-    assert observed[0][1]-observed[0][0] < 25
+    assert observed[0] == (0.,25.+offset) if offset else observed[0][1]-observed[0][0] < 25
     assert result['result']['segments'][0] == segments[0]
     assert result['result']['segments'][2] == segments[2]
-    assert result['result']['segments'][1]['words'] == segment(lines[1],13.)['words']
+    assert result['result']['segments'][1]['words'] == segment(lines[1],13.+offset)['words']
     assert result['asr_localizations'][0]['accepted_lines'] == [2]
 
 

@@ -371,10 +371,11 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             report['reason'] = 'deferred_until_missing_lines_are_located'
             continue
         # A long interlude does not invalidate neighbouring lyric anchors.
-        # recognize_audio divides this bounded search into overlapping chunks;
-        # recovered phrase bounds then narrow the acoustic alignment itself.
-        if not 0 <= begin < end <= duration or end-begin > 600:
-            report['reason'] = 'localization_budget_exceeded'
+        # recognize_audio covers the recording in bounded overlapping chunks;
+        # its full duration is not a single model window. Recovered phrase
+        # bounds still narrow the separately budgeted acoustic alignment.
+        if not 0 <= begin < end <= duration:
+            report['reason'] = 'invalid_localization_range'
             continue
         try:
             response = recognize(begin, end)
