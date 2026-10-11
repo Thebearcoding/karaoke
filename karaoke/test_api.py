@@ -4420,17 +4420,19 @@ def test_local_recognition_broadens_once_when_old_neighbours_miss_the_verse():
 
 @pytest.mark.parametrize('fallback,budget,recovers', [
     ('measured',3,True), ('measured',2,False), ('wrong_text',3,False),
-    ('outside',3,False), ('error',3,False), ('primary_passes',3,True)])
+    ('outside',3,False), ('error',3,False), ('primary_passes',3,True),
+    ('misplaced_preferred',3,True), ('misplaced_both',3,False)])
 def test_located_failed_alignment_reuses_bounded_acoustic_fallback(fallback,budget,recovers):
     from copy import deepcopy
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines=['opening phrase','dancing in moonlight','gentle evening','closing words']
-    starts=[1.,4.,7.,10.]
+    starts=[1.,5.,9.,13.] if fallback.startswith('misplaced') else [1.,4.,7.,10.]
+    duration=starts[-1]+2
     def segment(i,begin=0.,collapse=False,shift=0.):
         start=starts[i]+shift-begin
         return dict(words=[dict(word=lines[i],start=start,end=start+(0 if collapse else .8))])
     segments=[segment(i,collapse=i in (1,2)) for i in range(4)]
-    block=dict(range=[0,4],context=[0,4],source_range=[0.,12.],result=dict(segments=segments))
+    block=dict(range=[0,4],context=[0,4],source_range=[0.,duration],result=dict(segments=segments))
     original=deepcopy(block);calls=[]
     def recognize(begin,end):
         return dict(segments=[segment(i,begin) for i in range(4)])
@@ -4438,7 +4440,7 @@ def test_located_failed_alignment_reuses_bounded_acoustic_fallback(fallback,budg
         return dict(segments=[segment(i,begin,shift=.2) for i in range(4)]) if fallback=='primary_passes' else None
     def localize(begin,end,text):
         calls.append((begin,end,text))
-        assert 0<begin<starts[0] and starts[-1]<end<=12.
+        assert 0<begin<starts[0] and starts[-1]<end<=duration
         assert text=='\n'.join(lines)
         if fallback=='error':raise ValueError('No acoustic evidence')
         view=[];offset=0
@@ -4446,14 +4448,20 @@ def test_located_failed_alignment_reuses_bounded_acoustic_fallback(fallback,budg
             view.append(dict(text=line if fallback!='wrong_text' else 'other',first=offset,stop=offset+len(line),
                 start=starts[i]+.2 if fallback!='outside' else end+1,end=starts[i]+1.))
             offset+=len(line)+1
-        return dict(views=[view,deepcopy(view)])
-    result=recover_with_local_asr(block,lines,np.zeros(12*16000),'English',recognize,align,
+        views=[view,deepcopy(view)]
+        if fallback.startswith('misplaced'):
+            for candidate in views if fallback=='misplaced_both' else views[1:]:
+                for i in (1,2):
+                    candidate[i]['start']+=3
+                    candidate[i]['end']+=3
+        return dict(views=views)
+    result=recover_with_local_asr(block,lines,np.zeros(int(duration)*16000),'English',recognize,align,
         force_global=True,max_alignment_attempts=budget,localize=localize)
     assert block==original
     assert result['result']['segments'][0]==segments[0] and result['result']['segments'][-1]==segments[-1]
     assert bool(calls)==(budget>=3 and fallback!='primary_passes')
     if recovers:
-        assert [result['result']['segments'][i]['words'][0]['start'] for i in (1,2)]==[4.2,7.2]
+        assert [result['result']['segments'][i]['words'][0]['start'] for i in (1,2)]==[starts[i]+.2 for i in (1,2)]
     else:
         assert result['result']['segments']==segments
 

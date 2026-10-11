@@ -353,6 +353,10 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
     # Scattered partial word failures do not invalidate the song's anchors.
     # Keep them local even when many lines contain a missing token.
     global_recovery = force_global or bool(quiet) or len(unanchored) >= max(4, (stop-first+4)//5)
+    def supports_anchor(cue, anchor):
+        return (cue['status'] == 'candidate' and
+                not phrase_conflict(cue, anchor, fragments=not global_recovery) and
+                cue['end'] >= anchor['start']-2 and cue['start'] <= anchor['end']+2)
     untimed = {i for i in bad if cues[i]['status'] == 'unresolved_timing'}
     if global_recovery:
         windows = [(first, stop, block['source_range'][0], block['source_range'][1])]
@@ -584,12 +588,23 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 try:
                     evidence = localize(ab, ae, '\n'.join(lines[cf+left:cs+left]))
                     attempt['acoustic_fallback'] = evidence
+                    best_support = 0
                     for view_index in reversed(range(len(evidence['views']))):
                         alternate = acoustic_segments(lines[cf+left:cs+left], evidence['views'][view_index], ab, ae)
                         if alternate is not None:
-                            candidate = alternate
-                            attempt['acoustic_selected_view'] = view_index
-                            break
+                            part = dict(range=[cf+left, cs+left], context=[cf+left, cs+left],
+                                        source_range=[ab, ae], result=alternate)
+                            alternate_cues = partial_alignment_cues(lines, [part], duration, language)
+                            supported = {i for i in selected if supports_anchor(alternate_cues[i], anchors[i-left])}
+                            attempt.setdefault('acoustic_view_support', []).append(
+                                dict(view=view_index, lines=sorted(i+1 for i in supported)))
+                            # A complete word sequence can still occupy the wrong
+                            # phrase. Check location before discarding another view.
+                            if len(supported) > best_support:
+                                candidate, best_support = alternate, len(supported)
+                                attempt['acoustic_selected_view'] = view_index
+                            if best_support == len(selected):
+                                break
                 except ValueError as error:
                     attempt['acoustic_error'] = str(error)
             if (budget >= cost+1 and
@@ -682,8 +697,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 if cue['status'] != 'candidate':
                     continue
                 if anchor['status'] == 'candidate':
-                    if (phrase_conflict(cue, anchor, fragments=not global_recovery) or cue['end'] < anchor['start']-2
-                            or cue['start'] > anchor['end']+2):
+                    if not supports_anchor(cue, anchor):
                         continue
                 else:
                     before = [a for a in anchors[cf:i-left] if a['status'] == 'candidate']
