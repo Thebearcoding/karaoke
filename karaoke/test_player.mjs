@@ -194,7 +194,7 @@ test('removing the current song preserves pause or continuous-play intent', () =
 });
 
 let frame;
-class Context {
+class Context extends EventTarget {
   sampleRate = 48000;
   currentTime = 10;
   state = 'running';
@@ -685,26 +685,97 @@ test('music playback selects the media audio session and requires a running audi
     p.context.resume=async()=>{if (session.type==='playback') p.context.state='running';};
     await p.unlock(); await p.load(song); await p.apply(state,clockOffset());
     assert.equal(p.sources.length,3);
-    p.stop(); p.context.state='interrupted'; p.context.resume=async()=>{};
+    p.stop(); p.unlocked=false; p.context.state='interrupted'; p.context.resume=async()=>{};
     await assert.rejects(p.unlock(),/声音尚未启动/);
     assert.equal(p.unlocked,false);
     await p.apply(state,clockOffset()); assert.equal(p.sources.length,0);
   } finally { delete navigator.audioSession; p.clear(); }
 });
 
-test('an audio interruption pauses the video and local clock until sound is re-enabled', async () => {
-  const p=setup(), waiting=[], errors=[];
-  p.onBuffering=(...args)=>waiting.push(args); p.onError=error=>errors.push(error.message);
+test('transient audio interruptions freeze playback without revoking permission or starting the clock early', async t => {
+  t.mock.timers.enable({apis:['Date'],now:100000});
+  const p=setup(), waiting=[], errors=[], local=new LocalPlayback();
+  const entry={...song,status:'completed'}, room={entries:[entry]};
+  local.select(entry,true); local.command('ready',{},room.entries);
+  p.onBuffering=(position,startedAt)=>{
+    waiting.push(position);
+    local.command('buffering',{position,playback_started_at:startedAt},room.entries);
+  };
+  p.onError=error=>errors.push(error.message);
   try {
-    await p.unlock(); await p.load(song); await p.apply(state,clockOffset());
-    p.context.currentTime=p.anchor+4;
-    const sources=[...p.sources];
-    p.context.state='interrupted'; p.context.onstatechange();
-    assert.equal(p.anchor,null); assert.equal(p.video.paused,true); assert.equal(p.unlocked,false);
-    assert.ok(sources.every(s=>s.stopped)); assert.deepEqual(waiting,[[4,100]]);
-    assert.match(errors[0],/声音已中断/);
-    p.context.onstatechange(); assert.equal(waiting.length,1);
+    await p.unlock(); await p.load(entry); await p.apply(local.reconcile(room),0);
+    let attempts=0;
+    // Some browsers fulfill resume() while the external interruption persists.
+    p.context.resume=async()=>{attempts++;};
+    for (const [index, interrupted] of ['interrupted','suspended','interrupted'].entries()) {
+      const position=4+index;
+      p.context.currentTime=p.anchor+position;
+      const sources=[...p.sources];
+      p.context.state=interrupted; p.context.onstatechange();
+      assert.equal(p.anchor,null); assert.equal(p.video.paused,true); assert.equal(p.unlocked,true);
+      assert.ok(sources.every(s=>s.stopped)); assert.equal(local.state.started_at,null);
+      await p.unlock(); // Pause/next controls must not wait for output readiness.
+      assert.equal(attempts,index);
+      const ready=p.resumeAudio();
+      assert.equal(p.resumeAudio(),ready);
+      let resumed=false; ready.then(()=>{resumed=true;});
+      await new Promise(resolve=>setImmediate(resolve));
+      t.mock.timers.tick(3000);
+      assert.equal(resumed,false); assert.equal(attempts,index+1);
+      assert.equal(local.position(),position); assert.equal(p.sources.length,0);
+      p.context.onstatechange(); assert.equal(waiting.length,index+1);
+      p.context.state='running'; p.context.dispatchEvent(new Event('statechange'));
+      await ready;
+      local.command('ready',{},room.entries);
+      await p.apply(local.reconcile(room),0);
+      assert.equal(p.sources.length,3); assert.equal(p.sources[0].started[1],position);
+      p.context.currentTime=p.audibleWhen; p.tick();
+      assert.equal(p.video.paused,false);
+    }
+    assert.deepEqual(errors,[]);
   } finally { p.clear(); }
+});
+
+test('late audio recovery cannot undo pause, seek, song replacement, or disposal', async () => {
+  for (const action of ['pause','seek','replace','dispose']) {
+    const p=setup();
+    try {
+      await p.unlock(); await p.load(song);
+      p.context.state='interrupted';
+      const stale=p.apply(state,clockOffset());
+      await new Promise(resolve=>setImmediate(resolve));
+      assert.equal(p.sources.length,0);
+      if (action==='pause') await p.apply({...state,playing:false,started_at:null,position:5},clockOffset());
+      if (action==='replace') await p.load({...song,id:'two',job_id:'two'});
+      if (action==='dispose') p.dispose();
+      let current;
+      if (action==='seek') current=p.apply({...state,position:12},clockOffset());
+      p.context.state=action==='dispose'?'closed':'running';
+      p.context.dispatchEvent(new Event('statechange'));
+      await stale; await current;
+      if (action==='seek') {
+        assert.equal(p.sources.length,3); assert.equal(p.sources[0].started[1],12);
+      } else {
+        assert.equal(p.sources.length,0,action); assert.equal(p.anchor,null,action);
+      }
+    } finally { p.clear(); }
+  }
+});
+
+test('a genuine audio resume rejection remains retryable with a new play gesture', async () => {
+  const p=setup(), errors=[];
+  p.onError=error=>errors.push(error.message);
+  try {
+    await p.unlock(); await p.load(song);
+    p.context.state='suspended';
+    p.context.resume=async()=>{throw new DOMException('User gesture required','NotAllowedError');};
+    await p.apply(state,clockOffset());
+    assert.equal(p.unlocked,false); assert.equal(p.sources.length,0);
+    assert.deepEqual(errors,['User gesture required']);
+    p.context.resume=async()=>{p.context.state='running';};
+    await p.unlock(); await p.apply(state,clockOffset());
+    assert.equal(p.sources.length,3);
+  } finally {p.clear();}
 });
 
 test('decoded audio cannot start the clock before the video is ready', async () => {

@@ -191,13 +191,11 @@ export class Player {
 
   async startVideo(pending) {
     try {
+      if (this.unlocked) await this.resumeAudio();
+      if (this.pendingStart !== pending) return;
       // Normal startup primes before the room's ready command. Also protect
       // direct seek/resume callers before scheduling any audio.
       await this.prepareVideo(pending.position, pending.abort.signal);
-      if (this.pendingStart !== pending) return;
-      // Mobile browsers may suspend an idle context while the next song loads.
-      // Reuse the user's existing play permission before scheduling that song.
-      if (this.unlocked && this.context.state !== 'running') await this.context.resume();
       if (this.pendingStart !== pending) return;
       if (this.context.state !== 'running') throw new Error('声音尚未启动，请点播放重试');
       this.pendingStart = null;
@@ -223,7 +221,10 @@ export class Player {
     this.context.onstatechange = () => {
       if (this.context.state !== 'running' && this.anchor !== null) {
         const position = Math.max(0, Math.min(this.scheduledUntil, this.outputTime() - this.anchor));
-        this.failPlayback(new Error('声音已中断，请点播放继续'), position);
+        // An output-route/system interruption does not revoke the user's play
+        // permission. Freeze both tracks and let the current intent resume them.
+        if (this.context.state === 'closed') this.failPlayback(new Error('声音设备已关闭，请刷新播放页'), position);
+        else this.waitForMedia(position);
       }
     };
     this.master = this.context.createGain();
@@ -237,7 +238,32 @@ export class Player {
     this.setLevels(this.levels);
   }
 
+  resumeAudio() {
+    const context = this.context;
+    if (context.state === 'running') return Promise.resolve();
+    // resume() may settle before an iOS interruption has ended. Readiness means
+    // running, not merely a fulfilled promise. Share one event wait across SSE
+    // updates; callers still check their own song/command generation afterward.
+    if (!this.resumingAudio) this.resumingAudio = new Promise((resolve, reject) => {
+      const finish = error => {
+        context.removeEventListener('statechange', changed);
+        error ? reject(error) : resolve();
+      };
+      const changed = () => {
+        if (context.state === 'running') finish();
+        else if (context.state === 'closed') finish(new Error('声音设备已关闭，请刷新播放页'));
+      };
+      context.addEventListener('statechange', changed);
+      Promise.resolve().then(() => context.resume()).then(changed, finish);
+      changed();
+    }).finally(() => { this.resumingAudio = null; });
+    return this.resumingAudio;
+  }
+
   async unlock() {
+    // Transport controls can reuse permission even while the output is
+    // interrupted. In particular, pausing must never wait for sound to resume.
+    if (this.unlocked) return;
     // iOS otherwise treats Web Audio as ambient audio, which the ringer switch mutes.
     try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch { /* Optional API. */ }
     this.ensureContext();

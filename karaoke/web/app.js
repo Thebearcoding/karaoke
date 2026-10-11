@@ -739,11 +739,14 @@ async function syncPlayback() {
       player.onBuffering(position, state.started_at, song.id);
       return;
     }
-    loading = !player.hasAudio(position) || !player.matches(song);
+    loading = !player.hasAudio(position) || !player.matches(song) ||
+      (state.playing && player.context?.state !== 'running');
     updateCover();
     await player.load(song, position);
     if (!tabs.owns() || state.current_id !== song.id || state.revision !== revision || !player.matches(song)) return;
     if (state.playing && !state.started_at && player.unlocked) {
+      await player.resumeAudio();
+      if (!tabs.owns() || state.current_id !== song.id || state.revision !== revision) return;
       const preparing = player.prepareVideo(position);
       updateCover();
       await preparing;

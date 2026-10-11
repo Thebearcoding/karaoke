@@ -28,24 +28,23 @@ export function mountPreview(container, song, onError) {
     button.disabled = false;
   };
   const player = new Player(video, update, () => { pause(); update(0); });
-  const start = async () => {
+  const start = async (automatic = false) => {
     const token = ++generation;
-    button.disabled = true;
+    playing = true;
+    button.textContent = '暂停';
     try {
-      await player.unlock();
+      if (automatic) await player.resumeAudio();
+      else await player.unlock();
+      if (token !== generation) return;
       await player.load(entry, position);
       if (token !== generation) return;
-      playing = true;
-      button.textContent = '暂停';
       await player.apply({current_id:entry.id, position, playing:true, started_at:Date.now()/1000,
         levels:{instrumental:1, backing_vocals:1, lead_vocals:0}}, 0);
     } catch (error) {
       if (token === generation) { pause(); onError(error); }
-    } finally {
-      if (token === generation) button.disabled = false;
     }
   };
-  player.onBuffering = value => { pause(); update(value); start(); };
+  player.onBuffering = value => { pause(); update(value); start(true); };
   player.onError = error => { pause(); onError(error); };
   button.onclick = () => playing ? pause() : start();
   seek.onchange = () => {
