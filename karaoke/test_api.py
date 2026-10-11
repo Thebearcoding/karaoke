@@ -1397,7 +1397,8 @@ def test_lyric_identity_reuses_platform_native_alias_without_model(tmp_path, mon
         dict(id='aaaaaaaaaaa',track='Evening Wind (밤바람)',artist='Starlight',description='Album credits'),
         30,StageCache(tmp_path),'unused',None)
     assert bool(result)==(same_recording and not explicit)
-    assert sum(provider=='youtube_music' for provider,_ in calls)==1
+    assert [artist for provider,artist in calls if provider=='youtube_music'] == (
+        ['Starlight', '별빛'] if same_recording and not explicit and not unusable_body else ['Starlight'])
     if result:
         assert result['artist']=='별빛' and result['lines']==body and result['language']=='Korean'
         assert result['provenance']['lyric_lookup']['identity_recovery']['recovered']
