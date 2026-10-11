@@ -677,9 +677,16 @@ function updateTransport() {
   updateCover();
 }
 
+function introSkipTarget() {
+  return state.playing && tabs.owns() && player.unlocked && player.ready &&
+    player.matches(current()) && !loading && !loadError
+    ? player.introSkipTarget(playback.position()) : null;
+}
+
 function updateCover() {
   const song = current();
   const startingVideo = Boolean(player.pendingStart || player.videoPreparation);
+  $('skip-intro').toggleAttribute('hidden', startingVideo || introSkipTarget() === null);
   if (player.anchor === null || player.entry?.id !== song?.id)
     $('opening-countdown').toggleAttribute('hidden', true);
   $('screen-cover').toggleAttribute('hidden', Boolean(song?.status === 'completed' && !loading && !startingVideo && !loadError && player.unlocked && player.ready));
@@ -1011,6 +1018,10 @@ async function nextSong() {
 document.querySelectorAll('[data-next]').forEach(button => button.onclick = nextSong);
 $('now-song').onclick = () => switchView('player');
 $('transport-restart').onclick = () => command('restart');
+$('skip-intro').onclick = () => {
+  const position = introSkipTarget();
+  if (position !== null) command('seek', {entry_id:state.current_id, position});
+};
 $('lead-toggle').onclick = () => command('toggle_lead');
 for (const [id, step] of [['lead-down', -5], ['lead-up', 5]]) {
   $(id).onclick = () => command('lead', {level:(Math.round(state.levels.lead_vocals * 100) + step) / 100});

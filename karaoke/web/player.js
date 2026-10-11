@@ -339,6 +339,7 @@ export class Player {
     this.abort?.abort();
     this.key = null;
     this.entry = null;
+    this.introStart = null;
     this.stream = null;
     this.ready = false;
     this.video.removeAttribute('src');
@@ -355,6 +356,30 @@ export class Player {
     return Boolean(entry && this.key === entry.id && this.entry?.job_id === entry.job_id &&
       ['mv', 'accompaniment', 'instrumental', 'backing_vocals', 'lead_vocals'].every(
         name => this.entry.artifacts[name] === entry.artifacts[name]));
+  }
+
+  async loadIntro(entry, signal) {
+    this.introStart = null;
+    try {
+      const version = new URL(entry.artifacts.mv, 'http://localhost').searchParams.get('v');
+      if (!version) return;
+      const response = await fetch(`/v1/jobs/${entry.job_id}`, {signal});
+      if (!response.ok) return;
+      const job = await response.json();
+      const opening = job.result?.quality?.countdown_events?.[0];
+      // Use the countdown baked into this exact video, never infer an onset.
+      if (signal.aborted || !this.matches(entry) || job.status !== 'completed' ||
+          job.result?.artifacts?.mv?.sha256 !== version) return;
+      if (opening?.line === 0 && opening.unit === 0 && Number.isFinite(opening.start) &&
+          opening.start > 0 && Number.isFinite(opening.onset) &&
+          opening.onset > opening.start && opening.onset < entry.duration)
+        this.introStart = opening.start;
+    } catch { /* Optional metadata must not prevent playback. */ }
+  }
+
+  introSkipTarget(position) {
+    return Number.isFinite(this.introStart) && Number.isFinite(position) &&
+      position >= 0 && this.introStart - position >= 5 ? this.introStart : null;
   }
 
   async load(entry, position = 0) {
@@ -384,6 +409,7 @@ export class Player {
     this.video.preload = 'auto';
     this.video.src = entry.artifacts.mv;
     this.video.load();
+    this.loadIntro(entry, signal);
     this.stream = new StemStream(this.context, `/v1/jobs/${entry.job_id}/playback`, signal, () => this.pump());
     this.loading = Promise.all([this.stream.prepare(position), videoReady(this.video, signal, position)]).then(() => {
       if (signal.aborted) return;

@@ -619,6 +619,84 @@ test('lead percentage preserves the mix and playback through adjustment, refresh
   p.clear();
 });
 
+test('skip intro lands at the baked count-in and seeks all stems without resetting sound controls', async t => {
+  const entry={...song,status:'completed',artifacts:{...song.artifacts,mv:'video.mp4?v=first'}};
+  const opening={line:0,unit:0,start:12.25,onset:16.25,dots:3,step_seconds:1,settle_seconds:1};
+  const job={status:'completed',result:{artifacts:{mv:{sha256:'first'}},quality:{countdown_events:[opening]}}};
+  let requests=0;
+  t.mock.method(globalThis,'fetch',async url=>{
+    if (url==='/v1/jobs/one') {requests++;return {ok:true,json:async()=>job};}
+    return fetchAudio(url);
+  });
+  let now=100; t.mock.method(Date,'now',()=>now*1000);
+  const p=setup(), local=new LocalPlayback();
+  p.pitchFactory=async()=>({input:{},latency:0,setPitch(){},start(){},stop(){}});
+  try {
+    local.reconcile({entries:[entry]}); local.command('play',{},[entry]);
+    local.command('lead',{level:.35},[entry]); local.command('pitch',{pitch_semitones:2},[entry]);
+    await p.unlock(); await p.load(entry);
+    local.command('ready',{},[entry]);
+    await p.apply({...local.state,current_id:entry.id},0);
+    assert.equal(p.introSkipTarget(0),12.25);
+    assert.equal(p.introSkipTarget(7.25),12.25);
+    for (const position of [-1,7.26,12.25,16.25,19,NaN]) assert.equal(p.introSkipTarget(position),null);
+    const oldSources=[...p.sources], target=p.introSkipTarget(local.position());
+    local.command('seek',{entry_id:entry.id,position:target},[entry]);
+    await p.apply({...local.state,current_id:entry.id},0);
+    assert.ok(oldSources.every(source=>source.stopped));
+    now+=2;
+    assert.equal(local.position(),12.25); // Loading the target consumes no count-in time.
+    await p.load(entry,target); local.command('ready',{},[entry]);
+    await p.apply({...local.state,current_id:entry.id},0);
+    assert.equal(p.video.currentTime,target);
+    assert.ok(p.sources.every(source=>source.started[1]===target));
+    assert.equal(local.state.levels.lead_vocals,.35); assert.equal(local.state.pitch_semitones,2);
+    assert.equal(p.introSkipTarget(target),null); assert.equal(requests,1);
+    local.command('seek',{entry_id:'old song',position:0},[entry]);
+    assert.equal(local.position(),target);
+  } finally {p.dispose();}
+});
+
+test('intro metadata never blocks playback or leaks from an older song or video revision', async t => {
+  const pending=[];
+  t.mock.method(globalThis,'fetch',url=>url==='/v1/jobs/one'
+    ? new Promise(resolve=>pending.push(resolve)) : fetchAudio(url));
+  const entry={...song,artifacts:{...song.artifacts,mv:'video.mp4?v=first'}};
+  const job={status:'completed',result:{artifacts:{mv:{sha256:'first'}},
+    quality:{countdown_events:[{line:0,unit:0,start:12,onset:16}]}}};
+  const p=setup();
+  try {
+    await p.load(entry); assert.equal(p.ready,true); assert.equal(p.introSkipTarget(0),null);
+    await p.load({...entry,artifacts:{...entry.artifacts,mv:'video.mp4?v=repaired'}});
+    pending.shift()({ok:true,json:async()=>job}); await settled();
+    assert.equal(p.introSkipTarget(0),null);
+    pending.shift()({ok:true,json:async()=>job}); await settled();
+    assert.equal(p.introSkipTarget(0),null); // Metadata for the wrong video version.
+    await p.load(entry); p.clear();
+    pending.shift()({ok:true,json:async()=>job}); await settled();
+    assert.equal(p.introSkipTarget(0),null);
+    await p.load(entry);
+    pending.shift()({ok:false}); await settled();
+    assert.equal(p.ready,true); assert.equal(p.introSkipTarget(0),null);
+  } finally {p.dispose();}
+});
+
+test('missing, short or invalid opening cues never skip lyrics or a later instrumental break', async t => {
+  let opening;
+  t.mock.method(globalThis,'fetch',async url=>url==='/v1/jobs/one'
+    ? {ok:true,json:async()=>({status:'completed',result:{artifacts:{mv:{sha256:'first'}},quality:{countdown_events:opening ? [opening] : []}}})}
+    : fetchAudio(url));
+  for (const cue of [null,{line:0,unit:0,start:-3,onset:1},{line:0,unit:0,start:4.9,onset:8.9},
+    {line:3,unit:0,start:12,onset:16},{line:0,unit:1,start:12,onset:16},
+    {line:0,unit:0,start:12,onset:24},{line:0,unit:0,start:'12',onset:16}]) {
+    opening=cue; const p=setup();
+    try {
+      await p.load({...song,artifacts:{...song.artifacts,mv:'video.mp4?v=first'}});
+      assert.equal(p.introSkipTarget(0),null); assert.equal(p.ready,true);
+    } finally {p.dispose();}
+  }
+});
+
 test('local readiness, count-in and stale buffering never start or rewind the wrong clock', t => {
   let now=100; t.mock.method(Date,'now',()=>now*1000);
   const room={entries:[{...song,status:'completed',opening_countdown:{start:-3}}]};
