@@ -1824,12 +1824,13 @@ def test_catalogue_recovers_reversed_upload_credit_after_a_non_title_quote(
     from karaoke import lyric_lookup, lyric_consensus
     from karaoke.stage_cache import StageCache
     upload = '夜风 - 小河「SQ无损」'+suffix
+    label_query = '夜风 - 小河 SQ无损'+(' 词' if suffix else '')
     searches = []
     body = ['微风里我们一起歌唱', '星空下我们静静倾听'] * 3
     def catalogue(provider, url, *args):
         query = next(iter(parse_qs(urlsplit(url).query).values()))[0]
         searches.append(query)
-        rows = [dict(id=1, name='夜风', ar=[dict(name='小河')], dt=50000)] if query == upload else []
+        rows = [dict(id=1, name='夜风', ar=[dict(name='小河')], dt=50000)] if query == label_query else []
         return (dict(code=200, result=dict(songs=rows)) if provider == 'netease' else
                 dict(response=dict(result=dict(tracks=[]))))
     def consensus(song, *args, **kwargs):
@@ -1852,8 +1853,8 @@ def test_catalogue_recovers_reversed_upload_credit_after_a_non_title_quote(
         assert result is None and not searches
     else:
         assert result['lines'] == body and result['artist'] == '小河' and result['title'] == '夜风'
-        assert searches[-1] == upload
-        assert searches[0] == (upload if suffix else 'SQ无损')
+        assert searches[-1] == label_query
+        assert searches[0] == (label_query if suffix else 'SQ无损')
 
 
 @pytest.mark.parametrize('upload,title,artist,matched', [
@@ -1878,6 +1879,25 @@ def test_upload_identity_is_grounded_in_catalogue_title_and_separate_credit(
         assert candidate['title'] == title and candidate['artist'] == artist
         assert candidate['identity_basis'] == 'upload_title_and_credit'
         assert candidate['duration_difference'] == 20  # Text identity is not a recording-duration claim.
+
+
+def test_catalogue_search_keeps_credit_when_a_common_title_fills_the_results(tmp_path, monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+    from karaoke import lyric_lookup
+    from karaoke.stage_cache import StageCache
+    searches = []
+    def catalogue(provider, url, *args):
+        query = next(iter(parse_qs(urlsplit(url).query).values()))[0]
+        searches.append(query)
+        if provider == 'line_music':
+            return dict(response=dict(result=dict(tracks=[])))
+        artist = '小河' if query == '小河 夜风' else '其他歌手'
+        return dict(code=200, result=dict(songs=[dict(id=1, name='夜风', ar=[dict(name=artist)], dt=30000)]))
+    monkeypatch.setattr(lyric_lookup, 'cached_lyric_request', catalogue)
+    candidate, _ = lyric_lookup.catalogue_lyric_identity(dict(title='小河【夜风】'), 30, StageCache(tmp_path))
+    assert candidate['artist'] == '小河' and candidate['title'] == '夜风'
+    assert candidate['identity_basis'] == 'upload_title_and_credit'
+    assert searches == ['夜风', '夜風', '小河 夜风']
 
 
 @pytest.mark.parametrize('delimiters', ['《》', '【】', '「」', '『』', '〈〉', '［］', '“”', '""'])

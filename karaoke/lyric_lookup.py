@@ -697,7 +697,10 @@ def catalogue_lyric_identity(song, duration, cache):
     # Delimiters supply a search hint, not a trusted song identity. The
     # catalogue must still account for both work and credit in the upload.
     quoted = regex.findall(r'[\p{Ps}\p{Pi}"]([^\p{Ps}\p{Pe}\p{Pi}\p{Pf}"\n]+)[\p{Pe}\p{Pf}"]', titles[0])
-    queries = list(dict.fromkeys(([quoted[0]] if len(set(quoted)) == 1 else []) + [titles[-1]]))
+    # Search engines can treat adjacent bracketed credits as one literal
+    # token. Keep every word, but separate the title and credit for search.
+    label_query = ' '.join(regex.sub(r'[\p{Ps}\p{Pe}\p{Pi}\p{Pf}"]', ' ', titles[-1]).split())
+    queries = list(dict.fromkeys(([quoted[0]] if len(set(quoted)) == 1 else []) + [label_query]))
     upload = canonical_script(titles[0]).casefold()
 
     def named_span(value, text, *, title=False):
