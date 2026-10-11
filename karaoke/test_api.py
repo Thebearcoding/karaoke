@@ -6082,11 +6082,12 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
         assert calls == ([] if mode=='credits_only' else [primary,alternative] if mode=='all_fail' else [primary])
 
 
-@pytest.mark.parametrize('complete_source', [True, False])
+@pytest.mark.parametrize('source_case', ['published', 'copy', 'misaligned_copy'])
 @pytest.mark.parametrize('compression_ratio', [1., 3.2])
 @pytest.mark.parametrize('late_review', [False, True])
 @pytest.mark.parametrize('pending_opening', [False, True])
-def test_observed_missing_refrain_selects_complete_published_source(tmp_path, monkeypatch, complete_source, compression_ratio, late_review, pending_opening):
+def test_observed_missing_refrain_selects_complete_published_source(tmp_path, monkeypatch, source_case, compression_ratio, late_review, pending_opening):
+    complete_source = source_case == 'published'
     refrain = ['glowing red horizon', 'bright blue ocean']
     short, complete = ['opening',*refrain,'closing'], ['opening',*refrain,*refrain,'closing']
     if complete_source:
@@ -6111,6 +6112,8 @@ def test_observed_missing_refrain_selects_complete_published_source(tmp_path, mo
         calls.append(candidate['lines'])
         starts = ([1.,3.,5.,12.] if candidate['lines']==short else heard
                   if candidate['lines']==complete else [1.,3.,5.,8.,10.,12.])
+        if source_case == 'misaligned_copy' and candidate['lines'] == complete:
+            starts = [1.,3.,5.,6.,7.,12.]
         cues = [dict(text=t,start=s,end=s+.8,status='candidate',
                      units=[dict(first=0,stop=len(t),text=t,start=s,end=s+.8)])
                 for t,s in zip(candidate['lines'],starts)]
@@ -6141,6 +6144,12 @@ def test_observed_missing_refrain_selects_complete_published_source(tmp_path, mo
             (tmp_path/'timing-constraints.json').write_text('{}')
         pipeline.validate_localization(candidate,duration,cues)
     monkeypatch.setattr(pipeline,'validate_alignment',validate)
+    if source_case == 'misaligned_copy':
+        with pytest.raises(StageFailure, match='重复唱段'):
+            pipeline.align_candidates(lyrics,{},15.)
+        assert calls == [short,complete]
+        assert any(r['conflict'] for r in json.loads((tmp_path/'lyric-repeat-validation.json').read_text())['restored'])
+        return
     selected,error=pipeline.align_candidates(lyrics,{},15.)
     assert selected['lines']==complete and error is None
     assert calls==[short,complete]
@@ -6394,6 +6403,28 @@ def test_repeat_proposal_does_not_expand_a_chant_into_an_unheard_verse(repetitio
         assert candidate['lines'] == lines[:-1]+[chant]*3+lines[-1:]
         assert candidate['provenance']['repetitions'][0]['source_lines'] == [chant]*3
     assert (lyrics, cues, observations) == before
+
+
+@pytest.mark.parametrize('overlaps_caption', [False, True])
+@pytest.mark.parametrize('extra_suffix', [False, True])
+def test_repeat_proposal_counts_the_full_observed_run_across_source_locations(overlaps_caption, extra_suffix):
+    from karaoke.lyric_consensus import observed_repetition_candidate
+    chant = 'Golden lanterns'
+    lines = [chant]*3 + ['Different verse'] + [chant]*2 + ['Closing phrase']
+    if extra_suffix:
+        lines += [chant, chant, chant+', oh']
+    cues = [dict(text=t, start=s, end=s+1, status='candidate')
+            for t, s in zip(lines, [1.,4.,7.,10.,40.,43.,46.,50.,53.,56.])]
+    words = [dict(word='Golden', start=10.5 if overlaps_caption else 18., end=20.),
+             dict(word='lanterns', start=20., end=21.),
+             dict(word=chant, start=24., end=25.), dict(word=chant, start=27., end=28.)]
+    lyrics = dict(lines=lines, language='English', provenance=dict(kind='online_lyric_text'))
+    observations = [dict(context=[0,len(lines)], source_range=[0.,60.],
+                         recognition=dict(segments=[dict(words=words)]))]
+    candidate = observed_repetition_candidate(lyrics, cues, observations, 60.)
+    assert candidate is not None
+    assert candidate['lines'] == lines[:4] + [chant]*3 + lines[4:]
+    assert candidate['provenance']['repetitions'][0]['source_lines'] == [chant]*3
 
 
 @pytest.mark.parametrize('observed', ['repeat', 'unrelated', 'spelling_noise'])

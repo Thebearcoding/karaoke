@@ -1136,8 +1136,12 @@ class Pipeline:
                         candidates[index+1], candidates[position] = candidates[position], candidates[index+1]
                         write_json(self.output/'lyric-source-support.json', preferred)
                     else:
-                        repeated = observed_repetition_candidate(candidate,
-                            json.loads((self.output/'cues.json').read_text()), observations, duration)
+                        repeat_report = self.output/'lyric-repeat-validation.json'
+                        restored = json.loads(repeat_report.read_text()).get('restored', []) if repeat_report.exists() else []
+                        # Misplacing an already inserted repetition is an
+                        # alignment failure, not evidence for another copy.
+                        repeated = None if any(r['conflict'] for r in restored) else observed_repetition_candidate(
+                            candidate, json.loads((self.output/'cues.json').read_text()), observations, duration)
                         key = normalized(''.join(repeated['lines'])).casefold() if repeated else None
                         if key and key not in seen:
                             seen.add(key)

@@ -257,8 +257,13 @@ def missing_repetitions(reference, cues, words, language, duration):
                     verified.append((score, first, stop, clip, anchors))
             # Prefer the complete supported passage over its own interior,
             # which can have a higher percentage simply by being shorter.
+            # A shorter refrain elsewhere in the source is also an interior
+            # when the fuller match explains at least as much of the text.
+            texts = {item[1:3]: ''.join(normalized(s).lower() for s in reference[item[1]:item[2]])
+                     for item in verified}
             scores = [item for item in verified if not any(
-                other[1] <= item[1] < item[2] <= other[2] and other[1:3] != item[1:3]
+                (other[1] <= item[1] < item[2] <= other[2] and other[1:3] != item[1:3] or
+                 other[0] >= item[0] and texts[item[1:3]] != texts[other[1:3]] and texts[item[1:3]] in texts[other[1:3]])
                 and other[4][0]['start'] <= item[4][0]['start'] and item[4][-1]['end'] <= other[4][-1]['end']
                 for other in verified)]
             best, identity, complete_passage = None, None, False
