@@ -334,16 +334,25 @@ export class Player {
     this.video.pause();
   }
 
-  clear() {
+  suspend() {
     this.stop();
     this.abort?.abort();
+    this.ready = false;
+    this.videoPrepared = null;
+    // pause() alone permits the browser to keep downloading the video.
+    if (this.video.src) {
+      this.video.removeAttribute('src');
+      this.video.load();
+    }
+  }
+
+  clear() {
+    this.suspend();
     this.key = null;
     this.entry = null;
     this.introStart = null;
     this.stream = null;
     this.ready = false;
-    this.video.removeAttribute('src');
-    this.video.load();
   }
 
   dispose() {
@@ -384,7 +393,8 @@ export class Player {
 
   async load(entry, position = 0) {
     const generation = this.loadGeneration = (this.loadGeneration || 0) + 1;
-    if (this.matches(entry)) {
+    const cached = this.matches(entry) ? this.stream : null;
+    if (cached && !cached.signal.aborted) {
       const stream = this.stream;
       try {
         await this.loading;
@@ -392,7 +402,7 @@ export class Player {
           this.anchor === null ? videoReady(this.video, stream.signal, position) : Promise.resolve()]);
       } catch (error) {
         if (stream.signal.aborted) return;
-        if (generation === this.loadGeneration) this.key = null;
+        if (generation === this.loadGeneration) { this.key = null; this.suspend(); }
         throw error;
       }
       return;
@@ -410,14 +420,14 @@ export class Player {
     this.video.src = entry.artifacts.mv;
     this.video.load();
     this.loadIntro(entry, signal);
-    this.stream = new StemStream(this.context, `/v1/jobs/${entry.job_id}/playback`, signal, () => this.pump());
+    this.stream = new StemStream(this.context, `/v1/jobs/${entry.job_id}/playback`, signal, () => this.pump(), cached);
     this.loading = Promise.all([this.stream.prepare(position), videoReady(this.video, signal, position)]).then(() => {
       if (signal.aborted) return;
       this.ready = true;
     }).catch(error => {
       if (signal.aborted) return;
       this.key = null;
-      this.abort.abort();
+      this.suspend();
       throw error;
     });
     return this.loading;

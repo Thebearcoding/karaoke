@@ -23,7 +23,7 @@ export function mountPreview(container, song, onError) {
   const pause = () => {
     generation++;
     playing = false;
-    player.stop();
+    player.suspend();
     button.textContent = '播放';
     button.disabled = false;
   };
@@ -54,8 +54,8 @@ export function mountPreview(container, song, onError) {
     if (resume) start();
     else video.currentTime = value;
   };
-  video.src = entry.artifacts.mv;
-  video.preload = 'metadata';
+  video.poster = entry.poster || '';
+  video.preload = 'none';
   update(0);
   return () => { pause(); player.dispose(); };
 }

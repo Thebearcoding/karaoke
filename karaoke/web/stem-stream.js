@@ -1,4 +1,4 @@
-// Download ahead to the end of the song; decode only nearby windows.
+// Download and decode only nearby windows; retain fetched audio for replay.
 // Frame indices place every published stem on the shared AudioContext timeline.
 const decodeAheadSeconds = 24;
 
@@ -36,11 +36,13 @@ async function readMedia(url, signal, consume) {
 }
 
 export class StemStream {
-  constructor(context, url, signal, changed) {
+  constructor(context, url, signal, changed, cached) {
     Object.assign(this, {context, url, signal, changed});
-    this.windows = new Map();
-    this.encoded = new Map();
-    this.loading = this.read(url, signal, response => response.json()).then(info => {
+    this.windows = new Map([...cached?.windows || []].filter(([, item]) => item.audio)
+      .map(([index, {audio}]) => [index, {audio, loading:Promise.resolve(audio)}]));
+    this.encoded = new Map(cached?.encoded);
+    this.loading = (cached?.info ? Promise.resolve(cached.info) :
+      this.read(url, signal, response => response.json())).then(info => {
       this.info = info;
       this.stems = info.stems || ['instrumental', 'backing_vocals', 'lead_vocals'];
       this.duration = info.frames / info.sample_rate;
@@ -58,22 +60,14 @@ export class StemStream {
 
   at(position) { return this.info && this.windows.get(this.index(position))?.audio; }
 
-  download(index) {
+  async download(index, signal) {
     if (!this.encoded.has(index)) {
-      this.encoded.set(index, Promise.all(this.stems.map(stem =>
-        this.read(`${this.url}/${stem}/${index}`, this.signal, response => response.arrayBuffer()))));
+      const data = await Promise.all(this.stems.map(stem =>
+        this.read(`${this.url}/${stem}/${index}`, signal, response => response.arrayBuffer())));
+      if (signal.aborted) throw new Error('音轨加载已取消');
+      this.encoded.set(index, data);
     }
     return this.encoded.get(index);
-  }
-
-  async downloadAhead() {
-    // Start with the requested position, then keep fetching the entire song.
-    // A seek can fetch its own target without waiting behind distant audio.
-    const first = this.first;
-    for (let offset = 0; offset < this.count && !this.signal.aborted; offset++) {
-      try { await this.download((first + offset) % this.count); }
-      catch { /* The affected window reports its bounded retry failure. */ }
-    }
   }
 
   request(index) {
@@ -85,7 +79,7 @@ export class StemStream {
     const item = {controller};
     this.windows.set(index, item);
     let timer;
-    item.loading = this.download(index).then(data => {
+    item.loading = this.download(index, controller.signal).then(data => {
       if (controller.signal.aborted) throw new Error('音轨加载已取消');
       timer = setTimeout(abort, 20000);
       return Promise.all(data.map(bytes => this.context.decodeAudioData(bytes.slice(0))));
@@ -114,17 +108,17 @@ export class StemStream {
     this.last = this.index(position + decodeAheadSeconds);
     for (const [key, item] of this.windows) {
       if (key < index || key > this.last) {
-        item.controller.abort();
+        item.controller?.abort();
         this.windows.delete(key);
       }
     }
     this.request(index);
     this.prefetch();
-    this.downloading ||= this.downloadAhead();
   }
 
   prefetch() {
-    // Decode the current window first, then the reserve, all from local data.
+    if (this.signal.aborted) return;
+    // Fetch/decode the current window first, then only the nearby reserve.
     // Compressed copies survive seeks; decoded windows stay bounded.
     for (let index = this.first; index <= this.last; index++) {
       const item = this.windows.get(index);

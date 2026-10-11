@@ -657,6 +657,8 @@ function updateTransport() {
   $('now-art').querySelector('span').hidden = Boolean(song?.poster);
   $('player-title').textContent = song?.title || idleTitle;
   $('player-artist').textContent = song?.artist || '';
+  const poster = song?.poster || '';
+  if ($('video').getAttribute('poster') !== poster) $('video').setAttribute('poster', poster);
   $('player-elapsed').innerHTML = preparationElapsedHTML(song);
   const playingHere = tabs.owns() && state.playing && player.unlocked;
   $('play-icon').setAttribute('href', playingHere ? '#i-pause' : '#i-play');
@@ -694,7 +696,7 @@ function updateCover() {
   if ($('screen-status').textContent !== status) $('screen-status').textContent = status;
   $('screen-status').toggleAttribute('hidden', !status || song?.status === 'running');
   $('screen-start').toggleAttribute('hidden', !song || song.status !== 'completed' || loading || startingVideo);
-  const label = loadError ? '重试加载 ' : '开始唱 ';
+  const label = loadError ? '重试加载 ' : state.position > 0 ? '继续唱 ' : '开始唱 ';
   if ($('screen-start').firstChild.textContent !== label) $('screen-start').firstChild.textContent = label;
   const retry = preparationRetry(song);
   $('screen-retry').toggleAttribute('hidden', !retry || retry.action !== 'retry' || !state.entries.some(e => e.id === song.id));
@@ -755,8 +757,10 @@ player.onError = error => {
 
 async function syncPlayback() {
   const song = current();
-  if (!tabs.owns() || !song || song.status !== 'completed') {
-    player.clear(); readySent = null; loading = false; loadError = '';
+  if (!tabs.owns() || !song || song.status !== 'completed' || !state.playing || !player.unlocked) {
+    if (tabs.owns() && song && player.entry?.id === song.id) player.suspend();
+    else { player.clear(); loadError = ''; }
+    readySent = null; loading = false;
     updateCover(); return;
   }
   const revision = state.revision;
@@ -1108,7 +1112,7 @@ function claimPlayback() {
 window.addEventListener('storage', event => { if (event.key === tabs.key) followPlayback(); });
 window.addEventListener('online', () => { events.close(); connectEvents(); retryFinished(); });
 window.addEventListener('pagehide', () => {
-  if (tabs.suspend(playback.save())) player.stop();
+  if (tabs.suspend(playback.save())) player.suspend();
   events.close();
 });
 function resumePage() {

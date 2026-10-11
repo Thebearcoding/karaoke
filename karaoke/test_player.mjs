@@ -204,7 +204,7 @@ const song = {id:'one',job_id:'one',duration:20,artifacts:{mv:'video.mp4',instru
 const state = {current_id:'one',position:3,started_at:100,playing:true,mix:'karaoke'};
 function setup(onEnd=()=>{}) {
   let position=0, since=10, p;
-  const video = Object.assign(new EventTarget(), {readyState:4,load(){},removeAttribute(){},
+  const video = Object.assign(new EventTarget(), {readyState:4,load(){},removeAttribute(name){delete this[name];},
     pause(){position=this.currentTime;this.paused=true;},
     play(){since=p.context.currentTime;this.paused=false;return Promise.resolve();}});
   Object.defineProperty(video,'currentTime',{configurable:true,
@@ -713,7 +713,7 @@ test('local readiness, count-in and stale buffering never start or rewind the wr
   assert.equal(p.state.started_at,112); assert.equal(p.position(),3.5);
 });
 
-test('a paused video loads its first frame before playback is requested', async () => {
+test('preparing playback loads its first frame before starting the clock', async () => {
   const p=setup(); p.video.preload='metadata';
   p.video.load=function () {
     this.readyState=1;
@@ -1424,16 +1424,15 @@ test('prefetch prioritizes the current window and bounds concurrent network requ
   } finally { p.clear(); for (const item of pending) item.resolve(); globalThis.fetch=fetchAudio; }
 });
 
-test('the complete song downloads while paused, but decoded audio stays bounded through playback and rewind', async () => {
+test('audio downloads stay near playback and fetched audio is reused on rewind', async () => {
   const requests=[];
   globalThis.fetch=streamingFetch(url=>{requests.push(url);return null;});
   const p=setup();
   try {
     await p.unlock(); await p.load({...song,duration:80}); await settled();
-    assert.equal(requests.filter(url=>/\/(instrumental|backing_vocals|lead_vocals)\/\d+$/.test(url)).length,30);
-    assert.ok(requests.includes('/v1/jobs/one/playback/lead_vocals/9'));
+    assert.equal(requests.filter(url=>/\/(instrumental|backing_vocals|lead_vocals)\/\d+$/.test(url)).length,12);
+    assert.ok(!requests.includes('/v1/jobs/one/playback/lead_vocals/9'));
     assert.equal(p.sources.length,0);
-    const fetched=requests.length;
     await p.apply({...state,position:0},clockOffset());
     assert.equal(p.sources.length,12);
     const first=p.sources.slice(0,3), next=p.sources.slice(3,6);
@@ -1452,6 +1451,7 @@ test('the complete song downloads while paused, but decoded audio stays bounded 
       assert.ok(p.sources.length<=12);
       assert.ok([...p.stream.windows.keys()].every(i=>i>=Math.floor(position/8)));
     }
+    const fetched=requests.length;
     p.stop();
     await p.load({...song,duration:80},0); await settled();
     await p.apply({...state,position:0},clockOffset());
@@ -1459,6 +1459,60 @@ test('the complete song downloads while paused, but decoded audio stays bounded 
     assert.equal(requests.length,fetched);
     assert.ok(p.stream.windows.size<=4);
   } finally { p.clear(); globalThis.fetch=fetchAudio; }
+});
+
+test('pausing cancels media transfers and retry timers; resume reuses completed audio', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  const requests=[], pending=[];
+  let attempts=0;
+  globalThis.fetch=streamingFetch((url,{signal})=>{
+    requests.push(url);
+    if (url.endsWith('/lead_vocals/4')) return new Promise((resolve,reject)=>{
+      pending.push({signal,resolve});
+      signal.addEventListener('abort',()=>reject(new Error('cancelled')),{once:true});
+    });
+    if (url.endsWith('/backing_vocals/4')) {
+      attempts++;
+      return {ok:false,status:503,headers:{get:()=> '2'}};
+    }
+    return null;
+  });
+  const p=setup();
+  try {
+    await p.unlock(); await p.load({...song,duration:80}); await settled();
+    await p.apply({...state,position:0},clockOffset());
+    p.context.currentTime=p.anchor+8; frame(); await settled();
+    assert.equal(pending.length,1); assert.equal(attempts,1);
+    const previous=p.stream;
+    p.suspend(); await settled();
+    assert.equal(pending[0].signal.aborted,true);
+    assert.equal(p.video.src,undefined); assert.equal(p.video.paused,true);
+    assert.equal(p.ready,false); assert.equal(p.anchor,null);
+    const count=requests.length;
+    t.mock.timers.tick(10000); await settled();
+    assert.equal(requests.length,count); assert.equal(attempts,1);
+    globalThis.fetch=streamingFetch(url=>{requests.push(url);return null;});
+    await p.load({...song,duration:80},8); await settled();
+    await p.apply({...state,position:8},clockOffset());
+    assert.notEqual(p.stream,previous); assert.equal(p.ready,true);
+    assert.equal(p.video.src,song.artifacts.mv);
+    assert.ok(p.sources.length>0);
+    assert.ok(requests.slice(count).every(url=>url.endsWith('/4')));
+    assert.equal(p.stream.at(8),previous.at(8));
+  } finally { p.clear(); globalThis.fetch=fetchAudio; }
+});
+
+test('failed audio loading releases the native video transfer too', async () => {
+  const p=setup();
+  globalThis.fetch=async()=>{throw new Error('Audio metadata failed');};
+  try {
+    await assert.rejects(p.load(song), /Audio metadata failed/);
+    assert.equal(p.abort.signal.aborted,true);
+    assert.equal(p.video.src,undefined);
+    assert.equal(p.ready,false);
+    p.clear();
+    assert.equal(p.video.src,undefined);
+  } finally { p.clear();globalThis.fetch=fetchAudio; }
 });
 
 test('one delayed stem freezes all audio at the last common boundary and a seek can resume', async () => {
@@ -1589,7 +1643,7 @@ test('an audio fetch that never finishes times out and retries without stopping 
   t.mock.timers.enable({apis:['setTimeout']});
   let attempts=0;
   globalThis.fetch=streamingFetch((url,{signal})=>{
-    if (!url.endsWith('/lead_vocals/4') || ++attempts>1) return null;
+    if (!url.endsWith('/lead_vocals/3') || ++attempts>1) return null;
     return new Promise((resolve,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));
   });
   const p=setup(), waiting=[]; p.onBuffering=(...args)=>waiting.push(args);
@@ -1599,7 +1653,7 @@ test('an audio fetch that never finishes times out and retries without stopping 
     t.mock.timers.tick(20000); await settled();
     t.mock.timers.tick(250); await settled();
     assert.equal(attempts,2);
-    assert.ok(await p.stream.encoded.get(4));
+    assert.ok(await p.stream.encoded.get(3));
     assert.deepEqual(waiting,[]);
     assert.notEqual(p.anchor,null);
   } finally { p.clear(); globalThis.fetch=fetchAudio; }
