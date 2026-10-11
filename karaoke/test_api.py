@@ -1451,7 +1451,7 @@ def test_conflicting_lyrics_query_recording_native_credit_before_accepting_outli
         calls.append(song['artist'])
         recovered = song['artist'] == '林林' and scenario != 'no_corroboration'
         if len(calls) > 1:
-            assert 'youtube_music' in kwargs['prefetched']
+            assert 'youtube_music' not in kwargs['prefetched']
         return (native if recovered else original), dict(provider='netease', language='Chinese',
             crosscheck=dict(status='corroborated' if recovered else 'conflicting',
                 selection='similarity_support' if scenario == 'similarity_support' else 'published_source',
@@ -1775,7 +1775,7 @@ def test_uncredited_upload_recovers_lyrics_from_catalogue_without_guessing_artis
         song['artist'] = song.get('artist') or metadata['uploader']
         lookups.append(song['artist'])
         if song['artist'] == 'はる':
-            assert 'youtube_music' in kwargs['prefetched']
+            assert 'youtube_music' not in kwargs['prefetched']
             return body, dict(language='Japanese', crosscheck=dict(
                 status='insufficient_sources' if outcome == 'single_source' else 'corroborated'))
         return None, dict(crosscheck=dict(unavailable_sources=[dict(provider='youtube_music', status='unavailable')]))
@@ -1879,6 +1879,40 @@ def test_upload_identity_is_grounded_in_catalogue_title_and_separate_credit(
         assert candidate['title'] == title and candidate['artist'] == artist
         assert candidate['identity_basis'] == 'upload_title_and_credit'
         assert candidate['duration_difference'] == 20  # Text identity is not a recording-duration claim.
+
+
+def test_music_catalogue_recovers_missing_release_and_refreshes_lyrics(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from openai import OpenAIError
+    import ytmusicapi
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    searches = []
+    body = ['微風中我們一起唱歌', '星光下我們靜靜傾聽'] * 3
+    def search(query, **kwargs):
+        searches.append(query)
+        return [dict(videoId='abcdefghijk', title='夜风 (Live)', artists=[dict(name='小河')], duration_seconds=30),
+                dict(videoId='lmnopqrstuv', title='夜风 (Live)', artists=[dict(name='小河')], duration_seconds=60)]
+    monkeypatch.setattr(ytmusicapi, 'YTMusic', lambda **kw: SimpleNamespace(search=search))
+    def catalogue(provider, key, cache, request):
+        if provider == 'youtube_music':return request()
+        return (dict(code=200, result=dict(songs=[])) if provider == 'netease' else
+                dict(response=dict(result=dict(tracks=[]))))
+    def consensus(song, *args, **kwargs):
+        if song.get('artist') == '小河':
+            assert 'youtube_music' not in kwargs['prefetched']
+            return body, dict(language='Chinese', crosscheck=dict(status='insufficient_sources'))
+        return None, dict(crosscheck=dict(unavailable_sources=[dict(provider='youtube_music',status='unavailable')]))
+    def unavailable(*args):raise OpenAIError('No optional metadata model')
+    monkeypatch.setattr(lyric_lookup, 'cached_lyric_request', catalogue)
+    monkeypatch.setattr(lyric_consensus, 'fetch_lyric_consensus', consensus)
+    monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', unavailable)
+    result = lyric_lookup.prepare_online_lyrics(dict(url=URL),
+        dict(title='小河【夜风】', uploader='Channel', description='Live music'), 30, StageCache(tmp_path), 'unused', None)
+    assert result['artist'] == '小河' and result['lines'] == body
+    recovered = result['provenance']['lyric_lookup']['identity_recovery']['catalogue']['candidates'][0]
+    assert recovered['url'].endswith('abcdefghijk') and recovered['duration_difference'] == 0
+    assert searches == ['夜风']
 
 
 def test_catalogue_search_keeps_credit_when_a_common_title_fills_the_results(tmp_path, monkeypatch):
