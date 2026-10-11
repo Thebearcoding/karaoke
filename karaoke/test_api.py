@@ -1295,7 +1295,8 @@ def test_empty_lyric_search_broadens_query_without_weakening_identity(tmp_path, 
     if not first_found:assert calls[-1] == dict(track_name=['Evening'])
 
 
-@pytest.mark.parametrize('title', ['晚風', '晚風 (Official Music Video)', '晚風 [Official Audio]'])
+@pytest.mark.parametrize('title', ['晚風', '晚風 (Official Music Video)', '晚風 [Official Audio]',
+    '晚風　歌詞付き', '晚風【歌詞付き】', '晚風 (歌詞つき)', '晚風 with lyrics', '晚風 Official Lyric Video'])
 def test_lyrics_first_search_uses_metadata_duration_and_retains_review_status(tmp_path, monkeypatch, title):
     from karaoke import lyric_lookup, lyric_consensus
     from karaoke.stage_cache import StageCache
@@ -1813,6 +1814,56 @@ def test_catalogue_identity_respects_existing_provider_access_hold(tmp_path, mon
         raise lyric_lookup.LyricRequestError(hold)
     monkeypatch.setattr(lyric_lookup, 'cached_lyric_request', blocked)
     assert lyric_lookup.catalogue_lyric_identity(dict(title='夜の色'), 30, StageCache(tmp_path)) == (None, hold)
+
+
+@pytest.mark.parametrize('explicit_artist', [False, True])
+def test_uncredited_different_length_upload_keeps_work_text_without_claiming_a_singer(
+        tmp_path, monkeypatch, explicit_artist):
+    from openai import OpenAIError
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    body = ['星空の向こうまであなたと歩いてゆこう'] * 4
+    alternative = ['夜明けの向こうまであなたと歩いてゆこう'] * 4
+    searches, folders = [], []
+    def catalogue(provider, key, *args):
+        searches.append((provider, key))
+        if provider == 'netease':
+            return dict(code=200, result=dict(songs=[
+                dict(id=1, name='夜の色', ar=[dict(name='はる')], dt=45000),
+                dict(id=2, name='夜の色', ar=[dict(name='あき')], dt=46000),
+                dict(id=3, name='別の曲', ar=[dict(name='はる')], dt=30000)]))
+        return [] if provider == 'youtube_music' else dict(response=dict(result=dict(tracks=[])))
+    def consensus(song, metadata, duration, cache, *args, **kwargs):
+        if song.get('artist') not in ('はる', 'あき'):
+            return None, dict(crosscheck=dict(unavailable_sources=[]))
+        folders.append(cache.root)
+        text = body if song['artist'] == 'はる' else alternative
+        source = dict(provider='netease', url='https://example.test/'+song['artist'], language='Japanese')
+        annotated = dict(source, provider='line_music', url='https://example.test/annotated')
+        return text, dict(source, candidate_texts=[['星ほし空そら'], text],
+                         crosscheck=dict(sources=[annotated, source], selected_source=1, rejected_sources=[],
+                                         serialized_reading_variants=[dict(source=0, plain_source=1)]))
+    def unavailable(*args):
+        raise OpenAIError('Optional metadata model is not configured')
+    monkeypatch.setattr(lyric_lookup, 'cached_lyric_request', catalogue)
+    monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', unavailable)
+    monkeypatch.setattr(lyric_consensus, 'fetch_lyric_consensus', consensus)
+    metadata = dict(id='abcdefghijk', title='夜の色　歌詞付き', uploader='Video channel')
+    if explicit_artist:
+        metadata['artist'] = '別の歌手'
+    result = lyric_lookup.prepare_online_lyrics(dict(url=URL), metadata, 30, StageCache(tmp_path), 'unused', None)
+    if explicit_artist:
+        assert result is None and not searches and not folders
+    else:
+        assert result['title'] == '夜の色' and result['artist'] == '' and result['lines'] == body
+        packet = result['provenance']['lyric_lookup']
+        assert packet['performer_unconfirmed'] and packet['candidate_texts'] == [body, alternative]
+        assert packet['catalogue_reference']['artist'] == 'はる'
+        assert packet['identity_recovery']['method'] == 'catalogue_work_text'
+        assert result['provenance']['needs_review'] and result['provenance']['independent_asr_coverage'] is None
+        assert folders == [tmp_path, tmp_path]  # Reuse the job-wide provider cache and backoff.
+        assert len(packet['catalogue_attempts']) == 2
+        assert next(lyric_consensus.alternative_lyric_candidates(result, packet))['lines'] == alternative
 
 
 @pytest.mark.parametrize('explicit_artist', [False, True])

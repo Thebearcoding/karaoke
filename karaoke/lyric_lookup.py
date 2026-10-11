@@ -134,8 +134,13 @@ def names(value, *, title=False):
     value = unicodedata.normalize('NFKC', value if isinstance(value, str) else '').strip()
     result = [value] if value else []
     if title:
-        clean = re.sub(r'\s*[\[(](?:official\s+(?:music\s+video|video|mv|audio|visualizer)|'
-                       r'(?:official\s+)?lyrics?\s+video)(?:\s+(?:hd|4k))?[\])]\s*$', '', value, flags=re.I)
+        # Upload-format labels describe the video, not the musical work.
+        # Require a delimiter and retain the original spelling as an alias.
+        label = (r'(?:official\s+(?:music\s+video|video|mv|audio|visualizer)|'
+                 r'(?:official\s+)?lyrics?\s+video|with\s+lyrics|歌[詞词](?:付き|つき))'
+                 r'(?:\s+(?:hd|4k))?')
+        clean = re.sub(r'(?:\s*[\[(【「]\s*'+label+r'\s*[\])】」]|\s+'+label+r')\s*$',
+                       '', value, flags=re.I)
         if clean and clean != value:
             return result + names(clean, title=True)
     # Split explicit bilingual names before parsing either side's annotations.
@@ -716,7 +721,7 @@ def catalogue_lyric_identity(song, duration, cache):
         delta = candidate['duration_difference']
         return candidate['identity_basis'] != 'upload_title_and_credit', delta if delta is not None else math.inf
 
-    attempts = []
+    attempts, lyric_candidates = [], {}
     searches = [*product(queries, ('netease', 'line_music')),
                 *((query, 'youtube_music') for query in queries)]
     for query, provider in searches:
@@ -757,17 +762,19 @@ def catalogue_lyric_identity(song, duration, cache):
             title, artists, seconds = row['title'], row['artists'], row['seconds']
             if not isinstance(title, str) or not artists or not all(isinstance(a, str) and a.strip() for a in artists):
                 continue
-            seconds = seconds if seconds is not None and math.isfinite(seconds) and seconds > 0 else None
+            seconds = seconds if isinstance(seconds, (int, float)) and math.isfinite(seconds) and seconds > 0 else None
             span = named_span(title, upload, title=True)
             outside_title = upload[:span.start()]+' '+upload[span.end():] if span else ''
             grounded = bool(span and all(named_span(a, outside_title) for a in artists))
             delta = abs(seconds-duration) if seconds is not None else None
-            if not grounded and not (identity(song['title'], title=True) & identity(title, title=True) and
-                                     delta is not None and delta <= max(3., min(10., duration*.02))):
-                continue
             key = (comparison_key(names(title, title=True)[-1]), tuple(sorted(tuple(sorted(identity(a))) for a in artists)))
             candidate = dict(title=title, artist=' · '.join(artists), duration_seconds=seconds,
                 duration_difference=delta, url=row['url'], identity_basis='upload_title_and_credit' if grounded else 'title_and_duration')
+            title_match = bool(identity(song['title'], title=True) & identity(title, title=True))
+            if title_match and (key not in lyric_candidates or rank(candidate) < rank(lyric_candidates[key])):
+                lyric_candidates[key] = dict(candidate, identity_basis='work_title_only')
+            if not grounded and not (title_match and delta is not None and delta <= max(3., min(10., duration*.02))):
+                continue
             if key not in candidates or rank(candidate) < rank(candidates[key]):
                 candidates[key] = candidate
         ordered = sorted(candidates.values(), key=rank)
@@ -781,7 +788,44 @@ def catalogue_lyric_identity(song, duration, cache):
                     not rank(ordered[0])[0] or rank(ordered[1])[1] < rank(ordered[0])[1]+1):
                 return None, dict(report, status='ambiguous', attempts=attempts)
             return ordered[0], dict(report, status='candidate', attempts=attempts)
-    return None, report
+    # A different edit length prevents a recording-identity claim, not a
+    # lookup of its published words. Keep these explicitly unconfirmed and
+    # use the same five-candidate budget as alternate Music lyric releases.
+    return None, dict(report, lyric_candidates=sorted(lyric_candidates.values(), key=rank)[:5], attempts=attempts)
+
+
+def catalogue_lyric_text(candidates, metadata, duration, cache):
+    """Propose published work text without assigning its singer to an upload."""
+    from .lyric_consensus import compare_lyrics, fetch_lyric_consensus
+    texts, attempts, seen = [], [], set()
+    for candidate in candidates:
+        # Keep the job's shared response cache and provider backoff. Each
+        # lookup is identity-bound; retain its whole report before the next.
+        song = {k:candidate[k] for k in ('title', 'artist')}
+        lines, report = fetch_lyric_consensus(song, metadata, duration, cache, preserve_title=True)
+        attempts.append(dict(candidate=candidate, lookup=report))
+        review = report.get('crosscheck', {})
+        rejected = {row['source'] for row in review.get('rejected_sources', [])}
+        rejected.update(row['source'] for row in review.get('serialized_reading_variants', []))
+        available = list(zip(report.get('candidate_texts', []), review.get('sources', [])))
+        order = dict.fromkeys([review.get('selected_source'), *review.get('eligible_sources', []), *range(len(available))])
+        for i in order:
+            if not isinstance(i, int) or i not in range(len(available)) or i in rejected:
+                continue
+            body, source = available[i]
+            identity_key = (source.get('provider'), source.get('url'), tuple(body))
+            if identity_key not in seen:
+                seen.add(identity_key)
+                texts.append((body, dict(source, catalogue_reference=candidate, performer_unconfirmed=True)))
+    _, review = compare_lyrics(texts)
+    if not texts:
+        return None, dict(status='unavailable', attempts=attempts)
+    index = next(iter(review['agreeing_sources']), 0)
+    review.update(selected_source=index, selection='catalogue_work_text', eligible_sources=list(range(len(texts))),
+                  rejected_sources=[], unavailable_sources=[])
+    lines, source = texts[index]
+    return lines, dict(source, status='candidate', crosscheck=review, candidate_texts=[body for body, _ in texts],
+                       catalogue_attempts=attempts)
 
 
 def fetch_reading_lyrics(song, cache, duration=None, reference_lines=(), source_title=None):
@@ -1100,7 +1144,16 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                     lines, report = None, original_report
                     song.clear()
                     song.update(original_song)
-            report = dict(report, identity_recovery=dict(method='catalogue_title_and_duration',
+            elif recovery.get('lyric_candidates'):
+                lines, work_report = catalogue_lyric_text(recovery['lyric_candidates'], metadata, duration, cache)
+                if lines:
+                    song.update(title=names(upload['title'], title=True)[-1], artist='')
+                    report = work_report
+                    recovery = dict(recovery, performer_unconfirmed=True)
+                else:
+                    recovery = dict(recovery, rejected_lookup=work_report)
+            method = 'catalogue_work_text' if recovery.get('performer_unconfirmed') else 'catalogue_title_and_duration'
+            report = dict(report, identity_recovery=dict(method=method,
                           catalogue=recovery, recovered=bool(lines), previous_lookup=original_report,
                           original={k:original_song.get(k) for k in ('title','artist')},
                           resolved={k:song.get(k) for k in ('title','artist')}))
