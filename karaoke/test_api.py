@@ -3213,6 +3213,41 @@ def test_netease_reads_duet_lyrics_after_matching_reordered_credit(tmp_path, mon
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize('label,accepted', [
+    ('片头曲', True), ('片尾曲', True), ('主題歌', True), ('主题曲', True),
+    ('插曲', True), ('人物主题歌', True), ('那年的插曲', False), ('第二部', False),
+])
+def test_soundtrack_role_aliases_find_lyrics_without_filtering_sung_words(tmp_path, monkeypatch, label, accepted):
+    from urllib.parse import parse_qs, urlsplit
+    from karaoke import lyric_consensus, lyric_lookup
+    from karaoke.stage_cache import StageCache
+    calls = []
+    body = ['片头曲', '微風裡慢慢歌唱', '星光下靜靜傾聽']
+    annotated = f'晚風（{label}）'
+    def read(url, **kwargs):
+        query = parse_qs(urlsplit(url).query)
+        calls.append(query)
+        if 'cloudsearch' in url:
+            if accepted:
+                assert query['s'][0] in ('晚風 林林', '晚風')
+            return dict(code=200, result=dict(songs=[
+                dict(id=1, name='晚風', ar=[dict(name='別人')], al={}),
+                dict(id=2, name='晚風', ar=[dict(name='林林')], al={})]))
+        assert query['id'] == ['2']
+        return dict(lrc=dict(lyric='作词：林林\n'+'\n'.join(body)))
+    monkeypatch.setattr(lyric_consensus, 'read_document', read)
+    lines, _ = lyric_consensus.fetch_additional_lyrics('netease', dict(title=annotated, artist='林林'),
+        dict(title=annotated), StageCache(tmp_path), 30.)
+    assert lines == (body if accepted else None)
+    assert sum('id' in call for call in calls) == int(accepted)
+    # The annotation may instead be on the provider's title. It must not
+    # become a general instruction to drop the same words from sung text.
+    row = dict(trackId=2, trackTitle=annotated, artists=[dict(artistName='林林')], album={},
+               lyrics='作词：林林\n'+'\n'.join(body))
+    lines, _ = lyric_lookup.published_candidate([row], dict(title='晚風', artist='林林'), '')
+    assert lines == (body if accepted else None)
+
+
 def test_lyric_search_preserves_provider_declared_title_and_artist_aliases():
     from karaoke.lyric_lookup import published_candidate
     body = '夜の向こうに光が見える\n一緒に歩いて明日を探そう'

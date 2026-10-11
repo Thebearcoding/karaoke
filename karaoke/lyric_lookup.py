@@ -28,8 +28,9 @@ from .source_captions import read_document
 
 _traditional, _simplified = OpenCC('s2t'), OpenCC('tw2s')
 _versioned_title = re.compile(r'(.+?)\s*\(([^()]*(?:\b(?:version|ver\.?)|版本?)|[国國粤粵])\)\s*$', re.I)
+_soundtrack_role = r'(?:人物)?(?:主题[歌曲]|片[头尾]曲|插曲)'
 _soundtrack_credit = re.compile(r'(?:大型)?(?:纪录片|电影|电视剧|动画片|网络剧|网剧|剧集)?'
-    r'\s*《[^《》]+》\s*(?:人物)?(?:主题[歌曲]|片[头尾]曲|插曲)|from\s+["“][^"“”]+["”]', re.I)
+    r'\s*《[^《》]+》\s*'+_soundtrack_role+r'|from\s+["“][^"“”]+["”]', re.I)
 _credit_separators = r'\s*[&,/×+、;]\s*|\s+·\s+|\s+\b(?:feat\.?|featuring|ft\.?|with)\s+'
 _featured_title = re.compile(
     r'(.+?)\s*(?:[\[(](?:(?:feat\.?|featuring|ft\.?|with)\s+|合作音乐人\s*[:：]\s*)([^\])]+)[\])]|'
@@ -159,7 +160,7 @@ def names(value, *, title=False):
             label = canonical_script(annotation[2]).casefold()
             release = re.fullmatch(r'(?:live|现场)(?:版本?)?(?:[ |/].*)?|cover(?: version)?|'
                 r'(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?', label)
-            if release or _soundtrack_credit.fullmatch(label):
+            if release or _soundtrack_credit.fullmatch(label) or re.fullmatch(_soundtrack_role, label):
                 return result + names(annotation[1].strip(), title=True)
     # Platforms publish original names together with Latin-script aliases.
     # Version labels are not translations: never strip "Live", "Remix", etc.
