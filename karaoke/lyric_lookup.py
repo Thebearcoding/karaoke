@@ -337,8 +337,8 @@ def published_lyric_lines(text, title, artists=(), *, album=None):
     role = (rf'{instrument}|{production}|歌名|歌曲|(?:中文|英文)?词|曲|词曲|作词|作曲|(?:改编)?编曲(?:协力)?|原唱|演唱|专辑|发行(?:日|公司)|出品人?|音乐制作(?:人|助理)?|(?:定位)?制作人|制作助理|监制|'
         r'弦乐(?:编写|编曲|监制|录音)?|(?:人声|配唱|伴唱|主唱|合唱|童声|合声|合音|和声|和音)(?:编写|编曲|编配|制作|录音)?(?:人|师|指导)?|器乐|'
         r'录音(?:师|助理|(?:工作)?室)?|(?:前置)?混音(?:师|(?:工作)?室)?|母带(?:后期(?:处理|制作))?(?:人|工程师|录音室)?|音频(?:助理|工程师|编辑)|'
-        r'(?:song )?title|song name|artist|album|composer|lyricist|producer|production|lyrics|music(?: production| distributed by)?|written by|produced by|'
-        r'guitar|bass|drums|piano|strings|instrumental|recorded by|mixed by|mastered by|audio engineer|assistant engineer|'
+        r'(?:song )?title|song name|artist|album|composer|lyricist|producer|production|lyrics(?: by)?|music(?: production| distributed by)?|'
+        r'guitar|bass|drums|piano|strings|instrumental|(?:written|composed|arranged|produced|recorded|mixed|mastered) by|audio engineer|assistant engineer|'
         r'乐团|乐队|orchestra|band|arrange(?:ment|r)|(?:backing |lead )?vocals?(?: arrangement)?|(?:recording|mixing|mastering)(?: engineer| studio)?(?: \(vocals\))?|'
         r'production assistant|program(?:ming)?|PGM|[OS]P|O[AC](?:\s*/\s*O[AC])?|publisher|copyright')
     # A translated role is still metadata: "编曲 Arrangement: ...".

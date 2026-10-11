@@ -2953,11 +2953,14 @@ def test_translated_production_footer_cannot_change_the_lyric_language(credit):
 
 def test_bilingual_credits_do_not_consume_lyric_prose_or_change_the_body():
     from karaoke.lyric_lookup import published_lyric_lines
-    body = ['Music keeps us moving: through the night', '鼓beat tonight: 我们继续唱', 'Chief of my heart: stay with me']
-    text = '\n'.join(['编曲 Arrangement：A Person', *body, '制作人 Producer：Someone'])
-    assert published_lyric_lines(text, 'Evening') == (body, [1, 5])
+    body = ['Music keeps us moving: through the night', '鼓beat tonight: 我们继续唱',
+            'Chief of my heart: stay with me', 'I was composed by loss: I sing', 'Lyrics by the fire: we carry on']
+    header = ['作曲 Composed by：A Person', '作词 Lyrics by：A Writer', '制作人 Produced by：Someone',
+              '编曲 Music Arranged by：An Arranger', '编曲 Arrangement：A Person']
+    text = '\n'.join([*header, *body, '制作人 Producer：Someone'])
+    assert published_lyric_lines(text, 'Evening') == (body, [1, 2, 3, 4, 5, 11])
     text = '\n'.join([*body, 'Credit List', '歌名 Song Title：Evening', 'A Person'])
-    assert published_lyric_lines(text, 'Evening') == (body, [4, 5, 6])
+    assert published_lyric_lines(text, 'Evening') == (body, [6, 7, 8])
 
 
 @pytest.mark.parametrize('labelled', [False, True])
