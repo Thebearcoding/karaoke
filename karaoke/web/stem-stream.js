@@ -2,6 +2,30 @@
 // Frame indices place every published stem on the shared AudioContext timeline.
 const decodeAheadSeconds = 24;
 
+async function decodeAudio(context, data, signal) {
+  for (let attempt = 0; ; attempt++) {
+    signal.throwIfAborted();
+    let timer, aborted;
+    try {
+      return await Promise.race([
+        Promise.all(data.map(bytes => context.decodeAudioData(bytes.slice(0)))),
+        new Promise((_, reject) => {
+          aborted = () => reject(signal.reason);
+          signal.addEventListener('abort', aborted, {once:true});
+          timer = setTimeout(() => reject(new DOMException('音轨解码超时，请重试', 'TimeoutError')), 20000);
+        }),
+      ]);
+    } catch (error) {
+      // Web Audio has no cancellation API. Settle the wait ourselves and retry
+      // a hung decoder once from the same bytes, ignoring its eventual result.
+      if (signal.aborted || error.name !== 'TimeoutError' || attempt) throw error;
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', aborted);
+    }
+  }
+}
+
 async function readMedia(url, signal, consume) {
   for (let attempt = 0; ; attempt++) {
     let retryAfter = 0;
@@ -78,11 +102,9 @@ export class StemStream {
     if (this.signal.aborted) abort();
     const item = {controller};
     this.windows.set(index, item);
-    let timer;
     item.loading = this.download(index, controller.signal).then(data => {
       if (controller.signal.aborted) throw new Error('音轨加载已取消');
-      timer = setTimeout(abort, 20000);
-      return Promise.all(data.map(bytes => this.context.decodeAudioData(bytes.slice(0))));
+      return decodeAudio(this.context, data, controller.signal);
     }).then(audio => {
       if (controller.signal.aborted) throw new Error('音轨加载超时，请重试');
       item.audio = audio;
@@ -93,7 +115,6 @@ export class StemStream {
       item.error = error;
       throw error;
     }).finally(() => {
-      clearTimeout(timer);
       this.signal.removeEventListener('abort', abort);
     });
     // Prefetch failures are surfaced when that window is needed; never retry

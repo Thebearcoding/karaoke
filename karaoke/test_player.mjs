@@ -1658,3 +1658,44 @@ test('an audio fetch that never finishes times out and retries without stopping 
     assert.notEqual(p.anchor,null);
   } finally { p.clear(); globalThis.fetch=fetchAudio; }
 });
+
+for (const outcome of ['recovers', 'stays stuck', 'cancelled']) {
+  test(`a stalled audio decoder ${outcome} without hanging the stream`, async t => {
+    t.mock.timers.enable({apis:['setTimeout']});
+    const pending=[], requests=[];
+    let attempts=0;
+    globalThis.fetch=streamingFetch(url=>{requests.push(url);return null;});
+    const p=setup(), waiting=[];
+    p.onBuffering=(...args)=>waiting.push(args);
+    p.ensureContext();
+    p.context.decodeAudioData=data=>{
+      if (data.includes('/lead_vocals/3?') && (++attempts===1 || outcome!=='recovers'))
+        return new Promise(resolve=>pending.push(()=>resolve({duration:8,tag:data})));
+      return Promise.resolve({duration:8,tag:data});
+    };
+    try {
+      await p.unlock(); await p.load({...song,duration:80}); await settled();
+      await p.apply({...state,position:0},clockOffset());
+      const item=p.stream.windows.get(3);
+      let settledDecode=false;
+      item.loading.finally(()=>{settledDecode=true;}).catch(()=>{});
+      if (outcome==='cancelled') p.suspend();
+      else t.mock.timers.tick(20000);
+      await settled();
+      if (outcome==='stays stuck') {
+        t.mock.timers.tick(20000); await settled();
+        assert.match(item.error?.message || '',/超时/);
+      } else if (outcome==='recovers') {
+        assert.ok(p.hasAudio(24));
+        assert.deepEqual(waiting,[]);
+        assert.notEqual(p.anchor,null);
+      }
+      assert.equal(attempts,outcome==='cancelled'?1:2);
+      assert.equal(settledDecode,true);
+      assert.equal(requests.filter(url=>url.endsWith('/lead_vocals/3')).length,1);
+      for (const resolve of pending) resolve();
+      await settled();
+      if (outcome!=='recovers') assert.equal(item.audio,undefined);
+    } finally { p.clear(); for (const resolve of pending) resolve(); globalThis.fetch=fetchAudio; }
+  });
+}
