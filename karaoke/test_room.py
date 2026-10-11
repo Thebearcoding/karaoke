@@ -345,7 +345,8 @@ def test_unplayed_entries_do_not_enter_sung_history(tmp_path, monkeypatch, mode)
     if mode == 'seek_without_play':
         room.command(RoomCommand(action='seek', entry_id=entry['id'], position=5.))
     done = room.command(RoomCommand(action='next', entry_id=entry['id']))
-    assert done['entries'] == [] and done['history'] == []
+    assert [e['id'] for e in done['entries']] == ([entry['id']] if mode == 'unprepared' else [])
+    assert done['history'] == []
 
 
 def test_select_archives_sung_current_and_keeps_unplayed_entries_in_queue(tmp_path, monkeypatch):
