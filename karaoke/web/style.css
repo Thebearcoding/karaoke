@@ -122,14 +122,16 @@ html{scroll-padding-top:calc(var(--header-height,80px) + 20px)}
 [data-theme="dark"] .theme-sun{display:block}[data-theme="dark"] .theme-moon{display:none}
 @media(max-width:480px){.topbar{column-gap:8px;padding-inline:16px}.navigation{gap:10px}.navigation button{font-size:13px}}
 
-/* Phones are song-request screens; the same breakpoint gates audio ownership. */
+/* Compact song lists share the same player and controls on phones. */
 .music-compact-artist{display:none}
 @media(max-width:760px),(max-width:1000px) and (max-height:500px){
-  .navigation [data-view="player"],#player-view,.transport,.storage-panel{display:none!important}
-  .workspace{padding:16px 16px calc(24px + env(safe-area-inset-bottom))}
+  .storage-panel{display:none}
+  .workspace{padding:16px 16px calc(var(--transport-height,180px) + 24px)}
+  .screen{margin-inline:-16px}
+  .now-song{min-height:44px}
   .topbar{padding:10px 16px}.navigation{gap:20px}.navigation button{font-size:14px}
   .brand{gap:8px}.brand-name{font-size:20px}.brand-type{font-size:19px}
-  .toast{bottom:calc(16px + env(safe-area-inset-bottom));gap:12px;font-size:13px}
+  .toast{gap:12px;font-size:13px}
   .home-discovery{margin:22px 0 24px}.home-artists{grid-auto-columns:88px;gap:18px}.home-artist strong{font-size:13px}
   .searching #local-library{margin-bottom:24px}
   .library-filters{flex-wrap:nowrap;overflow-x:auto;margin-bottom:12px;gap:4px;scrollbar-width:none}
@@ -154,4 +156,11 @@ html{scroll-padding-top:calc(var(--header-height,80px) + 20px)}
   .queue-entry{grid-template-columns:18px 44px minmax(0,1fr);column-gap:10px;row-gap:0;padding:10px 0}
   .entry-cover,.entry-art{width:44px;height:44px}.entry-tools{padding-top:0;gap:12px}
   .entry-tools button{min-height:44px}.entry-title button{min-height:28px;padding:0;text-align:left}
+}
+
+@media(max-width:480px){
+  .topbar{grid-template-columns:minmax(0,1fr) 44px;gap:0 12px;padding-block:8px 0}
+  .theme-toggle{grid-column:2}
+  .navigation{grid-column:1/-1;grid-row:2;justify-content:space-between;gap:12px}
+  .navigation button{flex:1;white-space:nowrap}
 }

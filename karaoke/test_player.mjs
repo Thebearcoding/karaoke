@@ -114,36 +114,16 @@ test('browser tabs share a single audio owner and reject saves from the previous
   assert.equal(first.write(before,{release:true}),false);
   assert.equal(second.write(after,{release:true}),true);
   assert.equal(reopened.read().owner,null);
-  const anotherBrowser = new PlaybackTabs(null,'other',before);
+  const phoneValues = new Map(), phoneStorage = {getItem:key=>phoneValues.get(key), setItem:(key,value)=>phoneValues.set(key,value)};
+  const anotherBrowser = new PlaybackTabs(phoneStorage,'phone',before);
   assert.deepEqual(anotherBrowser.read().playback,before);
   assert.equal(anotherBrowser.write(before,{claim:true}),true);
   assert.equal(anotherBrowser.owns(),true);
-});
-
-test('song-request screens cannot claim audio, restore playback, or overwrite the playing tab', () => {
-  const values = new Map(), storage = {getItem:key=>values.get(key), setItem:(key,value)=>values.set(key,value)};
-  const desktop = new PlaybackTabs(storage, 'desktop');
-  const saved = {entry:{id:'song',job_id:'job'},position:12,playing:true};
-  desktop.write(saved, {claim:true});
-  const phone = new PlaybackTabs(storage, 'phone', saved, false);
-  assert.equal(phone.owns(), false);
-  assert.equal(phone.write(saved, {claim:true}), false);
-  assert.equal(phone.write({...saved,position:99}, {release:true}), false);
-  phone.setEnabled(false);
-  assert.equal(desktop.owns(), true);
-  assert.deepEqual(desktop.read().playback, saved);
-
-  // Shrinking the playing tab stops its session; enlarging does not autoplay.
-  const session = desktop.record.session;
-  desktop.setEnabled(false);
-  assert.equal(desktop.owns(session), false);
-  assert.equal(desktop.read().owner, null);
-  assert.equal(desktop.read().playback.playing, false);
-  assert.equal(desktop.read().playback.position, 12);
-  desktop.setEnabled(true);
-  assert.equal(desktop.owns(), false);
-  assert.equal(desktop.write(desktop.read().playback, {claim:true}), true);
-  assert.equal(desktop.owns(session), false);
+  assert.equal(anotherBrowser.write({...before,position:30,levels:{lead_vocals:0.5}}),true);
+  assert.deepEqual(reopened.read().playback,after);
+  reopened.write(after,{claim:true});
+  assert.equal(anotherBrowser.owns(),true);
+  assert.equal(anotherBrowser.read().playback.position,30);
 });
 
 test('interleaved tab claims and delayed writes cannot hide an ownership change behind a revision', () => {
@@ -384,7 +364,7 @@ test('queue to top inserts after the playing song without changing either device
   for (const device of [computer,phone]) device.reconcile(room);
   assert.deepEqual([computer,phone].map(p=>p.save()),before);
   assert.ok(computer.state.playing && phone.state.playing);
-  // A request-only phone has no local transport but receives active entry IDs.
+  // An idle browser still receives other devices' active entry IDs.
   const orderingPhone = new LocalPlayback();
   const shared = {entries, playing_entry_ids:['one']};
   orderingPhone.reconcile(shared);
