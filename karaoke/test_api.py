@@ -2810,7 +2810,9 @@ def test_music_cached_body_survives_duration_changes_and_other_song_backoff(tmp_
     ('改编词/念白：作者', '小号：乐手', '和音录制：制作人', '特别鸣谢 (女声念白录制)：演员'),
     ('音乐制作人Music Producer : A Person', '首席制作人 Executive Producer：Another Person',
      '联合制作人 Co-producer: A Person', '执行制作人 Executive Producer: Another Person'),
-    ('OA/OC: A Writer / B Writer', 'ＯＰ：A Publisher', 'SP: B Publisher', 'Publisher: C Publisher')])
+    ('OA/OC: A Writer / B Writer', 'ＯＰ：A Publisher', 'SP: B Publisher', 'Publisher: C Publisher'),
+    ('弦乐制谱：乐手', '人声编辑：工程师', '制作团队：录音室', '混音：工程师'),
+    ('弦樂製譜 : 樂手', '人聲編輯 : 工程師', '製作團隊 : 錄音室', '混音 : 工程師')])
 @pytest.mark.parametrize('heading', ['晚風', '晚風-林林', '晚風 - 林林', '晚風—林林', '晚風 – 林林'])
 def test_published_lyrics_remove_credit_blocks_but_keep_sung_titles_and_colons(credits, heading):
     from karaoke.lyric_lookup import published_candidate, published_lyric_lines
