@@ -261,9 +261,7 @@ export class Player {
   }
 
   async unlock() {
-    // Transport controls can reuse permission even while the output is
-    // interrupted. In particular, pausing must never wait for sound to resume.
-    if (this.unlocked) return;
+    if (this.unlocked && this.context.state === 'running') return;
     // iOS otherwise treats Web Audio as ambient audio, which the ringer switch mutes.
     try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch { /* Optional API. */ }
     this.ensureContext();

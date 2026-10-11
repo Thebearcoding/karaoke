@@ -808,6 +808,8 @@ async function activate() {
 
 async function togglePlay() {
   const wasUnlocked = tabs.owns() && player.unlocked;
+  // Pause is an intent change, not a request to reactivate the audio device.
+  if (state.playing && wasUnlocked) { await command('pause'); return; }
   if (!(await activate())) return;
   if (state.playing && !wasUnlocked) { await syncPlayback(); return; }
   await command(state.playing ? 'pause' : 'play');
@@ -981,7 +983,7 @@ async function nextSong() {
   if (skipping || !state.current_id) return;
   const entry_id = state.current_id;
   skipping = true; updateTransport();
-  try { if (await activate()) await command('next', {entry_id}); }
+  try { if ((tabs.owns() && player.unlocked) || await activate()) await command('next', {entry_id}); }
   finally { skipping = false; updateTransport(); }
 }
 document.querySelectorAll('[data-next]').forEach(button => button.onclick = nextSong);

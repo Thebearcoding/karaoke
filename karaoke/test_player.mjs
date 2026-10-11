@@ -714,8 +714,6 @@ test('transient audio interruptions freeze playback without revoking permission 
       p.context.state=interrupted; p.context.onstatechange();
       assert.equal(p.anchor,null); assert.equal(p.video.paused,true); assert.equal(p.unlocked,true);
       assert.ok(sources.every(s=>s.stopped)); assert.equal(local.state.started_at,null);
-      await p.unlock(); // Pause/next controls must not wait for output readiness.
-      assert.equal(attempts,index);
       const ready=p.resumeAudio();
       assert.equal(p.resumeAudio(),ready);
       let resumed=false; ready.then(()=>{resumed=true;});
@@ -775,6 +773,24 @@ test('a genuine audio resume rejection remains retryable with a new play gesture
     p.context.resume=async()=>{p.context.state='running';};
     await p.unlock(); await p.apply(state,clockOffset());
     assert.equal(p.sources.length,3);
+  } finally {p.clear();}
+});
+
+test('a fresh play gesture can release an automatic resume that is still waiting', async () => {
+  const p=setup();
+  try {
+    await p.unlock(); await p.load(song);
+    p.context.state='suspended';
+    const ready=p.resumeAudio();
+    await new Promise(resolve=>setImmediate(resolve));
+    let resumed=false; ready.then(()=>{resumed=true;});
+    let gestures=0;
+    p.context.resume=async()=>{
+      gestures++; p.context.state='running'; p.context.dispatchEvent(new Event('statechange'));
+    };
+    await p.unlock();
+    assert.equal(gestures,1); await ready; assert.equal(resumed,true);
+    await p.apply(state,clockOffset()); assert.equal(p.sources.length,3);
   } finally {p.clear();}
 });
 
