@@ -4,6 +4,7 @@ import html
 from html.parser import HTMLParser
 from difflib import SequenceMatcher
 from functools import lru_cache
+from itertools import product
 import json
 import math
 import os
@@ -697,7 +698,7 @@ def catalogue_lyric_identity(song, duration, cache):
     # catalogue must still account for both work and credit in the upload.
     quoted = [next(part for part in match if part) for match in re.findall(
         r'《([^《》]+)》|「([^「」]+)」|『([^『』]+)』|“([^“”]+)”|"([^"\n]+)"', titles[0])]
-    query = quoted[0] if len(set(quoted)) == 1 else titles[-1]
+    queries = list(dict.fromkeys(([quoted[0]] if len(set(quoted)) == 1 else []) + [titles[-1]]))
     upload = canonical_script(titles[0]).casefold()
 
     def named_span(value, text, *, title=False):
@@ -714,7 +715,7 @@ def catalogue_lyric_identity(song, duration, cache):
         return candidate['identity_basis'] != 'upload_title_and_credit', delta if delta is not None else math.inf
 
     attempts = []
-    for provider in ('netease', 'line_music'):
+    for query, provider in product(queries, ('netease', 'line_music')):
         provider_query = _traditional.convert(query) if provider == 'line_music' else query
         try:
             if provider == 'netease':
@@ -1040,7 +1041,8 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 if song == before:
                     continue
                 blocked = {r['provider']: (None, r) for r in report.get('crosscheck', {}).get('unavailable_sources', [])
-                           if r.get('provider') and (r.get('error') or r['provider'] == 'youtube_music')}
+                           if r.get('provider') and (r['provider'] == 'youtube_music' or
+                               r.get('error') and not lyric_retry_due(r, r['provider'], cache))}
                 blocked.update({r['provider']: (text, r) for text, r in
                     zip(report.get('candidate_texts', []), review.get('sources', [])) if r['provider'] == 'youtube_music'})
                 lines, report = fetch_lyric_consensus(song, metadata, duration, cache, description_text, True,
@@ -1065,17 +1067,18 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
             if artist_resolution:
                 report = dict(report, artist_identity_lookup=artist_resolution)
         # Watch-page "artists" can merely repeat a video's upload channel.
-        # Only recover missing credits; never replace an explicit performer.
-        if (not lines and not request.get('artist') and not video_song_info(metadata).get('artist')
-                and not (parsed and parsed.artist) and (not song.get('artist') or
-                artist_credit_matches(song['artist'], [metadata.get('uploader'), metadata.get('channel')]) or
-                any(a.get('id') and a['id'] == metadata.get('channel_id') for a in recording.get('artists') or []))):
-            candidate, recovery = catalogue_lyric_identity(song, duration, cache)
+        # Upload-title parsing can reverse artist/title order. Only actual
+        # music tags or explicit user/model credits exclude catalogue recovery.
+        if (not lines and not request.get('artist') and not metadata.get('artist') and not metadata.get('artists')
+                and not (parsed and parsed.artist)):
+            upload = dict(song, title=request.get('title') or metadata.get('title') or song.get('title'))
+            candidate, recovery = catalogue_lyric_identity(upload, duration, cache)
             original_report, original_song = report, dict(song)
             if candidate:
                 song.update({key:candidate[key] for key in ('title','artist')})
                 reused = {r['provider']:(None,r) for r in original_report.get('crosscheck', {}).get('unavailable_sources', [])
-                          if r.get('provider') and (r.get('error') or r['provider'] == 'youtube_music')}
+                          if r.get('provider') and (r['provider'] == 'youtube_music' or
+                              r.get('error') and not lyric_retry_due(r, r['provider'], cache))}
                 lines, report = fetch_lyric_consensus(song, metadata, duration, cache, None, True, prefetched=reused)
                 if not lines:
                     recovery = dict(recovery, rejected_lookup=report)

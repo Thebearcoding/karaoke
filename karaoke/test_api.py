@@ -1814,6 +1814,46 @@ def test_catalogue_identity_respects_existing_provider_access_hold(tmp_path, mon
     assert lyric_lookup.catalogue_lyric_identity(dict(title='夜の色'), 30, StageCache(tmp_path)) == (None, hold)
 
 
+@pytest.mark.parametrize('explicit_artist', [False, True])
+@pytest.mark.parametrize('backoff_expired', [False, True])
+def test_catalogue_recovers_reversed_upload_credit_after_a_non_title_quote(
+        tmp_path, monkeypatch, explicit_artist, backoff_expired):
+    from openai import OpenAIError
+    from urllib.parse import parse_qs, urlsplit
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    upload = '夜风 - 小河「SQ无损」(词)'
+    searches = []
+    body = ['微风里我们一起歌唱', '星空下我们静静倾听'] * 3
+    def catalogue(provider, url, *args):
+        query = next(iter(parse_qs(urlsplit(url).query).values()))[0]
+        searches.append(query)
+        rows = [dict(id=1, name='夜风', ar=[dict(name='小河')], dt=50000)] if query == upload else []
+        return (dict(code=200, result=dict(songs=rows)) if provider == 'netease' else
+                dict(response=dict(result=dict(tracks=[]))))
+    def consensus(song, *args, **kwargs):
+        matched = (song['title'], song['artist']) == ('夜风', '小河')
+        if matched:
+            assert ('netease' in kwargs['prefetched']) != backoff_expired
+            return body, dict(language='Chinese', crosscheck=dict(status='corroborated'))
+        return None, dict(crosscheck=dict(unavailable_sources=[dict(provider='netease',
+            error='ConnectTimeout', retry_at=time.time()+(-60 if backoff_expired else 60))]))
+    def unavailable(*args):
+        raise OpenAIError('No optional model configured')
+    monkeypatch.setattr(lyric_lookup, 'cached_lyric_request', catalogue)
+    monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', unavailable)
+    monkeypatch.setattr(lyric_consensus, 'fetch_lyric_consensus', consensus)
+    metadata = dict(title=upload, description='Published music', uploader='Channel')
+    if explicit_artist:
+        metadata['artist'] = 'Explicit artist'
+    result = lyric_lookup.prepare_online_lyrics(dict(url=URL), metadata, 30, StageCache(tmp_path), 'unused', None)
+    if explicit_artist:
+        assert result is None and not searches
+    else:
+        assert result['lines'] == body and result['artist'] == '小河' and result['title'] == '夜风'
+        assert searches[0] == 'SQ无损' and searches[-1] == upload
+
+
 @pytest.mark.parametrize('upload,title,artist,matched', [
     ('夜の風100% 光るBAND', '夜の風100%', '光るBAND', True),
     ('光るBAND 夜の風100%', '夜の風100%', '光るBAND', True),
