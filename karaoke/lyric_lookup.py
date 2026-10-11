@@ -689,47 +689,82 @@ def fetch_published_lyrics(song, source_title, cache, duration=None, *, referenc
 
 
 def catalogue_lyric_identity(song, duration, cache):
-    """Recover an uncredited work by title and duration, never by upload channel."""
-    query = names(song.get('title'), title=True)
-    if not query or not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0:
+    """Ground an upload label in catalogue credits, never in its channel name."""
+    titles = names(song.get('title'), title=True)
+    if not titles or not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0:
         return None, dict(status='missing_title_or_duration')
-    url = 'https://music.163.com/api/cloudsearch/pc?'+urlencode(dict(s=query[-1], type=1, limit=30, offset=0))
-    try:
-        packet = cached_lyric_request('netease', url, cache, lambda: read_document(url, timeout=10))
-        if packet.get('code') != 200:
-            raise ValueError('NetEase catalogue search rejected the request')
-        rows = packet.get('result', {}).get('songs', [])
-        if not isinstance(rows, list):
-            raise ValueError('Invalid catalogue search response')
-    except Exception as error:
-        return None, lyric_request_error(error)
-    candidates = {}
-    for row in rows:
-        if not isinstance(row, dict) or not isinstance(row.get('ar'), list):
-            continue
-        if not identity(song['title'], title=True) & identity(row.get('name'), title=True):
-            continue
-        artists = [a['name'] for a in row.get('ar', []) if isinstance(a, dict) and isinstance(a.get('name'), str) and a['name'].strip()]
-        milliseconds = row.get('dt')
-        if not artists or not isinstance(milliseconds, (int, float)) or not math.isfinite(milliseconds):
-            continue
-        delta = abs(milliseconds/1000-duration)
-        if delta > max(3., min(10., duration*.02)):
-            continue
-        key = tuple(sorted(tuple(sorted(identity(a))) for a in artists))
-        candidate = dict(title=row['name'], artist=' · '.join(artists), duration_seconds=milliseconds/1000,
-                         duration_difference=delta, url='https://music.163.com/#/song?id='+str(row['id']))
-        if key not in candidates or delta < candidates[key]['duration_difference']:
-            candidates[key] = candidate
-    ordered = sorted(candidates.values(), key=lambda c:c['duration_difference'])
-    report = dict(status='no_match', provider='netease', query=query[-1], candidates=ordered,
-                  basis='Matching title and recording duration; candidate text still requires acoustic alignment')
-    if ordered:
-        # Sub-second differences between different credits are within metadata
-        # rounding/encoder padding uncertainty, not evidence for one singer.
-        if len(ordered) > 1 and ordered[1]['duration_difference'] < ordered[0]['duration_difference']+1:
-            return None, dict(report, status='ambiguous')
-        return ordered[0], dict(report, status='candidate')
+    # Quotation marks supply a search hint, not a trusted song identity. The
+    # catalogue must still account for both work and credit in the upload.
+    quoted = [next(part for part in match if part) for match in re.findall(
+        r'《([^《》]+)》|「([^「」]+)」|『([^『』]+)』|“([^“”]+)”|"([^"\n]+)"', titles[0])]
+    query = quoted[0] if len(set(quoted)) == 1 else titles[-1]
+    upload = canonical_script(titles[0]).casefold()
+
+    def named_span(value, text, *, title=False):
+        for alias in sorted(names(value, title=title), key=len, reverse=True):
+            units = re.findall(r'[a-z\u00c0-\u024f]+|\d+|[^\W_]', canonical_script(alias).casefold())
+            if units:
+                match = re.search(r'(?<![a-z\u00c0-\u024f0-9])'+r'\W*'.join(map(re.escape, units))+
+                                  r'(?![a-z\u00c0-\u024f0-9])', text)
+                if match:
+                    return match
+
+    def rank(candidate):
+        delta = candidate['duration_difference']
+        return candidate['identity_basis'] != 'upload_title_and_credit', delta if delta is not None else math.inf
+
+    attempts = []
+    for provider in ('netease', 'line_music'):
+        provider_query = _traditional.convert(query) if provider == 'line_music' else query
+        try:
+            if provider == 'netease':
+                url = 'https://music.163.com/api/cloudsearch/pc?'+urlencode(dict(s=provider_query, type=1, limit=30, offset=0))
+                packet = cached_lyric_request(provider, url, cache, lambda: read_document(url, timeout=10))
+                if packet.get('code') != 200:
+                    raise ValueError('NetEase catalogue search rejected the request')
+                rows = [dict(title=r.get('name'), artists=[a.get('name') for a in r.get('ar') or [] if isinstance(a, dict)],
+                    seconds=r['dt']/1000 if isinstance(r.get('dt'), (int, float)) else None,
+                    url='https://music.163.com/#/song?id='+str(r.get('id')))
+                    for r in packet.get('result', {}).get('songs', []) if isinstance(r, dict)]
+            else:
+                url = 'https://music-tw.line.me/api/search/v4/track.json?'+urlencode(
+                    dict(query=provider_query, start=1, display=30, sort='RELEVANCE'))
+                packet = cached_lyric_request(provider, url, cache,
+                    lambda: read_document(url, headers={'CHANNEL-ID': '1581655766'}))
+                rows = [dict(title=r.get('trackTitle'), artists=[a.get('artistName') for a in r.get('artists') or [] if isinstance(a, dict)],
+                    seconds=None, url='https://music-tw.line.me/track/'+str(r.get('trackId')))
+                    for r in packet['response']['result']['tracks'] if isinstance(r, dict)]
+        except Exception as error:
+            return None, lyric_request_error(error)
+        candidates = {}
+        for row in rows:
+            title, artists, seconds = row['title'], row['artists'], row['seconds']
+            if not isinstance(title, str) or not artists or not all(isinstance(a, str) and a.strip() for a in artists):
+                continue
+            seconds = seconds if seconds is not None and math.isfinite(seconds) and seconds > 0 else None
+            span = named_span(title, upload, title=True)
+            outside_title = upload[:span.start()]+' '+upload[span.end():] if span else ''
+            grounded = bool(span and all(named_span(a, outside_title) for a in artists))
+            delta = abs(seconds-duration) if seconds is not None else None
+            if not grounded and not (identity(song['title'], title=True) & identity(title, title=True) and
+                                     delta is not None and delta <= max(3., min(10., duration*.02))):
+                continue
+            key = (comparison_key(names(title, title=True)[-1]), tuple(sorted(tuple(sorted(identity(a))) for a in artists)))
+            candidate = dict(title=title, artist=' · '.join(artists), duration_seconds=seconds,
+                duration_difference=delta, url=row['url'], identity_basis='upload_title_and_credit' if grounded else 'title_and_duration')
+            if key not in candidates or rank(candidate) < rank(candidates[key]):
+                candidates[key] = candidate
+        ordered = sorted(candidates.values(), key=rank)
+        report = dict(status='candidate' if ordered else 'no_match', provider=provider, query=provider_query, candidates=ordered,
+                      basis='Catalogue identity; candidate text still requires acoustic alignment')
+        attempts.append(report)
+        if ordered:
+            # Distinct complete credits in one label can describe a medley.
+            # Duration rounding alone also cannot disambiguate two singers.
+            if len(ordered) > 1 and rank(ordered[0])[0] == rank(ordered[1])[0] and (
+                    not rank(ordered[0])[0] or rank(ordered[1])[1] < rank(ordered[0])[1]+1):
+                return None, dict(report, status='ambiguous', attempts=attempts)
+            return ordered[0], dict(report, status='candidate', attempts=attempts)
     return None, report
 
 
@@ -1033,7 +1068,8 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
         # Only recover missing credits; never replace an explicit performer.
         if (not lines and not request.get('artist') and not video_song_info(metadata).get('artist')
                 and not (parsed and parsed.artist) and (not song.get('artist') or
-                artist_credit_matches(song['artist'], [metadata.get('uploader'), metadata.get('channel')]))):
+                artist_credit_matches(song['artist'], [metadata.get('uploader'), metadata.get('channel')]) or
+                any(a.get('id') and a['id'] == metadata.get('channel_id') for a in recording.get('artists') or []))):
             candidate, recovery = catalogue_lyric_identity(song, duration, cache)
             original_report, original_song = report, dict(song)
             if candidate:

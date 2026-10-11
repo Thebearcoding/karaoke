@@ -1814,6 +1814,70 @@ def test_catalogue_identity_respects_existing_provider_access_hold(tmp_path, mon
     assert lyric_lookup.catalogue_lyric_identity(dict(title='夜の色'), 30, StageCache(tmp_path)) == (None, hold)
 
 
+@pytest.mark.parametrize('upload,title,artist,matched', [
+    ('夜の風100% 光るBAND', '夜の風100%', '光るBAND', True),
+    ('光るBAND 夜の風100%', '夜の風100%', '光るBAND', True),
+    ('Jane Smith sings Evening Wind live', 'Evening Wind', 'Jane Smith', True),
+    ('Joanne sings Evening Wind live', 'Evening Wind', 'Ann', False),
+    ('A Song for Jane live', 'A Song for Jane', 'Jane', False),
+    ('夜の風100% 別の歌手', '夜の風100%', '光るBAND', False),
+])
+def test_upload_identity_is_grounded_in_catalogue_title_and_separate_credit(
+        tmp_path, monkeypatch, upload, title, artist, matched):
+    from karaoke import lyric_lookup
+    from karaoke.stage_cache import StageCache
+    row = dict(id=1, name=title, ar=[dict(name=artist)], dt=50000)
+    monkeypatch.setattr(lyric_lookup, 'cached_lyric_request', lambda provider, *a:
+        dict(code=200, result=dict(songs=[dict(row, ar=[None]), row])) if provider == 'netease' else
+        dict(response=dict(result=dict(tracks=[]))))
+    candidate, report = lyric_lookup.catalogue_lyric_identity(dict(title=upload), 30, StageCache(tmp_path))
+    assert bool(candidate) == matched
+    if matched:
+        assert candidate['title'] == title and candidate['artist'] == artist
+        assert candidate['identity_basis'] == 'upload_title_and_credit'
+        assert candidate['duration_difference'] == 20  # Text identity is not a recording-duration claim.
+
+
+def test_quoted_upload_recovers_localized_channel_identity_without_a_text_model(tmp_path, monkeypatch):
+    from openai import OpenAIError
+    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke.stage_cache import StageCache
+    from urllib.parse import parse_qs, urlsplit
+    upload = '纯享|小河/星星 演绎《夜风》，一起听歌 #音乐的伙伴 第三期'
+    metadata = dict(id='abcdefghijk', title=upload, channel='TV Music Channel',
+                    channel_id='UCchannel', description='欢迎订阅')
+    body = ['微風中我們一起唱歌', '星光下我們靜靜傾聽'] * 3
+    searches, identities = [], []
+    def catalogue(provider, url, cache, request):
+        searches.append((provider, parse_qs(urlsplit(url).query)))
+        if provider == 'netease':
+            return dict(code=200, result=dict(songs=[dict(id=2, name='夜風', ar=[dict(name='不相干的歌手')], dt=30000)]))
+        assert provider == 'line_music'
+        return dict(response=dict(result=dict(tracks=[dict(trackId=3,
+            trackTitle='夜風 (feat. 星星) (Live)', artists=[dict(artistName='音樂的伙伴')], album={})])))
+    def consensus(song, *args, **kwargs):
+        identities.append(dict(song))
+        if song.get('artist') == '音樂的伙伴':
+            return body, dict(language='Chinese', crosscheck=dict(status='corroborated'))
+        song['artist'] = '电视台音乐频道'
+        return None, dict(crosscheck=dict(unavailable_sources=[dict(provider='youtube_music',
+            recording_identity=dict(video_id='abcdefghijk', title=upload, artist='电视台音乐频道',
+                                    artists=[dict(name='电视台音乐频道', id='UCchannel')]))]))
+    def unavailable(*args):
+        raise OpenAIError('No optional text model configured')
+    monkeypatch.setattr(lyric_lookup, 'cached_lyric_request', catalogue)
+    monkeypatch.setattr(lyric_lookup, 'extract_song_metadata', unavailable)
+    monkeypatch.setattr(lyric_consensus, 'fetch_lyric_consensus', consensus)
+    monkeypatch.setattr(lyric_consensus, 'resolve_recording_artists',
+                        lambda *a: ('电视台音乐频道', {}))
+    result = lyric_lookup.prepare_online_lyrics(dict(url=URL), metadata, 30, StageCache(tmp_path), 'unused', None)
+    assert result is not None and result['lines'] == body
+    assert result['artist'] == '音樂的伙伴' and result['title'] == '夜風 (feat. 星星) (Live)'
+    assert searches == [('netease', dict(s=['夜风'], type=['1'], limit=['30'], offset=['0'])),
+                        ('line_music', dict(query=['夜風'], start=['1'], display=['30'], sort=['RELEVANCE']))]
+    assert identities[-1]['artist'] != '不相干的歌手'
+
+
 @pytest.mark.parametrize('failure', ['timeout', 'server', 'long_backoff', 'authentication'])
 def test_missing_lyrics_retry_transient_metadata_and_keep_confirmed_artist(tmp_path, monkeypatch, failure):
     import httpx
