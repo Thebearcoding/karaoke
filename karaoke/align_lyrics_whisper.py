@@ -810,6 +810,32 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
     return result
 
 
+def recover_recognition_timing(response, duration, recognize):
+    """Re-decode damaged localization; final alignment still times each word."""
+    def words(result):
+        return [w for s in result.get('segments', []) for w in s.get('words') or []
+                if normalized(w['word'])]
+
+    if not any(not np.isfinite([w['start'], w['end']]).all() or
+               not 0 <= w['start'] < w['end'] <= duration+.001 for w in words(response)):
+        return response
+    recovery = dict(reason='incomplete_word_timeline', original=response)
+    try:
+        alternative = recognize()
+        observed = words(alternative)
+        # ASR only supplies rough localization. Preserve residual zero-duration
+        # words for the subsequent acoustic alignment; never fill their times.
+        usable = (any(w['start'] < w['end'] for w in observed) and
+                  all(np.isfinite([w['start'], w['end']]).all() and
+                      0 <= w['start'] <= w['end'] <= duration+.001 for w in observed) and
+                  all(a['start'] <= b['start'] for a,b in zip(observed, observed[1:])))
+        recovery.update(alternative=alternative, accepted=usable,
+                        untimed_words=sum(w['start']==w['end'] for w in observed))
+    except ValueError as error:
+        recovery.update(error=str(error), accepted=False)
+    return dict(alternative if recovery['accepted'] else response, word_timing_recovery=recovery)
+
+
 def recognized_words(begin, response, end):
     # Compression ratio measures repeated text, not whether singing occurred.
     # Real refrains can exceed speech-ASR's repetition threshold. These words
@@ -1394,6 +1420,7 @@ def main():
                               implementation=inspect.getsource(recognize_audio), original_mix=original_mix,
                               windowing=inspect.getsource(recognize_in_windows),
                               word_filter=inspect.getsource(recognized_words),
+                              word_recovery=inspect.getsource(recover_recognition_timing),
                               audio_reader=inspect.getsource(audio_clip),
                               packages={name: version(name) for name in ('stable-ts', 'openai-whisper')})
                 key = 'alignment_localization_'+hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:16]
@@ -1404,11 +1431,11 @@ def main():
                     if not reused:
                         report_progress(detail='定位未对齐的唱段')
                         clip = audio_clip(start, stop, original_mix)
-                        def transcribe_chunk(samples):
+                        def transcribe_chunk(samples, **options):
                             return model.transcribe(samples,
                                 language=None, temperature=0, condition_on_previous_text=False,
                                 word_timestamps=True, regroup=False, verbose=None,
-                                fp16=args.device == 'cuda').to_dict()
+                                fp16=args.device == 'cuda', **options).to_dict()
                         # A whole-recording language choice can translate or
                         # erase a later language. Reuse the overlapping-window
                         # recovery path, detecting language in each crop.
@@ -1417,7 +1444,11 @@ def main():
                             'cuda' if args.device == 'cuda' else 'cpu', path.parent)
                             if fallback else nullcontext(transcribe_chunk))
                         with worker as recognize:
-                            transcribe_window = lambda left, right: recognize(clip[round(left*16000):round(right*16000)])
+                            def transcribe_window(left, right):
+                                samples = clip[round(left*16000):round(right*16000)]
+                                response = recognize(samples)
+                                return recover_recognition_timing(response, len(samples)/16000,
+                                    lambda: transcribe_chunk(samples, beam_size=5))
                             if seconds > 30:
                                 words, windows = recognize_in_windows(transcribe_window, 0., seconds,
                                                                      int(np.ceil(seconds/20)))

@@ -4491,6 +4491,43 @@ def test_display_words_do_not_inherit_a_phonetic_models_alphabet(language):
     assert [u['start'] for u in mapped] == [1.,1.2,1.6,2.,2.2]
 
 
+@pytest.mark.parametrize('fault', [None, 'punctuation', 'zero', 'negative', 'outside', 'nonfinite'])
+@pytest.mark.parametrize('recovery', ['valid', 'partial', 'invalid', 'error'])
+def test_localization_rechecks_untimed_words_without_dropping_refrains(fault, recovery):
+    from copy import deepcopy
+    from karaoke.align_lyrics_whisper import recover_recognition_timing, recognized_words
+    words = [dict(word=word, start=1.+i, end=1.8+i) for i,word in enumerate(['glowing', 'lanterns']*4)]
+    if fault == 'punctuation':
+        words.append(dict(word='!',start=9.,end=9.))
+    elif fault:
+        words[3].update(start={'zero':4.,'negative':-1.,'outside':4.,'nonfinite':float('inf')}[fault],
+                        end=4. if fault=='zero' else 11. if fault=='outside' else 4.8)
+    original = dict(segments=[dict(words=words)])
+    before = deepcopy(original)
+    alternative = dict(segments=[dict(words=[dict(word='glowing',start=1.,end=1.5),
+                                            dict(word='lanterns',start=1.5,end=1.5 if recovery=='partial' else 2.)])])
+    calls = []
+    def recognize():
+        calls.append(True)
+        if recovery == 'error':
+            raise ValueError('Recognition unavailable')
+        if recovery == 'invalid':
+            return dict(segments=[dict(words=[dict(word='glowing',start=1.,end=11.)])])
+        return alternative
+    result = recover_recognition_timing(original, 10., recognize)
+    if fault in (None, 'punctuation'):
+        assert result is original and not calls
+    else:
+        assert calls == [True]
+        assert result['word_timing_recovery']['original'] == original
+        assert result['word_timing_recovery']['accepted'] == (recovery in ('valid','partial'))
+        assert result['segments'] == (alternative if recovery in ('valid','partial') else original)['segments']
+        if recovery in ('valid','partial'):
+            assert [w['word'] for w in recognized_words(0., result, 10.)] == (['glowing'] if recovery=='partial' else ['glowing','lanterns'])
+            assert result['word_timing_recovery']['untimed_words'] == (1 if recovery=='partial' else 0)
+    assert original == before
+
+
 def test_recognition_windows_keep_language_switches_and_boundary_words():
     from karaoke.align_lyrics_whisper import recognize_in_windows
     calls=[]
