@@ -327,6 +327,41 @@ def observed_source_alternative(lyrics, alternatives, observations, *, cues=None
     return None
 
 
+def expanded_lyric_anchors(lyrics, previous, cues, report, duration):
+    """Locate unchanged phrases after explicit insertions; new lines stay untimed."""
+    from .timing_validation import validate_timeline
+    old, new = previous['lines'], lyrics['lines']
+    if (previous['language'] != lyrics['language'] or len(old) >= len(new) or
+            [c['text'] for c in cues] != old or report.get('unresolved') or
+            'pending_review_lines' not in report):
+        return []
+    try:
+        validate_timeline(cues, old, duration, report['constraints'], lyrics['language'])
+    except ValueError:
+        return []
+    prior_count = len(previous.get('provenance', {}).get('repetitions', []))
+    inserted = set()
+    for copy in lyrics.get('provenance', {}).get('repetitions', [])[prior_count:]:
+        first, stop = copy['output_range']
+        source_first, source_stop = copy['source_range']
+        if (not 0 <= first < stop <= len(new) or inserted.intersection(range(first, stop)) or
+                new[first:stop] != copy['source_lines'] or old[source_first:source_stop] != copy['source_lines']):
+            return []
+        inserted.update(range(first, stop))
+    if [line for i, line in enumerate(new) if i not in inserted] != old:
+        return []
+    anchors, index = [], 0
+    pending = set(report['pending_review_lines'])
+    for i, text in enumerate(new):
+        anchor = dict(text=text, start=None, end=None, status='unresolved_timing')
+        if i not in inserted:
+            if index+1 not in pending:
+                anchor.update(start=cues[index]['start'], end=cues[index]['end'], status='candidate')
+            index += 1
+        anchors.append(anchor)
+    return anchors
+
+
 def observed_repetition_candidate(lyrics, cues, observations, duration):
     """Propose exact source-text copies; their times still need full alignment."""
     from .align_lyrics_whisper import recognized_words
@@ -338,6 +373,10 @@ def observed_repetition_candidate(lyrics, cues, observations, duration):
     if provenance.get('kind') not in ('online_lyric_text', 'video_description') or provenance.get('repetition_passes', 0) >= 4:
         return None
     lines, language = lyrics['lines'], lyrics['language']
+    # Gaps in an incomplete alignment do not establish missing source lyrics,
+    # and its caption indexes no longer identify insertion points in the text.
+    if [normalized(c['text']) for c in cues] != [normalized(line) for line in lines]:
+        return None
     proposals = []
     for observation in observations:
         if not observation.get('recognition'):

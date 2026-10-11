@@ -1029,7 +1029,7 @@ class Pipeline:
             countdown_events=countdown_events(cues)))
 
     def align_candidates(self, lyrics, metadata, duration, lead=None):
-        from .lyric_consensus import alternative_lyric_candidates, observed_source_alternative, observed_repetition_candidate
+        from .lyric_consensus import alternative_lyric_candidates, observed_source_alternative, observed_repetition_candidate, expanded_lyric_anchors
         from .lyric_lookup import published_lyric_lines
         from .subtitles import normalized
         packet = lyrics.get('provenance', {}).get('lyric_lookup', {}) if not self.strict_audio else {}
@@ -1083,6 +1083,16 @@ class Pipeline:
             observations = list(recording_observations.values())
             try:
                 try:
+                    if previous and candidate['provenance'].get('route') == 'lyrics_first':
+                        # This prior was reviewed on this recording in this run.
+                        # Preserve its phrase locations before coarse alignment,
+                        # not only after an expanded text has already succeeded.
+                        prior_cues = json.loads((previous/'cues.json').read_text())
+                        anchors = expanded_lyric_anchors(candidate,
+                            json.loads((previous/'lyrics.json').read_text()), prior_cues,
+                            json.loads((previous/'timing-checked/report.json').read_text()), duration
+                        ) if prior_cues == json.loads((previous/'timing-checked/cues.json').read_text()) else []
+                        write_json(self.output/'anchors.json', anchors)
                     self.align(candidate, duration)
                 except (StageFailure, ValueError) as caught:
                     if self.strict_audio:
@@ -1100,6 +1110,7 @@ class Pipeline:
                     # Recognition belongs to the recording, not a candidate's line
                     # indexes. A narrower retry must not forget an observed verse.
                     observations = list(recording_observations.values())
+                    self.recording_observations = [dict(o, context=[0, len(candidate['lines'])]) for o in observations]
                 # The final timing review can expose a gap previously hidden
                 # by a held caption. Keep it in the same bounded source-repair
                 # loop; every replacement must pass this review again. Its
@@ -1307,16 +1318,18 @@ class Pipeline:
             if cues is None:
                 cues = json.loads((self.output/'cues.json').read_text())
             timed = [dict(c, status='candidate') for c in cues]
-            for block in json.loads(raw_path.read_text()):
-                for localization in block.get('asr_localizations', []):
-                    if not localization.get('recognition'):
-                        continue
-                    first, stop = localization['context']
-                    begin, end = localization['source_range']
-                    words = recognized_words(begin, localization['recognition'], end)
-                    word_views.append(words)
-                    first, stop = observed_context(lyrics['lines'], words, lyrics['language'], first, stop)
-                    observations.append(dict(context=[first, stop], source_range=[begin, end]))
+            localizations = getattr(self, 'recording_observations', None)
+            if localizations is None:
+                localizations = [o for b in json.loads(raw_path.read_text()) for o in b.get('asr_localizations', [])]
+            for localization in localizations:
+                if not localization.get('recognition'):
+                    continue
+                first, stop = localization['context']
+                begin, end = localization['source_range']
+                words = recognized_words(begin, localization['recognition'], end)
+                word_views.append(words)
+                first, stop = observed_context(lyrics['lines'], words, lyrics['language'], first, stop)
+                observations.append(dict(context=[first, stop], source_range=[begin, end]))
             for observation, words in zip(observations, word_views):
                 first, stop = observation['context']
                 begin, end = observation['source_range']

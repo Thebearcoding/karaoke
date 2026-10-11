@@ -6085,7 +6085,8 @@ def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeyp
 @pytest.mark.parametrize('complete_source', [True, False])
 @pytest.mark.parametrize('compression_ratio', [1., 3.2])
 @pytest.mark.parametrize('late_review', [False, True])
-def test_observed_missing_refrain_selects_complete_published_source(tmp_path, monkeypatch, complete_source, compression_ratio, late_review):
+@pytest.mark.parametrize('pending_opening', [False, True])
+def test_observed_missing_refrain_selects_complete_published_source(tmp_path, monkeypatch, complete_source, compression_ratio, late_review, pending_opening):
     refrain = ['glowing red horizon', 'bright blue ocean']
     short, complete = ['opening',*refrain,'closing'], ['opening',*refrain,*refrain,'closing']
     if complete_source:
@@ -6103,10 +6104,16 @@ def test_observed_missing_refrain_selects_complete_published_source(tmp_path, mo
     heard = [1.,3.,5.,8.,10.,*([11.] if complete_source else []),12.]
     calls=[]
     def align(candidate,duration):
+        if not complete_source and candidate['lines'] != short:
+            anchors = json.loads((tmp_path/'anchors.json').read_text()) if (tmp_path/'anchors.json').exists() else []
+            assert [c['text'] for c in anchors] == complete
+            assert [c['start'] for c in anchors] == [None if pending_opening else 1.,3.,5.,None,None,12.]
         calls.append(candidate['lines'])
         starts = ([1.,3.,5.,12.] if candidate['lines']==short else heard
                   if candidate['lines']==complete else [1.,3.,5.,8.,10.,12.])
-        cues = [dict(text=t,start=s,end=s+.8,status='candidate') for t,s in zip(candidate['lines'],starts)]
+        cues = [dict(text=t,start=s,end=s+.8,status='candidate',
+                     units=[dict(first=0,stop=len(t),text=t,start=s,end=s+.8)])
+                for t,s in zip(candidate['lines'],starts)]
         if late_review and candidate['lines']==short:
             cues[2]['end']=11.6  # A held caption initially hides the missing repeat.
         (tmp_path/'cues.json').write_text(json.dumps(cues))
@@ -6115,6 +6122,10 @@ def test_observed_missing_refrain_selects_complete_published_source(tmp_path, mo
         raw.write_text(json.dumps([dict(asr_localizations=[dict(context=[0,len(candidate['lines'])],
             source_range=[0.,15.],recognition=dict(segments=[dict(compression_ratio=compression_ratio, words=[
                 dict(word=t,start=s,end=s+.8) for t,s in zip(complete,heard)])]))])]))
+        if candidate['lines'] != short:
+            # Anchored alignment need not run ASR again. The whole-recording
+            # evidence from the prior attempt must still validate this text.
+            raw.write_text(json.dumps([dict(asr_localizations=[])]))
     monkeypatch.setattr(pipeline,'align',align)
     reviewed=[]
     def validate(candidate,duration,lead, **kwargs):
@@ -6123,6 +6134,11 @@ def test_observed_missing_refrain_selects_complete_published_source(tmp_path, mo
         if candidate['lines']==short:
             cues[2]['end']=5.8
             (tmp_path/'cues.json').write_text(json.dumps(cues))
+            checked = tmp_path/'timing-checked'; checked.mkdir(exist_ok=True)
+            (checked/'cues.json').write_text(json.dumps(cues))
+            (checked/'report.json').write_text(json.dumps(dict(constraints=[], unresolved=[],
+                pending_review_lines=[1] if pending_opening else [])))
+            (tmp_path/'timing-constraints.json').write_text('{}')
         pipeline.validate_localization(candidate,duration,cues)
     monkeypatch.setattr(pipeline,'validate_alignment',validate)
     selected,error=pipeline.align_candidates(lyrics,{},15.)
@@ -6132,6 +6148,7 @@ def test_observed_missing_refrain_selects_complete_published_source(tmp_path, mo
     if late_review and not complete_source:
         assert reviewed==[short,complete]
     evidence=json.loads((tmp_path/'localization-validation.json').read_text())
+    assert evidence
     assert all(not e['missing_repetitions'] and not e['conflicts'] for e in evidence)
     rejected=json.loads((tmp_path/'quality.json').read_text())['lyric_source_fallback']['rejected']
     saved=tmp_path/rejected[0]['diagnostics']
@@ -6355,7 +6372,8 @@ def test_repeat_proposal_keeps_source_interior_between_observed_outer_phrases(he
 
 
 @pytest.mark.parametrize('repetitions', [3, 4])
-def test_repeat_proposal_does_not_expand_a_chant_into_an_unheard_verse(repetitions):
+@pytest.mark.parametrize('missing_caption', [False, True])
+def test_repeat_proposal_does_not_expand_a_chant_into_an_unheard_verse(repetitions, missing_caption):
     from copy import deepcopy
     from karaoke.lyric_consensus import observed_repetition_candidate
     chant = 'Golden lanterns'
@@ -6363,13 +6381,18 @@ def test_repeat_proposal_does_not_expand_a_chant_into_an_unheard_verse(repetitio
     lyrics = dict(lines=lines, language='English', provenance=dict(kind='online_lyric_text'))
     cues = [dict(text=t, start=s, end=s+1, status='candidate')
             for t,s in zip(lines, [1.,4.,7.,10.,13.,40.])]
+    if missing_caption:
+        cues.pop(2)
     words = [dict(word=chant, start=20.+3*i, end=22.+3*i) for i in range(repetitions)]
     observations = [dict(context=[0,len(lines)], source_range=[0.,45.],
                          recognition=dict(segments=[dict(words=words)]))]
     before = deepcopy((lyrics, cues, observations))
     candidate = observed_repetition_candidate(lyrics, cues, observations, 45.)
-    assert candidate['lines'] == lines[:-1]+[chant]*3+lines[-1:]
-    assert candidate['provenance']['repetitions'][0]['source_lines'] == [chant]*3
+    if missing_caption:
+        assert candidate is None  # A missing caption is an alignment failure, not an omitted lyric.
+    else:
+        assert candidate['lines'] == lines[:-1]+[chant]*3+lines[-1:]
+        assert candidate['provenance']['repetitions'][0]['source_lines'] == [chant]*3
     assert (lyrics, cues, observations) == before
 
 
