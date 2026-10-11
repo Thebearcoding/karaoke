@@ -639,7 +639,8 @@ test('skip intro lands at the baked count-in and seeks all stems without resetti
     await p.apply({...local.state,current_id:entry.id},0);
     assert.equal(p.introSkipTarget(0),12.25);
     assert.equal(p.introSkipTarget(7.25),12.25);
-    for (const position of [-1,7.26,12.25,16.25,19,NaN]) assert.equal(p.introSkipTarget(position),null);
+    assert.equal(p.introSkipTarget(12.24),12.25); // Stay available until the count-in starts.
+    for (const position of [-1,12.25,16.25,19,NaN]) assert.equal(p.introSkipTarget(position),null);
     const oldSources=[...p.sources], target=p.introSkipTarget(local.position());
     local.command('seek',{entry_id:entry.id,position:target},[entry]);
     await p.apply({...local.state,current_id:entry.id},0);

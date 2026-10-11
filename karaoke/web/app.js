@@ -1050,6 +1050,7 @@ const transport = document.querySelector('.transport'), transportHome = transpor
 document.addEventListener('fullscreenchange', () => {
   const fullscreen = document.fullscreenElement === $('player-stage');
   (fullscreen ? $('player-stage') : transportHome).append(transport);
+  (fullscreen ? document.querySelector('.transport-playback') : $('screen')).append($('skip-intro'));
 });
 document.addEventListener('keydown', event => {
   if ($('video-preview').open) return;

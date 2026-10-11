@@ -379,7 +379,7 @@ export class Player {
 
   introSkipTarget(position) {
     return Number.isFinite(this.introStart) && Number.isFinite(position) &&
-      position >= 0 && this.introStart - position >= 5 ? this.introStart : null;
+      this.introStart >= 5 && position >= 0 && position < this.introStart ? this.introStart : null;
   }
 
   async load(entry, position = 0) {
