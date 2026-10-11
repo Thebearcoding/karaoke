@@ -694,10 +694,9 @@ def catalogue_lyric_identity(song, duration, cache):
     titles = names(song.get('title'), title=True)
     if not titles or not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0:
         return None, dict(status='missing_title_or_duration')
-    # Quotation marks supply a search hint, not a trusted song identity. The
+    # Delimiters supply a search hint, not a trusted song identity. The
     # catalogue must still account for both work and credit in the upload.
-    quoted = [next(part for part in match if part) for match in re.findall(
-        r'《([^《》]+)》|「([^「」]+)」|『([^『』]+)』|“([^“”]+)”|"([^"\n]+)"', titles[0])]
+    quoted = regex.findall(r'[\p{Ps}\p{Pi}"]([^\p{Ps}\p{Pe}\p{Pi}\p{Pf}"\n]+)[\p{Pe}\p{Pf}"]', titles[0])
     queries = list(dict.fromkeys(([quoted[0]] if len(set(quoted)) == 1 else []) + [titles[-1]]))
     upload = canonical_script(titles[0]).casefold()
 

@@ -1816,13 +1816,14 @@ def test_catalogue_identity_respects_existing_provider_access_hold(tmp_path, mon
 
 @pytest.mark.parametrize('explicit_artist', [False, True])
 @pytest.mark.parametrize('backoff_expired', [False, True])
+@pytest.mark.parametrize('suffix', ['', '(词)'])
 def test_catalogue_recovers_reversed_upload_credit_after_a_non_title_quote(
-        tmp_path, monkeypatch, explicit_artist, backoff_expired):
+        tmp_path, monkeypatch, explicit_artist, backoff_expired, suffix):
     from openai import OpenAIError
     from urllib.parse import parse_qs, urlsplit
     from karaoke import lyric_lookup, lyric_consensus
     from karaoke.stage_cache import StageCache
-    upload = '夜风 - 小河「SQ无损」(词)'
+    upload = '夜风 - 小河「SQ无损」'+suffix
     searches = []
     body = ['微风里我们一起歌唱', '星空下我们静静倾听'] * 3
     def catalogue(provider, url, *args):
@@ -1851,7 +1852,8 @@ def test_catalogue_recovers_reversed_upload_credit_after_a_non_title_quote(
         assert result is None and not searches
     else:
         assert result['lines'] == body and result['artist'] == '小河' and result['title'] == '夜风'
-        assert searches[0] == 'SQ无损' and searches[-1] == upload
+        assert searches[-1] == upload
+        assert searches[0] == (upload if suffix else 'SQ无损')
 
 
 @pytest.mark.parametrize('upload,title,artist,matched', [
@@ -1878,12 +1880,13 @@ def test_upload_identity_is_grounded_in_catalogue_title_and_separate_credit(
         assert candidate['duration_difference'] == 20  # Text identity is not a recording-duration claim.
 
 
-def test_quoted_upload_recovers_localized_channel_identity_without_a_text_model(tmp_path, monkeypatch):
+@pytest.mark.parametrize('delimiters', ['《》', '【】', '「」', '『』', '〈〉', '［］', '“”', '""'])
+def test_quoted_upload_recovers_localized_channel_identity_without_a_text_model(tmp_path, monkeypatch, delimiters):
     from openai import OpenAIError
     from karaoke import lyric_lookup, lyric_consensus
     from karaoke.stage_cache import StageCache
     from urllib.parse import parse_qs, urlsplit
-    upload = '纯享|小河/星星 演绎《夜风》，一起听歌 #音乐的伙伴 第三期'
+    upload = f'纯享|小河/星星 演绎{delimiters[0]}夜风{delimiters[1]}，一起听歌 #音乐的伙伴 第三期'
     metadata = dict(id='abcdefghijk', title=upload, channel='TV Music Channel',
                     channel_id='UCchannel', description='欢迎订阅')
     body = ['微風中我們一起唱歌', '星光下我們靜靜傾聽'] * 3
