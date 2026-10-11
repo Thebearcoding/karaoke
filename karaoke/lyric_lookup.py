@@ -462,6 +462,18 @@ def description_lyrics(metadata, reference_lines=()):
             # variants that did not match a particular reference spelling.
             while first and section[first-1][1]: first -= 1
             while last+1 < len(section) and section[last+1][1]: last += 1
+            # A repeated lyric already retained inside this block remains
+            # supported at its edges, even when the reference spells it
+            # differently. Blank lines format lyrics; unrelated prose stops us.
+            retained = {normalize(line) for _, line in section[first:last+1] if line}
+            for i in range(first-1, -1, -1):
+                if section[i][1] and normalize(section[i][1]) not in retained:
+                    break
+                first = i
+            for i in range(last+1, len(section)):
+                if section[i][1] and normalize(section[i][1]) not in retained:
+                    break
+                last = i
             section = section[first:last+1]
         selected = [(n, line) for n, line in section if line]
         text, excluded = published_lyric_lines('\n'.join(line for _, line in selected),

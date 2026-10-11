@@ -2762,6 +2762,25 @@ def test_description_extracts_published_block_without_a_metadata_model(labelled)
     assert description_lyrics(dict(description='We met the artist to discuss the night\nVisit our site'), body) is None
 
 
+@pytest.mark.parametrize('edge', ['opening', 'closing', 'both'])
+def test_description_keeps_repeated_edge_lines_despite_reference_spelling(edge):
+    from karaoke.lyric_lookup import description_lyrics
+    repeated = ['妳能看見仟山之外', '妳的笑容值得妳愛']
+    body = ['微風陪我們慢慢走過街角', *repeated, '今天的天空依然很晴朗',
+            '星光落在每個人的身旁', '我們一起等待清晨的陽光']
+    if edge in ('opening', 'both'):
+        body = repeated + body
+    if edge in ('closing', 'both'):
+        body += repeated
+    reference = [line.replace('妳', '你').replace('仟', '千') for line in body]
+    description = ('歡迎收聽今天的新歌\n\n'+'\n\n'.join(body)+
+                   '\n\n請關注我們的最新消息\n\n'+repeated[0])
+    lines, report = description_lyrics(dict(description=description), reference)
+    assert lines == body
+    assert [description.splitlines()[i-1] for i in report['lyric_line_numbers']] == body
+    assert not report['provider_timestamps_used']
+
+
 @pytest.mark.parametrize('credits', ['Singer', 'Singer · Guest'])
 def test_music_album_lyrics_are_a_fallback_for_same_work_not_another_artists_song(tmp_path, monkeypatch, credits):
     from karaoke import lyric_consensus as module
