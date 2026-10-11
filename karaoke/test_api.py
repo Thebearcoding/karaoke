@@ -2807,6 +2807,7 @@ def test_music_cached_body_survives_duration_changes_and_other_song_backoff(tmp_
     ('中文词：林林', '英文词：A Writer', '前置混音：制作人', '定位制作人：制作人'),
     ('出品：唱片公司', '歌曲营销：唱片公司', '二胡：乐手', '大提琴独奏：乐手'),
     ('乐队队长/键盘：乐手', '乐队总监/贝斯手：乐手', 'PGM：乐手', '合音编写：制作人'),
+    ('改编词/念白：作者', '小号：乐手', '和音录制：制作人', '特别鸣谢 (女声念白录制)：演员'),
     ('音乐制作人Music Producer : A Person', '首席制作人 Executive Producer：Another Person',
      '联合制作人 Co-producer: A Person', '执行制作人 Executive Producer: Another Person'),
     ('OA/OC: A Writer / B Writer', 'ＯＰ：A Publisher', 'SP: B Publisher', 'Publisher: C Publisher')])
@@ -2909,18 +2910,19 @@ def test_published_lyrics_require_matching_title_and_artist_for_a_two_line_heade
 def test_published_lrc_header_keeps_album_metadata_out_of_repeated_lyrics(reverse):
     from karaoke.lyric_lookup import published_candidate, published_lyric_lines
     body = ['We keep singing through the night', 'Together we will find the light']
-    header = ['[02:00][00:05]Concert Album', '[01:45][00:01]Singer - Evening']
+    header = ['[id:$00000000]', '[02:00][00:05]Concert Album', '[01:45][00:01]Singer - Evening']
     if reverse: header.reverse()
     raw = '\n'.join([*header, '[00:10]'+body[0], '[00:20]'+body[1]])
     row = dict(trackId=123, trackTitle='Evening (Live)', artists=[dict(artistName='Singer')],
                album=dict(albumTitle='Concert Album'), lyrics=raw)
     lines, report = published_candidate([row], dict(title='Evening',artist='Singer'), 'Evening',
                                         allow_recording_mismatch=True)
-    assert lines==body and report['excluded_credit_lines']==[1,2]
+    assert lines==body and report['excluded_credit_lines']==[1,2,3]
     # An album title can also be sung. It needs the adjoining work/artist
     # header, and only the opening header block is metadata.
     for text in ['Concert Album\n'+body[0], body[0]+'\nSinger - Evening\nConcert Album']:
         assert published_lyric_lines(text, 'Evening', ['Singer'], album='Concert Album')[0]==text.splitlines()
+    assert published_lyric_lines('[I sing: with you]', 'Evening')[0] == ['[I sing: with you]']
 
 
 def test_serialized_lrc_headers_preserve_payload_repetition_and_literal_escapes():
@@ -2956,13 +2958,14 @@ def test_translated_production_footer_cannot_change_the_lyric_language(credit):
 def test_bilingual_credits_do_not_consume_lyric_prose_or_change_the_body():
     from karaoke.lyric_lookup import published_lyric_lines
     body = ['Music keeps us moving: through the night', '鼓beat tonight: 我们继续唱',
-            'Chief of my heart: stay with me', 'I was composed by loss: I sing', 'Lyrics by the fire: we carry on']
+            'Chief of my heart: stay with me', 'I was composed by loss: I sing', 'Lyrics by the fire: we carry on',
+            '小号声响起：我们继续唱', '我在念白：这是我们的故事', '特别鸣谢你的爱：我不再害怕']
     header = ['作曲 Composed by：A Person', '作词 Lyrics by：A Writer', '制作人 Produced by：Someone',
               '编曲 Music Arranged by：An Arranger', '编曲 Arrangement：A Person']
     text = '\n'.join([*header, *body, '制作人 Producer：Someone'])
-    assert published_lyric_lines(text, 'Evening') == (body, [1, 2, 3, 4, 5, 11])
+    assert published_lyric_lines(text, 'Evening') == (body, [1, 2, 3, 4, 5, 14])
     text = '\n'.join([*body, 'Credit List', '歌名 Song Title：Evening', 'A Person'])
-    assert published_lyric_lines(text, 'Evening') == (body, [6, 7, 8])
+    assert published_lyric_lines(text, 'Evening') == (body, [9, 10, 11])
 
 
 @pytest.mark.parametrize('labelled', [False, True])

@@ -330,12 +330,13 @@ def text_language(text):
 
 def published_lyric_lines(text, title, artists=(), *, album=None):
     """Keep published phrases intact; remove only explicit credit metadata."""
-    instrument = (r'(?:钢琴|键盘|(?:低音)?吉他|贝斯|鼓|打击乐|二胡|'
+    instrument = (r'(?:钢琴|键盘|(?:低音)?吉他|贝斯|鼓|打击乐|二胡|小号|'
         r'(?:第[一二三四\d]+)?(?:小提琴|中提琴|大提琴))(?:手|独奏|\d+)?')
     production = (r'(?:音乐|音响|灯光|舞台秀?|乐队|声乐|演唱|歌曲)'
         r'(?:总监|设计|指导|统筹|队长|混音|编辑|发行|营销|策划|导演团队)')
-    role = (rf'{instrument}|{production}|歌名|歌曲|(?:中文|英文)?词|曲|词曲|作词|作曲|(?:改编)?编曲(?:协力)?|原唱|演唱|专辑|发行(?:日|公司)|出品人?|音乐制作(?:人|助理)?|(?:定位)?制作人|制作助理|监制|'
-        r'弦乐(?:编写|编曲|监制|录音)?|(?:人声|配唱|伴唱|主唱|合唱|童声|合声|合音|和声|和音)(?:编写|编曲|编配|制作|录音)?(?:人|师|指导)?|器乐|'
+    role = (rf'{instrument}|{production}|歌名|歌曲|(?:中文|英文|改编)?词|曲|词曲|作词|作曲|(?:改编)?编曲(?:协力)?|原唱|演唱|专辑|发行(?:日|公司)|出品人?|音乐制作(?:人|助理)?|(?:定位)?制作人|制作助理|监制|'
+        r'弦乐(?:编写|编曲|监制|录音)?|(?:人声|配唱|伴唱|主唱|合唱|童声|合声|合音|和声|和音|念白)(?:编写|编曲|编配|制作|录音|录制)?(?:人|师|指导)?|器乐|'
+        r'(?:特别)?鸣谢(?:\s*\([^()]*\))?|'
         r'录音(?:师|助理|(?:工作)?室)?|(?:前置)?混音(?:师|(?:工作)?室)?|母带(?:后期(?:处理|制作))?(?:人|工程师|录音室)?|音频(?:助理|工程师|编辑)|'
         r'(?:song )?title|song name|artist|album|composer|lyricist|producer|production|lyrics(?: by)?|music(?: production| distributed by)?|'
         r'guitar|bass|drums|piano|strings|instrumental|(?:written|composed|arranged|produced|recorded|mixed|mastered) by|audio engineer|assistant engineer|'
@@ -352,7 +353,7 @@ def published_lyric_lines(text, title, artists=(), *, album=None):
     rows, metadata, timestamps = [], [], {}
     for i, line in enumerate(text.splitlines(), 1):
         line = html.unescape(line).strip()
-        if re.fullmatch(r'\[(?:ar|ti|al|by|offset|re|ve):[^\]]*\]', line, re.I):
+        if re.fullmatch(r'\[(?:ar|ti|al|by|offset|re|ve|id):[^\]]*\]', line, re.I):
             metadata.append(i)
             continue
         # Provider timestamps describe text order/repetitions, never our onsets.
