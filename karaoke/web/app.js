@@ -542,16 +542,45 @@ function preparationElapsedHTML(entry) {
   return Number.isFinite(started) ? `<span class="preparation-elapsed" data-preparation-start="${started}">${preparationTime(started)}</span>` : '';
 }
 
-function preparationHTML(entry) {
-  if (entry?.status !== 'running') return '';
-  return `<div class="preparation">${(entry.active_stages?.length ? entry.active_stages : ['starting']).map(stage => {
+function preparationStages(entry) {
+  if (entry?.status !== 'running') return [];
+  return (entry.active_stages?.length ? entry.active_stages : ['starting']).map(stage => {
     const p = entry.stage_progress?.[stage] || {};
     const measured = Number.isFinite(p.completed) && Number.isFinite(p.total) && p.total > 0;
     const percent = measured ? Math.min(100, Math.floor(100*p.completed/p.total)) : null;
     const label = `${stages[stage] || '开始准备'}${p.detail ? ` · ${p.detail}` : ''}`;
     const amount = percent !== null ? `${percent}%` : p.unit === 'bytes' && Number.isFinite(p.completed) ? `${(p.completed/1024**2).toFixed(1)} MB` : '';
-    return `<div class="preparation-stage"><div class="preparation-label"><span title="${escape(label)}">${escape(label)}</span><span class="preparation-metrics">${amount}</span></div><progress max="100" ${percent === null ? '' : `value="${percent}"`} aria-label="${escape(label)}"></progress></div>`;
-  }).join('')}</div>`;
+    return {stage, label, amount, percent};
+  });
+}
+
+function preparationHTML(entry) {
+  const pending = preparationStages(entry);
+  if (!pending.length) return '';
+  return `<div class="preparation">${pending.map(({stage, label, amount, percent}) =>
+    `<div class="preparation-stage" data-stage="${escape(stage)}"><div class="preparation-label"><span title="${escape(label)}">${escape(label)}</span><span class="preparation-metrics">${amount}</span></div><div class="preparation-meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" ${percent === null ? '' : `aria-valuenow="${percent}"`} aria-label="${escape(label)}"><span style="width:${percent === null ? 30 : percent}%"></span></div></div>`
+  ).join('')}</div>`;
+}
+
+function updatePreparation(container, entry) {
+  const pending = preparationStages(entry);
+  const rows = [...container.querySelectorAll('[data-stage]')];
+  if (pending.length !== rows.length || pending.some((item, i) => item.stage !== rows[i].dataset.stage)) {
+    container.innerHTML = preparationHTML(entry);
+    return;
+  }
+  pending.forEach(({label, amount, percent}, i) => {
+    const row = rows[i], name = row.querySelector('.preparation-label>span');
+    const metrics = row.querySelector('.preparation-metrics'), meter = row.querySelector('[role=progressbar]');
+    if (name.textContent !== label) { name.textContent = label; name.title = label; meter.setAttribute('aria-label', label); }
+    if (metrics.textContent !== amount) metrics.textContent = amount;
+    if (meter.getAttribute('aria-valuenow') !== (percent === null ? null : String(percent))) {
+      if (percent === null) meter.removeAttribute('aria-valuenow');
+      else meter.setAttribute('aria-valuenow', percent);
+    }
+    const width = `${percent === null ? 30 : percent}%`;
+    if (meter.firstElementChild.style.width !== width) meter.firstElementChild.style.width = width;
+  });
 }
 
 function preparationTime(started) {
@@ -568,7 +597,7 @@ setInterval(() => {
 function updatePreparationSlots(container, songs) {
   for (const element of container.children) {
     const slot = element.querySelector('.preparation-slot');
-    if (slot) slot.innerHTML = preparationHTML(songs.find(s => s.id === (element.dataset.entry || element.dataset.card)));
+    if (slot) updatePreparation(slot, songs.find(s => s.id === (element.dataset.entry || element.dataset.card)));
   }
 }
 
@@ -790,7 +819,7 @@ function renderState() {
   library = roomState.library || [];
   renderLibrary();
   videoSearch.refreshLocal();
-  $('screen-preparation').innerHTML = preparationHTML(current());
+  updatePreparation($('screen-preparation'), current());
   renderQueue(); updateTransport(); renderStorage();
   updateAddButtons();
   if (!wasReady && state.playing && current()?.status === 'completed') switchView('player');
