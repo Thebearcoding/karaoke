@@ -6354,6 +6354,25 @@ def test_repeat_proposal_keeps_source_interior_between_observed_outer_phrases(he
     assert lyrics['lines']==lines  # This only proposes original text; alignment must validate it.
 
 
+@pytest.mark.parametrize('repetitions', [3, 4])
+def test_repeat_proposal_does_not_expand_a_chant_into_an_unheard_verse(repetitions):
+    from copy import deepcopy
+    from karaoke.lyric_consensus import observed_repetition_candidate
+    chant = 'Golden lanterns'
+    lines = [chant, 'Every sparrow flies back home', chant, chant, chant, 'Closing phrase']
+    lyrics = dict(lines=lines, language='English', provenance=dict(kind='online_lyric_text'))
+    cues = [dict(text=t, start=s, end=s+1, status='candidate')
+            for t,s in zip(lines, [1.,4.,7.,10.,13.,40.])]
+    words = [dict(word=chant, start=20.+3*i, end=22.+3*i) for i in range(repetitions)]
+    observations = [dict(context=[0,len(lines)], source_range=[0.,45.],
+                         recognition=dict(segments=[dict(words=words)]))]
+    before = deepcopy((lyrics, cues, observations))
+    candidate = observed_repetition_candidate(lyrics, cues, observations, 45.)
+    assert candidate['lines'] == lines[:-1]+[chant]*3+lines[-1:]
+    assert candidate['provenance']['repetitions'][0]['source_lines'] == [chant]*3
+    assert (lyrics, cues, observations) == before
+
+
 @pytest.mark.parametrize('observed', ['repeat', 'unrelated', 'spelling_noise'])
 @pytest.mark.parametrize('compression_ratio', [1., 3.2])
 def test_published_source_retry_requires_substantial_observed_content(observed, compression_ratio):

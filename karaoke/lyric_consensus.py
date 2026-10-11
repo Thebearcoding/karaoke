@@ -368,7 +368,11 @@ def observed_repetition_candidate(lyrics, cues, observations, duration):
             def strong(a):
                 return a['status']=='candidate' and (a['matched_fraction']>=.8 or
                     a.get('match_basis') in ('complete_phrase','complete_clause'))
-            starts = [i for i,a in enumerate(context[:first]) if strong(a) and a['end']<=anchors[-1]['end'] and not any(
+            # Hearing the same refrain again does not identify an earlier
+            # verse containing it. Expansion needs distinct context text.
+            seed_texts = {normalized(line).casefold() for line in lines[first:stop]}
+            starts = [i for i,a in enumerate(context[:first]) if strong(a) and
+                normalized(a['text']).casefold() not in seed_texts and a['end']<=anchors[-1]['end'] and not any(
                 normalized(c['text']).casefold()==normalized(a['text']).casefold() and
                 c['start']-2 <= a['end'] and a['start'] <= c['end']+2 for c in cues)]
             if starts and strong(context[-1]):
