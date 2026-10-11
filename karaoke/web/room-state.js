@@ -10,10 +10,13 @@ export class RoomEvents {
   constructor(receive, connection, create = url => new EventSource(url)) {
     this.receive = receive; this.connection = connection; this.create = create;
   }
-  connect(job = '', force = false) {
-    if (this.source && job === this.job && !force) return;
-    this.close(); this.job = job;
-    const source = this.source = this.create('/v1/room/events' + (job ? `?job_id=${encodeURIComponent(job)}` : ''));
+  connect(job = '', playingEntry = '', force = false) {
+    if (this.source && job === this.job && playingEntry === this.playingEntry && !force) return;
+    this.close(); this.job = job; this.playingEntry = playingEntry;
+    const query = new URLSearchParams();
+    if (job) query.set('job_id', job);
+    if (playingEntry) query.set('playing_entry_id', playingEntry);
+    const source = this.source = this.create('/v1/room/events' + (query.size ? `?${query}` : ''));
     const alive = () => {
       if (this.source !== source) return false;
       this.schedule(source, 45000);
@@ -36,7 +39,7 @@ export class RoomEvents {
     this.timer = setTimeout(() => {
       if (this.source !== source) return;
       this.connection(false);
-      this.connect(this.job, true);
+      this.connect(this.job, this.playingEntry, true);
     }, delay);
   }
   close() {
@@ -45,10 +48,11 @@ export class RoomEvents {
   }
 }
 
-export function queueToTop(entries, id, playingId = null) {
+export function queueToTop(entries, id, playingIds = []) {
   const ids = entries.map(entry => entry.id);
-  if (!ids.includes(id) || id === playingId) return null;
-  const first = ids.includes(playingId) ? [playingId, id] : [id];
+  const playing = ids.filter(item => (Array.isArray(playingIds) ? playingIds : [playingIds]).includes(item));
+  if (!ids.includes(id) || playing.includes(id)) return null;
+  const first = [...playing, id];
   const order = [...first, ...ids.filter(item => !first.includes(item))];
   return order.some((item, index) => item !== ids[index]) ? order : null;
 }

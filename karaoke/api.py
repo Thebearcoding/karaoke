@@ -746,8 +746,8 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
         return room.snapshot()
 
     @app.get('/v1/room/events')
-    async def room_events(job_id: str | None = None):
-        return StreamingResponse(room.events(job_id), media_type='text/event-stream',
+    async def room_events(job_id: str | None = None, playing_entry_id: str | None = None):
+        return StreamingResponse(room.events(job_id, playing_entry_id), media_type='text/event-stream',
             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
     @app.post('/v1/room/events', status_code=204)

@@ -29,13 +29,22 @@ test('room subscriptions recover closed and silent connections without polling o
     t.mock.timers.tick(45000);
     assert.equal(streams.length,3); assert.equal(streams[1].readyState,2);
     events.connect('singing job');
-    assert.equal(streams[3].url,'/v1/room/events?job_id=singing%20job');
+    assert.equal(new URL(streams[3].url,'http://localhost').searchParams.get('job_id'),'singing job');
     streams[2].room({entries:['old subscription']});
     assert.equal(received.length,2);
     streams[3].readyState=0; streams[3].onerror();
     t.mock.timers.tick(1000); assert.equal(streams.length,4); // Native retry still owns CONNECTING.
+    events.connect('singing job','playing entry');
+    const playingQuery = stream => new URL(stream.url,'http://localhost').searchParams.get('playing_entry_id');
+    assert.equal(playingQuery(streams[4]),'playing entry');
+    events.connect('singing job','playing entry');
+    assert.equal(streams.length,5);
+    t.mock.timers.tick(45000);
+    assert.equal(playingQuery(streams[5]),'playing entry'); // Reconnect retains presence, not a play command.
+    events.connect('singing job');
+    assert.equal(playingQuery(streams[6]),null);
     events.close(); t.mock.timers.tick(60000);
-    assert.equal(streams.length,4); assert.equal(connected.at(-1),false);
+    assert.equal(streams.length,7); assert.equal(connected.at(-1),false);
   } finally { events.close(); }
 });
 
@@ -364,6 +373,9 @@ test('queue to top inserts after the playing song without changing either device
   assert.equal(queueToTop(entries,'two','one'),null);
   assert.equal(queueToTop(entries,'deleted'),null);
   assert.deepEqual(queueToTop(entries,'four','removed-playing-entry'),['four','one','two','three']);
+  assert.deepEqual(queueToTop(entries,'four',['one']),['one','four','two','three']);
+  assert.deepEqual(queueToTop(entries,'four',['two','one']),['one','two','four','three']);
+  assert.equal(queueToTop(entries,'two',['one','two']),null);
   assert.deepEqual(entries.map(e=>e.id),['one','two','three','four']);
   const computer = new LocalPlayback(), phone = new LocalPlayback();
   computer.select(entries[1],true); phone.select(entries[0],true);
@@ -372,6 +384,12 @@ test('queue to top inserts after the playing song without changing either device
   for (const device of [computer,phone]) device.reconcile(room);
   assert.deepEqual([computer,phone].map(p=>p.save()),before);
   assert.ok(computer.state.playing && phone.state.playing);
+  // A request-only phone has no local transport but receives active entry IDs.
+  const orderingPhone = new LocalPlayback();
+  const shared = {entries, playing_entry_ids:['one']};
+  orderingPhone.reconcile(shared);
+  assert.equal(orderingPhone.state.playing,false);
+  assert.deepEqual(queueToTop(shared.entries,'three',shared.playing_entry_ids),['one','three','two','four']);
 });
 
 test('only idle preselection follows queue order; pause, refresh and seek preserve a performance', t => {

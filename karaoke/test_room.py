@@ -253,6 +253,39 @@ def test_unprepared_queue_entry_survives_finish_and_skip_until_explicit_removal(
     assert removed['entries'] == [] and removed['history'] == []
 
 
+def test_request_only_device_cannot_reorder_a_live_performance_behind_other_songs(tmp_path):
+    app = create_app(tmp_path, version='test')
+    room, store = app.state.room, app.state.store
+    job = ready_job(store)
+    ids = [room.add(AddSong(job_id=job['id']))['entries'][-1]['id'] for _ in range(3)]
+    transport = {key:room.read()[key] for key in ('current_id', 'playing', 'position', 'started_at')}
+
+    async def check():
+        first, duplicate = room.events(job['id'], ids[0]), room.events(job['id'], ids[0])
+        stale = room.events(job['id'], 'removed-entry')
+        try:
+            event = json.loads((await anext(first)).split('data: ', 1)[1])
+            assert event['playing_entry_ids'] == [ids[0]]
+            await anext(duplicate)
+            await anext(stale)
+            # The phone can have an older snapshot from before playback began.
+            # The server uses live presence, not the phone's local play button.
+            moved = room.command(RoomCommand(action='reorder', order=[ids[2], ids[0], ids[1]]))
+            assert [e['id'] for e in moved['entries']] == [ids[0], ids[2], ids[1]]
+            assert {key:room.read()[key] for key in transport} == transport
+            await first.aclose()
+            assert room.snapshot()['playing_entry_ids'] == [ids[0]]
+            await duplicate.aclose()
+            assert room.snapshot()['playing_entry_ids'] == []
+            idle = room.command(RoomCommand(action='reorder', order=[ids[2], ids[0], ids[1]]))
+            assert [e['id'] for e in idle['entries']] == [ids[2], ids[0], ids[1]]
+        finally:
+            await first.aclose()
+            await duplicate.aclose()
+            await stale.aclose()
+    asyncio.run(check())
+
+
 def test_device_stream_protects_media_after_shared_queue_removal_until_disconnect(tmp_path):
     app = create_app(tmp_path, version='test')
     room, store = app.state.room, app.state.store
@@ -261,13 +294,15 @@ def test_device_stream_protects_media_after_shared_queue_removal_until_disconnec
     store.update(job['id'], last_accessed_at='2000-01-01T00:00:00Z')
 
     async def check():
-        one, two = room.events(job['id']), room.events(job['id'])
+        one, two = room.events(job['id'], entry['id']), room.events(job['id'], entry['id'])
         try:
             event = json.loads((await anext(one)).split('data: ', 1)[1])
             assert event['playback_entry']['job_id'] == job['id']
+            assert event['playing_entry_ids'] == [entry['id']]
             await anext(two)
             room.command(RoomCommand(action='finish', entry_id=entry['id'], playback_started_at=time.time()-5))
             assert not room.read()['entries']
+            assert not room.snapshot()['playing_entry_ids']
             assert store.cache.leases[job['id']] == 2
             store.cache.limit = 1
             store.cache.enforce()

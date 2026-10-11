@@ -33,6 +33,8 @@ const navigation = createViewHistory(history, () => ({query:$('song-input').valu
   filter, view, queueTab, libraryPage, historyQuery:$('history-query').value,
   videoSource, searchOrder, catalogueSelection, search:videoSearch.snapshot(), scroll:scrollY}), restoreView);
 const current = () => tabs.enabled ? playback.entry : null;
+const playingEntries = () => [...new Set([...(roomState.playing_entry_ids || []), ...(state.playing ? [state.current_id] : [])])];
+const queueOrder = id => queueToTop(state.entries, id, playingEntries());
 
 function renderRange(input) {
   const span = Number(input.max) - Number(input.min);
@@ -579,7 +581,7 @@ function renderQueue() {
   $('upcoming-panel').hidden = queueTab !== 'upcoming';
   $('history-panel').hidden = queueTab !== 'history';
   renderHistory();
-  const signature = JSON.stringify([state.entries.map(({stage_progress, active_stages, ...entry}) => entry), state.current_id, state.playing, playback.pendingFinishes]);
+  const signature = JSON.stringify([state.entries.map(({stage_progress, active_stages, ...entry}) => entry), state.current_id, state.playing, playingEntries(), playback.pendingFinishes]);
   $('queue-count').textContent = String(state.entries.length).padStart(2,'0');
   $('nav-count').textContent = state.entries.length;
   $('queue-empty').hidden = state.entries.length > 0;
@@ -593,15 +595,16 @@ function renderQueue() {
   }
   queueSignature = signature;
   $('queue-list').innerHTML = state.entries.map((entry, i) => {
-    const active = entry.id === state.current_id;
+    const singing = playingEntries().includes(entry.id);
+    const active = entry.id === state.current_id || singing;
     const finishing = playback.isFinished(entry.id);
     const retry = preparationRetry(entry);
     const coverTag = tabs.enabled ? 'button' : 'span';
     const status = entry.status === 'running' || !statusText(entry) ? '' : `<span class="entry-status ${entry.status === 'queued' ? 'preparing' : ''}">${escape(statusText(entry))}</span>`;
-    return `<article class="queue-entry ${active ? 'current' : ''}" data-entry="${escape(entry.id)}"><span class="entry-number">${active && state.playing ? '♫' : String(i+1).padStart(2,'0')}</span>
+    return `<article class="queue-entry ${active ? 'current' : ''}" data-entry="${escape(entry.id)}"><span class="entry-number">${singing ? '♫' : String(i+1).padStart(2,'0')}</span>
       <${coverTag} class="entry-cover" ${tabs.enabled ? `data-action="preview" aria-label="${active ? '查看播放' : '预览'}：${escape(entry.title)}"` : ''}>${entry.poster ? `<img class="entry-art" src="${escape(entry.poster)}" alt="">` : `<span class="entry-art">♪</span>`}</${coverTag}>
       <div class="entry-info"><h3 class="entry-title">${tabs.enabled ? `<button data-action="preview">${escape(entry.title)}</button>` : escape(entry.title)}</h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || 'YouTube 视频')}</p>${finishing ? '<span class="entry-status">等待同步移除</span>' : entry.status === 'failed' ? '' : preparationElapsedHTML(entry) || status}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : entry.status === 'failed' ? `<p class="entry-error">${escape(statusText(entry))}</p>` : ''}</div>
-      <div class="entry-tools">${retry && !finishing ? `<button data-action="${retry.action}" aria-label="${retry.label}：${escape(entry.title)}">${icon('restart')}${retry.label}</button>` : ''}<button data-action="top" aria-label="置顶：${escape(entry.title)}" ${!finishing && queueToTop(state.entries, entry.id, state.playing ? state.current_id : null) ? '' : 'disabled'}>${icon('up')}置顶</button><button data-action="remove" aria-label="移除：${escape(entry.title)}" ${finishing ? 'disabled' : ''}>${icon('trash')}移除</button></div></article>`;
+      <div class="entry-tools">${retry && !finishing ? `<button data-action="${retry.action}" aria-label="${retry.label}：${escape(entry.title)}">${icon('restart')}${retry.label}</button>` : ''}<button data-action="top" aria-label="置顶：${escape(entry.title)}" ${!finishing && queueOrder(entry.id) ? '' : 'disabled'}>${icon('up')}置顶</button><button data-action="remove" aria-label="移除：${escape(entry.title)}" ${finishing ? 'disabled' : ''}>${icon('trash')}移除</button></div></article>`;
   }).join('');
 }
 
@@ -927,7 +930,7 @@ $('queue-list').onclick = async event => {
   if (action === 'retry') return retryPreparation(id);
   if (action === 'preview') return previewVideo(state.entries.find(entry => entry.id === id));
   if (action === 'top') {
-    const order = queueToTop(state.entries, id, state.playing ? state.current_id : null);
+    const order = queueOrder(id);
     if (order) await command('reorder', {order, revision:roomState.revision});
   } else {
     await command(action, {entry_id:id});
@@ -1053,7 +1056,10 @@ const events = new RoomEvents(acceptState, online => {
   connected = online; renderConnection();
   if (online) retryFinished();
 });
-function connectEvents() { events.connect(playback.entry?.job_id || ''); }
+function connectEvents() {
+  events.connect(playback.entry?.job_id || '',
+    tabs.owns() && playback.state.playing && playback.entry?.status === 'completed' ? playback.entry.id : '');
+}
 function savePlayback(position) {
   if (!tabs.enabled) return;
   lastPlaybackSave = Date.now();

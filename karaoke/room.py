@@ -1,5 +1,6 @@
 """One persistent karaoke room, with a playlist independent of preparation jobs."""
 import asyncio
+from collections import Counter
 import json
 from pathlib import Path
 import time
@@ -85,6 +86,7 @@ class Updates:
 class Room:
     def __init__(self, store, worker, version, updates):
         self.store, self.worker, self.version, self.updates = store, worker, version, updates
+        self.playing_connections = Counter()
         with store.connect() as db:
             db.execute('CREATE TABLE IF NOT EXISTS room (id INTEGER PRIMARY KEY, state TEXT NOT NULL)')
             initial = dict(entries=[], history=[], current_id=None, playing=False, position=0,
@@ -172,16 +174,23 @@ class Room:
     def snapshot(self):
         state = self.read()
         return {**state, 'entries': [self.describe(e) for e in state['entries']],
+                'playing_entry_ids': [e['id'] for e in state['entries'] if self.playing_connections[e['id']]],
                 'server_time': time.time(), 'preparation_job': self.worker.current,
                 'preparation_jobs': list(self.worker.processes),
                 'storage': self.store.cache.snapshot(), 'library': self.library()}
 
-    async def events(self, job_id=None):
+    async def events(self, job_id=None, playing_entry_id=None):
         # A second device may finish/remove the shared queue entry while this
         # browser is still singing. Keep its media until the connection closes.
         leased = job_id if job_id and self.store.read(job_id) else None
         if leased:
             self.store.cache.acquire(leased, record_access=False)
+        playing = next((e['id'] for e in self.read()['entries'] if e['id'] == playing_entry_id
+                        and e['job_id'] == leased and self.describe(e)['status'] == 'completed'), None)
+        if playing:
+            self.playing_connections[playing] += 1
+            if self.playing_connections[playing] == 1:
+                self.updates.publish()
 
         def snapshot():
             data = self.snapshot()
@@ -197,6 +206,11 @@ class Room:
             await stream.aclose()
             if leased:
                 self.store.cache.release(leased)
+            if playing:
+                self.playing_connections[playing] -= 1
+                if not self.playing_connections[playing]:
+                    del self.playing_connections[playing]
+                    self.updates.publish()
 
     @staticmethod
     def featured():
@@ -360,7 +374,10 @@ class Room:
             if not command.order or len(command.order) != len(ids) or set(command.order) != set(ids):
                 raise HTTPException(422, '排序必须包含歌单中的每一首歌，且不能重复')
             by_id = {e['id']: e for e in state['entries']}
-            state['entries'] = [by_id[i] for i in command.order]
+            # Remote clients never control a device's transport. Protect live
+            # performances even when a phone submits an older queue snapshot.
+            playing = [i for i in ids if self.playing_connections[i]]
+            state['entries'] = [by_id[i] for i in playing + [i for i in command.order if i not in playing]]
         elif action == 'mix':
             if command.mix is None:
                 raise HTTPException(422, '请选择人声模式')
