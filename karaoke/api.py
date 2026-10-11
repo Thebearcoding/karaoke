@@ -723,12 +723,23 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
 
     @app.post('/v1/room/entries', status_code=201)
     async def add_song(payload: AddSong):
-        return room.add(payload)
+        before = {e['id'] for e in room.read()['entries']}
+        state = room.add(payload)
+        added = [e for e in room.read()['entries'] if e['id'] not in before]
+        if added:
+            logging.getLogger('uvicorn.error').info('Queue add revision=%s entries=%s', state['revision'], json.dumps(added))
+        return state
 
     @app.post('/v1/room/commands')
     async def room_command(payload: RoomCommand):
-        before = {e['job_id'] for e in room.read()['entries']}
+        previous = room.read()
+        before = {e['job_id'] for e in previous['entries']}
         state = room.command(payload)
+        remaining = {e['id'] for e in state['entries']}
+        removed = [e for e in previous['entries'] if e['id'] not in remaining]
+        if payload.action in ('remove', 'finish', 'next', 'select', 'retry', 'reprepare', 'reorder'):
+            logging.getLogger('uvicorn.error').info('Queue command action=%s entry=%s revision=%s removed=%s',
+                payload.action, payload.entry_id, state['revision'], json.dumps(removed))
         for job_id in before - {e['job_id'] for e in state['entries']}:
             # Finish cleanup even if the deleting browser disconnects.
             await asyncio.shield(worker.cancel_unneeded(job_id))

@@ -296,6 +296,8 @@ class Room:
         action = command.action
         if action == 'finish' and entry is None:
             return self.snapshot()  # Another browser already finished this entry.
+        if action == 'finish' and self.describe(entry)['status'] != 'completed':
+            return self.snapshot()  # Skipping an unprepared song must not delete it.
         if action in ('pause', 'seek', 'ready', 'buffering', 'next') and command.entry_id != state['current_id']:
             raise HTTPException(409, '已经切换到另一首歌')
         if action in ('select', 'remove', 'retry', 'reprepare') and entry is None:
@@ -332,9 +334,10 @@ class Room:
                     state['started_at'] = time.time()+delay
         elif action in ('next', 'select'):
             if action == 'next':
-                self.remember_song(state, current)
-                state['entries'] = [e for e in state['entries'] if e['id'] != state['current_id']]
-                entry = state['entries'][0] if state['entries'] else None
+                if current and self.describe(current)['status'] == 'completed':
+                    self.remember_song(state, current)
+                    state['entries'].remove(current)
+                entry = next((e for e in state['entries'] if e != current), None)
             else:
                 if current != entry and self.remember_song(state, current):
                     state['entries'].remove(current)

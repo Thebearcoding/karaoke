@@ -234,6 +234,25 @@ def test_device_finish_is_idempotent_and_does_not_move_another_legacy_transport(
         assert repeated['revision'] == done['revision'] and repeated['history'] == done['history']
 
 
+@pytest.mark.parametrize('status', ['queued', 'running', 'failed', 'audio_ready'])
+def test_unprepared_queue_entry_survives_finish_and_skip_until_explicit_removal(tmp_path, status):
+    app = create_app(tmp_path, version='test')
+    room, store = app.state.room, app.state.store
+    job = ready_job(store)
+    entry = room.add(AddSong(job_id=job['id']))['entries'][0]
+    store.update(job['id'], status=status, result=None)
+    before = room.read()
+    ignored = room.command(RoomCommand(action='finish', entry_id=entry['id'], playback_started_at=time.time()-5))
+    assert [e['id'] for e in ignored['entries']] == [entry['id']]
+    assert room.read() == before
+    room.command(RoomCommand(action='play'))
+    skipped = room.command(RoomCommand(action='next', entry_id=entry['id']))
+    assert [e['id'] for e in skipped['entries']] == [entry['id']]
+    assert skipped['history'] == []
+    removed = room.command(RoomCommand(action='remove', entry_id=entry['id']))
+    assert removed['entries'] == [] and removed['history'] == []
+
+
 def test_device_stream_protects_media_after_shared_queue_removal_until_disconnect(tmp_path):
     app = create_app(tmp_path, version='test')
     room, store = app.state.room, app.state.store
