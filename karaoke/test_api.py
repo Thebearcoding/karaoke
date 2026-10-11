@@ -1469,7 +1469,7 @@ def test_conflicting_lyrics_query_recording_native_credit_before_accepting_outli
     assert result['artist'] == ('林林' if scenario == 'recover' else 'Lin Lin')
 
 
-@pytest.mark.parametrize('scenario', ['recover', 'explicit', 'other_video', 'subscription_channel', 'usable', 'artist_error'])
+@pytest.mark.parametrize('scenario', ['recover', 'explicit', 'other_video', 'subscription_channel', 'usable', 'artist_error', 'native_recording'])
 def test_lyric_identity_resolves_recording_artist_id_only_after_lookup_fails(tmp_path, monkeypatch, scenario):
     from urllib.parse import parse_qs, urlsplit
     from karaoke import lyric_lookup, lyric_consensus
@@ -1483,12 +1483,13 @@ def test_lyric_identity_resolves_recording_artist_id_only_after_lookup_fails(tmp
         def get_watch_playlist(self, videoId, limit):
             calls.append('watch')
             return dict(lyrics=None, tracks=[dict(videoId='bbbbbbbbbbb' if scenario=='other_video' else videoId,
-                title='Evening', artists=[dict(name='Lin Lin', id='artist-id')])])
+                title='Evening', artists=[dict(name='林林' if scenario=='native_recording' else 'Lin Lin', id='artist-id')])])
         def search(self, *args, **kwargs): return []
         def get_artist(self, browse_id):
             calls.append(('artist', browse_id))
             if scenario=='artist_error': raise ConnectionError('temporary provider error')
-            return dict(name='林林', channelId='subscription-id' if scenario=='subscription_channel' else browse_id)
+            return dict(name='Lin Lin' if scenario=='native_recording' else '林林',
+                        channelId='subscription-id' if scenario=='subscription_channel' else browse_id)
     def read(url, **kwargs):
         query = parse_qs(urlsplit(url).query)
         if 'cloudsearch' in url:
@@ -1509,14 +1510,15 @@ def test_lyric_identity_resolves_recording_artist_id_only_after_lookup_fails(tmp
     metadata=dict(id='aaaaaaaaaaa',track='Evening',artist='Lin Lin')
     for _ in range(2):
         result=lyric_lookup.prepare_online_lyrics(request,metadata,30,StageCache(tmp_path),'unused',None)
-        assert bool(result)==(scenario in ('recover','subscription_channel','usable'))
+        assert bool(result)==(scenario in ('recover','subscription_channel','usable','native_recording'))
     assert calls.count('watch')==1
     assert calls.count(('artist','artist-id'))==(1 if scenario in ('recover','subscription_channel','artist_error') else 0)
     assert calls.count(('query','Evening'))==(0 if scenario=='usable' else 1)
     if result:
         assert result['lines']==body and calls.count('body')==1
-        if scenario=='recover':
+        if scenario in ('recover','native_recording'):
             assert result['artist']=='林林'
+        if scenario=='recover':
             assert result['provenance']['lyric_lookup']['artist_identity_lookup']['artists'][0]['id']=='artist-id'
 
 

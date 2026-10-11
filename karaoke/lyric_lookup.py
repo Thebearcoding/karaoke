@@ -1086,7 +1086,10 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 before = dict(song)
                 review = report.get('crosscheck', {})
                 confirmed_alias = confirmed_names.get(key)
-                if key == 'artist' and not artist_alias and not retained_lines and recording.get('artists'):
+                # Try the recording's unused credit before an artist page can
+                # replace it with the same spelling that already found no text.
+                if (key == 'artist' and not artist_alias and not retained_lines and recording.get('artists')
+                        and identity(confirmed_alias) <= identity(song.get(key))):
                     confirmed_alias, artist_resolution = resolve_recording_artists(recording, cache)
                 if confirmed_alias and not identity(confirmed_alias, title=key == 'title') <= identity(song.get(key), title=key == 'title'):
                     song[key] = confirmed_alias
