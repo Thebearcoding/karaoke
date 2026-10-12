@@ -6,7 +6,6 @@ from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 import fcntl
 import hashlib
-import io
 import json
 import logging
 import math
@@ -17,6 +16,7 @@ import re
 import signal
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 from typing import Literal
@@ -92,11 +92,14 @@ def playback_window_bytes(path, info, chunk, gain):
     samples *= gain
     if len(samples) != end - start or not np.isfinite(samples).all() or np.max(np.abs(samples)) >= 1:
         raise ValueError('Invalid playback samples')
-    output = io.BytesIO()
     # FLAC has no encoder priming/padding. 24-bit previews preserve the common
     # headroom without sending float PCM's much larger payload over Wi-Fi.
-    sf.write(output, samples, info['sample_rate'], format='FLAC', subtype='PCM_24')
-    return output.getvalue()
+    # Give libsndfile a native descriptor: BytesIO callbacks repeatedly need
+    # the GIL while the event loop is busy sending room updates to viewers.
+    with tempfile.TemporaryFile() as output:
+        sf.write(output.fileno(), samples, info['sample_rate'], format='FLAC', subtype='PCM_24', closefd=False)
+        output.seek(0)
+        return output.read()
 
 
 def now():
