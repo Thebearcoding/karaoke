@@ -592,6 +592,10 @@ class StorageLimit(BaseModel):
 
 
 class LeasedFileResponse(FileResponse):
+    # Media responses are large; avoid a thread-pool handoff for every 64 KiB.
+    # Keep each read bounded so slow clients still apply backpressure.
+    chunk_size = 1024 * 1024
+
     def __init__(self, *args, cache, job_id, record_access=True, **kwargs):
         super().__init__(*args, **kwargs)
         self.cache, self.job_id = cache, job_id
