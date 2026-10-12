@@ -18,7 +18,11 @@ API 的依赖文件只安装服务依赖。新检出请按[安装说明](../SETU
 
 ## 网页与共享歌单
 
-网页使用 `GET /v1/room/events` 的 SSE 长连接接收完整状态快照，不轮询。断线后自动重连，重新获取当前状态。下面的 `GET /v1/jobs/{id}` 仍供脚本按需查询。
+网页使用 `GET /v1/room/events?compact=true` 的 SSE 长连接，不轮询。初次连接和漏过更新时收到 `room` 完整快照；连续更新收到 `room_patch`。同一次状态变化共用一次快照读取和 JSON 编码。省略 `compact` 仍返回旧版完整快照。
+
+完整快照带 `stream`（服务实例标识）和 `sequence`（推送序号，区别于命令的 `revision`）。补丁带同一 `stream`、`base`、`sequence`、`changes` 和 `collections`：`changes` 替换顶层字段；`entries`、`history`、`library` 按 ID 提供 `upsert`、`remove`，顺序变化时另给完整 ID `order`。包含重复 ID 的旧列表直接整体替换。客户端只有持有同一流的 `base` 才应用补丁，否则重连取完整快照。`server_time` 和本连接的 `playback_entry` 随每帧发送，不放进共享缓存。慢连接只保留一次更新通知，不累积补丁队列。
+
+断线重连采用有随机抖动的指数退避（起始 0.5–1 秒，上限 15–30 秒）；45 秒未收到数据或心跳也进入退避。收到有效状态或心跳后重置退避。下面的 `GET /v1/jobs/{id}` 仍供脚本按需查询。
 
 处理中的房间条目和曲库歌曲通过 `preparation_started_at` 提供本次开始时间（ISO 8601），其他状态为 `null`。前端结合快照的 `server_time` 校正时钟并显示累计用时，不额外轮询；重试使用新一次处理的开始时间。
 

@@ -1,7 +1,7 @@
 import { Player } from './player.js';
 import { mountPreview } from './preview.js';
-import { isStaleRoomSnapshot, LocalPlayback, PlaybackTabs, RoomEvents, queueToTop, preparationRetry } from './room-state.js';
-import { createVideoSearch, createViewHistory, previewURL, searchLibrary, artistLibrarySongs, librarySongs, libraryArtists, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, historySuggestions } from './search.js';
+import { isStaleRoomSnapshot, LocalPlayback, PlaybackTabs, RoomEvents, queueToTop, queueTopCandidates, preparationRetry } from './room-state.js';
+import { createVideoSearch, createViewHistory, previewURL, searchLibrary, artistLibrarySongs, librarySongs, libraryArtists, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, queuePositions, historySuggestions } from './search.js';
 
 const $ = id => document.getElementById(id);
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -20,16 +20,18 @@ let roomState = {entries:[], revision:0}, receivedRoom = false, viewRevision = 0
 const stages = {download:'下载音频', download_video:'下载视频', verify_video:'校验视频', decode_audio:'提取音频', decode_native:'准备音频母版', separate_music:'分离伴奏', separate_lead:'分离主唱', package_two_stems:'整理音轨', package_three_stems:'整理音轨', resample_vocals:'整理人声', transcribe:'识别歌词', prepare_lyrics:'整理歌词', detect_language:'确认演唱语言', align_words:'对齐歌词', align_phonemes:'对齐起唱时间', align_repeats:'检查重复段落', align_context:'校准字幕', validate_timing:'核对起唱时间', render:'生成字幕画面', mux_video:'合成字幕 MV'};
 let state = {entries:[], current_id:null, playing:false, position:0, started_at:null, levels:{instrumental:1,backing_vocals:1,lead_vocals:0}, revision:0};
 let library = [], filter = 'all', view = 'library', clockOffset = 0, readySent = null, loading = false, loadError = '', seeking = false;
+let indexedEntries, indexedLibrary, renderedLibrary, libraryById = new Map(), positionInQueue = queuePositions([]);
 let toastTimer, librarySignature = '', queueSignature = '', historySignature = '', discoverySignature = '';
 let queueTab = 'upcoming';
 let libraryPage = 1;
+let queuePage = 1, historyPage = 1, indexedHistory, recentHistory = [];
 let pitchRequest = Promise.resolve();
 let searchTimer, searchQuery = '', searchSongs = [], previewSong = null, skipping = false, composing = false;
 let videoSource = 'songs', searchOrder = 'relevance', searchSnapshot = null, catalogueSelection = null;
 const addingVideos = new Set();
 const videoSearch = createVideoSearch(renderVideoResults, fetch, query => searchLibrary(library, query));
 const navigation = createViewHistory(history, () => ({query:$('song-input').value, title:$('title-input').value,
-  filter, view, queueTab, libraryPage, historyQuery:$('history-query').value,
+  filter, view, queueTab, libraryPage, queuePage, historyPage, historyQuery:$('history-query').value,
   videoSource, searchOrder, catalogueSelection, search:videoSearch.snapshot(), scroll:scrollY}), restoreView);
 const current = () => playback.entry;
 const playingEntries = () => [...new Set([...(roomState.playing_entry_ids || []), ...(state.playing ? [state.current_id] : [])])];
@@ -169,6 +171,8 @@ function restoreView(saved) {
   $('title-input').value = saved.title || '';
   filter = [...document.querySelectorAll('[data-filter]')].some(button => button.dataset.filter === saved.filter) ? saved.filter : 'all';
   libraryPage = saved.libraryPage || 1;
+  queuePage = saved.queuePage || 1;
+  historyPage = saved.historyPage || 1;
   videoSource = saved.videoSource || 'songs';
   searchOrder = saved.searchOrder || 'relevance';
   queueTab = saved.queueTab === 'history' ? 'history' : 'upcoming';
@@ -249,8 +253,9 @@ function renderVideoResults(providers, mode = videoSource) {
   const info = providers[videoSource];
   if (!info) return;
   const artists = videoSource === 'artists', album = videoSource === 'album', catalogue = album || videoSource === 'artist';
+  const libraryStatus = new Map(library.map(song => [song.url, song.status]));
   const results = info.results.map(song => ({...song,
-    status:library.find(item => item.url === song.url)?.status || song.status}));
+    status:libraryStatus.get(song.url) || song.status}));
   const metadata = info.metadata || catalogueSelection || {};
   const catalogueHeading = metadata.catalogue_section === 'videos' ? '歌手视频' : metadata.catalogue_section === 'releases' ? '歌手作品' : '热门歌曲';
   $('clear-search').textContent = catalogue || (artists && providers.artist?.selection) ? '返回上一级' : '返回本地曲库';
@@ -405,10 +410,10 @@ function updateAddButtons() {
     const form = button.id === 'submit-song';
     const song = form ? {url:$('song-input').value.trim(), title:$('title-input').value.trim()} :
       button.id === 'preview-add' ? previewSong : button.hasAttribute('data-song')
-        ? library.find(item => item.id === button.dataset.song) : searchSongs[button.dataset.addVideo];
+        ? libraryById.get(button.dataset.song) : searchSongs[button.dataset.addVideo];
     if (!song) return;
     if (form && !/^https?:\/\//i.test(song.url)) { button.disabled = false; button.classList.remove('is-queued'); button.removeAttribute('aria-label'); return; }
-    const position = queuePosition(song, state.entries), adding = addingVideos.has(queueKey(song));
+    const position = positionInQueue(song), adding = addingVideos.has(queueKey(song));
     const label = position ? '已点' : adding ? '点歌中…' : song.available === false ? '暂不可用' : '点歌';
     button.disabled = Boolean(position || adding || song.available === false);
     button.classList.toggle('is-queued', position > 0);
@@ -457,7 +462,7 @@ function editSearch() {
 
 async function addVideo(song, {title, repeat = false} = {}) {
   if (!song || addingVideos.has(queueKey(song)) || song.available === false) return;
-  const queued = !repeat && state.entries[queuePosition(song, state.entries)-1];
+  const queued = !repeat && state.entries[positionInQueue(song)-1];
   if (queued) return;
   const key = queueKey(song);
   addingVideos.add(key); updateAddButtons();
@@ -480,7 +485,9 @@ async function addVideo(song, {title, repeat = false} = {}) {
 }
 
 function showQueuedSong(id) {
-  if (!state.entries.some(song => song.id === id)) return;
+  const index = state.entries.findIndex(song => song.id === id);
+  if (index < 0) return;
+  queuePage = Math.floor(index / 50) + 1;
   $('toast').hidden = true;
   if ($('video-preview').open) $('video-preview').close();
   queueTab = 'upcoming'; renderQueue(); switchView('queue');
@@ -580,6 +587,7 @@ function preparationTime(started) {
 }
 
 setInterval(() => {
+  if (document.hidden) return;
   for (const label of document.querySelectorAll('[data-preparation-start]')) {
     const text = preparationTime(Number(label.dataset.preparationStart));
     if (label.textContent !== text) label.textContent = text;
@@ -587,10 +595,23 @@ setInterval(() => {
 }, 1000);
 
 function updatePreparationSlots(container, songs) {
+  const byId = new Map(songs.map(song => [song.id, song]));
   for (const element of container.children) {
     const slot = element.querySelector('.preparation-slot');
-    if (slot) updatePreparation(slot, songs.find(s => s.id === (element.dataset.entry || element.dataset.card)));
+    if (slot) updatePreparation(slot, byId.get(element.dataset.entry || element.dataset.card));
   }
+}
+
+function renderQueuePage(kind, page) {
+  const nav = $(`${kind}-pagination`);
+  $(`${kind}-list`).style.setProperty('--queue-number-width', `${Math.max(2, String(page.offset + page.songs.length).length)}ch`);
+  nav.hidden = page.pages < 2;
+  const select = nav.querySelector('select');
+  if (select.options.length !== page.pages)
+    select.innerHTML = Array.from({length:page.pages}, (_, i) => `<option value="${i+1}">${i+1} / ${page.pages}</option>`).join('');
+  select.value = String(page.page);
+  nav.querySelector('[data-page-step="-1"]').disabled = page.page === 1;
+  nav.querySelector('[data-page-step="1"]').disabled = page.page === page.pages;
 }
 
 function renderQueue() {
@@ -602,47 +623,61 @@ function renderQueue() {
   $('upcoming-panel').hidden = queueTab !== 'upcoming';
   $('history-panel').hidden = queueTab !== 'history';
   renderHistory();
-  const signature = JSON.stringify([state.entries.map(({stage_progress, active_stages, ...entry}) => entry), state.current_id, state.playing, playingEntries(), playback.pendingFinishes]);
   $('queue-count').textContent = String(state.entries.length).padStart(2,'0');
   $('nav-count').textContent = state.entries.length;
   $('queue-empty').hidden = state.entries.length > 0;
   const preparing = state.entries.filter(e => ['running','queued'].includes(e.status)).length;
   $('queue-badge').textContent = `${preparing} 首准备中`;
   $('queue-badge').hidden = !preparing;
+  if (queueTab !== 'upcoming') return;
+  const page = paginateSongs(state.entries, queuePage, 50);
+  if (receivedRoom) queuePage = page.page;
+  renderQueuePage('queue', page);
+  const playing = new Set(playingEntries()), movable = queueTopCandidates(state.entries, [...playing]);
+  const signature = JSON.stringify([page.songs.map(({stage_progress, active_stages, ...entry}) => entry), page.page,
+    state.current_id, state.playing, [...playing], page.songs.map(entry => movable.has(entry.id)), playback.pendingFinishes]);
   if (signature === queueSignature) {
     // Progress pushes must not replace focused buttons or interrupt a click.
-    updatePreparationSlots($('queue-list'), state.entries);
+    updatePreparationSlots($('queue-list'), page.songs);
     return;
   }
   queueSignature = signature;
-  $('queue-list').innerHTML = state.entries.map((entry, i) => {
-    const singing = playingEntries().includes(entry.id);
+  $('queue-list').innerHTML = page.songs.map((entry, i) => {
+    const singing = playing.has(entry.id);
     const active = entry.id === state.current_id || singing;
     const finishing = playback.isFinished(entry.id);
     const retry = preparationRetry(entry);
     const status = entry.status === 'running' || !statusText(entry) ? '' : `<span class="entry-status ${entry.status === 'queued' ? 'preparing' : ''}">${escape(statusText(entry))}</span>`;
-    return `<article class="queue-entry ${active ? 'current' : ''}" data-entry="${escape(entry.id)}"><span class="entry-number">${singing ? '♫' : String(i+1).padStart(2,'0')}</span>
-      <button class="entry-cover" data-action="preview" aria-label="${active ? '查看播放' : '预览'}：${escape(entry.title)}">${entry.poster ? `<img class="entry-art" src="${escape(entry.poster)}" alt="">` : `<span class="entry-art">♪</span>`}</button>
+    return `<article class="queue-entry ${active ? 'current' : ''}" data-entry="${escape(entry.id)}"><span class="entry-number">${singing ? '♫' : String(page.offset+i+1).padStart(2,'0')}</span>
+      <button class="entry-cover" data-action="preview" aria-label="${active ? '查看播放' : '预览'}：${escape(entry.title)}">${entry.poster ? `<img class="entry-art" src="${escape(entry.poster)}" alt="" loading="lazy">` : `<span class="entry-art">♪</span>`}</button>
       <div class="entry-info"><h3 class="entry-title"><button data-action="preview">${escape(entry.title)}</button></h3><div class="song-info-row"><p class="entry-artist">${escape(entry.artist || 'YouTube 视频')}</p>${finishing ? '<span class="entry-status">等待同步移除</span>' : entry.status === 'failed' ? '' : preparationElapsedHTML(entry) || status}</div>${entry.status === 'running' ? `<div class="preparation-slot">${preparationHTML(entry)}</div>` : entry.status === 'failed' ? `<p class="entry-error">${escape(statusText(entry))}</p>` : ''}</div>
-      <div class="entry-tools">${retry && !finishing ? `<button data-action="${retry.action}" aria-label="${retry.label}：${escape(entry.title)}">${icon('restart')}${retry.label}</button>` : ''}<button data-action="top" aria-label="置顶：${escape(entry.title)}" ${!finishing && queueOrder(entry.id) ? '' : 'disabled'}>${icon('up')}置顶</button><button data-action="remove" aria-label="移除：${escape(entry.title)}" ${finishing ? 'disabled' : ''}>${icon('trash')}移除</button></div></article>`;
+      <div class="entry-tools">${retry && !finishing ? `<button data-action="${retry.action}" aria-label="${retry.label}：${escape(entry.title)}">${icon('restart')}${retry.label}</button>` : ''}<button data-action="top" aria-label="置顶：${escape(entry.title)}" ${!finishing && movable.has(entry.id) ? '' : 'disabled'}>${icon('up')}置顶</button><button data-action="remove" aria-label="移除：${escape(entry.title)}" ${finishing ? 'disabled' : ''}>${icon('trash')}移除</button></div></article>`;
   }).join('');
 }
 
 function renderHistory() {
-  const history = historySuggestions(state.history || []).recent;
-  const songs = filterSongs(history, $('history-query').value);
+  if (indexedHistory !== state.history) {
+    indexedHistory = state.history;
+    recentHistory = historySuggestions(state.history || []).recent;
+  }
+  const history = recentHistory;
   $('history-count').textContent = String(history.length).padStart(2,'0');
+  if (queueTab !== 'history') return;
+  const songs = filterSongs(history, $('history-query').value);
+  const page = paginateSongs(songs, historyPage, 50);
+  if (receivedRoom) historyPage = page.page;
+  renderQueuePage('history', page);
   $('history-empty').hidden = songs.length > 0;
   $('history-empty').querySelector('h3').textContent = history.length ? '没有找到匹配的已唱歌曲' : '还没有唱过的歌';
   const posters = new Map(library.map(song => [song.url, song.poster]));
-  const signature = JSON.stringify(songs.map(song => [song, posters.get(song.url)]));
+  const signature = JSON.stringify([page.page, page.songs.map(song => [song, posters.get(song.url)])]);
   if (signature === historySignature) return;
   historySignature = signature;
   const date = new Intl.DateTimeFormat('zh-CN', {month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit'});
-  $('history-list').innerHTML = songs.map((song, index) => {
+  $('history-list').innerHTML = page.songs.map((song, index) => {
     const poster = posters.get(song.url);
-    return `<article class="queue-entry history-entry" data-history-entry="${escape(song.id)}"><span class="entry-number">${String(index+1).padStart(2,'0')}</span>
-      ${poster ? `<img class="entry-art" src="${escape(poster)}" alt="">` : `<span class="entry-art">♪</span>`}
+    return `<article class="queue-entry history-entry" data-history-entry="${escape(song.id)}"><span class="entry-number">${String(page.offset+index+1).padStart(2,'0')}</span>
+      ${poster ? `<img class="entry-art" src="${escape(poster)}" alt="" loading="lazy">` : `<span class="entry-art">♪</span>`}
       <div class="entry-info"><h3 class="entry-title">${escape(song.title)}</h3><p class="entry-artist">${escape(song.artist)}</p></div>
       <div class="entry-tools"><time datetime="${new Date(song.finished_at*1000).toISOString()}">${escape(date.format(song.finished_at*1000))}</time><button data-repeat-song ${song.url ? '' : 'disabled'} aria-label="再点：${escape(song.title)}">${icon('plus')}再点</button></div></article>`;
   }).join('');
@@ -819,11 +854,24 @@ function renderState() {
   if (current()?.id !== previous) savePlayback();
   connectEvents();
   library = roomState.library || [];
-  renderLibrary();
-  videoSearch.refreshLocal();
-  updatePreparation($('screen-preparation'), current());
-  renderQueue(); updateTransport(); renderStorage();
-  updateAddButtons();
+  if (indexedEntries !== state.entries) {
+    indexedEntries = state.entries;
+    positionInQueue = queuePositions(state.entries);
+  }
+  if (indexedLibrary !== library) {
+    indexedLibrary = library;
+    libraryById = new Map(library.map(song => [song.id, song]));
+  }
+  if (!document.hidden) {
+    if (renderedLibrary !== library) {
+      renderedLibrary = library;
+      renderLibrary();
+      videoSearch.refreshLocal();
+    }
+    updatePreparation($('screen-preparation'), current());
+    renderQueue(); updateTransport(); renderStorage();
+    updateAddButtons();
+  }
   if (!wasReady && state.playing && current()?.status === 'completed') switchView('player');
   if (!player.anchor) updateTime(state.position);
   syncPlayback();
@@ -961,7 +1009,7 @@ $('queue-list').onclick = async event => {
   if (action === 'preview') return previewVideo(state.entries.find(entry => entry.id === id));
   if (action === 'top') {
     const order = queueOrder(id);
-    if (order) await command('reorder', {order, revision:roomState.revision});
+    if (order) { await command('reorder', {order, revision:roomState.revision}); showQueuedSong(id); }
   } else {
     await command(action, {entry_id:id});
   }
@@ -976,7 +1024,19 @@ for (const button of document.querySelectorAll('[data-queue-tab]')) {
     tab.click(); tab.focus();
   };
 }
-$('history-query').oninput = () => { renderHistory(); navigation.save(); };
+for (const kind of ['queue', 'history']) {
+  const nav = $(`${kind}-pagination`);
+  const change = page => {
+    if (kind === 'queue') queuePage = page; else historyPage = page;
+    renderQueue(); navigation.save();
+    $(`${kind}-list`).scrollTop = 0;
+    $(`${kind === 'queue' ? 'upcoming' : 'history'}-tab`).scrollIntoView({block:'nearest'});
+  };
+  nav.querySelector('select').onchange = event => change(Number(event.target.value));
+  for (const button of nav.querySelectorAll('[data-page-step]'))
+    button.onclick = () => change((kind === 'queue' ? queuePage : historyPage) + Number(button.dataset.pageStep));
+}
+$('history-query').oninput = () => { historyPage = 1; renderHistory(); navigation.save(); };
 $('history-list').onclick = async event => {
   const button = event.target.closest('[data-repeat-song]');
   if (!button || button.disabled) return;
@@ -1078,8 +1138,11 @@ const events = new RoomEvents(acceptState, online => {
   if (online) retryFinished();
 });
 function connectEvents() {
-  events.connect(playback.entry?.job_id || '',
-    tabs.owns() && playback.state.playing && playback.entry?.status === 'completed' ? playback.entry.id : '');
+  // Protect an activated performance across pauses, but not an idle viewer's
+  // automatic queue preselection (which has never loaded any media).
+  const active = tabs.owns() && player.unlocked;
+  const playing = active && playback.state.playing && playback.entry?.status === 'completed';
+  events.connect(active ? playback.entry?.job_id || '' : '', playing ? playback.entry.id : '');
 }
 function savePlayback(position) {
   lastPlaybackSave = Date.now();
@@ -1118,7 +1181,8 @@ window.addEventListener('pagehide', () => {
 function resumePage() {
   const resumed = tabs.resume();
   followPlayback();
-  events.close(); connectEvents();
+  connectEvents();
+  renderState();
   if (resumed && playback.state.playing)
     player.unlock().then(() => renderState()).catch(() => updateTransport());
   retryFinished();

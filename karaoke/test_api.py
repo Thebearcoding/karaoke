@@ -5644,6 +5644,9 @@ def test_silent_subprocess_still_obeys_timeout(tmp_path):
 
 
 def test_frontend_changes_invalidate_browser_cache_including_imports(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    clock = [0.]
+    monkeypatch.setattr('karaoke.api.time', SimpleNamespace(time=time.time, monotonic=lambda: clock[0]))
     web = tmp_path/'web'
     web.mkdir()
     (web/'index.html').write_text('<script type="module" src="/assets/app.js"></script>')
@@ -5657,12 +5660,18 @@ def test_frontend_changes_invalidate_browser_cache_including_imports(tmp_path, m
             assert home.headers['cache-control'] == 'no-cache'
             return re.search(r'src="([^"]+)"', home.text)[1]
         first = script_url()
+        etag = client.get('/').headers['etag']
+        assert client.get('/', headers={'If-None-Match':etag}).status_code == 304
         assert client.get(first).text == (web/'app.js').read_text()
         (web/'player.js').write_text('export const version=2;')
+        assert script_url() == first  # Requests in this refresh interval reuse the bundle hash.
+        clock[0] += 1
         second = script_url()
         assert first != second
+        assert client.get('/', headers={'If-None-Match':etag}).status_code == 200
         assert client.get(urljoin(second, './player.js')).text == 'export const version=2;'
         (web/'style.css').write_text('body{color:gold}')
+        clock[0] += 1
         assert script_url() != second
         assert client.get('/assets/player.js').status_code == 200
         assert client.get(first.rsplit('/', 1)[0]+'/%2e%2e/test.py').status_code == 404

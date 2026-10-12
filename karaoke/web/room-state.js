@@ -4,42 +4,75 @@ export function isStaleRoomSnapshot(incoming, current) {
     (incoming.revision === current.revision && incoming.server_time < current.server_time);
 }
 
+export function applyRoomPatch(current, patch) {
+  if (!current || current.stream !== patch.stream || current.sequence !== patch.base) return null;
+  const next = {...current, ...patch.changes, sequence:patch.sequence,
+    server_time:patch.server_time, playback_entry:patch.playback_entry};
+  for (const [key, delta] of Object.entries(patch.collections)) {
+    const items = new Map(current[key].map(item => [item.id, item]));
+    for (const id of delta.remove) items.delete(id);
+    for (const item of delta.upsert) items.set(item.id, item);
+    next[key] = delta.order ? delta.order.map(id => items.get(id)) : [...items.values()];
+    if (next[key].some(item => !item)) return null;
+  }
+  return next;
+}
+
 // A quiet room still sends a heartbeat. Reopen a dead stream without polling
 // room state; the new subscription starts with the current complete snapshot.
 export class RoomEvents {
-  constructor(receive, connection, create = url => new EventSource(url)) {
-    this.receive = receive; this.connection = connection; this.create = create;
+  constructor(receive, connection, create = url => new EventSource(url), random = Math.random) {
+    Object.assign(this, {receive, connection, create, random, attempts:0});
   }
   connect(job = '', playingEntry = '', force = false) {
     if (this.source && job === this.job && playingEntry === this.playingEntry && !force) return;
+    if (job !== this.job || playingEntry !== this.playingEntry) this.attempts = 0;
     this.close(); this.job = job; this.playingEntry = playingEntry;
-    const query = new URLSearchParams();
+    this.retrying = false;
+    let snapshot = null;
+    const query = new URLSearchParams({compact:'true'});
     if (job) query.set('job_id', job);
     if (playingEntry) query.set('playing_entry_id', playingEntry);
     const source = this.source = this.create('/v1/room/events' + (query.size ? `?${query}` : ''));
     const alive = () => {
-      if (this.source !== source) return false;
+      if (this.source !== source || this.retrying) return false;
       this.schedule(source, 45000);
       this.connection(true);
       return true;
     };
-    source.addEventListener('room', event => { if (alive()) this.receive(JSON.parse(event.data)); });
-    source.addEventListener('ping', alive);
+    const receive = (event, delta) => {
+      if (this.source !== source || this.retrying) return;
+      try {
+        const value = JSON.parse(event.data);
+        snapshot = delta ? applyRoomPatch(snapshot, value) : value;
+        if (!snapshot) { this.retry(source); return; }
+      } catch { this.retry(source); return; }
+      this.attempts = 0;
+      if (alive()) this.receive(snapshot);
+    };
+    source.addEventListener('room', event => receive(event, false));
+    source.addEventListener('room_patch', event => receive(event, true));
+    source.addEventListener('ping', () => { if (alive()) this.attempts = 0; });
     source.onopen = alive;
     source.onerror = () => {
-      if (this.source !== source) return;
-      this.connection(false);
-      // CONNECTING already has EventSource's own retry; CLOSED does not.
-      if (source.readyState === 2) this.schedule(source, 1000);
+      this.retry(source);
     };
     this.schedule(source, 45000);
   }
-  schedule(source, delay) {
+  retry(source) {
+    if (this.source !== source || this.retrying) return;
+    this.retrying = true;
+    source.close(); // Own the retry so thousands of native retries cannot synchronize.
+    this.connection(false);
+    const delay = Math.min(30000, 1000 * 2 ** Math.min(this.attempts++, 5));
+    this.schedule(source, delay * (.5 + .5 * this.random()), true);
+  }
+  schedule(source, delay, reconnect = false) {
     clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       if (this.source !== source) return;
-      this.connection(false);
-      this.connect(this.job, this.playingEntry, true);
+      if (reconnect) this.connect(this.job, this.playingEntry, true);
+      else this.retry(source);
     }, delay);
   }
   close() {
@@ -55,6 +88,14 @@ export function queueToTop(entries, id, playingIds = []) {
   const first = [...playing, id];
   const order = [...first, ...ids.filter(item => !first.includes(item))];
   return order.some((item, index) => item !== ids[index]) ? order : null;
+}
+
+export function queueTopCandidates(entries, playingIds = []) {
+  const playing = new Set(playingIds);
+  const count = entries.filter(entry => playing.has(entry.id)).length;
+  const pinned = entries.slice(0, count).every(entry => playing.has(entry.id));
+  return new Set(entries.filter((entry, index) => !playing.has(entry.id) && (!pinned || index !== count))
+    .map(entry => entry.id));
 }
 
 export function preparationRetry(entry) {

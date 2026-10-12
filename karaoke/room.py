@@ -61,18 +61,25 @@ class Updates:
     """Subscribers need the latest state, not an unbounded log of old snapshots."""
     def __init__(self):
         self.subscribers = set()
+        self.generation = 0
 
     def publish(self):
+        self.generation += 1
         for queue in tuple(self.subscribers):
             if queue.empty():
                 queue.put_nowait(True)
 
-    async def events(self, snapshot):
+    async def events(self, snapshot, *, encoded=False):
         queue = asyncio.Queue(maxsize=1)
         self.subscribers.add(queue)
         try:
             while True:
-                yield 'event: room\ndata: ' + json.dumps(snapshot(), ensure_ascii=False) + '\n\n'
+                value = snapshot()
+                if encoded:
+                    for chunk in value:
+                        yield chunk
+                else:
+                    yield 'event: room\ndata: ' + json.dumps(value, ensure_ascii=False) + '\n\n'
                 while True:
                     try:
                         await asyncio.wait_for(queue.get(), 15)
@@ -83,10 +90,61 @@ class Updates:
             self.subscribers.discard(queue)
 
 
+class RoomFeed:
+    """Build and encode shared state once per change, not once per viewer."""
+    def __init__(self, room):
+        self.room = room
+        self.stream = str(uuid4())
+        self.generation = None
+        self.data = {}
+
+    @staticmethod
+    def encode(value):
+        return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+
+    def frame(self, previous, job_id=None):
+        generation = self.room.updates.generation
+        if generation != self.generation:
+            data = self.room.snapshot()
+            data.pop('server_time')
+            changes, collections = {}, {}
+            for key, value in data.items():
+                old = self.data.get(key)
+                if old == value:
+                    continue
+                if key in ('entries', 'history', 'library') and old is not None:
+                    before, after = ({item['id']: item for item in rows} for rows in (old, value))
+                    # Legacy history can contain duplicate IDs. Replace that list.
+                    if len(before) == len(old) and len(after) == len(value):
+                        delta = dict(upsert=[item for ident, item in after.items() if before.get(ident) != item],
+                                     remove=[ident for ident in before if ident not in after])
+                        if list(before) != list(after):
+                            delta['order'] = list(after)
+                        collections[key] = delta
+                        continue
+                changes[key] = value
+            self.base = self.generation
+            self.data = data
+            self.generation = generation
+            self.personal = {}
+            common = dict(stream=self.stream, sequence=generation)
+            self.full = ('event: room\ndata: ' + self.encode(dict(data, **common))[:-1]).encode()
+            self.delta = ('event: room_patch\ndata: ' + self.encode(dict(common, base=self.base, changes=changes, collections=collections))[:-1]).encode()
+        if job_id not in self.personal:
+            self.personal[job_id] = self.encode(self.room.describe(dict(id=job_id, job_id=job_id))) if job_id else 'null'
+        # A slow/new viewer gets a full snapshot; never apply a delta across a gap.
+        delta = previous is not None and previous == self.base
+        body = self.delta if delta else self.full
+        # Yield the shared body separately: concatenating it would retain one
+        # full-library string for every slow connection until its next write.
+        return (body, f',"server_time":{time.time()},"playback_entry":{self.personal[job_id]}}}\n\n'.encode())
+
+
 class Room:
     def __init__(self, store, worker, version, updates):
         self.store, self.worker, self.version, self.updates = store, worker, version, updates
         self.playing_connections = Counter()
+        self.feed = RoomFeed(self)
         with store.connect() as db:
             db.execute('CREATE TABLE IF NOT EXISTS room (id INTEGER PRIMARY KEY, state TEXT NOT NULL)')
             initial = dict(entries=[], history=[], current_id=None, playing=False, position=0,
@@ -179,26 +237,33 @@ class Room:
                 'preparation_jobs': list(self.worker.processes),
                 'storage': self.store.cache.snapshot(), 'library': self.library()}
 
-    async def events(self, job_id=None, playing_entry_id=None):
+    async def events(self, job_id=None, playing_entry_id=None, *, compact=False):
         # A second device may finish/remove the shared queue entry while this
         # browser is still singing. Keep its media until the connection closes.
         leased = job_id if job_id and self.store.read(job_id) else None
         if leased:
             self.store.cache.acquire(leased, record_access=False)
         playing = next((e['id'] for e in self.read()['entries'] if e['id'] == playing_entry_id
-                        and e['job_id'] == leased and self.describe(e)['status'] == 'completed'), None)
+                        and e['job_id'] == leased and self.describe(e)['status'] == 'completed'), None) if playing_entry_id and leased else None
         if playing:
             self.playing_connections[playing] += 1
             if self.playing_connections[playing] == 1:
                 self.updates.publish()
 
+        previous = None
+
         def snapshot():
+            nonlocal previous
+            if compact:
+                frame = self.feed.frame(previous, leased)
+                previous = self.feed.generation
+                return frame
             data = self.snapshot()
             if leased:
                 data['playback_entry'] = self.describe(dict(id=leased, job_id=leased))
             return data
 
-        stream = self.updates.events(snapshot)
+        stream = self.updates.events(snapshot, encoded=compact)
         try:
             async for event in stream:
                 yield event

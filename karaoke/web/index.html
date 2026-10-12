@@ -49,7 +49,7 @@
       </section>
       <section id="local-library">
       <div class="section-heading library-heading"><h1 id="library-heading">本地曲库</h1><span id="library-count"></span>
-        <nav class="library-pagination" aria-label="本地曲库分页" hidden>
+        <nav class="pagination library-pagination" aria-label="本地曲库分页" hidden>
           <button data-library-step="-1" aria-label="上一页" title="上一页"><svg class="icon"><use href="#i-up"/></svg></button>
           <select aria-label="本地曲库页码"></select>
           <button data-library-step="1" aria-label="下一页" title="下一页"><svg class="icon"><use href="#i-up"/></svg></button>
@@ -60,7 +60,7 @@
         <div class="music-columns" role="row"><span class="music-rank" role="columnheader">#</span><span class="music-song" role="columnheader">歌曲</span><span class="music-credits" role="columnheader">歌手</span><span class="music-album" role="columnheader">专辑</span><span class="music-plays" role="columnheader">播放量</span><span class="music-duration" role="columnheader">时长</span><span class="music-actions" role="columnheader">点歌</span><span class="music-alternative" role="columnheader">找 MV</span></div>
         <div class="music-list" id="song-grid" role="rowgroup"></div>
       </div>
-      <nav class="library-pagination library-pagination-bottom" aria-label="本地曲库底部分页" hidden>
+      <nav class="pagination library-pagination library-pagination-bottom" aria-label="本地曲库底部分页" hidden>
         <button data-library-step="-1" aria-label="上一页" title="上一页"><svg class="icon"><use href="#i-up"/></svg></button>
         <select aria-label="本地曲库页码"></select>
         <button data-library-step="1" aria-label="下一页" title="下一页"><svg class="icon"><use href="#i-up"/></svg></button>
@@ -104,11 +104,13 @@
       </div></div>
       <section id="upcoming-panel" class="queue-content" role="tabpanel" aria-labelledby="upcoming-tab">
         <span class="queue-badge" id="queue-badge" hidden></span>
+        <nav class="pagination queue-pagination" id="queue-pagination" aria-label="待唱分页" hidden><button data-page-step="-1" aria-label="待唱上一页"><svg class="icon" aria-hidden="true"><use href="#i-up"/></svg></button><select aria-label="待唱页码"></select><button data-page-step="1" aria-label="待唱下一页"><svg class="icon" aria-hidden="true"><use href="#i-up"/></svg></button></nav>
         <div id="queue-list" class="queue-list"></div>
         <div id="queue-empty" class="queue-empty"><div class="queue-empty-lines"><i></i><i></i><i></i></div><h3>还没点歌</h3></div>
       </section>
       <section id="history-panel" class="queue-content" role="tabpanel" aria-labelledby="history-tab" hidden>
         <label class="history-search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="history-query" type="search" placeholder="搜索已唱的歌名或歌手" aria-label="搜索已唱的歌名或歌手" autocomplete="off"></label>
+        <nav class="pagination queue-pagination" id="history-pagination" aria-label="已唱分页" hidden><button data-page-step="-1" aria-label="已唱上一页"><svg class="icon" aria-hidden="true"><use href="#i-up"/></svg></button><select aria-label="已唱页码"></select><button data-page-step="1" aria-label="已唱下一页"><svg class="icon" aria-hidden="true"><use href="#i-up"/></svg></button></nav>
         <div id="history-list" class="queue-list"></div>
         <div id="history-empty" class="queue-empty"><div class="queue-empty-lines"><i></i><i></i><i></i></div><h3>还没有唱过的歌</h3></div>
       </section>

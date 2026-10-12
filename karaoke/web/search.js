@@ -214,8 +214,8 @@ export function librarySongs(library, filter = 'all', query = '') {
       song.language === filter)));
 }
 
-export function paginateSongs(songs, requestedPage = 1) {
-  const size = 12, pages = Math.max(1, Math.ceil(songs.length / size));
+export function paginateSongs(songs, requestedPage = 1, size = 12) {
+  const pages = Math.max(1, Math.ceil(songs.length / size));
   const page = Math.max(1, Math.min(pages, Number.isInteger(requestedPage) ? requestedPage : 1));
   const offset = (page - 1) * size;
   return {songs:songs.slice(offset, offset + size), page, pages, offset};
@@ -237,6 +237,20 @@ export function queuePosition(song, entries) {
   const key = queueKey(song);
   return entries.findIndex(entry => (key && queueKey(entry) === key) ||
     (song.job_id && entry.job_id === song.job_id)) + 1;
+}
+
+// Build once per queue snapshot, then reuse for every visible point-song button.
+export function queuePositions(entries) {
+  const sources = new Map(), jobs = new Map();
+  entries.forEach((entry, index) => {
+    const key = queueKey(entry);
+    if (key && !sources.has(key)) sources.set(key, index + 1);
+    if (entry.job_id && !jobs.has(entry.job_id)) jobs.set(entry.job_id, index + 1);
+  });
+  return song => {
+    const position = Math.min(sources.get(queueKey(song)) || Infinity, jobs.get(song.job_id) || Infinity);
+    return Number.isFinite(position) ? position : 0;
+  };
 }
 
 export function playCount(value) {

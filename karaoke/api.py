@@ -746,8 +746,8 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
         return room.snapshot()
 
     @app.get('/v1/room/events')
-    async def room_events(job_id: str | None = None, playing_entry_id: str | None = None):
-        return StreamingResponse(room.events(job_id, playing_entry_id), media_type='text/event-stream',
+    async def room_events(job_id: str | None = None, playing_entry_id: str | None = None, compact: bool = False):
+        return StreamingResponse(room.events(job_id, playing_entry_id, compact=compact), media_type='text/event-stream',
             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
     @app.post('/v1/room/events', status_code=204)
@@ -840,14 +840,25 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
     async def frontend_asset(version: str, path: str, request: Request):
         return await assets.get_response(path, request.scope)
 
+    frontend = None
+    frontend_checked = -math.inf
+
     @app.get('/', include_in_schema=False)
-    async def home():
-        web = ROOT/'web'
-        digest = hashlib.sha256(b''.join(p.read_bytes() for p in sorted(web.rglob('*'))
-            if p.suffix in ('.js', '.mjs', '.css'))).hexdigest()[:16]
-        # Relative module imports share this versioned directory as well.
-        html = (web/'index.html').read_text().replace('/assets/', f'/ui/{digest}/')
-        return HTMLResponse(html, headers={'Cache-Control': 'no-cache'})
+    async def home(request: Request):
+        nonlocal frontend, frontend_checked
+        # Hot deployments remain visible within a second. Concurrent arrivals
+        # reuse the same HTML instead of rereading/hashing every asset per user.
+        if time.monotonic() - frontend_checked >= 1:
+            web = ROOT/'web'
+            digest = hashlib.sha256(b''.join(p.read_bytes() for p in sorted(web.rglob('*'))
+                if p.suffix in ('.js', '.mjs', '.css'))).hexdigest()[:16]
+            html = (web/'index.html').read_text().replace('/assets/', f'/ui/{digest}/')
+            frontend = HTMLResponse(html, headers={'Cache-Control': 'no-cache',
+                'ETag': '"' + hashlib.sha256(html.encode()).hexdigest() + '"'})
+            frontend_checked = time.monotonic()
+        if request.headers.get('if-none-match') == frontend.headers['etag']:
+            return Response(status_code=304, headers={key: frontend.headers[key] for key in ('etag', 'cache-control')})
+        return frontend
 
     return app
 

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
-import {createVideoSearch, createViewHistory, previewURL, searchLibrary, artistLibrarySongs, librarySongs, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, libraryArtists, historySuggestions} from './web/search.js';
+import {createVideoSearch, createViewHistory, previewURL, searchLibrary, artistLibrarySongs, librarySongs, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, queuePositions, libraryArtists, historySuggestions} from './web/search.js';
 
 function setup() {
   const requests = [], snapshots = [];
@@ -11,6 +11,19 @@ function setup() {
   return {search, requests, snapshots};
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
+
+test('queue position index keeps the first matching source or job and refreshes after reorder', () => {
+  const a={url:'https://www.youtube.com/watch?v=abcdefghijk',job_id:'a'};
+  const b={url:'https://youtu.be/abcdefghijk',job_id:'b'};
+  const c={url:'https://www.youtube.com/watch?v=lmnopqrstuv',job_id:'c'};
+  const position=queuePositions([c,a,b]);
+  assert.equal(position(b),2);
+  assert.equal(position({job_id:'b'}),3);
+  assert.equal(position({...a,job_id:'c'}),1);
+  assert.equal(position({job_id:'unknown'}),0);
+  assert.equal(queuePositions([b,c,a])(a),1);
+  assert.equal(queuePositions([])(a),0);
+});
 
 test('library pages keep every song in order and clamp after the filtered library shrinks', () => {
   const songs = Array.from({length:29}, (_, id) => ({id}));
@@ -23,6 +36,12 @@ test('library pages keep every song in order and clamp after the filtered librar
   assert.equal(paginateSongs(songs.slice(0,4),3).page,1);
   assert.deepEqual(paginateSongs([],3),{songs:[],page:1,pages:1,offset:0});
   assert.equal(paginateSongs(songs,NaN).page,1);
+  const queue = Array.from({length:10001}, (_, id) => ({id}));
+  const last = paginateSongs(queue, 201, 50);
+  assert.deepEqual(last.songs, [queue[10000]]);
+  assert.equal(last.offset, 10000);
+  assert.equal(paginateSongs(queue.slice(0,-1),201,50).page, 200);
+  assert.deepEqual(Array.from({length:201}, (_, i) => paginateSongs(queue,i+1,50).songs).flat(), queue);
 });
 
 test('every local library view excludes missing or unfinished media, even when metadata is retained', () => {

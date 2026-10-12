@@ -971,6 +971,89 @@ def test_sse_initial_snapshot_push_coalescing_and_disconnect(monkeypatch):
     asyncio.run(check())
 
 
+def test_compact_sse_shares_snapshots_and_recovers_a_slow_viewer(tmp_path, monkeypatch):
+    app = create_app(tmp_path, version='test')
+    room, store = app.state.room, app.state.store
+    job = ready_job(store)
+    entry = room.add(AddSong(job_id=job['id']))['entries'][0]
+    calls = 0
+    snapshot = room.snapshot
+
+    def counted():
+        nonlocal calls
+        calls += 1
+        return snapshot()
+
+    monkeypatch.setattr(room, 'snapshot', counted)
+
+    async def read(stream):
+        text = (await anext(stream) + await anext(stream)).decode()
+        return text.splitlines()[0], json.loads(text.split('data: ', 1)[1])
+
+    async def check():
+        viewers = [room.events(compact=True) for _ in range(20)]
+        try:
+            initial = [await read(stream) for stream in viewers]
+            assert calls == 1  # New subscribers do not each scan SQLite/the library.
+            assert all(kind == 'event: room' for kind, _ in initial)
+            store.update(job['id'], result={**job['result'], 'title':'Updated'})
+            kind, first = await read(viewers[0])
+            assert kind == 'event: room_patch'
+            assert first['base'] == initial[0][1]['sequence']
+            assert first['collections']['entries']['upsert'][0]['title'] == 'Updated'
+            assert 'history' not in first['collections']
+            assert calls == 2
+            # This second update is consumed by one viewer but skipped by the others.
+            store.update(job['id'], status='failed', error={'code':'test', 'message':'failed'})
+            kind, next_update = await read(viewers[0])
+            assert kind == 'event: room_patch'
+            assert next_update['collections']['entries']['upsert'][0]['status'] == 'failed'
+            assert next_update['collections']['entries']['upsert'][0]['id'] == entry['id']
+            for viewer in viewers[1:]:
+                kind, caught_up = await read(viewer)
+                assert kind == 'event: room'
+                assert caught_up['entries'][0]['status'] == 'failed'
+                assert caught_up['sequence'] == next_update['sequence']
+            assert calls == 3
+        finally:
+            for viewer in viewers:
+                await viewer.aclose()
+        assert not room.updates.subscribers
+    asyncio.run(check())
+
+
+def test_compact_sse_preserves_reorder_removal_and_private_playback(tmp_path):
+    app = create_app(tmp_path, version='test')
+    room, store = app.state.room, app.state.store
+    job = ready_job(store)
+    first = room.add(AddSong(job_id=job['id']))['entries'][0]
+    second = room.add(AddSong(job_id=job['id']))['entries'][-1]
+
+    async def read(stream):
+        return json.loads((await anext(stream) + await anext(stream)).decode().split('data: ', 1)[1])
+
+    async def check():
+        stream = room.events(job['id'], first['id'], compact=True)
+        try:
+            initial = await read(stream)
+            assert initial['playback_entry']['job_id'] == job['id']
+            assert initial['playing_entry_ids'] == [first['id']]
+            room.command(RoomCommand(action='remove', entry_id=first['id']))
+            update = await read(stream)
+            assert update['collections']['entries']['remove'] == [first['id']]
+            assert update['collections']['entries']['order'] == [second['id']]
+            assert update['playback_entry']['status'] == 'completed'
+            assert store.cache.leases[job['id']] == 1
+            room.command(RoomCommand(action='remove', entry_id=second['id']))
+            update = await read(stream)
+            assert update['collections']['entries']['order'] == []
+            assert update['playback_entry']['job_id'] == job['id']
+        finally:
+            await stream.aclose()
+        assert not store.cache.leases and not room.playing_connections
+    asyncio.run(check())
+
+
 def test_progress_is_received_before_worker_exits(tmp_path):
     info = dict(title='New video title', artist='Singer', duration_seconds=123)
     counters = {'separate_lead': dict(completed=3, total=10, unit='chunks')}

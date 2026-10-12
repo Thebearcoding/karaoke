@@ -1,7 +1,7 @@
 import test, {beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import {Player} from './web/player.js';
-import {isStaleRoomSnapshot, LocalPlayback, PlaybackTabs, RoomEvents, queueToTop, preparationRetry} from './web/room-state.js';
+import {isStaleRoomSnapshot, applyRoomPatch, LocalPlayback, PlaybackTabs, RoomEvents, queueToTop, queueTopCandidates, preparationRetry} from './web/room-state.js';
 
 test('room subscriptions recover closed and silent connections without polling or accepting old events', t => {
   t.mock.timers.enable({apis:['setTimeout']});
@@ -13,7 +13,7 @@ test('room subscriptions recover closed and silent connections without polling o
   }
   const events=new RoomEvents(value=>received.push(value), value=>connected.push(value), url=>{
     const stream=new Stream(); stream.url=url; streams.push(stream); return stream;
-  });
+  }, () => 1);
   try {
     events.connect();
     const first=streams[0]; first.readyState=1; first.onopen(); first.room({entries:[]});
@@ -27,25 +27,76 @@ test('room subscriptions recover closed and silent connections without polling o
     assert.deepEqual(received,[{entries:[]},{entries:['new song']}]);
     // A half-open connection can stop delivering data without firing onerror.
     t.mock.timers.tick(45000);
+    t.mock.timers.tick(1000);
     assert.equal(streams.length,3); assert.equal(streams[1].readyState,2);
     events.connect('singing job');
     assert.equal(new URL(streams[3].url,'http://localhost').searchParams.get('job_id'),'singing job');
     streams[2].room({entries:['old subscription']});
     assert.equal(received.length,2);
     streams[3].readyState=0; streams[3].onerror();
-    t.mock.timers.tick(1000); assert.equal(streams.length,4); // Native retry still owns CONNECTING.
+    t.mock.timers.tick(1000); assert.equal(streams.length,5); // Close native retry and back off ourselves.
     events.connect('singing job','playing entry');
     const playingQuery = stream => new URL(stream.url,'http://localhost').searchParams.get('playing_entry_id');
-    assert.equal(playingQuery(streams[4]),'playing entry');
+    assert.equal(playingQuery(streams[5]),'playing entry');
     events.connect('singing job','playing entry');
-    assert.equal(streams.length,5);
+    assert.equal(streams.length,6);
     t.mock.timers.tick(45000);
-    assert.equal(playingQuery(streams[5]),'playing entry'); // Reconnect retains presence, not a play command.
+    t.mock.timers.tick(1000);
+    assert.equal(playingQuery(streams[6]),'playing entry'); // Reconnect retains presence, not a play command.
     events.connect('singing job');
-    assert.equal(playingQuery(streams[6]),null);
+    assert.equal(playingQuery(streams[7]),null);
     events.close(); t.mock.timers.tick(60000);
-    assert.equal(streams.length,7); assert.equal(connected.at(-1),false);
+    assert.equal(streams.length,8); assert.equal(connected.at(-1),false);
   } finally { events.close(); }
+});
+
+test('room patches retain unchanged collections and apply progress, removal and reordering', () => {
+  const a={id:'a',status:'running'}, b={id:'b',status:'completed'};
+  const initial={stream:'session',sequence:4,revision:2,entries:[a,b],library:[a,b],history:[]};
+  const progress=applyRoomPatch(initial,{stream:'session',base:4,sequence:5,server_time:100,
+    changes:{},collections:{entries:{upsert:[{...a,progress:50}],remove:[]}}});
+  assert.equal(progress.library,initial.library);
+  assert.equal(progress.history,initial.history);
+  assert.equal(progress.entries[1],b);
+  assert.equal(progress.entries[0].progress,50);
+  assert.equal(initial.entries[0].progress,undefined);
+  const removed=applyRoomPatch(progress,{stream:'session',base:5,sequence:9,server_time:101,
+    changes:{revision:3},collections:{entries:{upsert:[{id:'c'}],remove:['a'],order:['c','b']}}});
+  assert.deepEqual(removed.entries,[{id:'c'},b]);
+  assert.equal(removed.revision,3);
+  assert.equal(applyRoomPatch(initial,{stream:'other',base:4}),null);
+  assert.equal(applyRoomPatch(progress,{stream:'session',base:4}),null);
+});
+
+test('stream retry backs off with jitter and a missing patch base forces a full resubscription', t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  const streams=[], received=[];
+  class Stream extends EventTarget { close() { this.closed=true; } }
+  const events=new RoomEvents(value=>received.push(value),()=>{},url=>{
+    const stream=new Stream(); streams.push(stream); return stream;
+  },()=>0);
+  try {
+    events.connect();
+    const fail=()=>streams.at(-1).onerror();
+    fail(); assert.equal(streams[0].closed,true);
+    t.mock.timers.tick(499); assert.equal(streams.length,1);
+    t.mock.timers.tick(1); assert.equal(streams.length,2);
+    fail(); t.mock.timers.tick(999); assert.equal(streams.length,2);
+    t.mock.timers.tick(1); assert.equal(streams.length,3);
+    streams.at(-1).dispatchEvent(new MessageEvent('room',{data:JSON.stringify({stream:'s',sequence:3,entries:[]})}));
+    streams.at(-1).dispatchEvent(new MessageEvent('room_patch',{data:JSON.stringify({stream:'s',sequence:5,base:4})}));
+    assert.equal(received.length,1);
+    t.mock.timers.tick(500); assert.equal(streams.length,4); // Valid snapshot reset the backoff.
+  } finally { events.close(); }
+});
+
+test('queue move availability preserves singing pins without constructing an order for every row', () => {
+  const entries=['a','b','c','d'].map(id=>({id}));
+  assert.deepEqual([...queueTopCandidates(entries)],['b','c','d']);
+  assert.deepEqual([...queueTopCandidates(entries,['a','b'])],['d']);
+  assert.deepEqual([...queueTopCandidates(entries,['b'])],['a','c','d']);
+  assert.deepEqual([...queueTopCandidates(entries,['missing'])],['b','c','d']);
+  assert.deepEqual([...queueTopCandidates([],['missing'])],[]);
 });
 
 test('a restored page resumes its released session without undoing pause or taking audio from another tab', () => {
