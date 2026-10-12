@@ -1,11 +1,12 @@
 """Local persistent jobs API. Run one server worker for one GPU queue."""
 import asyncio
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+import io
 import json
 import logging
 import math
@@ -16,7 +17,6 @@ import re
 import signal
 import sqlite3
 import sys
-import tempfile
 import threading
 import time
 from typing import Literal
@@ -94,16 +94,53 @@ def playback_window_bytes(path, info, chunk, gain):
         raise ValueError('Invalid playback samples')
     # FLAC has no encoder priming/padding. 24-bit previews preserve the common
     # headroom without sending float PCM's much larger payload over Wi-Fi.
-    # Give libsndfile a native descriptor: BytesIO callbacks repeatedly need
-    # the GIL while the event loop is busy sending room updates to viewers.
-    with tempfile.TemporaryFile() as output:
-        sf.write(output.fileno(), samples, info['sample_rate'], format='FLAC', subtype='PCM_24', closefd=False)
-        output.seek(0)
-        return output.read()
+    output = io.BytesIO()
+    sf.write(output, samples, info['sample_rate'], format='FLAC', subtype='PCM_24')
+    return output.getvalue()
 
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+class AudioWindowCache:
+    """Share encoded bytes across listeners, with bounded memory and one producer."""
+    def __init__(self, max_bytes=256*1024**2, max_entries=256):
+        self.max_bytes, self.max_entries = max_bytes, max_entries
+        self.values, self.pending = OrderedDict(), {}
+        self.size_bytes = 0
+        self.lock = threading.Lock()
+
+    def get(self, key, produce):
+        with self.lock:
+            if key in self.values:
+                self.values.move_to_end(key)
+                return self.values[key]
+            waiting = self.pending.get(key)
+            if waiting is None:
+                waiting = self.pending[key] = Future()
+                owner = True
+            else:
+                owner = False
+        if not owner:
+            return waiting.result()
+        try:
+            value = produce()
+            with self.lock:
+                if len(value) <= self.max_bytes:
+                    self.values[key] = value
+                    self.size_bytes += len(value)
+                    while self.size_bytes > self.max_bytes or len(self.values) > self.max_entries:
+                        self.size_bytes -= len(self.values.popitem(last=False)[1])
+        except BaseException as error:
+            waiting.set_exception(error)
+            raise
+        else:
+            waiting.set_result(value)
+            return value
+        finally:
+            with self.lock:
+                self.pending.pop(key)
 
 
 def known_song_info(job):
@@ -646,6 +683,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
     room = Room(store, worker, version, updates)
     video_search = VideoSearch()
     playback_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix='playback')
+    playback_windows = AudioWindowCache()
     playback_tasks = set()
 
     @asynccontextmanager
@@ -856,7 +894,12 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
             paths, info = playback_sources(store.cache.folder(key), doc['result'], sample_rate)
             if stem is None:
                 return info
-            data = playback_window_bytes(paths[names.index(stem)], info, chunk, doc['result']['shared_preview_gain'])
+            path = paths[names.index(stem)]
+            stamp = path.stat()
+            gain = doc['result']['shared_preview_gain']
+            cache_key = (path, stamp.st_ino, stamp.st_size, stamp.st_mtime_ns, stamp.st_ctime_ns, gain, chunk,
+                   *(info[name] for name in ('sample_rate', 'channels', 'frames', 'chunk_frames', 'padding_frames')))
+            data = playback_windows.get(cache_key, lambda: playback_window_bytes(path, info, chunk, gain))
             return Response(data, media_type='audio/flac', headers={'Cache-Control': 'no-store'})
         except (OSError, ValueError, TypeError, KeyError, RuntimeError) as error:
             raise HTTPException(409, '播放音轨不完整，请重新准备') from error

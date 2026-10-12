@@ -11163,6 +11163,89 @@ def test_media_access_does_not_block_health(tmp_path, monkeypatch, access_error,
         assert not app.state.store.cache.leases
 
 
+@pytest.mark.parametrize(('max_bytes', 'max_entries'), [(5, 99), (99, 2)])
+def test_audio_window_cache_coalesces_reads_and_bounds_retained_bytes(max_bytes, max_entries):
+    from concurrent.futures import ThreadPoolExecutor
+    from karaoke.api import AudioWindowCache
+    cache = AudioWindowCache(max_bytes=max_bytes, max_entries=max_entries)
+    calls = []
+    entered, release = threading.Event(), threading.Event()
+
+    def slow():
+        calls.append('shared')
+        entered.set()
+        assert release.wait(2)
+        return b'aa'
+
+    with ThreadPoolExecutor(8) as pool:
+        pending = [pool.submit(cache.get, 'a', slow) for _ in range(8)]
+        try:
+            assert entered.wait(1)
+            assert calls == ['shared']
+        finally:
+            release.set()
+        assert [future.result() for future in pending] == [b'aa']*8
+
+    def get(key, data=b'xx'):
+        return cache.get(key, lambda: calls.append(key) or data)
+
+    get('b')
+    get('a')
+    get('c')  # Byte budget evicts b, preserving the recently read a.
+    get('a')
+    get('b')
+    assert calls == ['shared', 'b', 'c', 'b']
+    get('oversize', b'x'*(max_bytes+1))
+    get('oversize', b'x'*(max_bytes+1))
+    assert calls[-2:] == ['oversize', 'oversize']
+
+    def fail():
+        raise ValueError('broken')
+
+    with pytest.raises(ValueError, match='broken'):
+        cache.get('bad', fail)
+    assert get('bad', b'ok') == b'ok'
+
+
+def test_playback_cache_reuses_audio_but_rechecks_source_and_gain(tmp_path, monkeypatch):
+    import soundfile as sf
+    from karaoke.api import playback_window_bytes
+    app = create_app(tmp_path, version='test')
+    store = app.state.store
+    job = cache_fixture(store, '1')
+    paths = []
+    for name in ('accompaniment', 'lead_vocals'):
+        path = tmp_path/job['id']/f'{name}.flac'
+        sf.write(path, np.full((16000, 2), .2), 16000, subtype='PCM_24')
+        job['result']['artifacts'][name] = dict(path=path.name, bytes=path.stat().st_size)
+        paths.append(path)
+    store.update(job['id'], result=job['result'])
+    calls = []
+
+    def encode(*args):
+        calls.append(args)
+        return playback_window_bytes(*args)
+
+    monkeypatch.setattr('karaoke.api.playback_window_bytes', encode)
+    url = f"/v1/jobs/{job['id']}/playback/accompaniment/0"
+    with TestClient(app) as client:
+        first = client.get(url)
+        assert first.status_code == 200
+        assert client.get(url).content == first.content and len(calls) == 1
+        job['result']['shared_preview_gain'] = .5
+        store.update(job['id'], result=job['result'])
+        quieter = client.get(url)
+        assert quieter.status_code == 200 and quieter.content != first.content and len(calls) == 2
+        sf.write(paths[0], np.full((16000, 2), .4), 16000, subtype='PCM_24')
+        replaced = client.get(url)
+        assert replaced.status_code == 200 and replaced.content != quieter.content and len(calls) == 3
+        paths[0].unlink()
+        assert client.get(url).status_code == 409
+        store.update(job['id'], status='evicted')
+        assert client.get(url).status_code == 410
+        assert not store.cache.leases
+
+
 def test_audio_encoding_does_not_starve_video_streams(tmp_path, monkeypatch):
     import anyio.to_thread
     import soundfile as sf
@@ -11213,7 +11296,7 @@ def test_playback_burst_is_bounded_and_disconnect_keeps_running_reads_protected(
     job = cache_fixture(store, '1')
     for name in ('accompaniment', 'lead_vocals'):
         path = tmp_path/job['id']/f'{name}.flac'
-        sf.write(path, np.zeros((100, 2)), 16000)
+        sf.write(path, np.zeros((16000*8*16, 2)), 16000)
         job['result']['artifacts'][name] = dict(path=path.name, bytes=path.stat().st_size)
     store.update(job['id'], result=job['result'])
     entered, release = threading.Event(), threading.Event()
@@ -11230,8 +11313,8 @@ def test_playback_burst_is_bounded_and_disconnect_keeps_running_reads_protected(
 
     async def check():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
-            pending = [asyncio.create_task(client.get(f"/v1/jobs/{job['id']}/playback/accompaniment/0"))
-                       for _ in range(16)]
+            pending = [asyncio.create_task(client.get(f"/v1/jobs/{job['id']}/playback/accompaniment/{index}"))
+                       for index in range(16)]
             try:
                 assert await asyncio.to_thread(entered.wait, 2)
                 await asyncio.sleep(.05)
