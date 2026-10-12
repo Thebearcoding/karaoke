@@ -105,7 +105,7 @@ def now():
 
 class AudioWindowCache:
     """Share encoded bytes across listeners, with bounded memory and one producer."""
-    def __init__(self, max_bytes=256*1024**2, max_entries=256):
+    def __init__(self, max_bytes=512*1024**2, max_entries=256):
         self.max_bytes, self.max_entries = max_bytes, max_entries
         self.values, self.pending = OrderedDict(), {}
         self.size_bytes = 0
