@@ -360,8 +360,12 @@ class SongCache:
 
     def acquire(self, job_id, *, record_access=True):
         self.leases[job_id] += 1
-        if record_access:
-            self.store.touch(job_id)
+        try:
+            if record_access:
+                self.store.touch(job_id)
+        except BaseException:
+            self.release(job_id)
+            raise
 
     def release(self, job_id):
         self.leases[job_id] -= 1

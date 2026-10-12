@@ -11124,10 +11124,18 @@ def test_new_survey_reuses_verified_ready_sources(tmp_path, status):
 
 
 @pytest.mark.parametrize('access_error', [False, True])
-def test_media_access_does_not_block_health(tmp_path, monkeypatch, access_error):
+@pytest.mark.parametrize('media_kind', ['video', 'audio'])
+def test_media_access_does_not_block_health(tmp_path, monkeypatch, access_error, media_kind):
     from concurrent.futures import ThreadPoolExecutor
+    import soundfile as sf
     app = create_app(tmp_path, version='test')
     job = cache_fixture(app.state.store, '1')
+    if media_kind == 'audio':
+        for name in ('accompaniment', 'lead_vocals'):
+            path = tmp_path/job['id']/f'{name}.flac'
+            sf.write(path, np.zeros((100, 2)), 16000)
+            job['result']['artifacts'][name] = dict(path=path.name, bytes=path.stat().st_size)
+        app.state.store.update(job['id'], result=job['result'])
     entered, release = threading.Event(), threading.Event()
     touch = app.state.store.touch
 
@@ -11140,7 +11148,8 @@ def test_media_access_does_not_block_health(tmp_path, monkeypatch, access_error)
 
     with TestClient(app) as client, ThreadPoolExecutor(2) as pool:
         monkeypatch.setattr(app.state.store, 'touch', slow_access)
-        media = pool.submit(client.get, f"/v1/jobs/{job['id']}/artifacts/mv")
+        route = 'artifacts/mv' if media_kind == 'video' else 'playback/accompaniment/0'
+        media = pool.submit(client.get, f"/v1/jobs/{job['id']}/{route}")
         try:
             assert entered.wait(2)
             assert pool.submit(client.get, '/health').result(timeout=2).status_code == 200
@@ -11191,6 +11200,64 @@ def test_audio_encoding_does_not_starve_video_streams(tmp_path, monkeypatch):
             limiter.total_tokens = previous
         assert audio.result(timeout=2).status_code == 200
         assert not app.state.store.cache.leases
+
+
+@pytest.mark.parametrize('cancel_index', [0, 15])
+def test_playback_burst_is_bounded_and_disconnect_keeps_running_reads_protected(tmp_path, monkeypatch, cancel_index):
+    import asyncio
+    import httpx
+    import soundfile as sf
+    from karaoke.api import playback_window_bytes
+    app = create_app(tmp_path, version='test')
+    store = app.state.store
+    job = cache_fixture(store, '1')
+    for name in ('accompaniment', 'lead_vocals'):
+        path = tmp_path/job['id']/f'{name}.flac'
+        sf.write(path, np.zeros((100, 2)), 16000)
+        job['result']['artifacts'][name] = dict(path=path.name, bytes=path.stat().st_size)
+    store.update(job['id'], result=job['result'])
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def slow_encode(*args):
+        calls.append(args)
+        if len(calls) == 8:
+            entered.set()
+        assert release.wait(5)
+        return playback_window_bytes(*args)
+
+    monkeypatch.setattr('karaoke.api.playback_window_bytes', slow_encode)
+
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+            pending = [asyncio.create_task(client.get(f"/v1/jobs/{job['id']}/playback/accompaniment/0"))
+                       for _ in range(16)]
+            try:
+                assert await asyncio.to_thread(entered.wait, 2)
+                await asyncio.sleep(.05)
+                assert len(calls) == 8
+                assert store.cache.leases[job['id']] == 16
+                pending[cancel_index].cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await pending[cancel_index]
+                await asyncio.sleep(0)
+                expected_reads = 16 if cancel_index == 0 else 15
+                assert store.cache.leases[job['id']] == expected_reads
+                store.cache.limit = 1
+                store.cache.enforce()
+                assert (tmp_path/job['id']/'accompaniment.flac').is_file()
+            finally:
+                release.set()
+                replies = await asyncio.gather(*pending, return_exceptions=True)
+            assert all(response.status_code == 200 for i, response in enumerate(replies) if i != cancel_index)
+            for _ in range(100):
+                if not store.cache.leases:
+                    break
+                await asyncio.sleep(.01)
+            assert len(calls) == expected_reads and not store.cache.leases
+            store.cache.enforce()
+            assert store.read(job['id'])['status'] == 'evicted'
+    asyncio.run(check())
 
 
 def test_concurrent_media_access_coalesces_writes_but_persists_later_usage(tmp_path, monkeypatch):

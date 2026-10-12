@@ -641,6 +641,8 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
     store.on_change = updates.publish
     room = Room(store, worker, version, updates)
     video_search = VideoSearch()
+    playback_slots = asyncio.Semaphore(8)
+    playback_tasks = {}  # Task -> whether its encoder thread has started.
 
     @asynccontextmanager
     async def lifespan(app):
@@ -657,6 +659,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
                 room.pause_on_shutdown()
                 await video_search.close()
                 await worker.stop()
+                await asyncio.gather(*playback_tasks, return_exceptions=True)
 
     app = FastAPI(title='Karaoke preparation API', version='1.0', lifespan=lifespan,
         description='提交视频链接，后台生成带字幕 MV、背景音乐、伴唱和主唱。默认 MV 保留伴唱。')
@@ -842,7 +845,8 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
         names = playback_stems(doc['result']['artifacts'])
         if chunk < 0 or stem is not None and stem not in names:
             raise HTTPException(404, 'Unknown audio window')
-        store.cache.acquire(key, record_access=stem is not None)
+        if stem is not None:
+            store.touch(key)
         try:
             paths, info = playback_sources(store.cache.folder(key), doc['result'], sample_rate)
             if stem is None:
@@ -851,16 +855,41 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
             return Response(data, media_type='audio/flac', headers={'Cache-Control': 'no-store'})
         except (OSError, ValueError, TypeError, KeyError, RuntimeError) as error:
             raise HTTPException(409, '播放音轨不完整，请重新准备') from error
+
+    async def prepare_playback_window(job_id, stem, chunk, sample_rate):
+        # Lease changes stay on the event loop, alongside cache eviction.
+        # Queued reads are protected too; cancellation of one HTTP request
+        # must not release a file while its encoder thread is still using it.
+        key = str(job_id)
+        store.cache.acquire(key, record_access=False)
+        try:
+            async with playback_slots:
+                playback_tasks[asyncio.current_task()] = True
+                return await asyncio.to_thread(read_playback_window, job_id, stem, chunk, sample_rate)
         finally:
             store.cache.release(key)
+
+    def playback_finished(task):
+        playback_tasks.pop(task, None)
+        if not task.cancelled():
+            task.exception()  # Also observe errors after an HTTP disconnect.
 
     @app.get('/v1/jobs/{job_id}/playback')
     @app.get('/v1/jobs/{job_id}/playback/{stem}/{chunk}')
     async def playback_window(job_id: UUID, stem: str | None = None, chunk: int = 0,
                               sample_rate: int = Query(48000, ge=8000, le=192000)):
-        # Encodes use asyncio's bounded executor, leaving Starlette's shared
-        # file-I/O pool available for video and static assets during a burst.
-        return await asyncio.to_thread(read_playback_window, job_id, stem, chunk, sample_rate)
+        # Limit actual encoders, not just executor threads: virtual FLAC I/O
+        # repeatedly enters Python and otherwise delays the event loop and
+        # Starlette's file-I/O pool during a burst.
+        task = asyncio.create_task(prepare_playback_window(job_id, stem, chunk, sample_rate))
+        playback_tasks[task] = False
+        task.add_done_callback(playback_finished)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if playback_tasks.get(task) is False:
+                task.cancel()  # A queued read owns no thread to wait for.
+            raise
 
     assets = StaticFiles(directory=ROOT/'web')
     app.mount('/assets', assets, name='assets')

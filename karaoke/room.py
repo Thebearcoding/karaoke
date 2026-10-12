@@ -78,7 +78,10 @@ class Updates:
                     yield chunk
                 while True:
                     try:
-                        await asyncio.wait_for(queue.get(), 15)
+                        # Keep the timeout on this stream task. wait_for would
+                        # create and wake another task per viewer per update.
+                        async with asyncio.timeout(15):
+                            await queue.get()
                         break
                     except asyncio.TimeoutError:
                         yield 'event: ping\ndata: {}\n\n'
