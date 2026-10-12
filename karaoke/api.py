@@ -1,5 +1,6 @@
 """Local persistent jobs API. Run one server worker for one GPU queue."""
 import asyncio
+from collections import OrderedDict
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 import fcntl
@@ -15,6 +16,7 @@ import re
 import signal
 import sqlite3
 import sys
+import threading
 import time
 from typing import Literal
 from uuid import UUID, uuid4
@@ -109,6 +111,8 @@ def known_song_info(job):
 class Store:
     def __init__(self, root, cache_limit_bytes=None):
         self.on_change = lambda: None
+        self.access_times = OrderedDict()
+        self.access_lock = threading.Lock()
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root/'jobs.sqlite3'
@@ -169,8 +173,18 @@ class Store:
 
     def touch(self, job_id):
         # Listing or receiving SSE snapshots is not use of a cached song.
-        with self.connect() as db:
-            db.execute("UPDATE jobs SET doc=json_set(doc, '$.last_accessed_at', ?) WHERE id=?", (now(), job_id))
+        # A popular song can serve hundreds of chunks a second. Persist real
+        # access at one-second resolution instead of contending on each chunk.
+        with self.access_lock:
+            stamp = time.monotonic()
+            if stamp - self.access_times.get(job_id, -math.inf) < 1:
+                return
+            with self.connect() as db:
+                db.execute("UPDATE jobs SET doc=json_set(doc, '$.last_accessed_at', ?) WHERE id=?", (now(), job_id))
+            self.access_times[job_id] = stamp
+            self.access_times.move_to_end(job_id)
+            if len(self.access_times) > 1024:
+                self.access_times.popitem(last=False)
 
     def create(self, payload, version):
         key_payload = payload.model_dump(exclude={'force'})

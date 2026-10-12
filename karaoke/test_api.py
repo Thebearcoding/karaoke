@@ -11193,6 +11193,41 @@ def test_audio_encoding_does_not_starve_video_streams(tmp_path, monkeypatch):
         assert not app.state.store.cache.leases
 
 
+def test_concurrent_media_access_coalesces_writes_but_persists_later_usage(tmp_path, monkeypatch):
+    import sqlite3
+    from concurrent.futures import ThreadPoolExecutor
+    store = Store(tmp_path)
+    jobs = [cache_fixture(store, str(i)) for i in (1, 2)]
+    clock = [100.]
+    monkeypatch.setattr('karaoke.api.time', SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr('karaoke.api.now', lambda: str(clock[0]))
+    with store.connect() as db:
+        db.execute('CREATE TABLE accesses (job TEXT)')
+        db.execute('CREATE TRIGGER record_access AFTER UPDATE OF doc ON jobs '
+                   'BEGIN INSERT INTO accesses VALUES (new.id); END')
+    with ThreadPoolExecutor(16) as pool:
+        list(pool.map(store.touch, [jobs[i % 2]['id'] for i in range(200)]))
+    with store.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM accesses').fetchone()[0] == 2
+    clock[0] += .5
+    store.touch(jobs[0]['id'])
+    assert store.read(jobs[0]['id'])['last_accessed_at'] == '100.0'
+    clock[0] += 1
+    store.touch(jobs[0]['id'])
+    assert Store(tmp_path).read(jobs[0]['id'])['last_accessed_at'] == '101.5'
+    assert store.read(jobs[1]['id'])['last_accessed_at'] == '100.0'
+    with store.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM accesses').fetchone()[0] == 3
+        db.execute("CREATE TRIGGER deny_access BEFORE UPDATE ON jobs BEGIN SELECT RAISE(ABORT, 'full'); END")
+    clock[0] += 2
+    with pytest.raises(sqlite3.IntegrityError, match='full'):
+        store.touch(jobs[0]['id'])
+    with store.connect() as db:
+        db.execute('DROP TRIGGER deny_access')
+    store.touch(jobs[0]['id'])
+    assert store.read(jobs[0]['id'])['last_accessed_at'] == '103.5'
+
+
 def test_lru_uses_real_access_persists_and_evicted_song_can_be_requested_again(tmp_path):
     app = create_app(tmp_path, worker_command=fake_worker, version='test')
     store = app.state.store
