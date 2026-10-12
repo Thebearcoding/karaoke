@@ -5621,7 +5621,7 @@ def test_external_repair_notifies_subscribers_without_approving_results(tmp_path
     app = create_app(tmp_path, worker_command=fake_worker, version='test')
     with TestClient(app) as client:
         job = client.post('/v1/room/entries', json={'url':URL}).json()['entries'][-1]['job_id']
-        events = app.state.room.updates.events(app.state.room.snapshot)
+        events = app.state.room.updates.events(lambda: ('event: room\ndata: ' + json.dumps(app.state.room.snapshot()) + '\n\n',))
         client.portal.call(anext, events)
         Store(tmp_path).update(job, status='running', active_stages=['render'])
         pending = client.portal.start_task_soon(anext, events)

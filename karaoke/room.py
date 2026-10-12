@@ -69,17 +69,13 @@ class Updates:
             if queue.empty():
                 queue.put_nowait(True)
 
-    async def events(self, snapshot, *, encoded=False):
+    async def events(self, snapshot):
         queue = asyncio.Queue(maxsize=1)
         self.subscribers.add(queue)
         try:
             while True:
-                value = snapshot()
-                if encoded:
-                    for chunk in value:
-                        yield chunk
-                else:
-                    yield 'event: room\ndata: ' + json.dumps(value, ensure_ascii=False) + '\n\n'
+                for chunk in snapshot():
+                    yield chunk
                 while True:
                     try:
                         await asyncio.wait_for(queue.get(), 15)
@@ -237,7 +233,7 @@ class Room:
                 'preparation_jobs': list(self.worker.processes),
                 'storage': self.store.cache.snapshot(), 'library': self.library()}
 
-    async def events(self, job_id=None, playing_entry_id=None, *, compact=False):
+    async def events(self, job_id=None, playing_entry_id=None):
         # A second device may finish/remove the shared queue entry while this
         # browser is still singing. Keep its media until the connection closes.
         leased = job_id if job_id and self.store.read(job_id) else None
@@ -254,16 +250,11 @@ class Room:
 
         def snapshot():
             nonlocal previous
-            if compact:
-                frame = self.feed.frame(previous, leased)
-                previous = self.feed.generation
-                return frame
-            data = self.snapshot()
-            if leased:
-                data['playback_entry'] = self.describe(dict(id=leased, job_id=leased))
-            return data
+            frame = self.feed.frame(previous, leased)
+            previous = self.feed.generation
+            return frame
 
-        stream = self.updates.events(snapshot, encoded=compact)
+        stream = self.updates.events(snapshot)
         try:
             async for event in stream:
                 yield event

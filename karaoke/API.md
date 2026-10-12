@@ -18,7 +18,7 @@ API 的依赖文件只安装服务依赖。新检出请按[安装说明](../SETU
 
 ## 网页与共享歌单
 
-网页使用 `GET /v1/room/events?compact=true` 的 SSE 长连接，不轮询。初次连接和漏过更新时收到 `room` 完整快照；连续更新收到 `room_patch`。同一次状态变化共用一次快照读取和 JSON 编码。省略 `compact` 仍返回旧版完整快照。
+网页使用 `GET /v1/room/events` 的 SSE 长连接，不轮询。初次连接和漏过更新时收到 `room` 完整快照；连续更新收到 `room_patch`。同一次状态变化共用一次快照读取和 JSON 编码。
 
 完整快照带 `stream`（服务实例标识）和 `sequence`（推送序号，区别于命令的 `revision`）。补丁带同一 `stream`、`base`、`sequence`、`changes` 和 `collections`：`changes` 替换顶层字段；`entries`、`history`、`library` 按 ID 提供 `upsert`、`remove`，顺序变化时另给完整 ID `order`。包含重复 ID 的旧列表直接整体替换。客户端只有持有同一流的 `base` 才应用补丁，否则重连取完整快照。`server_time` 和本连接的 `playback_entry` 随每帧发送，不放进共享缓存。慢连接只保留一次更新通知，不累积补丁队列。
 
@@ -34,7 +34,7 @@ API 的依赖文件只安装服务依赖。新检出请按[安装说明](../SETU
 | `GET /v1/room` | 待唱 `entries`、倒序演唱记录 `history`、准备状态和兼容旧客户端的播放字段 |
 | `POST /v1/room/entries` | 传入 `{ "url": "..." }` 点新歌，或 `{ "job_id": "..." }` 复用已准备歌曲 |
 | `POST /v1/room/commands` | 网页共享操作：`finish`、`remove`、`reorder`、`retry`、`reprepare`；另保留旧客户端播放命令 |
-| `GET /v1/room/events` | 推送 `event: room`；空闲时只发连接保活注释 |
+| `GET /v1/room/events` | 推送 `room` 完整快照、`room_patch` 增量更新；空闲时发送 `ping` |
 | `GET /v1/storage` | 缓存使用量、上限、受保护与可回收容量、准备空间是否足够 |
 | `POST /v1/storage` | `{ "limit_gib": 10 }` 修改并持久化上限；`null` 取消应用配额，仍保护实际磁盘余量，返回新的房间快照 |
 

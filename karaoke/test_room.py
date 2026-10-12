@@ -14,6 +14,11 @@ from karaoke.room import AddSong, Room, RoomCommand, Updates
 from karaoke.test_api import URL, cache_fixture, fake_worker, finished
 
 
+async def read_room_event(stream):
+    text = (await anext(stream) + await anext(stream)).decode()
+    return json.loads(text.split('data: ', 1)[1])
+
+
 def ready_job(store, url=URL):
     job, _ = store.create(JobRequest(url=url), 'test')
     folder = store.root/job['id']
@@ -264,10 +269,10 @@ def test_request_only_device_cannot_reorder_a_live_performance_behind_other_song
         first, duplicate = room.events(job['id'], ids[0]), room.events(job['id'], ids[0])
         stale = room.events(job['id'], 'removed-entry')
         try:
-            event = json.loads((await anext(first)).split('data: ', 1)[1])
+            event = await read_room_event(first)
             assert event['playing_entry_ids'] == [ids[0]]
-            await anext(duplicate)
-            await anext(stale)
+            await read_room_event(duplicate)
+            await read_room_event(stale)
             # The phone can have an older snapshot from before playback began.
             # The server uses live presence, not the phone's local play button.
             moved = room.command(RoomCommand(action='reorder', order=[ids[2], ids[0], ids[1]]))
@@ -296,10 +301,10 @@ def test_device_stream_protects_media_after_shared_queue_removal_until_disconnec
     async def check():
         one, two = room.events(job['id'], entry['id']), room.events(job['id'], entry['id'])
         try:
-            event = json.loads((await anext(one)).split('data: ', 1)[1])
+            event = await read_room_event(one)
             assert event['playback_entry']['job_id'] == job['id']
             assert event['playing_entry_ids'] == [entry['id']]
-            await anext(two)
+            await read_room_event(two)
             room.command(RoomCommand(action='finish', entry_id=entry['id'], playback_started_at=time.time()-5))
             assert not room.read()['entries']
             assert not room.snapshot()['playing_entry_ids']
@@ -310,7 +315,7 @@ def test_device_stream_protects_media_after_shared_queue_removal_until_disconnec
             assert store.read(job['id'])['last_accessed_at'] == '2000-01-01T00:00:00Z'
             await one.aclose()
             assert store.cache.leases[job['id']] == 1
-            assert '"playback_entry"' in await anext(two)
+            assert 'playback_entry' in await read_room_event(two)
         finally:
             await one.aclose()
             await two.aclose()
@@ -945,7 +950,7 @@ def test_sse_initial_snapshot_push_coalescing_and_disconnect(monkeypatch):
     async def check():
         updates = Updates()
         data = {'revision':0}
-        stream = updates.events(lambda: data.copy())
+        stream = updates.events(lambda: ('event: room\ndata: ' + json.dumps(data) + '\n\n',))
         assert '"revision": 0' in await anext(stream)
         async def idle_timeout(awaitable, timeout):
             awaitable.close()
@@ -971,7 +976,7 @@ def test_sse_initial_snapshot_push_coalescing_and_disconnect(monkeypatch):
     asyncio.run(check())
 
 
-def test_compact_sse_shares_snapshots_and_recovers_a_slow_viewer(tmp_path, monkeypatch):
+def test_sse_shares_snapshots_and_recovers_a_slow_viewer(tmp_path, monkeypatch):
     app = create_app(tmp_path, version='test')
     room, store = app.state.room, app.state.store
     job = ready_job(store)
@@ -991,7 +996,7 @@ def test_compact_sse_shares_snapshots_and_recovers_a_slow_viewer(tmp_path, monke
         return text.splitlines()[0], json.loads(text.split('data: ', 1)[1])
 
     async def check():
-        viewers = [room.events(compact=True) for _ in range(20)]
+        viewers = [room.events() for _ in range(20)]
         try:
             initial = [await read(stream) for stream in viewers]
             assert calls == 1  # New subscribers do not each scan SQLite/the library.
@@ -1022,7 +1027,7 @@ def test_compact_sse_shares_snapshots_and_recovers_a_slow_viewer(tmp_path, monke
     asyncio.run(check())
 
 
-def test_compact_sse_preserves_reorder_removal_and_private_playback(tmp_path):
+def test_sse_preserves_reorder_removal_and_private_playback(tmp_path):
     app = create_app(tmp_path, version='test')
     room, store = app.state.room, app.state.store
     job = ready_job(store)
@@ -1033,7 +1038,7 @@ def test_compact_sse_preserves_reorder_removal_and_private_playback(tmp_path):
         return json.loads((await anext(stream) + await anext(stream)).decode().split('data: ', 1)[1])
 
     async def check():
-        stream = room.events(job['id'], first['id'], compact=True)
+        stream = room.events(job['id'], first['id'])
         try:
             initial = await read(stream)
             assert initial['playback_entry']['job_id'] == job['id']
@@ -1088,7 +1093,7 @@ def test_song_info_updates_push_to_room_and_preserve_user_overrides(tmp_path):
         state = room.read()
         state['entries'] = [dict(id='entry', job_id=job['id'])]
         room.save(state)
-        stream = room.updates.events(room.snapshot)
+        stream = room.updates.events(lambda: ('event: room\ndata: ' + json.dumps(room.snapshot()) + '\n\n',))
 
         def entry(event):
             return json.loads(event.split('data: ', 1)[1])['entries'][0]

@@ -30,7 +30,7 @@ export class RoomEvents {
     this.close(); this.job = job; this.playingEntry = playingEntry;
     this.retrying = false;
     let snapshot = null;
-    const query = new URLSearchParams({compact:'true'});
+    const query = new URLSearchParams();
     if (job) query.set('job_id', job);
     if (playingEntry) query.set('playing_entry_id', playingEntry);
     const source = this.source = this.create('/v1/room/events' + (query.size ? `?${query}` : ''));
