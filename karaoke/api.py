@@ -967,4 +967,5 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
 if __name__ == '__main__':
     import uvicorn
     uvicorn.run(create_app(), host=os.getenv('KARAOKE_HOST', '127.0.0.1'),
-                port=int(os.getenv('KARAOKE_PORT', '8746')), timeout_graceful_shutdown=5)
+                port=int(os.getenv('KARAOKE_PORT', '8746')), timeout_graceful_shutdown=5,
+                timeout_keep_alive=2*CHUNK_SECONDS)
