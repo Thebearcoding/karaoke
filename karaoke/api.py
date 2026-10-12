@@ -1,6 +1,7 @@
 """Local persistent jobs API. Run one server worker for one GPU queue."""
 import asyncio
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 import fcntl
@@ -641,8 +642,8 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
     store.on_change = updates.publish
     room = Room(store, worker, version, updates)
     video_search = VideoSearch()
-    playback_slots = asyncio.Semaphore(8)
-    playback_tasks = {}  # Task -> whether its encoder thread has started.
+    playback_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix='playback')
+    playback_tasks = set()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -659,6 +660,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
                 room.pause_on_shutdown()
                 await video_search.close()
                 await worker.stop()
+                playback_pool.shutdown(wait=False, cancel_futures=True)
                 await asyncio.gather(*playback_tasks, return_exceptions=True)
 
     app = FastAPI(title='Karaoke preparation API', version='1.0', lifespan=lifespan,
@@ -856,39 +858,34 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
         except (OSError, ValueError, TypeError, KeyError, RuntimeError) as error:
             raise HTTPException(409, '播放音轨不完整，请重新准备') from error
 
-    async def prepare_playback_window(job_id, stem, chunk, sample_rate):
-        # Lease changes stay on the event loop, alongside cache eviction.
-        # Queued reads are protected too; cancellation of one HTTP request
-        # must not release a file while its encoder thread is still using it.
-        key = str(job_id)
-        store.cache.acquire(key, record_access=False)
-        try:
-            async with playback_slots:
-                playback_tasks[asyncio.current_task()] = True
-                return await asyncio.to_thread(read_playback_window, job_id, stem, chunk, sample_rate)
-        finally:
-            store.cache.release(key)
-
-    def playback_finished(task):
-        playback_tasks.pop(task, None)
-        if not task.cancelled():
-            task.exception()  # Also observe errors after an HTTP disconnect.
-
     @app.get('/v1/jobs/{job_id}/playback')
     @app.get('/v1/jobs/{job_id}/playback/{stem}/{chunk}')
     async def playback_window(job_id: UUID, stem: str | None = None, chunk: int = 0,
                               sample_rate: int = Query(48000, ge=8000, le=192000)):
-        # Limit actual encoders, not just executor threads: virtual FLAC I/O
-        # repeatedly enters Python and otherwise delays the event loop and
-        # Starlette's file-I/O pool during a burst.
-        task = asyncio.create_task(prepare_playback_window(job_id, stem, chunk, sample_rate))
-        playback_tasks[task] = False
-        task.add_done_callback(playback_finished)
+        # Workers take the next window without waiting for the busy event loop
+        # to release a semaphore. Keep encoding separate from file transfers.
+        key = str(job_id)
+        store.cache.acquire(key, record_access=False)
+        try:
+            work = playback_pool.submit(read_playback_window, job_id, stem, chunk, sample_rate)
+        except BaseException:
+            store.cache.release(key)
+            raise
+        task = asyncio.wrap_future(work)
+        playback_tasks.add(task)
+
+        def finished(done):
+            # Lease changes stay on the event loop, alongside cache eviction.
+            store.cache.release(key)
+            playback_tasks.discard(done)
+            if not done.cancelled():
+                done.exception()  # Observe errors even after HTTP cancellation.
+
+        task.add_done_callback(finished)
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
-            if playback_tasks.get(task) is False:
-                task.cancel()  # A queued read owns no thread to wait for.
+            work.cancel()  # Cancels queued work; running threads retain leases.
             raise
 
     assets = StaticFiles(directory=ROOT/'web')
