@@ -11123,6 +11123,76 @@ def test_new_survey_reuses_verified_ready_sources(tmp_path, status):
     assert json.loads((target/'source.json').read_text())['input_url'] == URL
 
 
+@pytest.mark.parametrize('access_error', [False, True])
+def test_media_access_does_not_block_health(tmp_path, monkeypatch, access_error):
+    from concurrent.futures import ThreadPoolExecutor
+    app = create_app(tmp_path, version='test')
+    job = cache_fixture(app.state.store, '1')
+    entered, release = threading.Event(), threading.Event()
+    touch = app.state.store.touch
+
+    def slow_access(job_id):
+        entered.set()
+        assert release.wait(5)
+        if access_error:
+            raise OSError('Access write failed')
+        touch(job_id)
+
+    with TestClient(app) as client, ThreadPoolExecutor(2) as pool:
+        monkeypatch.setattr(app.state.store, 'touch', slow_access)
+        media = pool.submit(client.get, f"/v1/jobs/{job['id']}/artifacts/mv")
+        try:
+            assert entered.wait(2)
+            assert pool.submit(client.get, '/health').result(timeout=2).status_code == 200
+        finally:
+            release.set()
+        if access_error:
+            with pytest.raises(OSError, match='Access write failed'):
+                media.result(timeout=2)
+        else:
+            assert media.result(timeout=2).status_code == 200
+        assert not app.state.store.cache.leases
+
+
+def test_audio_encoding_does_not_starve_video_streams(tmp_path, monkeypatch):
+    import anyio.to_thread
+    import soundfile as sf
+    from concurrent.futures import ThreadPoolExecutor
+    from karaoke.api import playback_window_bytes
+    app = create_app(tmp_path, version='test')
+    job = cache_fixture(app.state.store, '1')
+    for name in ('accompaniment', 'lead_vocals'):
+        path = tmp_path/job['id']/f'{name}.wav'
+        sf.write(path, np.zeros((100, 2)), 16000)
+        job['result']['artifacts'][name] = dict(path=path.name, bytes=path.stat().st_size)
+    app.state.store.update(job['id'], result=job['result'])
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_encode(*args):
+        entered.set()
+        assert release.wait(5)
+        return playback_window_bytes(*args)
+
+    async def io_limiter():
+        return anyio.to_thread.current_default_thread_limiter()
+
+    with TestClient(app) as client, ThreadPoolExecutor(2) as pool:
+        limiter = client.portal.call(io_limiter)
+        previous, limiter.total_tokens = limiter.total_tokens, 1
+        monkeypatch.setattr('karaoke.api.playback_window_bytes', slow_encode)
+        audio = pool.submit(client.get, f"/v1/jobs/{job['id']}/playback/accompaniment/0")
+        try:
+            assert entered.wait(2)
+            video = pool.submit(client.get, f"/v1/jobs/{job['id']}/artifacts/mv", headers={'Range':'bytes=0-3'})
+            response = video.result(timeout=2)
+            assert response.status_code == 206 and response.content == b'xxxx'
+        finally:
+            release.set()
+            limiter.total_tokens = previous
+        assert audio.result(timeout=2).status_code == 200
+        assert not app.state.store.cache.leases
+
+
 def test_lru_uses_real_access_persists_and_evicted_song_can_be_requested_again(tmp_path):
     app = create_app(tmp_path, worker_command=fake_worker, version='test')
     store = app.state.store

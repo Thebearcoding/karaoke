@@ -66,9 +66,11 @@ API 的依赖文件只安装服务依赖。新检出请按[安装说明](../SETU
 
 ### 分段播放
 
-`GET /v1/jobs/{id}/playback` 返回三轨共有的 `sample_rate`、`channels`、`frames`、`chunk_frames`、`padding_frames`。仅允许已完成任务，三轨格式、共同增益或文件无效时拒绝播放。此元数据查询不刷新 LRU。
+`GET /v1/jobs/{id}/playback` 返回播放音轨列表 `stems` 及共有的 `sample_rate`、`channels`、`frames`、`chunk_frames`、`padding_frames`。仅允许已完成任务，音轨格式、共同增益或文件无效时拒绝播放。此元数据查询不刷新 LRU。
 
-`GET /v1/jobs/{id}/playback/{stem}/{chunk}` 返回单段 24-bit FLAC，`stem` 是 `instrumental`、`backing_vocals` 或 `lead_vocals`，`chunk` 从零开始。两个请求都传入浏览器 AudioContext 的 `sample_rate`（默认 48000）。每段 8 秒，前后附加至少 20 ms 的重采样余量，边界同时落在源采样与浏览器采样的整数位置；按元数据裁掉重叠部分，并以整型源帧边界调度三轨。读取期间取得缓存租约，实际音频访问刷新 LRU；不写入新缓存文件，不触发预处理模型。
+`GET /v1/jobs/{id}/playback/{stem}/{chunk}` 返回单段 24-bit FLAC，`stem` 取自上述元数据的 `stems`，`chunk` 从零开始。两个请求都传入浏览器 AudioContext 的 `sample_rate`（默认 48000）。每段 8 秒，前后附加至少 20 ms 的重采样余量，边界同时落在源采样与浏览器采样的整数位置；按元数据裁掉重叠部分，并以整型源帧边界调度三轨。读取期间取得缓存租约，实际音频访问刷新 LRU；不写入新缓存文件，不触发预处理模型。
+
+音轨编码使用独立且有线程数上限的执行池，避免耗尽视频和静态文件共用的 I/O 线程池。视频访问时间的数据库写入也放在线程池中，租约在等待写入前取得，写入失败或传输结束后释放。
 
 播放页发送 `buffering` 时携带 `entry_id`、共同的已播 `position` 和当前 `playback_started_at`。服务器拒绝切歌、定位、暂停之前的过期事件；有效请求保留播放意图并清空 `started_at`，直到片段齐备后收到带当前 `revision` 的 `ready`。
 

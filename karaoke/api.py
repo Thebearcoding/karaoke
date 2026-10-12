@@ -24,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from .cache import CacheFull, GIB, SongCache, can_restore_video
 from .job_schema import JobRequest, download_backoff, playback_stems, retry_after_seconds, retry_fields as source_retry_fields
@@ -798,18 +799,20 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
         path = (folder/artifact['path']).resolve()
         if not path.is_relative_to(folder) or not path.is_file():
             raise HTTPException(404, 'Artifact is unavailable')
-        return LeasedFileResponse(path, cache=store.cache, job_id=str(job_id),
-                            record_access=name != 'poster',
+        response = LeasedFileResponse(path, cache=store.cache, job_id=str(job_id),
+                            record_access=False,
                             headers={'Cache-Control': 'private, max-age=31536000, immutable' if v else 'no-cache'},
                             media_type=mimetypes.guess_type(path.name)[0] or 'application/octet-stream',
                             filename=path.name, content_disposition_type='inline')
+        try:
+            if name != 'poster':
+                await run_in_threadpool(store.touch, str(job_id))
+        except BaseException:
+            store.cache.release(str(job_id))
+            raise
+        return response
 
-    @app.get('/v1/jobs/{job_id}/playback')
-    @app.get('/v1/jobs/{job_id}/playback/{stem}/{chunk}')
-    def playback_window(job_id: UUID, stem: str | None = None, chunk: int = 0,
-                        sample_rate: int = Query(48000, ge=8000, le=192000)):
-        # Run disk reads and the small FLAC encode in the thread pool, never on
-        # the event loop. No models, subprocesses, or persistent copies.
+    def read_playback_window(job_id, stem, chunk, sample_rate):
         key = str(job_id)
         doc = store.read(key)
         if doc is None:
@@ -832,6 +835,14 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
             raise HTTPException(409, '播放音轨不完整，请重新准备') from error
         finally:
             store.cache.release(key)
+
+    @app.get('/v1/jobs/{job_id}/playback')
+    @app.get('/v1/jobs/{job_id}/playback/{stem}/{chunk}')
+    async def playback_window(job_id: UUID, stem: str | None = None, chunk: int = 0,
+                              sample_rate: int = Query(48000, ge=8000, le=192000)):
+        # Encodes use asyncio's bounded executor, leaving Starlette's shared
+        # file-I/O pool available for video and static assets during a burst.
+        return await asyncio.to_thread(read_playback_window, job_id, stem, chunk, sample_rate)
 
     assets = StaticFiles(directory=ROOT/'web')
     app.mount('/assets', assets, name='assets')
