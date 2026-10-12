@@ -199,7 +199,7 @@ class Room:
             finished_at=time.time()))
         return True
 
-    def describe(self, entry, job=None):
+    def describe(self, entry, job=None, *, catalog=None):
         if job is None:
             job = self.store.read(entry['job_id'])
         if job is None:
@@ -209,7 +209,8 @@ class Room:
                      for key, value in result.get('artifacts', {}).items()
                      if key != 'poster' or (self.store.root/job['id']/value['path']).is_file()}
         song_info = job.get('song_info') or {}
-        featured = next((s for s in self.featured() if s['url'] == inputs['url']), {})
+        featured = (next((s for s in self.featured() if s['url'] == inputs['url']), {})
+                    if catalog is None else catalog.get(inputs['url'], {}))
         return dict(**entry,
             title=inputs.get('title') or result.get('title') or song_info.get('title') or featured.get('title') or '新点的歌',
             artist=inputs.get('artist') or result.get('artist') or song_info.get('artist') or featured.get('artist', ''),
@@ -230,11 +231,16 @@ class Room:
 
     def snapshot(self):
         state = self.read()
-        return {**state, 'entries': [self.describe(e) for e in state['entries']],
+        jobs = self.store.list(1000)
+        by_id = {job['id']: job for job in jobs}
+        featured = self.featured()
+        catalog = {song['url']: song for song in reversed(featured)}
+        return {**state, 'entries': [self.describe(e, by_id.get(e['job_id']), catalog=catalog)
+                                   for e in state['entries']],
                 'playing_entry_ids': [e['id'] for e in state['entries'] if self.playing_connections[e['id']]],
                 'server_time': time.time(), 'preparation_job': self.worker.current,
                 'preparation_jobs': list(self.worker.processes),
-                'storage': self.store.cache.snapshot(), 'library': self.library()}
+                'storage': self.store.cache.snapshot(), 'library': self.library(jobs=jobs, featured=featured)}
 
     async def events(self, job_id=None, playing_entry_id=None):
         # A second device may finish/remove the shared queue entry while this
@@ -276,11 +282,13 @@ class Room:
         path = Path(__file__).with_name('web')/'catalog.json'
         return json.loads(path.read_text()) if path.exists() else []
 
-    def library(self):
-        songs = [dict(song, status='unprepared') for song in self.featured()]
+    def library(self, *, jobs=None, featured=None):
+        featured = self.featured() if featured is None else featured
+        catalog = {song['url']: song for song in reversed(featured)}
+        songs = [dict(song, status='unprepared') for song in featured]
         by_url = {s['url']: s for s in songs}
         seen = {}
-        for job in self.store.list(1000):
+        for job in self.store.list(1000) if jobs is None else jobs:
             url = job['input']['url']
             result = job.get('result') or {}
             artifacts = result.get('artifacts', {})
@@ -292,7 +300,7 @@ class Room:
                 continue
             seen[url] = priority
             song = by_url.get(url)
-            info = self.describe(dict(id=job['id'], job_id=job['id']), job)
+            info = self.describe(dict(id=job['id'], job_id=job['id']), job, catalog=catalog)
             if song is None:
                 song = dict(id=job['id'])
                 songs.append(song)

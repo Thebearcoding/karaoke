@@ -30,6 +30,40 @@ def ready_job(store, url=URL):
                         duration_seconds=10, artifacts=artifacts))
 
 
+def test_snapshot_shares_batch_reads_but_keeps_older_entries_and_fresh_metadata(tmp_path, monkeypatch):
+    room = create_app(tmp_path, version='test').state.room
+    jobs = [room.store.create(JobRequest(url=f'https://www.youtube.com/watch?v=abcdefghij{i}'), 'test')[0]
+            for i in range(3)]
+    state = room.read()
+    state['entries'] = [dict(id=f'entry-{i}', job_id=job['id']) for i, job in enumerate(jobs)]
+    state['entries'].append(dict(id='missing', job_id='missing'))
+    room.save(state)
+    featured = [dict(id=f'catalog-{i}', url=job['input']['url'], title=f'Catalog {i}')
+                for i, job in enumerate(jobs)]
+    batches, catalogs, single_reads = [], [], []
+    read = room.store.read
+
+    def read_one(key):
+        single_reads.append(key)
+        return read(key)
+
+    monkeypatch.setattr(room.store, 'read', read_one)
+    # The third queued song is outside the recent-library batch.
+    monkeypatch.setattr(room.store, 'list', lambda limit: batches.append(True) or jobs[:2])
+    monkeypatch.setattr(room, 'featured', lambda: catalogs.append(True) or featured)
+    snapshot = room.snapshot()
+    assert [song['title'] for song in snapshot['entries']] == ['Catalog 0', 'Catalog 1', 'Catalog 2', '歌曲已不可用']
+    assert [song['id'] for song in snapshot['entries']] == [e['id'] for e in state['entries']]
+    assert len(batches) == len(catalogs) == 1
+    assert single_reads == [jobs[2]['id'], 'missing']
+    assert [song['title'] for song in snapshot['library']] == ['Catalog 0', 'Catalog 1', 'Catalog 2']
+    jobs[0] = room.store.update(jobs[0]['id'], song_info={'title': 'Resolved title'})
+    featured[1]['title'] = 'Updated catalog title'
+    refreshed = room.snapshot()
+    assert [song['title'] for song in refreshed['entries'][:2]] == ['Resolved title', 'Updated catalog title']
+    assert [song['title'] for song in refreshed['library'][:2]] == ['Resolved title', 'Updated catalog title']
+
+
 def test_room_distinguishes_missing_lyrics_from_alignment_review(tmp_path):
     app = create_app(tmp_path, version='test')
     job = ready_job(app.state.store)
