@@ -36,6 +36,9 @@
 *.jpg
 *.jpeg
 *.webp
+# Curated README screenshots only; keep generated media excluded.
+!/docs/images/desktop.png
+!/docs/images/mobile.png
 *.ckpt
 *.pth
 *.pt
