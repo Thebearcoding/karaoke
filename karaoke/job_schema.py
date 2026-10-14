@@ -26,8 +26,11 @@ def download_backoff(url, directory=None, *, until=0):
     if not directory:
         return 0
     folder = Path(directory)
-    provider = 'youtube' if 'youtube.com/' in url else 'bilibili'
-    path = folder/(provider+'.retry.json')
+    try:
+        video_url(url)
+    except ValueError:
+        return 0  # Retired sources in stored jobs must not hold the active queue.
+    path = folder/'youtube.retry.json'
 
     def read():
         try:
@@ -35,13 +38,13 @@ def download_backoff(url, directory=None, *, until=0):
         except FileNotFoundError:
             return 0
         if type(deadline) not in (int, float) or not math.isfinite(deadline) or deadline < 0:
-            raise ValueError(f'Invalid {provider} download backoff')
+            raise ValueError('Invalid youtube download backoff')
         return deadline
 
     if not until:
         return read()
     folder.mkdir(parents=True, exist_ok=True)
-    with (folder/(provider+'.retry.lock')).open('a') as lock:
+    with (folder/'youtube.retry.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         deadline = max(read(), until)
         temporary = path.with_suffix('.tmp')
@@ -176,7 +179,7 @@ def thumbnail_url(value):
         if (parsed.scheme == 'https' and not parsed.username and not parsed.password
                 and parsed.port in (None, 443) and any(
                     parsed.hostname == host or (parsed.hostname or '').endswith('.'+host)
-                    for host in ('ytimg.com', 'googleusercontent.com', 'hdslb.com'))):
+                    for host in ('ytimg.com', 'googleusercontent.com'))):
             return value
     except ValueError:
         pass
@@ -186,7 +189,7 @@ def thumbnail_url(value):
 def video_url(value: str) -> str:
     parsed = urlsplit(value.strip())
     if parsed.scheme not in ('http', 'https') or parsed.username or parsed.password:
-        raise ValueError('请输入 YouTube 或 Bilibili 的 HTTP(S) 视频链接')
+        raise ValueError('请输入 YouTube 的 HTTP(S) 视频链接')
     if parsed.port not in (None, 80, 443):
         raise ValueError('视频链接不支持自定义端口')
     host = (parsed.hostname or '').lower()
@@ -199,16 +202,7 @@ def video_url(value: str) -> str:
         if not re.fullmatch(r'[A-Za-z0-9_-]{11}', identifier):
             raise ValueError('请提供单个 YouTube 视频链接，而非频道或播放列表')
         return 'https://www.youtube.com/watch?v=' + identifier
-    if host in ('bilibili.com', 'www.bilibili.com', 'm.bilibili.com'):
-        if len(parts) != 2 or parts[0] != 'video' or not re.fullmatch(r'(?:BV[0-9A-Za-z]{10}|av[0-9]+)', parts[1]):
-            raise ValueError('请提供 /video/BV… 或 /video/av… 的 Bilibili 视频链接')
-        page = query.get('p', ['1'])[0]
-        if not page.isdigit() or not 1 <= int(page) <= 10000:
-            raise ValueError('无效的 Bilibili 分 P 编号')
-        return f'https://www.bilibili.com/video/{parts[1]}' + (f'?p={int(page)}' if int(page) != 1 else '')
-    if host == 'b23.tv' and len(parts) == 1 and re.fullmatch(r'[0-9A-Za-z]{4,32}', parts[0]):
-        return f'https://b23.tv/{parts[0]}'
-    raise ValueError('当前只接受 YouTube、Bilibili 和 b23.tv 视频链接')
+    raise ValueError('当前只接受 YouTube 单个视频链接')
 
 
 class JobRequest(BaseModel):

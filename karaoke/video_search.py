@@ -13,14 +13,13 @@ from urllib.parse import urlsplit
 
 from opencc import OpenCC
 
-from .job_schema import video_url
+from .job_schema import thumbnail_url, video_url
 
 
 _RELEASE = re.compile(r'\bofficial\b|官方|オフィシャル', re.I)
 _UNOFFICIAL = re.compile(r'\b(?:fan[ -]?made|unofficial)\b|饭制|飯製|搬运|搬運|非官方', re.I)
 _PUBLISHER = re.compile(r'music|records?|recordings?|entertainment|vevo|音[乐樂]|唱片|娱[乐樂]|娛樂|演[艺藝]|[卫衛][视視]|[广廣]播|[电電][视視]', re.I)
 _FAN_CHANNEL = re.compile(r'\bfan\b|lyrics?|covers?|搬运|搬運|歌[词詞]|粉[丝絲]|后援|後援', re.I)
-_ARTIST = re.compile(r'歌手|唱作人|音[乐樂]人|音[乐樂]制作人|音樂製作人|[乐樂][队隊团團]|[组組]合|singer|songwriter|musician|band', re.I)
 _simplified = OpenCC('t2s')
 
 
@@ -54,13 +53,6 @@ def official_source(provider, item):
         if (item.get('channel_is_verified') is True and _RELEASE.search(title)
                 and _PUBLISHER.search(channel) and not _FAN_CHANNEL.search(channel)):
             return 'youtube_verified_music_channel_and_release_title'
-    else:
-        identity = item.get('official_identity') or {}
-        description = identity.get('desc') or ''
-        if identity.get('type') == 0 and _ARTIST.search(description):
-            return 'bilibili_certified_artist'
-        if identity.get('type') == 1 and _PUBLISHER.search(description) and not _FAN_CHANNEL.search(description):
-            return 'bilibili_certified_music_publisher'
     return None
 
 
@@ -118,12 +110,10 @@ def search_results(provider, entries, query=''):
                 duration = 0
             thumbnail = item.get('thumbnail') or next((t.get('url') for t in
                 reversed(item.get('thumbnails') or []) if t.get('url')), '')
-            host = urlsplit(thumbnail).hostname or ''
-            if urlsplit(thumbnail).scheme != 'https' or not (host == 'ytimg.com' or host.endswith('.ytimg.com')):
-                thumbnail = None
             results.append(dict(url=url, title=title, provider=provider, duration=duration,
                                 uploader=str(item.get('uploader') or item.get('channel') or ''),
-                                thumbnail=thumbnail, views=item.get('view_count')))
+                                thumbnail=thumbnail_url(thumbnail), views=item.get('view_count'),
+                                source_evidence=official_source(provider, item), live_status=item.get('live_status')))
         except (KeyError, TypeError, ValueError):
             continue
     return results
@@ -132,10 +122,8 @@ def search_results(provider, entries, query=''):
 def music_thumbnail(item):
     for thumb in reversed(item.get('thumbnails') or []):
         url = thumb.get('url', '')
-        parsed = urlsplit(url)
-        if parsed.scheme == 'https' and any(parsed.hostname == host or
-                (parsed.hostname or '').endswith('.'+host) for host in ('ytimg.com', 'googleusercontent.com')):
-            return url
+        if safe := thumbnail_url(url):
+            return safe
     return None
 
 

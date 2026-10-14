@@ -4,7 +4,7 @@ import SignalsmithStretch from './vendor/signalsmith-stretch.mjs';
 export const pitchConfiguration = {blockMs:160, intervalMs:40, splitComputation:true};
 
 export async function createPitchShift(context, destination) {
-  if (!context.audioWorklet) throw new Error('当前播放页不支持实时升降调，请在电脑上用 localhost 打开');
+  if (!context.audioWorklet) throw new Error('实时升降调需要安全连接，请用 HTTPS 或本机 localhost 打开');
   const processor = await SignalsmithStretch(context);
   await processor.configure(pitchConfiguration);
   const latency = await processor.latency();

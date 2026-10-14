@@ -500,7 +500,7 @@ function previewVideo(song) {
   previewSong = song;
   $('preview-title').textContent = song.title;
   $('preview-source').href = song.url;
-  $('preview-source').textContent = `在 ${song.url.includes('youtube.com') ? 'YouTube' : 'B站'} 观看 ↗`;
+  $('preview-source').textContent = '在原站观看 ↗';
   $('preview-error').hidden = true;
   const cached = library.find(item => item.url === song.url && item.status === 'completed' && item.job_id);
   closeCachedPreview?.(); closeCachedPreview = null;
@@ -513,8 +513,17 @@ function previewVideo(song) {
     updateAddButtons();
     return;
   }
+  const source = previewURL(song, location.origin);
+  if (!source) {
+    $('preview-player').replaceChildren();
+    $('preview-error').textContent = '这个来源没有嵌入预览，可在原站观看';
+    $('preview-error').hidden = false;
+    updateAddButtons();
+    $('video-preview').showModal();
+    return;
+  }
   const iframe = document.createElement('iframe');
-  iframe.src = previewURL(song, location.origin);
+  iframe.src = source;
   iframe.title = song.title;
   iframe.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen';
   iframe.allowFullscreen = true;

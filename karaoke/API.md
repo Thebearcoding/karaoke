@@ -58,7 +58,7 @@ API 的依赖文件只安装服务依赖。新检出请按[安装说明](../SETU
 
 `pitch` 实时设置三轨共同的升降调，例如 `{ "action": "pitch", "pitch_semitones": -2 }`。接受 -6 至 +6 的整数半音数，0 为原调；兼容字段 `pitch_semitones` 持久保存；当前网页在本机保存，不同步到其他设备。此命令不改变播放位置、播放速度、音量、预处理结果或缓存音轨。
 
-预处理队列按歌单中尚未开始的歌曲重新排序，不中断当前处理。播放抵达未准备好的歌曲时等待；媒体加载完成后由播放页发送 `ready`，从设定位置起播，不把预处理／加载耗时算入歌曲时间。首个起音不足四秒的成品通过 `opening_countdown` 提供准备提示。零点起播时 `ready` 可返回未来的 `started_at`，播放器必须等到该时间再启动三轨和视频，并在等待期间显示倒计时；中途续播不加此等待。移除最后一个引用该任务的点歌项时，普通 worker 会停止尚未完成的整个进程组，并等待清理完成后返回；任务记为 `cancelled`，自动重试一并取消。完整成品继续保留并参与 LRU，不影响其他设备正在播放的成品。
+预处理队列按歌单中尚未开始的歌曲重新排序，不中断当前处理。播放抵达未准备好的歌曲时等待；旧服务端播放模式下，媒体加载完成后由客户端发送 `ready`，从设定位置起播，不把预处理／加载耗时算入歌曲时间。首个起音不足四秒的成品通过 `opening_countdown` 提供准备提示。零点起播时 `ready` 可返回未来的 `started_at`，播放器必须等到该时间再启动三轨和视频，并在等待期间显示倒计时；中途续播不加此等待。移除最后一个引用该任务的点歌项时，普通 worker 会停止尚未完成的整个进程组，并等待清理完成后返回；任务记为 `cancelled`，自动重试一并取消。完整成品继续保留并参与 LRU，不影响其他设备正在播放的成品。
 
 取消后的已完成阶段检查点、来源文件和诊断仍保留在原缓存预算内，未完成阶段的临时文件清理。再次点歌会复用同一任务，逐阶段验证输入、模型、代码和产物哈希后继续；取消过程中重新点歌，先等待旧进程退出，随后只启动一次恢复任务。其他待唱条目仍引用同一任务时不取消，独立 probe 的生命周期仍由其控制器管理。
 
@@ -74,7 +74,7 @@ API 的依赖文件只安装服务依赖。新检出请按[安装说明](../SETU
 
 内置服务入口的 HTTP 空闲连接保留 16 秒，覆盖两个音频分片周期，减少播放过程中反复建连及分片请求遇到空闲断连的竞争。另用 Uvicorn 或反向代理启动时，也应让连接保留时间覆盖分片请求间隔。
 
-播放页发送 `buffering` 时携带 `entry_id`、共同的已播 `position` 和当前 `playback_started_at`。服务器拒绝切歌、定位、暂停之前的过期事件；有效请求保留播放意图并清空 `started_at`，直到片段齐备后收到带当前 `revision` 的 `ready`。
+旧服务端播放接口接收 `buffering` 时要求携带 `entry_id`、共同的已播 `position` 和当前 `playback_started_at`。服务器拒绝切歌、定位、暂停之前的过期事件；有效请求保留播放意图并清空 `started_at`，直到片段齐备后收到带当前 `revision` 的 `ready`。
 
 ## 提交
 
@@ -84,7 +84,7 @@ curl -sS http://127.0.0.1:8746/v1/jobs \
   -d '{"url":"https://www.youtube.com/watch?v=n5sjpCQhTDk"}'
 ```
 
-也支持 `youtu.be`、YouTube shorts/live 的录播、Bilibili BV/av 地址、`?p=2` 等分 P，以及 `b23.tv` 短链。一个任务只处理一个视频；直播流、播放列表和超过默认 15 分钟的视频会拒绝处理。
+也支持 `youtu.be`、YouTube Music 单曲链接、YouTube shorts/live 的录播。一个任务只处理一个视频；直播流、播放列表和超过默认 15 分钟的视频会拒绝处理。
 
 立即返回 HTTP 202：
 
@@ -102,7 +102,7 @@ curl -sS http://127.0.0.1:8746/v1/jobs \
 
 | 字段 | 默认 | 用途 |
 |---|---|---|
-| `mv_audio` | `instrumental_backing` | 成片使用背景音乐＋伴唱；设为 `instrumental` 只播放背景音乐 |
+| `mv_audio` | `instrumental_backing` | 兼容旧请求的记录字段，不改变当前静音视频或网页混音；网页只调节主唱增益 |
 | `lyrics` | 自动 | 字符串数组或按换行分句的文本；应与该视频版本实际演唱一致 |
 | `language` | 自动 | ISO 语言代码或名称，如 `zh` / `ja` / `en` / `ko-KR` / `fr` / `ru` 或 `Chinese` / `Korean`；处理时按安装的 Whisper 模型能力解析 |
 | `title`、`artist` | 自动 | 覆盖片头歌曲和原唱信息 |
@@ -110,9 +110,8 @@ curl -sS http://127.0.0.1:8746/v1/jobs \
 
 ```json
 {
-  "url": "https://www.bilibili.com/video/BV1bK411W797?p=1",
-  "mv_audio": "instrumental",
-  "language": "ja"
+  "url": "https://www.youtube.com/watch?v=n5sjpCQhTDk",
+  "language": "zh"
 }
 ```
 
@@ -130,9 +129,9 @@ curl -sS http://127.0.0.1:8746/v1/jobs/任务UUID
 
 在线歌词在对齐前检查明显残缺：按拉丁文字的词、其他文字的字计数，少于每十秒一个文本单元时跳过该候选，继续尝试同站其他匹配版本、备用查询和其他来源。重复唱词照常计数，换行数量不影响判断。同一录音的独立来源之间，某份文本不足另一份的一半、且至少 90% 都包含于后者时，也按歌词片段排除。拒绝原因、长度和来源保存在查询与交叉检查诊断中；全部候选被拒绝时标为 `lyrics_incomplete`，不进入对齐、不发布“已准备”。这只是拦截明显残片的保守检查，不证明歌词完整或起音准确；用户明确提供的歌词不自动替换。
 
-普通点歌与严格音频验收区分处理。普通点歌先查已发表的歌词文本，核对歌名、歌手与版本，再做声学对齐；该路径的 `validation_scope=playback_lyrics_first`，不声称完成独立 ASR 覆盖率验证。LINE MUSIC、LRCLIB、网易云及同一视频的 YouTube Music 歌词并行获取，加上已有视频简介歌词最多五路；LRCLIB 候选另做时长检查。正文规范化后至少两个不同来源一致且无同票数冲突时优先采用一致版本，已知同一出版方去重；未达成一致时选用可信来源原文并保留冲突，不拼接歌词。`lyrics_provenance.lyric_lookup.crosscheck` 记录来源和比较结果，`lyric-crosscheck.json` 另保留各份候选文本。结果状态包括 `corroborated`、`conflicting`、`insufficient_sources`，`selection` 记录 `agreement` 或 `published_source`，后两种状态本身不阻止声学对齐；来源站点可能互相转载，这不是独立人工验证。无可靠文本、全曲无可用字幕或仍有输入歌词行缺失时为 hard fail，保留音轨、可用字幕和诊断，不返回可唱成品或“已准备”。输入歌词完整但字词精度需要局部回退时，可返回 `completed`，`validation_scope=playback_with_lyrics_review`，`quality.playback_fallback` 保留错误与字幕模式，`lyrics_provenance.needs_review=true`。各句独立恢复，有效词字保留原时间；失败词组在已有词组起止点或相邻词组／唱句边界之间匀速扫亮。`timing_source=linear_fallback` 仅用于播放，内部记录 `estimated_spans`、`phrase_timing_sources` 和 `omitted_lines`，页面不额外显示估算标记。不能确定合法唱句时间时保留缺行诊断并阻止发布；不因其他行可用就把整首标为已准备。历史 ASR 草稿仅作诊断，不作为回退字幕。音轨分离、文件和完整解码失败仍然阻止发布。`--audio-only` 固定回归继续执行原有完整验收，任何这类回退都不能计为通过。
+普通点歌与严格音频验收区分处理。普通点歌先查已发表的歌词文本，核对歌名、歌手与版本，再做声学对齐；该路径的 `validation_scope=playback_lyrics_first`，不声称完成独立 ASR 覆盖率验证。身份足够明确后，并行查询 LINE MUSIC、LRCLIB、网易云、LyricsWeb 和同一视频的 YouTube Music 歌词；已有视频简介歌词及后续查询到的日文注音歌词页也可作为候选。LRCLIB 候选另做时长检查。正文规范化后至少两个不同来源一致且无同票数冲突时优先采用一致版本，已知同一出版方去重；未达成一致时选用可信来源原文并保留冲突，不拼接歌词。`lyrics_provenance.lyric_lookup.crosscheck` 记录来源和比较结果，`lyric-crosscheck.json` 另保留各份候选文本。结果状态包括 `corroborated`、`conflicting`、`insufficient_sources`，`selection` 记录 `agreement` 或 `published_source`，后两种状态本身不阻止声学对齐；来源站点可能互相转载，这不是独立人工验证。无可靠文本、全曲无可用字幕或仍有输入歌词行缺失时为 hard fail，保留音轨、可用字幕和诊断，不返回可唱成品或“已准备”。输入歌词完整但字词精度需要局部回退时，可返回 `completed`，`validation_scope=playback_with_lyrics_review`，`quality.playback_fallback` 保留错误与字幕模式，`lyrics_provenance.needs_review=true`。各句独立恢复，有效词字保留原时间；失败词组在已有词组起止点或相邻词组／唱句边界之间匀速扫亮。`timing_source=linear_fallback` 仅用于播放，内部记录 `estimated_spans`、`phrase_timing_sources` 和 `omitted_lines`，页面不额外显示估算标记。不能确定合法唱句时间时保留缺行诊断并阻止发布；不因其他行可用就把整首标为已准备。历史 ASR 草稿仅作诊断，不作为回退字幕。音轨分离、文件和完整解码失败仍然阻止发布。`--audio-only` 固定回归继续执行原有完整验收，任何这类回退都不能计为通过。
 
-多首交错处理时，普通 worker 使用数据目录中的 `stage-locks/` 协调下载、分离、识别／对齐、编码四个独立阶段；同阶段单任务，不同阶段可并行。首次下载和补视频共用下载阶段，避免突发请求和同时改写登录文件。`stage_progress.<阶段>.waiting=true` 表示尚未获得执行机会，等待不计入模型运行超时。任务结束或进程退出会释放阶段锁；共享缓存预算保持不变。
+多首交错处理时，普通 worker 使用数据目录中的 `stage-locks/` 协调下载、分离、识别／对齐、音轨封装、视频渲染和封装；各类阶段按配置限制并发，不同阶段可交叠。首次下载和补视频共用下载阶段，避免突发请求和同时改写登录文件。`stage_progress.<阶段>.waiting=true` 表示尚未获得执行机会，等待不计入模型运行超时。任务结束或进程退出会释放阶段锁；共享缓存预算保持不变。
 
 外部语音／歌词服务错误还包含 `error.provider` 和 `error.retryable`：超时、连接或限流可以退避后重试；内容拒绝、认证或权限失败需要人工处理。错误码分别为 `openai_timeout`、`openai_connection`、`openai_rate_limit`、`openai_content_rejected`、`openai_authentication` 和 `openai_permission`。对外只返回固定说明，不暴露原始响应、请求头或密钥；已完成阶段仍按检查点规则保留。
 
@@ -194,7 +193,7 @@ curl -sS http://127.0.0.1:8746/v1/jobs/任务UUID
 
 中日文歌曲里的英文段若仍有多个词合并高亮或单词被拆断，会用现有英文 SOFA 模型在三个上下文重新对齐，并用 MMS 分别核对原音与分离人声。单词跨越多个字幕单元时，先扩展到完整单词覆盖的单元，再用新的声学预测取起点；范围若涉及未分开的中日文字或已核验的重复片段，保留原结果。混合语言句只截取已有字词边界限定的连续英文段，两种模型和两份音频都受相邻外文的时间边界约束；无法取得三个不同窗口时保留失败。沿用 80 ms 的上下文极差、100 ms 的独立模型差异及原有音量、邻词范围和顺序检查；不满足就保留原结果及失败。只替换证据完整的缺失高亮范围，其余词和相邻中日文保持不变，诊断见 `context/song/latin-repairs.json`。这仍是自动候选校验，不代表人工起音准确率。
 
-固定样本回归控制器 `karaoke.tools.soak` 会把各阶段日志末尾最多 16 KiB、轻量对齐诊断及 ASR 原始响应压缩保存到 `service-data/soak-100/`，其中每份 JSON 最多 2 MiB。被拒绝的恢复响应、最终字幕和产物清单也会保留；最终字幕的覆盖检查结果及其输入哈希写入 `lyric-coverage-validation.json`，一同归档，便于在任务缓存被 LRU 回收后复查拒绝原因。归档按诊断内容的 SHA-256 区分，同一任务再次报相同错误时也不会覆盖早先的证据；记录不包含音视频，也不代表该样本已通过。
+固定样本回归控制器 `karaoke.tools.soak` 会把各阶段日志末尾最多 16 KiB、轻量对齐诊断及 ASR 原始响应压缩保存到 `service-data/soak-100/`，其中每份 JSON 最多 16 MiB。被拒绝的恢复响应、最终字幕和产物清单也会保留；最终字幕的覆盖检查结果及其输入哈希写入 `lyric-coverage-validation.json`，一同归档，便于在任务缓存被 LRU 回收后复查拒绝原因。归档按诊断内容的 SHA-256 区分，同一任务再次报相同错误时也不会覆盖早先的证据；记录不包含音视频，也不代表该样本已通过。
 
 控制器将 DNS 解析失败归为网络故障并退避，不等待代码版本变化才允许重试。同一平台的新退避只延长已有等待，不会让后来的短等待覆盖先前的长等待。服务主动关闭或 macOS 明确报告正在关机时，保留原始错误和阶段检查点，短暂等待后允许同版本重试；这类本机中断不触发视频站点或 OpenAI 的全局退避。普通模块加载错误仍按软件故障处理。
 
@@ -208,7 +207,7 @@ curl -sS http://127.0.0.1:8746/v1/jobs/任务UUID
 
 房间快照也包含每首运行任务的 `stage_progress`，通过 SSE 更新。进度来自子进程的结构化标准输出；计数更新通常限频为每 0.5 秒一次，阶段切换立即推送。前端不轮询，不根据经过的时间伪造进度。
 
-曲库从入队开始就包含歌曲，状态可以是 `queued`、`running`、`completed`、`failed`、`cancelled`、`video_evicted` 或 `evicted`；静态目录中尚未提交的歌曲为 `unprepared`。同一视频只展示最近一次任务。`job_id` 也可指向尚未完成的任务，再次点播时复用该任务，不重复下载或处理；只有 `status == "completed"` 才表示已准备好。房间 SSE 快照的 `library` 与 `GET /v1/library` 使用同一份数据，元数据、语言分类和进度一并推送。
+曲库从入队开始就包含歌曲，状态可以是 `queued`、`running`、`completed`、`failed`、`cancelled`、`video_evicted` 或 `evicted`；静态目录中尚未提交的歌曲为 `unprepared`。同一视频优先展示文件完整的成品，其次是可补视频的任务，再按创建时间选择；较新的失败记录不会遮住可播放成品。`job_id` 也可指向尚未完成的任务，再次点播时复用该任务，不重复下载或处理；只有 `status == "completed"` 才表示已准备好。房间 SSE 快照的 `library` 与 `GET /v1/library` 使用同一份数据，元数据、语言分类和进度一并推送。
 
 页面语言分类优先采用用户指定值，再使用已生成结果、当前音频语言信息或已知曲目目录。处理初期可用所选音频轨的语言标签暂时分类，ASR 返回后立即更新，歌词整理后再次确认。未知语言暂时只列在「全部」，不会按标题文字或字幕语言猜测演唱语言。
 
@@ -222,9 +221,10 @@ LRU 先清理未受保护任务的无用中间文件，再回收视频：任务�
 
 | 名称 | 文件 |
 |---|---|
-| `mv` | 已烧录字幕的完整 MP4；混音含义见 `result.mv_audio` |
-| `instrumental` | 背景音乐无损音轨 |
-| `backing_vocals` | 伴唱无损音轨 |
+| `mv` | 已烧录字幕的完整 MP4，含静音 AAC 兼容轨；音乐由独立音轨播放 |
+| `accompaniment` | 普通播放的底轨 FLAC，包含背景音乐＋伴唱 |
+| `instrumental` | 严格三轨验收的背景音乐无损音轨 |
+| `backing_vocals` | 严格三轨验收的伴唱无损音轨 |
 | `lead_vocals` | 主唱无损音轨 |
 | `instrumental_preview` | 背景音乐 MP3；仅旧任务或严格音频验收 |
 | `backing_vocals_preview` | 伴唱 MP3；仅旧任务或严格音频验收 |
@@ -256,7 +256,9 @@ with httpx.Client(timeout=30) as client:
 
 `GET /v1/jobs?limit=20` 列出近期任务；`GET /health` 返回队列和正在处理的任务。持久退避记录或任务读取失败时，调度器保留对应任务、继续处理其他可运行任务；健康状态为 `degraded`，`dispatch_blocked_jobs` 列出受影响的任务 ID。损坏记录不按零退避处理，修复记录后自动继续。单条无效进度消息记入日志，不终止计算；最终产物校验仍照常执行。
 
-## 自动歌词与质量边界
+## 严格音频验收的 ASR 与质量边界
+
+以下描述 `--audio-only` 的独立验收路径。普通点歌使用前述已发表歌词优先流程；找不到可靠文本时失败，不使用 ASR 草稿替代歌词。
 
 已核对的本地歌词只在视频身份和时长匹配时复用。新视频从分离人声生成 ASR，按原文顺序分行，仅改变空白，不让文本模型增删歌词、重复句或改写唱词。结果标为 `asr_draft` / `needs_review`，附转录指纹；识别本身的错字、对白或幻听仍可能需要复核，这不是出版歌词的正确性保证。文本和词时间支持不足、粗时间轴冲突或字体缺字时仍明确失败，可提供修正后的 `lyrics` 再提交。文字来自 ASR 时，文字匹配率主要用于一致性检查，不能当作独立的识别或起音准确率。
 
@@ -381,7 +383,7 @@ MP3 试听使用 LAME 命令行写入完整的尾部填充信息，避免某些�
 采用 float32 计算、beam size 5 和固定 temperature 0。自动语言识别从录音中部三个窗口投票。
 批次大小、推理库版本和模型文件版本均参与流水线与检查点指纹。
 
-本地模式不请求远程转录、文本整理或音频分类接口，也不在线查找歌词／字幕。
+严格 `--audio-only` 的本地模式不请求远程转录、文本整理或音频分类接口，也不在线查找歌词／字幕。普通点歌仍需已有可信歌词或访问已发表的歌词来源。
 无声警告的异常检测包含正好挤在片段结束点的零时长词，避免这些词漏过恢复检查；不把下一句的正常词算入前句。
 若整句及其前后 250 ms 的有效音频均为数字零，句内完全匹配的词即使挤到文件结束之外，也可随这句一起剔除，并记录其静音父句。没有明确父句、归属冲突、负时间或附近仍有微弱声音时，继续保留异常并走恢复流程，不按音量阈值删词。
 保留用户提供的歌词和已下载的同源字幕；否则从本地转录逐字保留文本，仍需通过原有完整性和声学对齐校验。
@@ -398,7 +400,7 @@ ASR 固定宽度断行若留下孤立的单字或单词，会在同一短句内�
 
 | 环境变量 | 说明 |
 |---|---|
-| `OPENAI_API_KEY` | ASR 和自动歌词整理需要 |
+| `OPENAI_API_KEY` | 在线 ASR 及需要模型补充的元数据查询使用；已发表歌词检索本身不需要 |
 | `KARAOKE_TEXT_MODEL` | 默认 `gpt-5-mini`；仅整理歌曲元数据，不改写歌词 |
 | `KARAOKE_ASR_FALLBACK_MODEL` | 默认 `gpt-4o-transcribe`；识别文本或时间异常时恢复整首文本 |
 | `KARAOKE_DATA_DIR` | 默认 `karaoke/service-data`，保存 SQLite 任务状态和每个任务的文件 |
@@ -408,7 +410,7 @@ ASR 固定宽度断行若留下孤立的单字或单词，会在同一短句内�
 | `KARAOKE_HOST` | 默认 `127.0.0.1`；需要局域网设备点歌时可显式设为 `0.0.0.0` |
 | `KARAOKE_CORS_ORIGINS` | 允许调用接口的前端来源，逗号分隔；默认允许本地 8745 预览页 |
 | `KARAOKE_DEVICE` | 默认 `auto`：CUDA → MPS → CPU；也可显式指定 |
-| `KARAOKE_SEPARATOR_PYTHON` | 分离环境的 Python；本机默认复用已有 `audio/.venv-separator-local` |
+| `KARAOKE_SEPARATOR_PYTHON` | 分离环境的 Python；未设置时使用启动流水线的当前 Python，不自动查找相邻项目的环境 |
 | `KARAOKE_SEPARATION_BATCH_SIZE` | 分离窗口批量大小，默认 `1`；按显存实测选择 |
 | `KARAOKE_REQUIRE_CACHED_SOURCE` | `1` 时只接受同源且哈希完整的媒体缓存，不重新下载媒体 |
 | `KARAOKE_MAX_DURATION_SECONDS` | 默认 `900` |
@@ -416,7 +418,7 @@ ASR 固定宽度断行若留下孤立的单字或单词，会在同一短句内�
 | `KARAOKE_FONT_FILE` | 可选的完整字体路径；Linux 可使用覆盖对应语言的 Noto Serif CJK 字体 |
 | `KARAOKE_DISABLE_LYRIC_CATALOG` | 设为 `1` 时强制走自动歌词，用于测试新歌流程 |
 
-单进程、单 GPU 队列运行；不要给同一数据目录启动多个 Uvicorn worker。`none` 模式下所有已点歌曲可进入流水线，同一种重阶段仍串行，不同阶段可以交错；`/health.preparation_concurrency` 返回 `null`，`running_jobs` 和房间快照的 `preparation_jobs` 列出全部在途任务，旧单数属性保留首项。暂停领取任务后，所有已经开始的歌曲仍会自然完成。并发处理各自监控共享缓存，并按运行任务数预留写入余量。独立的分离环境与主环境都需安装对应硬件的 PyTorch。CUDA 入口已接入；本次实际端到端运行平台是 Mac / MPS，未在 RTX 4090 上测时。
+单进程、单 GPU 队列运行；不要给同一数据目录启动多个 Uvicorn worker。`none` 模式下所有已点歌曲可进入流水线，同类阶段按 `KARAOKE_COMPUTE_CONCURRENCY` 限制并发，下载和视频编码仍各为一个槽位，不同阶段可以交错；`/health.preparation_concurrency` 返回 `null`，`running_jobs` 和房间快照的 `preparation_jobs` 列出全部在途任务，旧单数属性保留首项。暂停领取任务后，所有已经开始的歌曲仍会自然完成。并发处理各自监控共享缓存，并按运行任务数预留写入余量。独立的分离环境与主环境都需安装对应硬件的 PyTorch。CUDA 入口已接入；本次实际端到端运行平台是 Mac / MPS，未在 RTX 4090 上测时。
 
 等待同一工位的步骤按共享待唱列表顺序选择，旧服务端 `current_id` 不再影响准备优先级；已拿到工位的步骤不被打断。每次处理的 `stage-timeline.json` 和成功结果中的 `stage_timeline` 记录相对该 Pipeline 初始化的秒数：`ready`（进入阶段及检查缓存）、`resource_acquired`（取得共享工位）、`started`（开始执行）、`finished`，以及完成／失败／缓存命中状态。缓存命中没有执行时间；工位等待不再混入模型耗时。提交到领取任务的等待另由任务的 `created_at`、`started_at` 计算。部分纯 Python 步骤无工位，只有就绪、开始和结束时间。
 
@@ -430,20 +432,11 @@ LINE、网易云和 LRCLIB 的歌词候选不再因歌手名的别名、译名�
 
 服务重启后恢复排队任务；被中断的运行任务标为失败，保留日志和中间文件，不假装完成。失败任务可以重新提交；已完成且文件完整的相同请求直接命中缓存。
 
-## 本次端到端验证（Mac / MPS）
-
-| 输入 | 视频时长 | 处理总时长，不含排队 | 歌词来源 |
-|---|---:|---:|---|
-| YouTube《美丽的神话》 | 4 分 50 秒 | 6 分 04 秒 | 同版本已核对歌词 |
-| Bilibili《Staple Stable》片段，含角色对话 | 1 分 30 秒 | 2 分 04 秒 | 音频识别＋自动整理，待复核 |
-
-两次均通过 HTTP 提交真实 URL，下载、处理、渲染完整跑通；八个输出文件均通过完整下载哈希和首尾 Range 校验。三轨重组均与解码后的原始 PCM 逐样本一致。当时 68 项行为测试通过；这不是歌词听辨或切字准确率的测量。历史验证记录与媒体保留在原开发工作区，未随源码上传。
-
 播放设备通过现有 `/v1/room/events` 连接的 `playing_entry_id` 报告正在演唱的待唱项；房间快照的 `playing_entry_ids` 仅表示当前连接中的演唱项，不包含播放进度或控制命令。手机置顶和服务端排序都保留这些条目在队首；多个演唱项保持原先相对顺序。停止演唱或关闭连接后释放保护，已移除或与 `job_id` 不符的条目不能获得保护。
 
 ## 音乐与视频搜索
 
-`GET /v1/search?q=歌名或歌手&provider=youtube`。只支持 YouTube；B站搜索返回 422。每次返回平台一页的全部可用单视频链接，字段为 `url`、`title`、`uploader`、`thumbnail`、`duration`（秒）、`views`、`provider`。查询限 1–160 字。搜索不创建任务，也不读写歌曲缓存。
+`GET /v1/search?q=歌名或歌手&provider=youtube`。只支持 YouTube；不支持的 provider 返回 422。每次返回平台一页的全部可用单视频链接，字段为 `url`、`title`、`uploader`、`thumbnail`、`duration`（秒）、`views`、`provider`、`source_evidence`（来源认证证据，可为空）、`live_status`。后两个字段供离线回归采样筛选；网页搜索不据此过滤。查询限 1–160 字。搜索不创建任务，也不读写歌曲缓存。
 
 前后端保留 YouTube 的结果顺序和数量，没有 3 条截断，不按字面关键词、认证、直播状态额外过滤。仅校验单视频 URL 和封面地址。前端在「YouTube 视频」标签展示，本地曲库在独立标签查看。服务端相同查询和分页游标合并请求，元数据缓存 120 秒、最多 32 项；最多并行 2 个查询、待处理最多 8 个，每次含等待最多 25 秒。超量返回 429，平台错误返回 502，成功无结果返回空数组。复用 yt-dlp 解析一个完整原生搜索页，使用平台 continuation 按需翻页，不重复读取前面的页，无需额外 API key。
 

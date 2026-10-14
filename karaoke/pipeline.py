@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from .job_schema import JobRequest, download_backoff, provider_error, retry_fields, song_language, video_url
+from .job_schema import JobRequest, download_backoff, provider_error, retry_fields, song_language
 from .song_sources import (independent_transcript_support, lyric_coverage, missing_repetitions, prepare_song_text,
                            restore_repetitions, transcript_lines, video_song_info)
 from .stage_progress import parse_progress
@@ -198,8 +198,7 @@ class Pipeline:
         self.request = JobRequest.model_validate(request).model_dump()
         self.output = Path(output).resolve()
         self.output.mkdir(parents=True, exist_ok=True)
-        default_separator = ROOT.parent.parent/'audio/.venv-separator-local/bin/python'
-        self.separator_python = separator_python or (str(default_separator) if default_separator.exists() else sys.executable)
+        self.separator_python = separator_python or sys.executable
         self.device, self.text_model = device, text_model
         self.compute_concurrency = int(os.getenv('KARAOKE_COMPUTE_CONCURRENCY', '1'))
         if self.compute_concurrency < 1:
@@ -593,16 +592,6 @@ class Pipeline:
             shutil.rmtree(self.output/'download')
         (self.output/'download').mkdir()
         url = self.request['url']
-        if url.startswith('https://b23.tv/'):
-            import httpx
-            for _ in range(5):
-                response = httpx.get(url, follow_redirects=False, timeout=20)
-                if not response.is_redirect:
-                    break
-                from urllib.parse import urljoin
-                url = video_url(urljoin(url, response.headers['location']))
-            if url.startswith('https://b23.tv/'):
-                raise StageFailure('download', '无法解析 b23.tv 短链，请使用完整 Bilibili 视频链接')
         command = [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--js-runtimes', 'node', '--no-playlist',
             '--newline', '--progress', '--progress-delta', '.5', '--progress-template',
             'download:KARAOKE_STAGE_PROGRESS {"completed":%(progress.downloaded_bytes)j,'
@@ -697,11 +686,13 @@ class Pipeline:
                     cached = self.output/'prepared-lyrics.json'
                     keys = ('title', 'artist', 'language', 'lyrics')
                     overrides = {key:self.request.get(key) for key in keys}
+                    selection = dict(duration=duration, metadata_model=self.text_model)
                     lyrics = None
                     if cached.is_file() and not self.request.get('force'):
                         try:
                             packet = json.loads(cached.read_text())
-                            if packet.get('request_overrides', dict.fromkeys(keys)) == overrides:
+                            if (packet.get('request_overrides', dict.fromkeys(keys)) == overrides
+                                    and packet.get('selection') == selection):
                                 lyrics = read_prepared_lyrics(cached, self.request['url'], metadata)
                                 if not lyrics or not lyrics.get('lines'):
                                     lyrics = None
@@ -713,7 +704,7 @@ class Pipeline:
                                   if not local_asr.offline() or self.request.get('lyrics') else None)
                         if lyrics is not None:
                             write_json(cached, dict(identity=prepared_lyrics_identity(self.request['url'], metadata),
-                                                   request_overrides=overrides, lyrics=lyrics))
+                                                   request_overrides=overrides, selection=selection, lyrics=lyrics))
                 if lyrics is not None:
                     write_json(self.output/'lyrics.json', lyrics)
                     # An empty anchor list selects direct acoustic alignment.

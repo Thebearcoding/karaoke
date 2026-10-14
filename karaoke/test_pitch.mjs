@@ -115,3 +115,23 @@ test('inactive pitch path skips DSP and resumes processing when enabled', async 
   node.process([input],[output],{});
   assert.equal(calls,1);
 });
+
+test('real WASM continues producing audio when the output channel count changes', async () => {
+  const {node, context}=await processor();
+  let frame=0;
+  for (const channels of [1,2]) {
+    let peak=0;
+    for (let block=0;block<100;block++,frame+=128) {
+      context.currentTime=frame/48000;
+      const input=Array.from({length:channels}, () => Float32Array.from({length:128},
+        (_,i)=>.1*Math.sin(2*Math.PI*440*(frame+i)/48000)));
+      const output=input.map(()=>new Float32Array(128));
+      assert.equal(node.process([input],[output],{}),true);
+      for (const channel of output) {
+        assert.ok(channel.every(Number.isFinite));
+        peak=Math.max(peak,...channel.map(Math.abs));
+      }
+    }
+    assert.ok(peak>.05,'Reconfigured processor must emit the input tone');
+  }
+});

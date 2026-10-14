@@ -4,7 +4,6 @@ import hashlib
 import json
 import logging
 import os
-from pathlib import Path
 import shutil
 import stat
 import time
@@ -261,7 +260,7 @@ class SongCache:
         used = self.total_size(self.folder(j['id']) for j in jobs)
         free = shutil.disk_usage(self.store.root).free
         candidates = sorted((j for j in jobs if j['id'] not in protected and
-                             j['status'] in ('completed', 'video_evicted', 'failed', 'evicted', 'audio_ready', 'source_ready')),
+                             j['status'] in ('completed', 'video_evicted', 'failed', 'cancelled', 'evicted', 'audio_ready', 'source_ready')),
                             key=lambda j: (j.get('last_accessed_at', j['created_at']), j['id']))
         # Discard unused working files before evicting any playable media.
         for job in candidates:

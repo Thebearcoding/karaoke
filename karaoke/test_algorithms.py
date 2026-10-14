@@ -1409,7 +1409,6 @@ class SubtitleIntegrity(unittest.TestCase):
                     self.assertFalse(report['constraints'])
 
     def test_label_boundary_uncertainty_does_not_preserve_a_displaced_first_word(self):
-        from copy import deepcopy
         from timing_validation import reconcile_timing, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
         cue = dict(text='あいう', start=.2, end=4.6, units=[

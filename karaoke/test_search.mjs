@@ -71,6 +71,7 @@ test('queued feedback follows source identity and room order, including unprepar
   assert.equal(queuePosition({job_id:'job'},queue),2);
   for (const url of ['https://youtu.be/abcdefghijk?t=20', 'https://m.youtube.com/watch?v=abcdefghijk&list=album',
     'https://music.youtube.com/watch?v=abcdefghijk', 'https://www.youtube.com/shorts/abcdefghijk',
+    'https://www.youtube.com/live/abcdefghijk',
     'https://www.youtube.com/embed/abcdefghijk']) {
     assert.equal(queuePosition({url},queue),2);
   }
@@ -217,10 +218,12 @@ test('preview uses provider embeds, never arbitrary pages or autoplay', () => {
   assert.equal(new URL(yt).pathname, '/embed/n5sjpCQhTDk');
   assert.equal(new URL(yt).searchParams.get('autoplay'), '0');
   assert.equal(new URL(yt).searchParams.get('origin'), 'http://localhost:8746');
+  assert.equal(previewURL({url:'https://www.youtube.com/watch?v=n5sjpCQhTDk'}, 'http://localhost:8746'), yt);
   const bili = previewURL({provider:'bilibili', url:'https://www.bilibili.com/video/BV1bK411W797'}, '');
-  assert.equal(new URL(bili).searchParams.get('bvid'), 'BV1bK411W797');
-  assert.equal(new URL(bili).searchParams.get('autoplay'), '0');
+  assert.equal(bili, '');
   assert.equal(previewURL({provider:'youtube', url:'https://www.youtube.com.attacker.test/watch?v=n5sjpCQhTDk'}, ''), '');
+  assert.equal(previewURL({url:'not a URL'}, ''), '');
+  assert.equal(previewURL({url:'https://user:secret@www.youtube.com/watch?v=n5sjpCQhTDk'}, ''), '');
 });
 
 test('local matches appear only after completion and disappear on eviction or restore', async () => {

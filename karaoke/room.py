@@ -326,7 +326,7 @@ class Room:
                 try:
                     url = JobRequest(url=request.url).url
                 except ValueError as error:
-                    raise HTTPException(422, '请输入有效的 YouTube 或 Bilibili 单个视频链接') from error
+                    raise HTTPException(422, '请输入有效的 YouTube 单个视频链接') from error
             for entry in state['entries']:
                 job = self.store.read(entry['job_id'])
                 if job and job['input']['url'] == url:
@@ -340,7 +340,11 @@ class Room:
             if job and (request.force or job['status'] in ('evicted', 'video_evicted', 'cancelled', 'audio_ready', 'source_ready') or job.get('restore_video') or
                         (not replay and job['status'] == 'completed' and job.get('pipeline_version') != self.version)):
                 version = job['pipeline_version'] if replay and job.get('restore_video') else self.version
-                job, cached = self.store.create(JobRequest(**{**job['input'], 'force': request.force}), version)
+                try:
+                    payload = JobRequest(**{**job['input'], 'force': request.force})
+                except ValueError as error:
+                    raise HTTPException(422, '这首歌的来源已不支持重新准备，请使用 YouTube 视频链接') from error
+                job, cached = self.store.create(payload, version)
                 if not cached:
                     self.worker.queue.put_nowait(job['id'])
             elif not job or job['status'] not in ('completed', 'queued', 'running'):
@@ -352,7 +356,7 @@ class Room:
             try:
                 payload = JobRequest(url=request.url, title=request.title, force=request.force)
             except ValueError as error:
-                raise HTTPException(422, '请输入有效的 YouTube 或 Bilibili 单个视频链接') from error
+                raise HTTPException(422, '请输入有效的 YouTube 单个视频链接') from error
             job, cached = self.store.create(payload, self.version)
             if not cached:
                 if request.source_title and not (job.get('song_info') or {}).get('title'):
@@ -466,6 +470,10 @@ class Room:
             if (action == 'reprepare' and old['status'] != 'completed') or (
                     action == 'retry' and old['status'] != 'failed' and not waiting):
                 raise HTTPException(409, '歌曲状态已改变，请查看最新进度')
+            try:
+                payload = JobRequest(**{**old['input'], 'force': action == 'reprepare'})
+            except ValueError as error:
+                raise HTTPException(422, '这首歌的来源已不支持重新准备，请使用 YouTube 视频链接') from error
             until = download_backoff(old['input']['url'], self.store.root/'stage-locks')
             if until > time.time() and (waiting or (old.get('error') or {}).get('stage') == 'download'
                     or (old.get('error') or {}).get('code') == 'download_failed'):
@@ -475,7 +483,7 @@ class Room:
                     download_retry={**old['download_retry'], 'next_retry_at': None, 'count': 0})
                 cached = False
             else:
-                job, cached = self.store.create(JobRequest(**{**old['input'], 'force': action == 'reprepare'}), self.version)
+                job, cached = self.store.create(payload, self.version)
             if action == 'reprepare':
                 self.store.cache.reuse_download(self.store.root/job['id'], old['input']['url'])
                 # A new queue identity lets browsers already singing keep their

@@ -121,7 +121,8 @@ def paced_requests(interval, protected_root=None):
 def run_case(case, output, model):
     folder = output/'cases'/case['case_id']
     folder.mkdir(parents=True, exist_ok=True)
-    identity = dict(input_sha256=digest(case), **lyric_lookup.prepared_lyrics_identity(case['url'],case['metadata']))
+    identity = dict(input_sha256=digest(case), metadata_model=model,
+                    **lyric_lookup.prepared_lyrics_identity(case['url'],case['metadata']))
     result_path = folder/'result.json'
     if result_path.exists():
         old = json.loads(result_path.read_text())

@@ -96,7 +96,7 @@ MMS_FA 的校验值见 [mms-alignment.json](karaoke/dependencies/mms-alignment.j
 
 ## 5. 运行配置
 
-通过环境注入 `OPENAI_API_KEY`，不要写进源代码、命令示例或提交 `.env`。默认在线调用用于 ASR 和歌词／元数据整理，文本模型默认 `gpt-5-mini`。
+通过环境注入 `OPENAI_API_KEY`，不要写进源代码、命令示例或提交 `.env`。普通点歌优先使用已发表歌词；元数据不足时才调用文本模型补充，默认 `gpt-5-mini`。严格音频验收另行使用 ASR，默认在线调用。
 
 可选本地识别：安装 `karaoke/requirements-local-asr.txt`，下载上述完整模型目录，
 设置 `KARAOKE_ASR_BACKEND=local`、`KARAOKE_WHISPER_MODEL=/绝对路径/模型目录`。

@@ -79,7 +79,7 @@ def select_cases(pool, quotas, seed):
 
 
 def sample(path, data_dir, seed):
-    from karaoke.video_search import youtube_entries, official_source, matches_query
+    from karaoke.video_search import youtube_entries, matches_query
     if path.exists():
         raise ValueError('The fixed manifest already exists; refusing to replace its cases')
     pool_path = path.with_name('candidate-pool.json')
@@ -98,10 +98,10 @@ def sample(path, data_dir, seed):
             query = artist + ' official music video'
             if query in pool['queries']:
                 continue
-            items = youtube_entries(query)
+            items = youtube_entries(query)['results']
             added = 0
             for item in items:
-                evidence = official_source('youtube', item)
+                evidence = item.get('source_evidence')
                 duration = item.get('duration') or 0
                 if (not evidence or not matches_query(artist, item) or not 90 <= duration <= 480
                         or item.get('live_status') in ('is_live', 'is_upcoming')):
@@ -110,7 +110,7 @@ def sample(path, data_dir, seed):
                 if url in excluded or any(x['url'] == url for x in pool['items']):
                     continue
                 pool['items'].append(dict(url=url, title=item['title'], language=language,
-                    duration=duration, channel=item.get('channel'), evidence=evidence,
+                    duration=duration, channel=item.get('uploader'), evidence=evidence,
                     provider='youtube', query=query))
                 added += 1
             pool['queries'][query] = dict(at=stamp(), added=added)
@@ -296,15 +296,14 @@ def wait_job(client, base, job_id):
     job = client.get(f'{base}/v1/jobs/{job_id}').raise_for_status().json()
     if job['status'] not in ('queued', 'running'):
         return job
-    with client.stream('GET', base+'/v1/room/events') as events:
+    with client.stream('GET', base+'/v1/room/events', params={'job_id': job_id}) as events:
         events.raise_for_status()
         for line in events.iter_lines():
             if not line.startswith('data: '):
                 continue
             snapshot = json.loads(line[6:])
-            library = snapshot.get('library', [])
-            if any(song.get('url') == job['input']['url'] and song.get('status') not in ('queued', 'running')
-                   for song in library):
+            song = snapshot.get('playback_entry') or {}
+            if song.get('job_id') == job_id and song.get('status') not in ('queued', 'running'):
                 current = client.get(f'{base}/v1/jobs/{job_id}').raise_for_status().json()
                 if current['status'] not in ('queued', 'running'):
                     return current
@@ -393,7 +392,7 @@ def run_probe(client, base, folder, command, *, resume_preparation=None, session
         session.check(folder)
         (folder/'error.json').unlink(missing_ok=True)
         with (folder/'probe.log').open('ab') as log, ThreadPoolExecutor(max_workers=1) as reader:
-            process = subprocess.Popen(command, cwd=folder.parent.parent.parent,
+            process = subprocess.Popen(command, cwd=Path(__file__).resolve().parents[2],
                 stdout=subprocess.PIPE if store is not None else log,
                 stderr=subprocess.STDOUT, start_new_session=True,
                 env={**os.environ, 'KARAOKE_EVENTS_STDOUT': '1',
@@ -425,21 +424,31 @@ def run_probe(client, base, folder, command, *, resume_preparation=None, session
                         output.result()
                     result = process.poll()
                     if result is not None:
-                        if output is not None:
-                            output.result()
-                        return result
+                        break
                     time.sleep(1)
             except BaseException:
                 session.cancelled.set()
                 raise
             finally:
-                if process.poll() is None:
+                try:
                     os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+                finally:
+                    # The parent may exit before a descendant closes stdout.
+                    # Release the entire group before joining the output reader.
                     try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
                         os.killpg(process.pid, signal.SIGKILL)
-                        process.wait()
+                    except ProcessLookupError:
+                        pass
+                process.wait()
+            if output is not None:
+                output.result()
+            return result
 
 
 def probe(path, data_dir, base, job_id):
@@ -560,7 +569,13 @@ def run_audio(path, data_dir, base, *, case_url=None, defer_urls=(), keep_going=
                     print('Waiting for cache space; user queue remains protected', flush=True)
                     return
             existing = {e['id'] for e in room['entries']}
-            room = client.post(base+'/v1/room/entries', json=dict(url=case['url'], source_title=case['title'])).raise_for_status().json()
+            # A full playback result is not a strict audio acceptance result.
+            # Keep it intact, including when its video is being restored.
+            force = not download_only and any(j['input']['url'] == case['url'] and
+                (j['status'] == 'completed' or j.get('restore_video') or j.get('result'))
+                for j in store.list(-1))
+            room = client.post(base+'/v1/room/entries', json=dict(
+                url=case['url'], source_title=case['title'], force=force)).raise_for_status().json()
             entry = next(e for e in room['entries'] if e['id'] not in existing)
             job = client.get(f'{base}/v1/jobs/{entry["job_id"]}').raise_for_status().json()
             attempts = case.setdefault(ledger, [])
@@ -574,6 +589,8 @@ def run_audio(path, data_dir, base, *, case_url=None, defer_urls=(), keep_going=
                        '--output', str(folder), '--download-only' if download_only else '--audio-only']
             probe_finished = False
             try:
+                if force:
+                    store.cache.reuse_download(folder, case['url'])
                 cached_full = job['status'] == 'completed'
                 exit_code = 0 if cached_full else run_probe(client, base, folder, command)
                 probe_finished = True
@@ -614,7 +631,8 @@ def run_audio(path, data_dir, base, *, case_url=None, defer_urls=(), keep_going=
                     state['provider_backoff'][provider] = max(state['provider_backoff'].get(provider, 0), attempt['next_retry_at'])
             save(path, state)
             room = client.get(base+'/v1/room').raise_for_status().json()
-            if room['current_id'] != entry['id'] and any(e['id']==entry['id'] for e in room['entries']):
+            if (room['current_id'] != entry['id'] and entry['id'] not in room.get('playing_entry_ids', [])
+                    and any(e['id']==entry['id'] for e in room['entries'])):
                 client.post(base+'/v1/room/commands',json=dict(action='remove',entry_id=entry['id'],revision=room['revision'])).raise_for_status()
             print(json.dumps({k:attempt.get(k) for k in ('job_id','status','error')},ensure_ascii=False),flush=True)
             if (case_url is not None or not probe_finished or (download_only and attempt['status'] == 'blocked') or
@@ -716,7 +734,8 @@ def release_finished_entries(client, base, state):
     owned = {a.get('entry_id') for c in state['cases'] for a in c['attempts']
              if a['status'] not in ('submitted', 'running')}
     for entry in list(room['entries']):
-        if entry['id'] not in owned or entry['id'] == room['current_id']:
+        if (entry['id'] not in owned or entry['id'] == room['current_id']
+                or entry['id'] in room.get('playing_entry_ids', [])):
             continue
         response = client.post(base+'/v1/room/commands', json=dict(action='remove',
             entry_id=entry['id'], revision=room['revision']))
@@ -765,7 +784,9 @@ def run(path, data_dir, base):
                 attempt['pipeline_version'] = job.get('pipeline_version', attempt['pipeline_version'])
                 if job['status'] == 'completed':
                     try:
-                        evidence = verify_outputs(client, base, data_dir, job)
+                        playback = (job.get('result') or {}).get('validation_scope') in (
+                            'playback_lyrics_first', 'playback_with_lyrics_review')
+                        evidence = verify_outputs(client, base, data_dir, job, playback_policy=playback)
                         attempt.update(status='passed', finished_at=stamp(), evidence=evidence)
                     except Exception as error:
                         job['error'] = dict(code='verification_failed', message=str(error)[:1000])

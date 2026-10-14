@@ -1,7 +1,8 @@
-"""Run explicitly authorized pretrained comparisons at fixed original gain.
+"""Run pretrained separation at fixed original gain.
 
-These outputs are candidates, never reference stems. Use the separate existing
-audio-separator environment; no NN dependency is added to the heuristic runtime.
+The production pipeline and offline comparisons share this subprocess runner.
+Outputs are model estimates, never ground-truth reference stems. An optional
+audio-separator environment can be selected by the pipeline configuration.
 """
 
 import argparse

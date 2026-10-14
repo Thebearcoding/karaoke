@@ -264,22 +264,14 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			// Check the input/output channel counts
 			if (outputList[0].length != this.channels) {
 				this.channels = outputList[0]?.length || 0;
-				configure();
+				this.configure();
 			}
 			let outputBlockSize = outputList[0][0].length;
 
 			let memory = wasmModule.exports ? wasmModule.exports.memory.buffer : wasmModule.HEAP8.buffer;
 			// Buffer list (one per channel)
 			let inputs = inputList[0];
-			if (!currentMapSegment.active) {
-				outputList[0].forEach((_, c) => {
-					let channelBuffer = inputs[c%inputs.length];
-					let buffer = new Float32Array(memory, this.buffersIn[c], outputBlockSize);
-					buffer.fill(0);
-				});
-				// Should detect silent input and skip processing
-				wasmModule._process(outputBlockSize, outputBlockSize);
-			} else if (inputs?.length) {
+			if (inputs?.length) {
 				// Live input
 				outputList[0].forEach((_, c) => {
 					let channelBuffer = inputs[c%inputs.length];

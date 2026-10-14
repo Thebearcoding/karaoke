@@ -241,7 +241,7 @@ def run_once(manifest, data_dir, report, prepared_dir, base, *, case_urls=(), co
                         attempt.update({k:diagnostic[k] for k in ('reproduction_file','diagnostic_sha256') if k in diagnostic})
                     if entry:
                         room = client.get(base+'/v1/room').raise_for_status().json()
-                        if room['current_id'] != entry['id']:
+                        if room['current_id'] != entry['id'] and entry['id'] not in room.get('playing_entry_ids', []):
                             client.post(base+'/v1/room/commands', json=dict(action='remove', entry_id=entry['id'],
                                 revision=room['revision'])).raise_for_status()
                     state.update(summary=summarize(state['cases']), updated_at=stamp())

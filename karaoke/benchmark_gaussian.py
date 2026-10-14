@@ -4,7 +4,6 @@ import time
 
 import numpy as np
 
-from align import align_lines
 from benchmark_alignment import DATA, ROOT, measure
 from benchmark_alignment_joint import build
 from gaussian_align import make_model, phones, train

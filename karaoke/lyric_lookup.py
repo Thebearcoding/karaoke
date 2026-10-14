@@ -757,7 +757,8 @@ def catalogue_lyric_identity(song, duration, cache):
                     seconds=r.get('duration_seconds'), url='https://music.youtube.com/watch?v='+r['videoId'])
                     for r in packet if isinstance(r, dict) and re.fullmatch(r'[A-Za-z0-9_-]{11}', r.get('videoId') or '')]
         except Exception as error:
-            return None, lyric_request_error(error)
+            attempts.append(dict(lyric_request_error(error), provider=provider, query=provider_query))
+            continue
         candidates = {}
         for row in rows:
             title, artists, seconds = row['title'], row['artists'], row['seconds']
@@ -792,7 +793,7 @@ def catalogue_lyric_identity(song, duration, cache):
     # A different edit length prevents a recording-identity claim, not a
     # lookup of its published words. Keep these explicitly unconfirmed and
     # use the same five-candidate budget as alternate Music lyric releases.
-    return None, dict(report, lyric_candidates=sorted(lyric_candidates.values(), key=rank)[:5], attempts=attempts)
+    return None, dict(attempts[-1], lyric_candidates=sorted(lyric_candidates.values(), key=rank)[:5], attempts=attempts)
 
 
 def catalogue_lyric_text(candidates, metadata, duration, cache):

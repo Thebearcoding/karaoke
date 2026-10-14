@@ -253,6 +253,8 @@ class Store:
                         db.execute('UPDATE jobs SET cache_key=? WHERE id=?', (key, doc['id']))
                     if doc['status'] in ('failed', 'cancelled', 'audio_ready', 'source_ready') and not doc.get('restore_video'):
                         folder = self.root/doc['id']
+                        if not folder.is_dir():
+                            continue
                         source_ready = doc['status'] == 'source_ready' and all((folder/name).is_file()
                             for name in ('source.json', 'download/source.mkv', 'download/source.info.json'))
                         if (not source_ready and doc['status'] != 'cancelled'
@@ -705,7 +707,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
                 await asyncio.gather(*playback_tasks, return_exceptions=True)
 
     app = FastAPI(title='Karaoke preparation API', version='1.0', lifespan=lifespan,
-        description='提交视频链接，后台生成带字幕 MV、背景音乐、伴唱和主唱。默认 MV 保留伴唱。')
+        description='提交 YouTube 视频链接，后台生成字幕视频、底轨（背景音乐＋伴唱）和主唱音轨。视频含静音兼容轨，播放时使用独立音轨。')
     origins = os.getenv('KARAOKE_CORS_ORIGINS', 'http://127.0.0.1:8745,http://localhost:8745')
     app.add_middleware(CORSMiddleware, allow_origins=[o.strip() for o in origins.split(',') if o.strip()],
                        allow_methods=['GET', 'POST'], allow_headers=['Content-Type'])

@@ -227,7 +227,7 @@ export function queueKey(song) {
     const url = new URL(song.url);
     const host = url.hostname.replace(/^(www|m|music)\./, '');
     const id = host === 'youtu.be' ? url.pathname.slice(1) : host === 'youtube.com'
-      ? url.searchParams.get('v') || url.pathname.match(/^\/(?:shorts|embed)\/([^/]+)/)?.[1] : null;
+      ? url.searchParams.get('v') || url.pathname.match(/^\/(?:shorts|live|embed)\/([^/]+)/)?.[1] : null;
     if (/^[\w-]{11}$/.test(id || '')) return `youtube:${id}`;
   } catch { /* A known job can still be queued without a source URL. */ }
   return song.url || (song.job_id ? `job:${song.job_id}` : null);
@@ -274,14 +274,12 @@ export function orderResults(songs, order) {
 }
 
 export function previewURL(song, origin) {
-  const url = new URL(song.url);
-  if (['local','youtube','youtube_music'].includes(song.provider) && url.hostname === 'www.youtube.com') {
-    const id = url.searchParams.get('v');
-    if (/^[\w-]{11}$/.test(id || '')) return `https://www.youtube.com/embed/${id}?${new URLSearchParams({autoplay:'0', playsinline:'1', origin})}`;
-  }
-  if (['local','bilibili'].includes(song.provider) && url.hostname === 'www.bilibili.com') {
-    const id = url.pathname.match(/^\/video\/(BV[\w]{10})$/)?.[1];
-    if (id) return `https://player.bilibili.com/player.html?bvid=${id}&autoplay=0&danmaku=0`;
-  }
+  try {
+    const url = new URL(song.url);
+    if (url.protocol === 'https:' && url.hostname === 'www.youtube.com' && !url.username && !url.password && !url.port) {
+      const id = url.searchParams.get('v');
+      if (/^[\w-]{11}$/.test(id || '')) return `https://www.youtube.com/embed/${id}?${new URLSearchParams({autoplay:'0', playsinline:'1', origin})}`;
+    }
+  } catch { /* Missing or retired source links have no embedded preview. */ }
   return '';
 }

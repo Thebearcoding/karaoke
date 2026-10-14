@@ -5,8 +5,6 @@ import json
 import time
 from pathlib import Path
 
-import numpy as np
-
 from benchmark_separation import ROOT, load, metrics, select, summarize
 from dsp import RATE, apply_masks, istft, lowrank_background, masks_for, repeating_background, stft
 from experiment_output import output_directory

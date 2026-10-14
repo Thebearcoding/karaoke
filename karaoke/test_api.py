@@ -86,15 +86,21 @@ def test_corrupt_provider_backoff_does_not_kill_dispatch_or_bypass_hold(tmp_path
     state = folder/'youtube.retry.json'; state.write_text(bad_state)
     with TestClient(app) as client:
         blocked = client.post('/v1/jobs', json={'url':URL}).json()['id']
-        other = client.post('/v1/jobs', json={'url':'https://www.bilibili.com/video/BV1bK411W797'}).json()['id']
+        other = client.post('/v1/jobs', json={'url':'https://youtu.be/C0ppulkmXPw'}).json()['id']
         (tmp_path/'preparation.pause').unlink()
-        assert finished(client, other)['status'] == 'completed'
+        assert client.get('/v1/jobs/'+other).json()['status'] == 'queued'
         assert client.get('/v1/jobs/'+blocked).json()['status'] == 'queued'
-        health = client.get('/health').json()
+        deadline = time.monotonic()+8
+        while True:
+            health = client.get('/health').json()
+            if blocked in health['dispatch_blocked_jobs'] or time.monotonic() >= deadline:
+                break
+            time.sleep(.03)
         assert health['status'] == 'degraded' and blocked in health['dispatch_blocked_jobs']
         assert not app.state.worker.dispatcher.done() and state.read_text() == bad_state
         state.write_text(json.dumps(time.time()-.1))
         assert finished(client, blocked)['status'] == 'completed'
+        assert finished(client, other)['status'] == 'completed'
         assert client.get('/health').json()['status'] == 'ok'
 
 
@@ -116,10 +122,7 @@ def test_bad_progress_messages_preserve_the_worker_and_valid_result(tmp_path):
     ('https://youtu.be/n5sjpCQhTDk?t=30', URL),
     ('https://www.youtube.com/watch?v=n5sjpCQhTDk&list=anything', URL),
     ('https://m.youtube.com/shorts/n5sjpCQhTDk', URL),
-    ('https://www.bilibili.com/video/BV1bK411W797/?p=2&share_source=copy',
-     'https://www.bilibili.com/video/BV1bK411W797?p=2'),
-    ('http://www.bilibili.com/video/av1074402/', 'https://www.bilibili.com/video/av1074402'),
-    ('https://b23.tv/abcd123', 'https://b23.tv/abcd123'),
+    ('https://music.youtube.com/watch?v=n5sjpCQhTDk', URL),
 ])
 def test_video_identity(value, expected):
     assert video_url(value) == expected
@@ -129,12 +132,42 @@ def test_video_identity(value, expected):
     'file:///etc/passwd', 'http://127.0.0.1/private', 'https://youtube.com.attacker.test/watch?v=n5sjpCQhTDk',
     'https://user:secret@youtube.com/watch?v=n5sjpCQhTDk',
     'https://youtube.com:9000/watch?v=n5sjpCQhTDk', 'https://youtube.com/playlist?list=foo',
+    'https://www.bilibili.com/video/BV1bK411W797/?p=2&share_source=copy',
+    'http://www.bilibili.com/video/av1074402/', 'https://b23.tv/abcd123',
     'https://bilibili.com/video/BV1bK411W797?p=../../secret',
     'https://bilibili.com/video/../../../secret',
 ])
 def test_reject_non_video_or_local_targets(value):
     with pytest.raises(ValueError):
         video_url(value)
+
+
+@pytest.mark.parametrize('url', [
+    'https://www.bilibili.com/video/BV1bK411W797?p=2', 'https://b23.tv/abcd123',
+])
+def test_retired_sources_cannot_start_work_but_cached_media_remain_readable(tmp_path, url):
+    from karaoke.job_schema import download_backoff, thumbnail_url
+    app = create_app(tmp_path, worker_command=fake_worker, version='test')
+    with TestClient(app) as client:
+        for path in ('/v1/jobs', '/v1/room/entries'):
+            assert client.post(path, json={'url':url}).status_code == 422
+        entry = client.post('/v1/room/entries', json={'url':URL}).json()['entries'][0]
+        job = finished(client, entry['job_id'])
+        # A stored pre-removal job is data, not permission to download that source again.
+        original = {**job['input'], 'url':url}
+        app.state.store.update(job['id'], input=original)
+        assert client.get('/v1/room').status_code == 200
+        assert client.get(f"/v1/jobs/{job['id']}/artifacts/mv").content == b'0123456789'
+        assert client.post('/v1/room/entries', json={'job_id':job['id']}).status_code == 201
+        assert client.post('/v1/room/commands', json={'action':'reprepare', 'entry_id':entry['id']}).status_code == 422
+        assert client.post('/v1/room/entries', json={'job_id':job['id'], 'force':True}).status_code == 422
+        app.state.store.update(job['id'], status='failed')
+        assert client.post('/v1/room/commands', json={'action':'retry', 'entry_id':entry['id']}).status_code == 422
+        assert app.state.store.read(job['id'])['input'] == original
+        assert len(app.state.store.list()) == 1
+    download_backoff(URL, tmp_path/'stage-locks', until=time.time()+60)
+    assert download_backoff(url, tmp_path/'stage-locks') == 0
+    assert thumbnail_url('https://i0.hdslb.com/bfs/archive/cover.jpg') is None
 
 
 @pytest.mark.parametrize('missing', ['poster', 'mv'])
@@ -525,7 +558,7 @@ def test_removing_last_room_entry_cancels_pending_download_retry(tmp_path):
         assert app.state.worker.queue.empty()
 
 
-def test_provider_limit_and_login_hold_survive_restart_and_allow_other_providers(tmp_path):
+def test_provider_limit_and_login_hold_survive_restart(tmp_path):
     from karaoke.job_schema import download_backoff
     app = create_app(tmp_path, worker_command=fake_worker, version='test')
     job, _ = app.state.store.create(JobRequest(url=URL), 'test')
@@ -540,8 +573,6 @@ def test_provider_limit_and_login_hold_survive_restart_and_allow_other_providers
     restarted = create_app(tmp_path, worker_command=fake_worker, version='test')
     with TestClient(restarted) as client:
         waiting = client.post('/v1/jobs', json={'url':'https://youtu.be/C0ppulkmXPw'}).json()
-        other = client.post('/v1/jobs', json={'url':'https://www.bilibili.com/video/BV1bK411W797'}).json()
-        assert finished(client, other['id'])['status'] == 'completed'
         assert client.get(f"/v1/jobs/{waiting['id']}").json()['status'] == 'queued'
         assert client.get(f"/v1/jobs/{job['id']}").json()['status'] == 'failed'
 
@@ -1808,14 +1839,31 @@ def test_uncredited_upload_recovers_lyrics_from_catalogue_without_guessing_artis
             assert report['identity_recovery']['catalogue']['status'] == 'ambiguous'
 
 
-def test_catalogue_identity_respects_existing_provider_access_hold(tmp_path, monkeypatch):
+@pytest.mark.parametrize('available', [None, 'line_music', 'youtube_music'])
+def test_catalogue_identity_respects_provider_hold_without_blocking_other_sources(tmp_path, monkeypatch, available):
     from karaoke import lyric_lookup
     from karaoke.stage_cache import StageCache
     hold = dict(status='unavailable', http_status=429, retry_at=time.time()+60, requires_access=True)
-    def blocked(*args):
+    calls = []
+    def blocked(provider, *args):
+        calls.append(provider)
+        if provider == available:
+            if provider == 'line_music':
+                return dict(response=dict(result=dict(tracks=[dict(trackId=1, trackTitle='夜の色',
+                    artists=[dict(artistName='はる')], album={})])))
+            return [dict(videoId='abcdefghijk', title='夜の色', artists=[dict(name='はる')], duration_seconds=30)]
         raise lyric_lookup.LyricRequestError(hold)
     monkeypatch.setattr(lyric_lookup, 'cached_lyric_request', blocked)
-    assert lyric_lookup.catalogue_lyric_identity(dict(title='夜の色'), 30, StageCache(tmp_path)) == (None, hold)
+    candidate, report = lyric_lookup.catalogue_lyric_identity(dict(title='はる 夜の色'), 30, StageCache(tmp_path))
+    assert calls == ['netease', 'line_music'] + ([] if available == 'line_music' else ['youtube_music'])
+    if available:
+        assert candidate['title'] == '夜の色' and candidate['artist'] == 'はる'
+        assert report['provider'] == available and report['status'] == 'candidate'
+    else:
+        assert candidate is None and report['status'] == 'unavailable'
+    failed = [attempt for attempt in report['attempts'] if attempt['status'] == 'unavailable']
+    assert len(failed) == (calls.index(available) if available else 3)
+    assert all({key: attempt[key] for key in hold} == hold for attempt in failed)
 
 
 @pytest.mark.parametrize('explicit_artist', [False, True])
@@ -2642,7 +2690,7 @@ def test_lyric_rate_limit_is_shared_between_jobs_without_blocking_other_sources(
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
     clock, calls = [1000.], []
-    monkeypatch.setattr(module.time,'time',lambda:clock[0])
+    monkeypatch.setattr(module.lookup.time,'time',lambda:clock[0])
     def limited(url, **kwargs):
         calls.append('line_music')
         response = httpx.Response(http_status, headers={'Retry-After':'900'}, request=httpx.Request('GET',url))
@@ -5105,6 +5153,21 @@ def test_lyric_audit_cached_success_is_available_during_another_queries_retry(tm
     assert attempts == [1000.,1060.]
 
 
+def test_lyric_audit_reuses_only_the_same_metadata_model(tmp_path, monkeypatch):
+    from karaoke.tools import lyric_audit
+    calls = []
+    def prepare(request, metadata, duration, cache, model, catalog_root):
+        calls.append(model)
+        return None
+    monkeypatch.setattr(lyric_audit.lyric_lookup, 'prepare_online_lyrics', prepare)
+    case = dict(case_id='one', url=URL, metadata={'id': 'n5sjpCQhTDk'}, duration=30)
+    first = lyric_audit.run_case(case, tmp_path, 'model-a')
+    assert lyric_audit.run_case(case, tmp_path, 'model-a') == first
+    with pytest.raises(ValueError, match='changed input/code'):
+        lyric_audit.run_case(case, tmp_path, 'model-b')
+    assert calls == ['model-a']
+
+
 def test_soak_retries_changed_code_not_unchanged_failures_or_finished_cases():
     from karaoke.tools.soak import eligible
     assert eligible({'attempts': []}, 'v1', 100)
@@ -5128,22 +5191,26 @@ def test_soak_selection_is_fixed_distinct_and_does_not_fill_missing_quota():
         select_cases(pool, {'English': 20}, 42)
 
 
-def test_soak_observes_failed_job_when_library_no_longer_exposes_job_id():
+@pytest.mark.parametrize('status', ['failed', 'completed'])
+@pytest.mark.parametrize('event', ['room', 'room_patch'])
+def test_soak_observes_target_job_in_full_or_incremental_events(status, event):
     import httpx
     from karaoke.tools.soak import wait_job
     calls = []
     def respond(request):
         calls.append(request.url.path)
         if request.url.path.endswith('/events'):
-            return httpx.Response(200, text='data: '+json.dumps({'library': [
-                {'job_id': None, 'url': URL, 'status': 'failed'}]})+'\n\n')
-        return httpx.Response(200, json={'status': 'running' if len(calls)==1 else 'failed', 'input': {'url': URL}})
+            assert request.url.params['job_id'] == 'job'
+            return httpx.Response(200, text='event: ping\ndata: {}\n\nevent: '+event+'\ndata: '+json.dumps({
+                'playback_entry': {'job_id': 'job', 'status': status}})+'\n\n')
+        return httpx.Response(200, json={'status': 'running' if len(calls)==1 else status, 'input': {'url': URL}})
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
-        assert wait_job(client, 'http://test', 'job')['status'] == 'failed'
+        assert wait_job(client, 'http://test', 'job')['status'] == status
     assert calls == ['/v1/jobs/job', '/v1/room/events', '/v1/jobs/job']
 
 
-def test_soak_collects_retries_in_submission_order(tmp_path, monkeypatch):
+@pytest.mark.parametrize('scope', [None, 'playback_lyrics_first', 'playback_with_lyrics_review'])
+def test_soak_collects_retries_in_submission_order(tmp_path, monkeypatch, scope):
     import hashlib
     import httpx
     from karaoke.tools import soak
@@ -5168,18 +5235,41 @@ def test_soak_collects_retries_in_submission_order(tmp_path, monkeypatch):
         else:
             job_id = path.removeprefix('/v1/jobs/')
             observed.append(job_id)
-            data = dict(id=job_id, status='failed', pipeline_version='v2',
-                        error={'code': 'processing_failed', 'message': 'test'})
+            data = dict(id=job_id, status='completed' if scope else 'failed', pipeline_version='v2',
+                        result={'validation_scope': scope}, error={'code': 'processing_failed', 'message': 'test'})
         return httpx.Response(200, json=data)
 
     client = httpx.Client(transport=httpx.MockTransport(respond))
     monkeypatch.setattr(soak.httpx, 'Client', lambda **kwargs: client)
+    def verify(*args, playback_policy=False):
+        assert playback_policy is bool(scope)
+        return {'validation_scope': 'full_mv'}
+    monkeypatch.setattr(soak, 'verify_outputs', verify)
     soak.run(manifest, tmp_path, 'http://test')
     assert observed == ['1', '0']
     saved = json.loads(manifest.read_text())['cases']
     assert [c['url'] for c in saved] == [c['url'] for c in cases]
-    assert all(c['attempts'][-1]['status'] == 'failed' for c in saved)
+    assert all(c['attempts'][-1]['status'] == ('passed' if scope else 'failed') for c in saved)
     assert all(c['attempts'][-1]['pipeline_version'] == 'v2' for c in saved)
+
+
+def test_soak_releases_only_finished_entries_not_playing_on_any_device():
+    import httpx
+    from karaoke.tools.soak import release_finished_entries
+    removed = []
+    room = dict(current_id='legacy', playing_entry_ids=['tablet'], revision=1,
+                entries=[{'id': name} for name in ('legacy', 'tablet', 'finished', 'running', 'user')])
+    state = {'cases': [{'attempts': [dict(entry_id=name, status='running' if name == 'running' else 'passed')
+                                   for name in ('legacy', 'tablet', 'finished', 'running')]}]}
+    def respond(request):
+        if request.method == 'POST':
+            entry = json.loads(request.content)['entry_id']
+            removed.append(entry)
+            room['entries'] = [e for e in room['entries'] if e['id'] != entry]
+        return httpx.Response(200, json=room)
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        release_finished_entries(client, 'http://test', state)
+    assert removed == ['finished']
 
 
 @pytest.mark.parametrize('provider,login', [('youtube', False), ('youtube', True), ('openai', False)])
@@ -5432,14 +5522,14 @@ def test_started_pipelines_respect_provider_backoff_before_taking_download_lane(
             "import sys;print('HTTP Error 429: Too Many Requests');print('Retry-After: 125');sys.exit(1)"])
     assert 120 < download_backoff(URL)-time.time() <= 125
     second = Pipeline(dict(url=URL), tmp_path/'second')
-    other = Pipeline(dict(url='https://www.bilibili.com/video/BV1bK411W797'), tmp_path/'other')
-    def download(pipeline):
-        with pipeline.stage_slot('download_video'):
+    other = Pipeline(dict(url=URL), tmp_path/'other')
+    def download(pipeline, stage='download_video'):
+        with pipeline.stage_slot(stage):
             return pipeline.output.name
     with ThreadPoolExecutor(max_workers=2) as pool:
         waiting = pool.submit(download, second)
         try:
-            assert pool.submit(download, other).result(timeout=3) == 'other'
+            assert pool.submit(download, other, 'separate_music').result(timeout=3) == 'other'
             assert not waiting.done()
         finally:
             # Expire the recorded limit; the existing child resumes naturally.
@@ -6027,14 +6117,19 @@ def test_prepared_lyrics_preserve_provenance_and_reject_different_inputs(tmp_pat
             assert json.loads((pipeline.output/'anchors.json').read_text()) == []
 
 
-@pytest.mark.parametrize('change', [None, 'url', 'metadata', 'code', 'override', 'force', 'empty', 'corrupt'])
+@pytest.mark.parametrize('change', [None, 'url', 'metadata', 'code', 'override', 'force', 'empty', 'corrupt',
+                                    'duration', 'metadata_model', 'legacy_selection'])
 def test_normal_preparation_reuses_bound_lyrics_and_refetches_stale_cache(tmp_path, monkeypatch, change):
     from karaoke.lyric_lookup import prepared_lyrics_identity, read_prepared_lyrics
     metadata = dict(title='Example', artist='Singer')
     lyrics = dict(title='Example', artist='Singer', language='English', lines=['Original published text'],
                   source_url=URL, provenance=dict(route='lyrics_first', kind='online_lyric_text'))
-    packet = dict(identity=prepared_lyrics_identity(URL, metadata), lyrics=lyrics)
+    packet = dict(identity=prepared_lyrics_identity(URL, metadata), lyrics=lyrics,
+                  selection=dict(duration=10, metadata_model='gpt-5-mini'))
     request = dict(url=URL)
+    if change == 'duration': packet['selection']['duration'] = 30
+    if change == 'metadata_model': packet['selection']['metadata_model'] = 'old-model'
+    if change == 'legacy_selection': packet.pop('selection')
     if change == 'url': packet['identity']['url'] = 'https://www.youtube.com/watch?v=abcdefghijk'
     if change == 'metadata': metadata['title'] = 'Changed recording'
     if change == 'code': packet['identity']['code_sha256']['lyric_lookup.py'] = 'old'
@@ -8154,8 +8249,55 @@ def test_focused_probe_obeys_shared_budget_and_preserves_checkpoints(tmp_path, o
     assert (folder/'checkpoint.wav').read_bytes() == b'reusable'
 
 
+@pytest.mark.parametrize('interactive', [False, True])
+def test_focused_probe_reaps_descendants_after_parent_exit(tmp_path, interactive):
+    import fcntl
+    import os
+    import signal
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path
+    from karaoke.tools.soak import run_probe
+    pause = tmp_path/'preparation.pause'
+    pause.write_text('probe owner')
+    app = create_app(tmp_path, version='test')
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=1) as pool:
+        job = client.post('/v1/jobs', json={'url': URL}).json()['id']
+        folder = tmp_path/job
+        child = ('import os,pathlib,signal,time,fcntl; signal.signal(signal.SIGTERM,signal.SIG_IGN); '
+                 f'lock=open({str(folder/"child.lock")!r},"w"); fcntl.flock(lock,fcntl.LOCK_EX); '
+                 f'pathlib.Path({str(folder/"child")!r}).write_text(str(os.getpid())); time.sleep(60)')
+        parent = ('import os,pathlib,subprocess,sys,time; '
+                  f'p=pathlib.Path({str(folder)!r}); (p/"parent").write_text(str(os.getpid())); '
+                  '(p/"cwd").write_text(str(pathlib.Path.cwd())); '
+                  f'subprocess.Popen([sys.executable,"-c",{child!r}]); '
+                  '\nwhile not (p/"child").exists(): time.sleep(.01)')
+        future = pool.submit(run_probe, client, 'http://testserver', folder,
+            [sys.executable, '-c', parent], resume_preparation='probe owner' if interactive else None)
+        try:
+            assert future.result(timeout=12) == 0
+            assert (folder/'cwd').read_text() == str(Path(__file__).resolve().parents[1])
+            with (folder/'child.lock').open() as lock:
+                # SIGKILL delivery is asynchronous, even after the parent exits.
+                deadline = time.monotonic()+2
+                while True:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(.01)
+        finally:
+            if (folder/'parent').exists():
+                try:
+                    os.killpg(int((folder/'parent').read_text()), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    # macOS may retain an exited orphan owned by launchd briefly.
+                    pass
+
+
 @pytest.mark.parametrize('evict', [False, True])
-@pytest.mark.parametrize('status', ['audio_ready', 'source_ready'])
+@pytest.mark.parametrize('status', ['audio_ready', 'source_ready', 'cancelled'])
 def test_audio_ready_job_releases_queue_protection_and_resumes_its_checkpoints(tmp_path,evict,status):
     from karaoke.stage_cache import StageCache
     hold=tmp_path/'preparation.pause'
@@ -8230,6 +8372,9 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
     data=tmp_path/'jobs';data.mkdir();(data/'preparation.pause').write_text('test')
     app=create_app(data,version='test');store=app.state.store;room=app.state.room
     cases=[dict(url=f'https://www.youtube.com/watch?v={i:011d}',title=str(i),language='English',provider='youtube',attempts=[]) for i in range(3)]
+    cached = cache_fixture(store, '0', restorable=True)
+    store.update(cached['id'], pipeline_version='previous-version')
+    cached_media = (data/cached['id']/'mv.mp4').read_bytes()
     selection=[dict(url=c['url'],language=c['language']) for c in cases]
     manifest=tmp_path/'manifest.json'
     manifest.write_text(json.dumps(dict(cases=cases,provider_backoff={},selection_sha256=hashlib.sha256(json.dumps(selection,sort_keys=True).encode()).hexdigest())))
@@ -8246,6 +8391,7 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
     monkeypatch.setattr(soak.httpx,'Client',lambda **kwargs:client_type(transport=httpx.MockTransport(respond)))
     calls=[]
     def execute(client,base,folder,command):
+        assert folder.name != cached['id']
         calls.append(folder.name)
         if len(calls) in (2,3):
             (folder/'error.json').write_text(json.dumps(dict(code='align_words_failed',message='real failed boundary')))
@@ -8262,6 +8408,9 @@ def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separ
     assert all(c['attempts']==[] for c in saved)
     assert store.read(calls[0])['status']=='audio_ready'
     assert room.read()['entries']==[]
+    assert store.read(cached['id'])['status'] == 'completed'
+    assert store.read(cached['id'])['pipeline_version'] == 'previous-version'
+    assert (data/cached['id']/'mv.mp4').read_bytes() == cached_media
     soak.run_audio(manifest,data,'http://test')
     assert len(calls)==2
     version='after-fix'
@@ -9957,7 +10106,7 @@ def test_audio_only_failure_is_not_evicted_as_disposable_video(tmp_path):
 
 
 @pytest.mark.parametrize('audio_only', [True, False])
-@pytest.mark.parametrize('status', ['failed', 'audio_ready'])
+@pytest.mark.parametrize('status', ['failed', 'audio_ready', 'cancelled'])
 def test_offline_cache_keeps_sources_when_reclaiming_computed_audio(tmp_path, monkeypatch, audio_only, status):
     monkeypatch.setenv('KARAOKE_REQUIRE_CACHED_SOURCE', '1')
     store = Store(tmp_path)
@@ -11863,9 +12012,9 @@ def test_cancelling_video_search_terminates_its_subprocess(monkeypatch):
     ('youtube', {'title':'A song (Unofficial)', 'channel':'Example Music', 'channel_is_verified':True}, False),
     ('bilibili', {'title':'官方 MV', 'author':'官方音乐'}, False),
     ('bilibili', {'title':'官方 MV', 'official_identity':{'type':0, 'desc':'bilibili 知名音乐UP主'}}, False),
-    ('bilibili', {'title':'A song', 'official_identity':{'type':0, 'desc':'歌手、音乐制作人'}}, True),
-    ('bilibili', {'title':'A song 翻唱', 'official_identity':{'type':0, 'desc':'歌手'}}, True),
-    ('bilibili', {'title':'A song', 'official_identity':{'type':1, 'desc':'某唱片公司官方账号'}}, True),
+    ('bilibili', {'title':'A song', 'official_identity':{'type':0, 'desc':'歌手、音乐制作人'}}, False),
+    ('bilibili', {'title':'A song 翻唱', 'official_identity':{'type':0, 'desc':'歌手'}}, False),
+    ('bilibili', {'title':'A song', 'official_identity':{'type':1, 'desc':'某唱片公司官方账号'}}, False),
     ('bilibili', {'title':'A song', 'official_identity':{'type':1, 'desc':'某科技公司官方账号'}}, False),
     ('bilibili', {'title':'官方 MV', 'official_identity':None}, False),
 ])
@@ -11940,6 +12089,31 @@ def test_youtube_search_fetches_one_native_page_and_resumes_its_continuation(mon
     second = youtube_entries('anything', found['continuation'])
     assert [row['title'] for row in second['results']] == ['Last video']
     assert len(calls) == 2 and second['continuation'] is None
+
+
+def test_soak_sampling_consumes_search_page_and_preserves_source_evidence(tmp_path, monkeypatch):
+    from karaoke.tools import soak
+    from karaoke.video_search import search_results
+    data = tmp_path/'data'
+    Store(data)
+    monkeypatch.setattr(soak, 'GROUPS', {'English': (1, ['Example Artist'])})
+    monkeypatch.setattr(soak.time, 'sleep', lambda _: None)
+    rows = search_results('youtube', [
+        dict(url=URL, title='Example Artist — First song', duration=180,
+             channel='Example Artist', channel_is_official_artist=True),
+        dict(url='https://youtu.be/abcdefghijk', title='Example Artist — live now',
+             duration=180, channel_is_official_artist=True, live_status='is_live'),
+        dict(url='https://youtu.be/01234567890', title='Example Artist — fan edit', duration=180),
+    ])
+    monkeypatch.setattr('karaoke.video_search.youtube_entries',
+                        lambda query: dict(results=rows, continuation={'query': 'next-page'}))
+    manifest = tmp_path/'manifest.json'
+    soak.sample(manifest, data, 42)
+    case, = json.loads(manifest.read_text())['cases']
+    assert case['url'] == URL and case['channel'] == 'Example Artist'
+    assert case['evidence'] == 'youtube_official_artist_channel'
+    assert case['attempts'] == []
+    assert Store(data).list() == []
 
 
 @pytest.mark.parametrize(('kind', 'first_page'), [
