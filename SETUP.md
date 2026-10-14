@@ -83,7 +83,7 @@ cp karaoke/dependencies/english-alignment.json karaoke/research/word-onset-2026-
 
 权重和压缩包的校验值分别记录在 [separation.json](karaoke/dependencies/separation.json)、[sofa-mandarin.json](karaoke/dependencies/sofa-mandarin.json)、[sofa-japanese.json](karaoke/dependencies/sofa-japanese.json)。`separation.json` 也保留了早期对照模型的来源；正式流程只需要 F 和 Anvuew。可用 `shasum -a 256 文件路径` 核对下载内容。上游若更新了 `main` 对应的文件，应以这里记录的 SHA-256 判断是否还是同一个模型。
 
-这些模型和上游源码遵循各自的许可。仓库只保存调用代码、配置和来源，不重新分发其权重或第三方源码。
+这些模型和上游源码遵循各自的许可，见 [第三方说明](THIRD_PARTY.md)。尤其注意 Anvuew 的 GPL 声明与可选 MMS_FA 的非商业条款。仓库不分发模型权重或第三方研究 checkout；随源码提供的配置及浏览器运行库另列许可。
 
 MMS_FA 的校验值见 [mms-alignment.json](karaoke/dependencies/mms-alignment.json)。它复核仍然合并的中文字组、中日文歌曲中纯英文句的合并词组，以及疑似提前过久的中日文句首：分别对原音和分离人声对齐，再与 SOFA 的三个上下文结果比较。运行中不自动下载该模型；缺少权重会保留原结果与原因，不能把未能拆开的字词标成通过。没有问题的字词不调用它。
 
@@ -144,4 +144,4 @@ node --test karaoke/test_player.mjs karaoke/test_pitch.mjs karaoke/test_search.m
 
 仓库的 [Tests workflow](.github/workflows/tests.yml) 在 push、PR 和手动触发时分别运行 Python 3.12 与 Node.js 22 测试。Python 任务使用 Ubuntu 24.04、CPU 版 PyTorch／torchaudio 2.11.0、现有开发依赖、上述固定版本的 SOFA 字典及 Noto Serif CJK 字体；先准备日文发音字典，再检查空库启动及全部行为测试。两组 JUnit 测试报告、启动日志和测试子进程日志保留 14 天。CI 不需要配置密钥；真实歌曲的分离质量和逐字起音验收仍单独进行。
 
-`benchmark_*.py`、OCR 对照脚本及历史实验说明属于研究工具；它们可能引用本机实验素材或可选模型，不是空仓库一键可运行的演示。正式入口是 `python -m karaoke.api`。
+正式入口是 `python -m karaoke.api`。`benchmark_neural.py` 和 `experiments/cjk-onsets-v003/run.py` 仍是正式处理链的一部分；其他研究工具可能引用未发布的实验素材或可选模型，不是空仓库一键可运行的演示。入口说明见 [源码导航](karaoke/README.md)。

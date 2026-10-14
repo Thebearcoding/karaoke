@@ -1,7 +1,8 @@
 """Run Sony's released deterministic MIMO BS-RoFormer on the fixed inputs.
 
-Chunking/crossfade follows Sony's src/evaluate.py (MIT, Copyright 2026 Yukara
-Ikemiya). The full license and original source are retained under research/.
+Chunking/crossfade follows SonyResearch/mimo-audio-separation src/evaluate.py
+at 9169bbbf9e6fdca5b22d5735b4244fbad7ab40b5 (MIT, Copyright 2025 Yukara
+Ikemiya). The full license is retained in ../licenses/mimo-MIT.txt.
 """
 
 import argparse

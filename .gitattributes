@@ -1,2 +1,2 @@
-# Keep upstream runtime releases byte-for-byte, including their whitespace.
+# Keep vendored runtime whitespace intact; local changes are in karaoke/dependencies/.
 karaoke/web/vendor/* linguist-vendored -whitespace
