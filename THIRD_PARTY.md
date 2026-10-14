@@ -1,6 +1,6 @@
 # 第三方来源与许可
 
-项目自身许可证尚未选定。以下是第三方组件的来源和已核对的许可，不能把它们统一解释为本项目的授权。模型、媒体和歌词各有独立的使用与分发条件。
+项目自行编写的代码与文档采用 [MIT License](LICENSE)。下列第三方代码、配置、数据与另行安装的组件保留其原有许可，不因出现在本项目中而改为 MIT。模型、媒体和歌词各有独立的使用与分发条件。
 
 ## 随仓库分发的代码和配置
 
@@ -11,17 +11,49 @@
 | `karaoke/models/pretrained/vocals_mel_band_roformer*.yaml` | [KimberleyJSN / Mel-Band RoFormer](https://huggingface.co/KimberleyJSN/melbandroformer) | 上游模型卡声明 MIT。保留上游配置及本项目的推理配置；权重哈希见 [separation.json](karaoke/dependencies/separation.json)。 |
 | `karaoke/models/pretrained/karaoke_bs_roformer_anvuew.yaml` | [Anvuew 的固定版本](https://huggingface.co/anvuew/karaoke_bs_roformer/tree/0d4423d42e12cf2ba39ae09171028507b8a2a7be) | 该版本模型卡声明 `gpl-3.0`，保留 [GPL v3 全文](licenses/GPL-3.0.txt)。此声明不能被项目自身的许可证覆盖。 |
 
-## 另行安装的源码与模型
+## 另行安装的 Python 组件与数据
+
+下表补充需要特别区分许可范围的直接依赖；它们由 `requirements*.txt` 安装，包本身不随源码仓库分发。声明依赖不等于已经分发该包，但直接导入及组合发布时仍须遵守适用条款。
+
+| 组件 | 固定版本、用途与许可 |
+| --- | --- |
+| [cmudict](https://pypi.org/project/cmudict/1.1.3/) | **1.1.3，GPL-3.0-or-later**；`gaussian_align.py` 中的研究工具直接导入。包内 CMU 发音字典有单独的 BSD 类许可，不能用字典的数据许可替代 Python 包的许可。 |
+| [phonemizer](https://github.com/bootphon/phonemizer/tree/v3.3.0) | **3.3.0，GPL-3.0-or-later**；英文歌声音素对齐使用其 eSpeak 接口。[上游许可](https://github.com/bootphon/phonemizer/blob/v3.3.0/LICENSE)。 |
+| [pykakasi](https://pypi.org/project/pykakasi/2.3.0/) | **2.3.0，GPL-3.0-or-later**；日文发音处理直接导入。 |
+| [espeakng-loader](https://pypi.org/project/espeakng-loader/0.2.4/) / [eSpeak NG](https://github.com/espeak-ng/espeak-ng) | **loader 0.2.4**；loader 当前上游声明 MIT，所加载的 eSpeak NG 为 GPLv3 系列许可。该版本本机 wheel 含原生库及数据，但缺少可核验的随包许可/源码版本说明；打包前须补齐实际二进制来源、对应源码与通知，不能将整个 wheel 标为 MIT。 |
+| [uroman](https://pypi.org/project/uroman/1.3.1.1/) | **1.3.1.1，MIT 类许可附额外项目署名要求**；用于多语言声学复核的转写。该版本包分类写 Apache，但实际附带许可如下，不依据分类替换条款。 |
+| [PyCantonese](https://github.com/jacksonllee/pycantonese) | **5.0.0，Python 代码 MIT**；粤拼函数使用 HKCanCor 与 rime-cantonese 数据，二者为 CC-BY-4.0。包内另有 CantoMap（GPLv3）、Common Voice（MPL-2.0）、CTCPC（CC0）数据；制作整包时须保留各数据子目录的许可，不能只保留代码的 MIT。 |
+| [pyopenjtalk](https://github.com/r9y9/pyopenjtalk) | **0.4.1，Python 封装 MIT**；本项目使用文本前端。包内 Mei voice 另按 CC-BY-3.0，不能将声音资源重新许可为 MIT。 |
+
+GPL 允许商业使用；它要求按适用条件提供受覆盖作品的源码、通知和许可。分发直接导入 GPL 库的程序组合时，应按 GPL 兼容方式处理，不能只附本项目的 MIT 就宣称覆盖所有组件。独立作品的集合也不会仅因放在同一目录而全部变为 GPL。参见 [GNU FAQ](https://www.gnu.org/licenses/gpl-faq.en.html#IfInterpreterIsGPL) 和 [GPL v3 全文](licenses/GPL-3.0.txt)。
+
+### uroman 署名
+
+This project uses the universal romanizer software 'uroman' written by Ulf Hermjakob, USC Information Sciences Institute (2015-2020).
+
+Ulf Hermjakob, Jonathan May, and Kevin Knight. 2018. *Out-of-the-box universal romanization tool uroman*. Proceedings of the 56th Annual Meeting of the Association for Computational Linguistics, Demo Track.
+
+固定版本随包的[完整许可](licenses/uroman-LICENSE.txt)保留其原始版权年份与附加署名条款；本项目的 MIT 不移除这些要求。
+
+### 粤拼数据署名
+
+- **HKCanCor**：K. K. Luke and May L. Y. Wong (2015). *The Hong Kong Cantonese Corpus: Design and Uses*. Journal of Chinese Linguistics Monograph Series, 25, 312–333。[数据来源](https://github.com/fcbond/hkcancor)，经 PyCantonese 使用，许可为 [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)。PyCantonese 调整了上游数据格式，本项目未再修改随包数据。
+- **rime-cantonese**：rime-cantonese contributors 的[粤语拼音词库](https://github.com/rime/rime-cantonese/tree/33f7d81bc7ef5eb2f69538a2d3d5fc109529e2dd)与 [CanCLID 上游数据](https://github.com/CanCLID/rime-cantonese-upstream/tree/bea0d7a366627506eb214d82b80780b5db4b05a1)，经 PyCantonese 转为运行时词典，许可为 [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)。项目查询词典生成读音注释，不修改随包词典；文档示例说明见 [截图素材](docs/images/README.md)。
+
+## 另行安装的对齐源码与模型
 
 - **audio-separator 0.44.5**：调用入口的[上游许可为 MIT](https://github.com/nomadkaraoke/python-audio-separator/blob/v0.44.5/LICENSE)；它使用的每个模型仍需单独核对。
 - **SOFA**：固定源码版本的[许可为 MIT](https://github.com/qiuqiao/SOFA/blob/9549c6a86d16019c817eefe4bb8183405da524cc/LICENSE)。这不自动覆盖来自其他作者的日文／英文模型、字典或训练数据。
 - **LyricsAlignment-Multilingual**：固定源码版本的[许可为 MIT](https://github.com/jhuang448/LyricsAlignment-Multilingual/blob/ca1a3923d6c8bf7d20eefa1080f3f104a6173d38/LICENSE)。来源与校验值见 [english-alignment.json](karaoke/dependencies/english-alignment.json)。
 - **MMS_FA**：可选的声学复核模型；[PyTorch 官方文档](https://docs.pytorch.org/audio/stable/generated/torchaudio.pipelines.MMS_FA.html)明确声明 **CC-BY-NC 4.0（非商业）**。它不是通用的商业使用授权；如需商业部署，应另行取得适用授权或替换该模型。
-- 其他 SOFA 权重、SenseVoice、Whisper、Qwen 等按 [SETUP](SETUP.md) 从原发布者取得；[依赖清单](karaoke/dependencies)记录版本和哈希。哈希只核对文件身份，不证明使用或再分发权限。
+- **SOFA Japanese `akm_ja_v001`**：[发布页](https://github.com/ariikamusic/SOFA_Models/releases/tag/akm_ja_v001)及所附 readme 未提供明确的权重许可。使用/分发权限需向该权重发布者确认，不能由 SOFA 主项目的 MIT 推定；其他作者的 SOFA 权重、字典和 G2P 资源也分别核实。
+- **SenseVoice Small**：官方源码为 MIT，官方权重适用独立的模型协议。[官方说明](https://github.com/QwenAudio/SenseVoice#license)澄清遵守协议时允许商业使用，仍需署名并保留模型名称。本项目使用的是 sherpa-onnx 发布的 int8 转换包，应保留并核对该包的实际许可；不能用 sherpa-onnx 的 Apache 许可替代模型条款。
+- **Qwen3 ForcedAligner 0.6B**：[固定版本模型卡](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B/blob/c7cbfc2048c462b0d63a45797104fc9db3ad62b7/README.md)声明 Apache-2.0；相关文件身份见依赖清单。
+- Whisper 等其余资源按 [SETUP](SETUP.md) 从原发布者取得；[依赖清单](karaoke/dependencies)记录版本和哈希。哈希只核对文件身份，不证明使用或再分发权限。
 - 早期对照模型的来源可能没有完整许可声明，因此不随仓库提供其权重或配置，也不作为默认安装依赖。
 
 Python 包由各 `requirements*.txt` 固定版本，Node.js、FFmpeg、LAME 和系统字体由部署者安装。这里没有对全部间接依赖或组合分发作兼容性结论；制作包含依赖／模型的容器、安装包或公开演示服务前，应核对所含组件的实际许可。
 
 ## 音乐和在线来源
 
-本仓库不授予任何歌曲、MV、封面或歌词的版权许可。请使用有权处理和展示的素材，并遵守实际来源的访问条件。不要将私人 cookies、API key、下载媒体、歌词库或第三方研究 checkout 加入源码发布包。
+软件许可不授予第三方歌曲、MV、封面或歌词的版权许可。README 截图包含第三方作品的画面和歌词节选，未取得另行书面授权，不属于项目的 MIT 授权内容；展示范围及出处见 [截图素材说明](docs/images/README.md)。说明来源不等于获得授权，也不保证适用合理使用。请使用有权处理和展示的素材，并遵守实际来源的访问条件；能从网页或接口取得内容不代表获得再分发权，[YouTube 条款](https://www.youtube.com/static?template=terms)也单独约束访问和下载。不要将私人 cookies、API key、下载媒体、歌词库或第三方研究 checkout 加入源码发布包。

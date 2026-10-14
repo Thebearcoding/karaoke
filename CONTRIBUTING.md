@@ -20,7 +20,7 @@ node --test karaoke/test_player.mjs karaoke/test_pitch.mjs karaoke/test_search.m
 
 ## 数据与凭据
 
-歌曲、歌词库、封面、模型权重、生成文件、数据库、cookies、API key、个人部署信息和运行报告留在仓库外或 Git 已忽略的数据目录。测试优先使用合成音频与自写短文本；确需第三方素材时先核对分发授权。不要用 `git add -f` 绕过排除规则。
+歌曲、歌词库、封面、模型权重、生成文件、数据库、cookies、API key、个人部署信息和运行报告留在仓库外或 Git 已忽略的数据目录。文档截图优先使用授权明确的素材，在 [素材说明](docs/images/README.md)记录来源、展示范围和授权状态，不将第三方内容当作项目的 MIT 内容。测试优先使用合成音频与自写短文本；确需第三方素材时先核对分发授权。不要用 `git add -f` 绕过排除规则。
 
 提交前检查 `git diff --cached --stat` 和 `git diff --cached`。发布前对整个 Git 历史做密钥扫描，例如安装 Gitleaks 后运行：
 
@@ -34,4 +34,4 @@ gitleaks git . --log-opts=--all --redact=100
 
 服务默认只监听本机，没有内置账号隔离；允许访问的用户可以操作共享歌单。远程访问应由部署者保护整个站点、API、媒体及 SSE，不能只保护首页。
 
-项目自身许可证尚未选定；发布前需由维护者明确授权范围。新增依赖、复制的代码和模型配置须保留出处及许可，见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+项目自行编写的代码与文档采用 [MIT License](LICENSE)。提交贡献前请确认有权按项目许可提供该内容；第三方文件保留其原有许可。新增依赖、复制的代码和模型配置须保留出处及许可，见 [THIRD_PARTY.md](THIRD_PARTY.md)，不要将第三方 GPL 组件或受限模型重新标为 MIT。
