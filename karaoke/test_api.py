@@ -21,7 +21,7 @@ from karaoke.job_schema import JobRequest, video_url
 from karaoke.song_sources import SongText, find_verified_lyrics, prepare_song_text, video_song_info
 from karaoke.align_lyric_phonemes import protect_line_order
 from karaoke.cache import CacheFull, GIB, can_restore_video
-from karaoke.pipeline import Pipeline, StageFailure, create_poster, file_hash, processing_error
+from karaoke.pipeline import Pipeline, StageFailure, create_poster, file_hash, processing_error, write_json
 from karaoke.stage_progress import PREFIX, parse_progress, progress_items
 from karaoke.transcribe_lyrics import repetition_loop, transcribe
 
@@ -98,7 +98,7 @@ def test_corrupt_provider_backoff_does_not_kill_dispatch_or_bypass_hold(tmp_path
             time.sleep(.03)
         assert health['status'] == 'degraded' and blocked in health['dispatch_blocked_jobs']
         assert not app.state.worker.dispatcher.done() and state.read_text() == bad_state
-        state.write_text(json.dumps(time.time()-.1))
+        write_json(state, time.time()-.1)
         assert finished(client, blocked)['status'] == 'completed'
         assert finished(client, other)['status'] == 'completed'
         assert client.get('/health').json()['status'] == 'ok'
@@ -5532,8 +5532,8 @@ def test_started_pipelines_respect_provider_backoff_before_taking_download_lane(
             assert pool.submit(download, other, 'separate_music').result(timeout=3) == 'other'
             assert not waiting.done()
         finally:
-            # Expire the recorded limit; the existing child resumes naturally.
-            (slots/'youtube.retry.json').write_text('0')
+            # Publish expiry atomically, as production does, while the child reads it.
+            write_json(slots/'youtube.retry.json', 0)
         assert waiting.result(timeout=3) == 'second'
 
 
