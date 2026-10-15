@@ -18,11 +18,11 @@ python3.12 -m venv .venv
 
 ### 安装前检查内存
 
-目前尚无经过端到端实测的最低内存要求；已有 Mac / RTX 5090 计时来自 128 GiB/GB 内存机器。M1 8GB 的完整处理未验证，不能保证模型加载、分离和对齐能顺利完成。内存不足时，可以在另一台主机运行服务，用这台 Mac 的浏览器点歌和播放。
+单首处理推荐 Apple Silicon Mac 配备 24 GB 统一内存，NVIDIA 主机配备 32 GB 系统内存和 16 GB 显存。浏览器端不需要加载模型，可以连接另一台处理主机。
 
 macOS 用 `sysctl -n hw.memsize` 查看物理内存（字节），用「活动监视器 → 内存」观察内存压力和交换空间；Linux 可用 `free -h`。同时检查磁盘空间：默认 10 GiB 是歌曲磁盘缓存预算，不是内存上限，模型、依赖和运行时临时空间还需要另留余量。
 
-内存紧张时保持单首准备、单个计算工位和最小批次：
+按上述配置运行时，保持单首准备、单个计算工位和最小批次：
 
 ```sh
 export KARAOKE_PREPARATION_CONCURRENCY=1
@@ -31,7 +31,7 @@ export KARAOKE_SEPARATION_BATCH_SIZE=1
 export KARAOKE_WHISPER_BATCH_SIZE=1  # 仅本地 Whisper 模式使用
 ```
 
-前三项本来就默认 1；本地 Whisper 批次默认 8。这些设置只减少并发峰值，不保证 8GB 足够；同一首歌的不同步骤仍可能交叠。出现系统内存压力、持续大量交换或内存不足错误时，保留失败日志和已完成检查点，先解决资源不足，不反复重试同一配置，也不要禁用系统或框架的内存保护。
+前三项默认 1；本地 Whisper 批次默认 8，内存预算有限时改为 1。同时准备多首歌或调大批次需要额外内存和显存。
 
 需要 `ffmpeg`、`ffprobe` 和 Node.js 22+ 在 PATH 中；严格音频验收及独立 MP3 导出还需要 `lame`。例如 macOS 使用 `brew install ffmpeg lame node`，Debian/Ubuntu 使用 `sudo apt-get install ffmpeg lame libsndfile1` 并安装 Node.js 22+。普通点歌只生成底轨（伴奏＋伴唱）与主唱两轨 FLAC，不调用 LAME；FFmpeg 负责母版解码、公共增益转换与视频编码。YouTube 下载启用 Node.js 执行播放器脚本；`yt-dlp[default]` 同时安装与下载器版本配套的 EJS 组件，不在下载时拉取额外脚本。Node.js 也用于播放器和音频变调测试，前端本身不需要构建。实时升降调的 Signalsmith Stretch / WASM 随源码提供，不需要额外安装、模型下载或运行时 CDN；版本和许可见 `karaoke/dependencies/pitch-shift.json`。
 
