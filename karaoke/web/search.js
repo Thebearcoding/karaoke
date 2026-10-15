@@ -137,7 +137,10 @@ export function createVideoSearch(onChange, fetcher = fetch, getLocal = () => []
     if (request === active && !request.signal.aborted) {
       for (const song of request.providers[request.mode].results) {
         const key = queueKey(song), lyrics = results[key?.slice(8)];
-        if (keys.includes(key)) song.lyrics = ['available','unknown'].includes(lyrics?.status) && Number.isFinite(lyrics.expires_at) ? lyrics :
+        // A phone's wall clock need not agree with the server. Use a bounded
+        // relative TTL and a short floor so expiry during transit cannot loop.
+        if (keys.includes(key)) song.lyrics = ['available','unknown'].includes(lyrics?.status) && Number.isFinite(lyrics.cache_seconds) ?
+          {...lyrics, expires_at:Date.now()/1000+Math.max(30,Math.min(3600,lyrics.cache_seconds))} :
           {status:'unknown', reason:'lookup_failed', expires_at:Date.now()/1000+60};
       }
       onChange(request.providers, request.mode);

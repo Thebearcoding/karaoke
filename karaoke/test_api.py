@@ -12681,6 +12681,7 @@ def test_lyric_api_validates_and_batches_without_creating_jobs(tmp_path, monkeyp
         response = client.get('/v1/lyrics/availability', params={'ids':'abcdefghijk,00000000000,abcdefghijk'})
         assert response.status_code == 200
         assert set(response.json()['results']) == {'abcdefghijk', '00000000000'}
+        assert all(0 < row['cache_seconds'] <= 3600 for row in response.json()['results'].values())
         assert sorted(calls) == ['00000000000', 'abcdefghijk']
         for ids in ('https://example.com/', '../abcdefgh', 'a'*12, ',abcdefghijk', ','.join(f'{i:011d}' for i in range(13))):
             assert client.get('/v1/lyrics/availability', params={'ids':ids}).status_code == 422

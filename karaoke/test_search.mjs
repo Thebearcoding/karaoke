@@ -675,7 +675,8 @@ test('visible lyric checks are batched, cached and do not fetch the whole catalo
   assert.equal(requests.length,2);
   const ids = new URL(requests[1].url,'http://test').searchParams.get('ids').split(',');
   assert.deepEqual(ids,['00000000000','00000000001','00000000002']);
-  const packet = {status:'available',expires_at:Date.now()/1000+3600};
+  // A server clock far behind the phone must not cause a refetch loop.
+  const packet = {status:'available',expires_at:1,cache_seconds:3600};
   requests[1].finish({results:{[ids[0]]:packet,[ids[1]]:{...packet,status:'unknown'}}}); await flush();
   const checked = states.at(-1).youtube.results;
   assert.equal(checked[0].lyrics.status,'available');
@@ -702,7 +703,7 @@ test('a cancelled lyric batch cannot repaint a new query, including the same rec
   requests[1].finish({results:{abcdefghijk:{status:'available',expires_at:Date.now()/1000+3600}}}); await flush();
   assert.equal(states.at(-1).youtube.results[0].lyrics,undefined);
   assert.equal(requests.length,4);
-  requests[3].finish({results:{abcdefghijk:{status:'unknown',expires_at:Date.now()/1000+60}}}); await flush();
+  requests[3].finish({results:{abcdefghijk:{status:'unknown',expires_at:1,cache_seconds:60}}}); await flush();
   assert.equal(states.at(-1).youtube.results[0].lyrics.status,'unknown');
 });
 

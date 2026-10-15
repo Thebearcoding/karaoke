@@ -780,7 +780,8 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
         if len(videos) > 8 or any(not re.fullmatch(r'[A-Za-z0-9_-]{11}', video) for video in videos):
             raise HTTPException(422, '一次最多查询 8 个有效视频编号')
         results = await asyncio.gather(*(lyric_availability.check(video) for video in videos))
-        return dict(results=dict(zip(videos, results)))
+        return dict(results={video: dict(result, cache_seconds=max(0, result['expires_at']-time.time()))
+                             for video, result in zip(videos, results)})
 
     @app.get('/v1/storage')
     async def storage():
