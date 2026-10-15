@@ -12578,3 +12578,134 @@ def test_repeated_stage_timings_include_failed_and_successful_work(tmp_path, mon
     assert first == .25
     assert pipeline.timings['render'] == 1.
     assert sum(a['finished']-a['started'] for a in attempts) == 1.
+
+
+@pytest.mark.parametrize('body,matching,expected', [
+    ('A song\nArtist\nWe can sing beneath the trees\nListen to the falling rain\nMorning light is shining through\nWe will find our way again', True, 'available'),
+    ('A song\nArtist\nLyrics by: A writer', True, 'unknown'),
+    ('Just a tiny excerpt', True, 'unknown'),
+    ('A song\nWe can sing beneath the trees\nListen to the falling rain', False, 'unknown'),
+    (None, True, 'unknown'),
+])
+def test_lyric_availability_checks_actual_source_bound_text(tmp_path, monkeypatch, body, matching, expected):
+    from karaoke.lyric_availability import lookup
+    calls = []
+    class Music:
+        def __init__(self, **kwargs): pass
+        def get_watch_playlist(self, videoId, limit):
+            calls.append(('watch', videoId))
+            return dict(tracks=[dict(videoId=videoId if matching else '00000000000', title='A song',
+                                    artists=[dict(name='Artist')], length='4:00')], lyrics='published' if body is not None else None)
+        def get_lyrics(self, browse):
+            calls.append(('lyrics', browse))
+            return dict(lyrics=body, source='Musixmatch')
+    monkeypatch.setattr('ytmusicapi.YTMusic', Music)
+    result = lookup('abcdefghijk', tmp_path)
+    assert result['status'] == expected
+    assert calls == [('watch', 'abcdefghijk')] + ([('lyrics', 'published')] if matching and body is not None else [])
+    assert 'lines' not in result and 'lyrics' not in result
+    if expected == 'available':
+        assert result['source'].endswith('abcdefghijk')
+        assert result['text_sha256'] == hashlib.sha256(body.encode()).hexdigest()
+
+
+def test_lyric_checks_share_work_for_ten_thousand_readers_and_bound_distinct_load(monkeypatch):
+    import asyncio
+    from karaoke import lyric_availability as module
+    async def scenario():
+        service = module.LyricAvailability()
+        release, started = asyncio.Event(), asyncio.Event()
+        calls, active, peak = [], 0, 0
+        async def fetch(video):
+            nonlocal active, peak
+            active += 1; peak = max(peak, active); calls.append(video); started.set()
+            try:
+                await release.wait()
+                return dict(status='available', source=video)
+            finally:
+                active -= 1
+        monkeypatch.setattr(module, 'fetch_availability', fetch)
+        ids = [f'{i:011d}' for i in range(8)]
+        readers = [asyncio.create_task(service.check(ids[i % 8])) for i in range(10000)]
+        await started.wait()
+        await asyncio.sleep(0)
+        assert len(service.pending) == 8 and active == 2
+        overflow = await asyncio.gather(*(service.check(f'{i:011d}') for i in range(8,108)))
+        assert all(row['status'] == 'unknown' and row['reason'] == 'busy' for row in overflow)
+        readers[0].cancel()  # Other readers still own the shared lookup.
+        release.set()
+        result = await asyncio.gather(*readers, return_exceptions=True)
+        assert all(row['status'] == 'available' for row in result[1:])
+        assert peak == 2 and sorted(calls) == ids
+        assert not service.pending
+        await asyncio.gather(*(service.check(ids[i % 8]) for i in range(10000)))
+        assert len(calls) == 8
+        service.cache[ids[0]]['expires_at'] = 0
+        await service.check(ids[0])
+        assert calls.count(ids[0]) == 2
+        for i in range(600):
+            await service.check(f'{i:011d}')
+        assert len(service.cache) == 512
+        await service.close()
+    asyncio.run(scenario())
+
+
+def test_lyric_provider_failure_is_unknown_and_backoff_is_shared(monkeypatch):
+    import asyncio
+    from karaoke import lyric_availability as module
+    async def scenario():
+        service = module.LyricAvailability()
+        calls = []
+        async def fetch(video):
+            calls.append(video)
+            return dict(status='unknown', reason='lookup_failed', http_status=429, retry_at=time.time()+300)
+        monkeypatch.setattr(module, 'fetch_availability', fetch)
+        first = await service.check('abcdefghijk')
+        assert first['status'] == 'unknown'
+        assert (await service.check('abcdefghijk')) == first
+        assert (await service.check('00000000000'))['reason'] == 'busy'
+        assert calls == ['abcdefghijk']
+        await service.close()
+    asyncio.run(scenario())
+
+
+def test_lyric_api_validates_and_batches_without_creating_jobs(tmp_path, monkeypatch):
+    from karaoke import lyric_availability as module
+    calls = []
+    async def fetch(video):
+        calls.append(video)
+        return dict(status='available', source='https://music.youtube.com/watch?v='+video)
+    monkeypatch.setattr(module, 'fetch_availability', fetch)
+    app = create_app(tmp_path, version='test')
+    with TestClient(app) as client:
+        response = client.get('/v1/lyrics/availability', params={'ids':'abcdefghijk,00000000000,abcdefghijk'})
+        assert response.status_code == 200
+        assert set(response.json()['results']) == {'abcdefghijk', '00000000000'}
+        assert sorted(calls) == ['00000000000', 'abcdefghijk']
+        for ids in ('https://example.com/', '../abcdefgh', 'a'*12, ',abcdefghijk', ','.join(f'{i:011d}' for i in range(13))):
+            assert client.get('/v1/lyrics/availability', params={'ids':ids}).status_code == 422
+        assert client.get('/v1/room').json()['entries'] == []
+        assert app.state.store.list() == []
+
+
+def test_cancelling_lyric_check_reaps_its_process(monkeypatch):
+    import asyncio
+    from karaoke import lyric_availability as module
+    async def scenario():
+        original = asyncio.create_subprocess_exec
+        started, children, folders = asyncio.Event(), [], []
+        async def spawn(*args, **kwargs):
+            folders.append(module.Path(args[-1]))
+            process = await original(sys.executable, '-c', 'import time; time.sleep(60)', **kwargs)
+            children.append(process); started.set()
+            return process
+        monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
+        service = module.LyricAvailability()
+        reader = asyncio.create_task(service.check('abcdefghijk'))
+        await started.wait()
+        await service.close()
+        with pytest.raises(asyncio.CancelledError):
+            await reader
+        assert children[0].returncode is not None and not service.pending
+        assert not folders[0].exists()
+    asyncio.run(scenario())

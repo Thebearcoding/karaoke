@@ -2,6 +2,8 @@
 export function createVideoSearch(onChange, fetcher = fetch, getLocal = () => []) {
   let controller, generation = 0, active;
   const albums = new Map();
+  const lyricQueue = new Map();
+  let lyricRequest;
   async function readPage(url, signal) {
     const response = await fetcher(url, {signal});
     const data = await response.json();
@@ -25,6 +27,7 @@ export function createVideoSearch(onChange, fetcher = fetch, getLocal = () => []
     generation++;
     controller?.abort();
     active = null;
+    lyricQueue.clear();
   }
   function activate(query, mode, providers, autoSelectArtist = false) {
     cancel();
@@ -106,6 +109,41 @@ export function createVideoSearch(onChange, fetcher = fetch, getLocal = () => []
     active.providers.local = {loading:false, results, error:''};
     onChange(active.providers, active.mode);
   }
+  function checkLyrics(url, visible = true) {
+    const song = active?.providers[active.mode]?.results.find(song => song.url === url);
+    const key = song && queueKey(song);
+    if (!visible) { lyricQueue.delete(key); return; }
+    if (!key?.startsWith('youtube:') || (song.kind && song.kind !== 'song') ||
+        song.lyrics?.expires_at > Date.now()/1000 ||
+        (lyricRequest?.request === active && lyricRequest.keys.includes(key))) return;
+    // The view queues only visible rows. Never walk an entire artist catalogue.
+    if (lyricQueue.size < 20) lyricQueue.set(key, active);
+    queueMicrotask(drainLyrics);
+  }
+  async function drainLyrics() {
+    if (lyricRequest || !active || !lyricQueue.size) return;
+    const request = active;
+    const keys = [...lyricQueue].filter(([,owner]) => owner === request).slice(0,8).map(([key]) => key);
+    if (!keys.length) return;
+    keys.forEach(key => lyricQueue.delete(key));
+    lyricRequest = {request, keys};
+    let results = {};
+    try {
+      const ids = keys.map(key => key.slice(8)).join(',');
+      const response = await fetcher(`/v1/lyrics/availability?ids=${encodeURIComponent(ids)}`, {signal:request.signal});
+      if (response.ok) results = (await response.json()).results || {};
+    } catch { /* Unknown is not a claim that a song has no lyrics. */ }
+    finally { lyricRequest = null; }
+    if (request === active && !request.signal.aborted) {
+      for (const song of request.providers[request.mode].results) {
+        const key = queueKey(song), lyrics = results[key?.slice(8)];
+        if (keys.includes(key)) song.lyrics = ['available','unknown'].includes(lyrics?.status) && Number.isFinite(lyrics.expires_at) ? lyrics :
+          {status:'unknown', reason:'lookup_failed', expires_at:Date.now()/1000+60};
+      }
+      onChange(request.providers, request.mode);
+    }
+    drainLyrics();
+  }
   function snapshot() {
     if (!active) return null;
     return structuredClone({query:active.query, mode:active.mode, providers:active.providers, autoSelectArtist:active.autoSelectArtist,
@@ -126,7 +164,15 @@ export function createVideoSearch(onChange, fetcher = fetch, getLocal = () => []
     if (restart) loadPage(request, false);
     return true;
   }
-  return {search, selectArtist, showArtists, loadMore, cancel, refreshLocal, snapshot, restore};
+  return {search, selectArtist, showArtists, loadMore, cancel, refreshLocal, snapshot, restore, checkLyrics};
+}
+
+export function lyricLabel(song) {
+  if (song.status === 'completed' || (song.lyrics?.status === 'available' && song.lyrics.expires_at > Date.now()/1000)) {
+    return {text:'有歌词', available:true, title:'已找到对应录音的歌词正文；新歌仍需完成音轨分离、字幕对齐和视频生成。'};
+  }
+  return song.lyrics ? {text:'歌词未确认', available:false, title:'暂未确认这版录音的歌词，可能尚未收录或来源暂不可用。可以换一个版本；点歌后仍会尝试其他歌词来源。'} :
+    {text:'歌词待查', available:false, title:'正在检查这版录音是否有已发表的歌词。'};
 }
 
 // One browser-history entry per navigation; refresh restores the same search scene.
@@ -260,6 +306,7 @@ export function playCount(value) {
 }
 
 export function orderResults(songs, order) {
+  if (order === 'lyrics') return [...songs].sort((a,b) => Number(lyricLabel(b).available)-Number(lyricLabel(a).available));
   if (order === 'popular') return [...songs].sort((a,b) => (playCount(b.views) ?? -1)-(playCount(a.views) ?? -1));
   if (order === 'ready') return [...songs].sort((a,b) => Number(b.status === 'completed')-Number(a.status === 'completed'));
   if (order === 'title') return [...songs].sort((a,b) => a.title.localeCompare(b.title, 'zh-CN'));

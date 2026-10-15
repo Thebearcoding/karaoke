@@ -33,6 +33,7 @@ from .cache import CacheFull, GIB, SongCache, can_restore_video
 from .job_schema import JobRequest, download_backoff, playback_stems, retry_after_seconds, retry_fields as source_retry_fields
 from .room import AddSong, Room, RoomCommand, Updates, artifact_url
 from .video_search import SearchCursorExpired, VideoSearch
+from .lyric_availability import LyricAvailability
 
 
 ROOT = Path(__file__).resolve().parent
@@ -684,6 +685,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
     store.on_change = updates.publish
     room = Room(store, worker, version, updates)
     video_search = VideoSearch()
+    lyric_availability = LyricAvailability()
     playback_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix='playback')
     playback_windows = AudioWindowCache()
     playback_tasks = set()
@@ -702,6 +704,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
             finally:
                 room.pause_on_shutdown()
                 await video_search.close()
+                await lyric_availability.close()
                 await worker.stop()
                 playback_pool.shutdown(wait=False, cancel_futures=True)
                 await asyncio.gather(*playback_tasks, return_exceptions=True)
@@ -770,6 +773,14 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
         if not re.fullmatch(r'MPRE[\w-]+', browse_id):
             raise HTTPException(422, '无效的专辑链接')
         return await search_metadata('album', browse_id, None)
+
+    @app.get('/v1/lyrics/availability')
+    async def check_lyrics(ids: str = Query(min_length=11, max_length=95)):
+        videos = list(dict.fromkeys(ids.split(',')))
+        if len(videos) > 8 or any(not re.fullmatch(r'[A-Za-z0-9_-]{11}', video) for video in videos):
+            raise HTTPException(422, '一次最多查询 8 个有效视频编号')
+        results = await asyncio.gather(*(lyric_availability.check(video) for video in videos))
+        return dict(results=dict(zip(videos, results)))
 
     @app.get('/v1/storage')
     async def storage():

@@ -459,3 +459,11 @@ LINE、网易云和 LRCLIB 的歌词候选不再因歌手名的别名、译名�
 普通播放的音频 artifact 为 `accompaniment`（背景音乐＋伴唱）与 `lead_vocals`，音频存储记录 `audio_storage.layout=accompaniment_and_lead`。新 MV 记录 `video_audio=silent_aac`，含静音 AAC 兼容轨；旧的 `video_only=true` 表示历史纯视频容器。`/playback` 返回 `stems`，客户端按列表加载；旧三轨成品仍可播放。所有声部使用同一增益；预览也读取独立音轨。
 
 停止服务后可运行 `python -m karaoke.tools.compact_storage --data 数据目录`，通过同一 `worker.lock` 防止与服务并发迁移。先验证原产物，生成两轨并逐块验证量化误差，核对去音轨前后的全长视频像素哈希，再发布清单与清理中间文件。原处理版本、任务 ID 和歌单不变。相同内容的最终 FLAC/MP4 通过校验后共享硬链接，缓存统计按唯一 inode 计数，单个任务的回收不删除其他引用。
+
+### 歌词可用性预检
+
+`GET /v1/lyrics/availability?ids=视频ID,视频ID` 接受最多 8 个 YouTube 视频 ID，返回 `results` 对象，以 ID 为键。只读取对应录音的 YouTube Music 歌词，不下载媒体、不调用模型、不创建任务，也不返回歌词正文。
+
+每项含 `status=available|unknown`、`checked_at`（真正查询时）和 `expires_at`（Unix 秒）。`available` 带来源、歌词正文哈希；`unknown` 的 `reason` 为 `not_found`、`lookup_failed` 或 `busy`。`not_found` 只表示这次无法确认，不能推断其他来源没有歌词。该结果不取代准备阶段的正文、录音版本与声学检查。
+
+跨用户合并同一 ID 的在途请求，最多 2 个查询同时执行、8 个 ID 在途，每次包含排队最多 25 秒。独立于搜索元数据的并发池，关闭服务会终止查询子进程。缓存最多 512 个 ID：成功 1 小时、未找到 5 分钟、错误 1 分钟；401/403/429 共享来源退避，遵守更晚的 `retry_at`。容量不足直接返回短期 `unknown/busy`，不建立无界等待队列。前端仅批量检查可见歌曲，不轮询刷新状态。

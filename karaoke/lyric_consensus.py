@@ -148,6 +148,7 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
                         report['url'] = 'https://music.163.com/#/song?id='+report['url'].rsplit('/',1)[-1]
                 else:
                     from ytmusicapi import YTMusic
+                    from ytmusicapi.parsers._utils import parse_duration
                     video = metadata.get('id', '')
                     lyric_video, release = video, None
                     with requests.Session() as session:
@@ -160,6 +161,7 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
                             raise ValueError('Music lyrics refer to another recording')
                         track = listing['tracks'][0]
                         recording_identity = dict(title=track.get('title') or '', video_id=video,
+                            duration_seconds=parse_duration(track.get('length')),
                             artist=' · '.join(a['name'] for a in track.get('artists', []) if a.get('name')),
                             artists=[dict(name=a.get('name'), id=a.get('id')) for a in track.get('artists') or []])
                         result = (lookup.cached_lyric_request(provider,

@@ -1,7 +1,7 @@
 import { Player } from './player.js';
 import { mountPreview } from './preview.js';
 import { isStaleRoomSnapshot, LocalPlayback, PlaybackTabs, RoomEvents, queueToTop, queueTopCandidates, preparationRetry } from './room-state.js';
-import { createVideoSearch, createViewHistory, previewURL, searchLibrary, artistLibrarySongs, librarySongs, libraryArtists, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, queuePositions, historySuggestions } from './search.js';
+import { createVideoSearch, createViewHistory, previewURL, searchLibrary, artistLibrarySongs, librarySongs, libraryArtists, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, queuePositions, historySuggestions, lyricLabel } from './search.js';
 
 const $ = id => document.getElementById(id);
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -30,6 +30,9 @@ let searchTimer, searchQuery = '', searchSongs = [], previewSong = null, skippin
 let videoSource = 'songs', searchOrder = 'relevance', searchSnapshot = null, catalogueSelection = null;
 const addingVideos = new Set();
 const videoSearch = createVideoSearch(renderVideoResults, fetch, query => searchLibrary(library, query));
+const lyricObserver = new IntersectionObserver(entries => {
+  for (const entry of entries) videoSearch.checkLyrics(entry.target.dataset.lyricUrl, entry.isIntersecting);
+});
 const navigation = createViewHistory(history, () => ({query:$('song-input').value, title:$('title-input').value,
   filter, view, queueTab, libraryPage, queuePage, historyPage, historyQuery:$('history-query').value,
   videoSource, searchOrder, catalogueSelection, search:videoSearch.snapshot(), scroll:scrollY}), restoreView);
@@ -269,10 +272,10 @@ function renderVideoResults(providers, mode = videoSource) {
   $('video-results').classList.toggle('is-catalogue', catalogue);
   $('search-heading').textContent = catalogue ? metadata.title || (album ? '专辑曲目' : catalogueHeading) : artists ? '找一位歌手' : '搜索结果';
   $('search-order-note').textContent = artists ? '选一位歌手，看看有哪些歌想唱' :
-    searchOrder === 'popular' ? '已加载结果按播放量排序 · YouTube 提供' : searchOrder === 'ready' ? '已加载结果中，已准备歌曲排在前面' :
+    searchOrder === 'popular' ? '已加载结果按播放量排序 · YouTube 提供' : searchOrder === 'lyrics' ? '已加载结果中，有歌词的排在前面；新歌仍需准备字幕和音轨' : searchOrder === 'ready' ? '已加载结果中，已准备歌曲排在前面' :
     searchOrder === 'title' ? '已加载结果按歌名排序' : album ? 'YouTube Music 专辑曲目顺序' :
     videoSource === 'local' ? '本地曲库 · 现场版靠后' : 'YouTube 原顺序 · 现场版靠后';
-  $('search-order-note').hidden = searchOrder !== 'popular';
+  $('search-order-note').hidden = !['popular','lyrics'].includes(searchOrder);
   $('search-order').title = $('search-order-note').textContent;
   $('search-status').innerHTML = `<span class="${info.error ? 'search-error' : ''}">${info.loading ? '正在查找…' : info.error ? escape(info.error) : results.length ? `${videoSource === 'local' ? '' : '已加载 '}${results.length} ${artists ? '位歌手' : videoSource === 'youtube' || metadata.catalogue_section === 'videos' ? '个视频' : videoSource === 'songs' || metadata.catalogue_section === 'releases' ? '项' : '首'}${catalogue && info.metadata?.complete === false ? ' · 歌手页精选' : ''}` : catalogue ? '这个页面暂未提供可点播作品' : '没有找到，试试另一个关键词或搜索类型'}${info.error ? '<button data-search-retry>重试</button>' : ''}</span>`;
   $('artist-summary').hidden = !catalogue;
@@ -316,7 +319,9 @@ function songRow(song, index, {artists = false, videos = false, local = false, i
   const plays = playCount(song.views) === null ? null : formatPlays(song.views);
   const kind = song.kind === 'album' ? '专辑' : song.kind === 'artist' ? '歌手' : song.version || '';
   const status = inLibrary && song.status === 'failed' ? '<span class="library-status is-failed">准备失败</span>' : '';
-  const meta = kind || status ? `<div class="music-meta">${kind ? `<span${song.kind === 'album' ? ' class="music-kind"' : ''}>${escape(kind)}</span>` : ''}${status}</div>` : '';
+  const lyric = !inLibrary && !local && playable ? lyricLabel(song) : null;
+  const lyricHTML = lyric ? `<span class="lyric-status${lyric.available ? ' has-lyrics' : ''}" data-lyric-url="${escape(song.url)}" title="${escape(lyric.title)}">${lyric.text}</span>` : '';
+  const meta = kind || status || lyricHTML ? `<div class="music-meta">${kind ? `<span${song.kind === 'album' ? ' class="music-kind"' : ''}>${escape(kind)}</span>` : ''}${status}${lyricHTML}</div>` : '';
   return `<article class="music-row" ${inLibrary ? `data-card="${escape(song.id)}"` : `data-result="${index}"`} role="row"><span class="music-rank" role="cell">${String(index+1).padStart(2,'0')}</span>
     <div class="music-song" role="cell"><${tag} class="music-cover" ${open} aria-label="${playable ? '预览' : '打开'}：${escape(song.title)}">${thumbnail}<span>${icon(playable ? 'play' : 'arrow')}</span></${tag}>
       <div class="music-title"><h3><${tag} ${open} title="${escape(song.title)}"><span class="music-name">${escape(song.title)}</span><span class="music-compact-artist"><span>${artistText}</span>${kind ? `<small>${escape(kind)}</small>` : ''}${plays !== null && !local ? `<span class="music-compact-plays" aria-label="播放量 ${plays}">${plays}次</span>` : ''}${song.duration ? `<span class="music-compact-duration" aria-label="时长 ${time(song.duration)}">${time(song.duration)}</span>` : ''}</span></${tag}></h3>${meta}${inLibrary && song.status === 'running' ? `<div class="preparation-slot">${preparationHTML(song)}</div>` : ''}</div></div>
@@ -330,6 +335,7 @@ function songRow(song, index, {artists = false, videos = false, local = false, i
 
 function updateSearchRows(rows) {
   const grid = $('video-grid');
+  lyricObserver.disconnect();
   const existing = new Map([...grid.children].map(node => [node.dataset.searchKey, node]));
   const occurrences = new Map();
   searchSongs.forEach((song, index) => {
@@ -355,6 +361,14 @@ function updateSearchRows(rows) {
     }
     const rank = node.querySelector('.music-rank');
     if (rank) rank.textContent = String(index+1).padStart(2,'0');
+    const label = node.querySelector('.lyric-status');
+    if (label) {
+      const lyric = lyricLabel(song);
+      label.textContent = lyric.text;
+      label.title = lyric.title;
+      label.classList.toggle('has-lyrics', lyric.available);
+      if (song.status !== 'completed') lyricObserver.observe(label);
+    }
     if (grid.children[index] !== node) grid.insertBefore(node, grid.children[index] || null);
   });
   existing.forEach(node => node.remove());

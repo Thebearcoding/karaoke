@@ -16,6 +16,23 @@ python3.12 -m venv .venv
 
 ## 2. 完整处理环境
 
+### 安装前检查内存
+
+目前尚无经过端到端实测的最低内存要求；已有 Mac / RTX 5090 计时来自 128 GiB/GB 内存机器。M1 8GB 的完整处理未验证，不能保证模型加载、分离和对齐能顺利完成。内存不足时，可以在另一台主机运行服务，用这台 Mac 的浏览器点歌和播放。
+
+macOS 用 `sysctl -n hw.memsize` 查看物理内存（字节），用「活动监视器 → 内存」观察内存压力和交换空间；Linux 可用 `free -h`。同时检查磁盘空间：默认 10 GiB 是歌曲磁盘缓存预算，不是内存上限，模型、依赖和运行时临时空间还需要另留余量。
+
+内存紧张时保持单首准备、单个计算工位和最小批次：
+
+```sh
+export KARAOKE_PREPARATION_CONCURRENCY=1
+export KARAOKE_COMPUTE_CONCURRENCY=1
+export KARAOKE_SEPARATION_BATCH_SIZE=1
+export KARAOKE_WHISPER_BATCH_SIZE=1  # 仅本地 Whisper 模式使用
+```
+
+前三项本来就默认 1；本地 Whisper 批次默认 8。这些设置只减少并发峰值，不保证 8GB 足够；同一首歌的不同步骤仍可能交叠。出现系统内存压力、持续大量交换或内存不足错误时，保留失败日志和已完成检查点，先解决资源不足，不反复重试同一配置，也不要禁用系统或框架的内存保护。
+
 需要 `ffmpeg`、`ffprobe` 和 Node.js 22+ 在 PATH 中；严格音频验收及独立 MP3 导出还需要 `lame`。例如 macOS 使用 `brew install ffmpeg lame node`，Debian/Ubuntu 使用 `sudo apt-get install ffmpeg lame libsndfile1` 并安装 Node.js 22+。普通点歌只生成底轨（伴奏＋伴唱）与主唱两轨 FLAC，不调用 LAME；FFmpeg 负责母版解码、公共增益转换与视频编码。YouTube 下载启用 Node.js 执行播放器脚本；`yt-dlp[default]` 同时安装与下载器版本配套的 EJS 组件，不在下载时拉取额外脚本。Node.js 也用于播放器和音频变调测试，前端本身不需要构建。实时升降调的 Signalsmith Stretch / WASM 随源码提供，不需要额外安装、模型下载或运行时 CDN；版本和许可见 `karaoke/dependencies/pitch-shift.json`。
 
 主环境负责音频导出、ASR、歌词整理、对齐及字幕渲染。先按硬件安装匹配版本的 PyTorch 与 torchaudio，再装项目依赖。当前 Mac / MPS 开发环境使用 Python 3.12、`torch==2.11.0`、`torchaudio==2.11.0`：
@@ -131,7 +148,19 @@ nohup .venv/bin/python -u -m karaoke.api </dev/null >>karaoke/service-data/serve
 
 网页能打开只说明本地服务正常，不代表下载网络可用。若日志出现 `Unable to connect to proxy` / `Tunnel connection failed: 403 Forbidden`，检查启动进程继承的代理环境。通过 Codex 启动长期服务时，应使用已获准访问视频站点的运行环境；不要把工具临时注入的受限代理当作应用代理，也不要在应用代码里擅自删除用户的代理设置。可在同一运行环境先执行 `python -m yt_dlp --ignore-config --skip-download --print title 视频URL` 验证。
 
-## 6. 测试与范围
+## 6. 完成首歌再交付
+
+“网页能打开”和“已经可以唱”是两个验收阶段。完整安装应交付后一种状态：
+
+1. 选择一首有权下载和处理的完整歌曲，例如周杰伦《稻香》，确认歌手和录音版本。通过网页搜索并点歌，或向 `POST /v1/room/entries` 提交 `{"url":"完整视频链接"}`。不要使用假歌曲、空数据或只跑某个模型步骤代替验收。
+2. 保存返回的待唱项 `id` 和 `job_id`。查看原任务 `GET /v1/jobs/{job_id}`，直到 `status=completed`；同时确认 `GET /v1/room` 中原待唱项仍在、产物可用。界面的可播放状态对应任务的 `completed`，不是把 API 状态手动改成 `ready`。
+3. 按任务清单核对音轨、字幕、完整 MV 的文件大小和 SHA-256；完整解码音视频，检查字幕正文、时间范围与顺序。可复用 `karaoke.tools.soak.verify_outputs(..., playback_policy=True)`。真实模型的隔离排查使用现有 `ProbeSession` / `run_probe` 和共享阶段锁，随后通过正常 worker 完成原任务。
+4. 在实际浏览器确认歌曲加载、定位、字幕显示及主唱开关；需要出声时先取得用户同意。自动文件与时间检查不能替代人工逐字起音准确率验收。
+5. 交付网页地址、歌名和来源、任务 ID、验证结果、启动／停止方法，以及任何仍未解决的问题。保留可唱成品；只清理已验证完成的隔离测试中间文件。来源登录、下载网络或资源不足时明确报告阻塞，不能只展示空曲库就说安装完成。
+
+搜索中的「有歌词」只表示已经读取到该录音对应的已发表歌词候选；「歌词未确认」可能是未收录、网络错误或来源限流。它们都不代替这套首歌验收。
+
+## 7. 测试与范围
 
 安装开发依赖、主环境 PyTorch 和 SOFA 源码后：
 

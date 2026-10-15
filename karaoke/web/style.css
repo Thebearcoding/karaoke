@@ -149,7 +149,7 @@ html{scroll-padding-top:calc(var(--header-height,80px) + 20px)}
   .music-compact-artist>span{min-width:0;overflow:hidden;text-overflow:ellipsis}.music-compact-artist small{flex-shrink:0;font-size:10px;color:var(--muted)}
   .music-compact-artist>.music-compact-duration,.music-compact-artist>.music-compact-plays{flex-shrink:0;font-variant-numeric:tabular-nums}.music-compact-duration::before,.music-compact-plays::before{content:'·';margin-right:6px}
   .music-meta{font-size:11px;line-height:16px;margin-top:0}
-  .music-meta>span:not(.library-status){display:none}
+  .music-meta>span:not(.library-status):not(.lyric-status){display:none}
   .music-add,.find-mv,button.find-mv{min-width:44px;min-height:44px;padding:4px;font-size:12px;border-color:transparent;background:transparent}
   .music-add{gap:3px;color:var(--gold)}.music-add .icon{width:14px;height:14px}
   .music-add.is-queued{color:var(--muted)}.music-add small{font-size:10px}
@@ -167,3 +167,7 @@ html{scroll-padding-top:calc(var(--header-height,80px) + 20px)}
 }
 
 .queue-pagination{flex:none;justify-content:center;padding:6px 0}
+
+/* Lyric evidence stays visible below the title on narrow screens too. */
+.music-meta .lyric-status{display:inline-block;color:var(--muted);font-size:11px;line-height:18px;white-space:nowrap}
+.music-meta .lyric-status.has-lyrics{color:var(--green)}

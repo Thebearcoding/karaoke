@@ -659,3 +659,59 @@ test('theme follows system changes until chosen, and resumes after the saved cho
     assert.equal(meta.content, system.matches ? '#202022' : '#ffffff');
   }
 });
+
+test('visible lyric checks are batched, cached and do not fetch the whole catalogue', async () => {
+  const requests = [], states = [];
+  const search = createVideoSearch(s => states.push(structuredClone(s)), (url, {signal}) =>
+    new Promise(resolve => requests.push({url, signal, finish:data => resolve({ok:true,json:async()=>data})})));
+  const songs = Array.from({length:100}, (_,i) => ({url:`https://www.youtube.com/watch?v=${String(i).padStart(11,'0')}`,kind:'song',title:`Song ${i}`}));
+  const initial = search.search('songs');
+  requests[0].finish({results:songs}); await initial;
+  assert.equal(requests.length,1);
+  for (const song of songs.slice(0,4)) search.checkLyrics(song.url);
+  search.checkLyrics(songs[0].url);
+  search.checkLyrics(songs[3].url,false);
+  await flush();
+  assert.equal(requests.length,2);
+  const ids = new URL(requests[1].url,'http://test').searchParams.get('ids').split(',');
+  assert.deepEqual(ids,['00000000000','00000000001','00000000002']);
+  const packet = {status:'available',expires_at:Date.now()/1000+3600};
+  requests[1].finish({results:{[ids[0]]:packet,[ids[1]]:{...packet,status:'unknown'}}}); await flush();
+  const checked = states.at(-1).youtube.results;
+  assert.equal(checked[0].lyrics.status,'available');
+  assert.equal(checked[1].lyrics.status,'unknown');
+  assert.equal(checked[2].lyrics.reason,'lookup_failed');
+  assert.equal(checked[4].lyrics,undefined);
+  for (const song of songs.slice(0,3)) search.checkLyrics(song.url);
+  await flush(); assert.equal(requests.length,2);
+  const saved=search.snapshot();
+  search.restore(saved); search.checkLyrics(songs[0].url); await flush();
+  assert.equal(requests.length,2);
+});
+
+test('a cancelled lyric batch cannot repaint a new query, including the same recording', async () => {
+  const requests=[], states=[];
+  const search=createVideoSearch(s=>states.push(structuredClone(s)), (url,{signal})=>
+    new Promise(resolve=>requests.push({url,signal,finish:data=>resolve({ok:true,json:async()=>data})})));
+  const song={url:'https://www.youtube.com/watch?v=abcdefghijk',kind:'song',title:'Song'};
+  let initial=search.search('old'); requests[0].finish({results:[song]}); await initial;
+  search.checkLyrics(song.url); await flush();
+  initial=search.search('new'); requests[2].finish({results:[song]}); await initial;
+  search.checkLyrics(song.url); await flush();
+  assert.equal(requests[1].signal.aborted,true);
+  requests[1].finish({results:{abcdefghijk:{status:'available',expires_at:Date.now()/1000+3600}}}); await flush();
+  assert.equal(states.at(-1).youtube.results[0].lyrics,undefined);
+  assert.equal(requests.length,4);
+  requests[3].finish({results:{abcdefghijk:{status:'unknown',expires_at:Date.now()/1000+60}}}); await flush();
+  assert.equal(states.at(-1).youtube.results[0].lyrics.status,'unknown');
+});
+
+test('lyric priority keeps unconfirmed versions and separates availability from readiness', () => {
+  const expiry=Date.now()/1000+300;
+  const songs=[{title:'Unchecked'}, {title:'Expired',lyrics:{status:'available',expires_at:0}},
+    {title:'Found',lyrics:{status:'available',expires_at:expiry}}, {title:'Failed',lyrics:{status:'unknown',expires_at:expiry}},
+    {title:'Ready',status:'completed'}];
+  assert.deepEqual(orderResults(songs,'lyrics').map(s=>s.title),['Found','Ready','Unchecked','Expired','Failed']);
+  assert.deepEqual(orderResults(songs,'ready').map(s=>s.title),['Ready','Unchecked','Expired','Found','Failed']);
+  assert.equal(songs[0].title,'Unchecked');
+});
