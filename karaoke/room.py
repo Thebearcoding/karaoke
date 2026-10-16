@@ -231,7 +231,7 @@ class Room:
 
     def snapshot(self):
         state = self.read()
-        jobs = self.store.list(1000)
+        jobs = self.store.list(-1)
         by_id = {job['id']: job for job in jobs}
         featured = self.featured()
         catalog = {song['url']: song for song in reversed(featured)}
@@ -288,7 +288,7 @@ class Room:
         songs = [dict(song, status='unprepared') for song in featured]
         by_url = {s['url']: s for s in songs}
         seen = {}
-        for job in self.store.list(1000) if jobs is None else jobs:
+        for job in self.store.list(-1) if jobs is None else jobs:
             url = job['input']['url']
             result = job.get('result') or {}
             artifacts = result.get('artifacts', {})

@@ -30,6 +30,21 @@ def ready_job(store, url=URL):
                         duration_seconds=10, artifacts=artifacts))
 
 
+@pytest.mark.parametrize('path, key', [('/v1/library', 'songs'), ('/v1/room', 'library')])
+def test_library_keeps_completed_song_after_1000_newer_jobs(tmp_path, path, key):
+    app = create_app(tmp_path, version='test')
+    store = app.state.store
+    with TestClient(app) as client:
+        oldest = ready_job(store)
+        for number in range(1000):
+            store.create(JobRequest(url=f'https://www.youtube.com/watch?v=capacity{number:03d}', force=True), 'test')
+        songs = client.get(path).json()[key]
+        assert len(songs) == 1001
+        song = next(song for song in songs if song['job_id'] == oldest['id'])
+        assert song['status'] == 'completed'
+        assert client.get(song['artifacts']['mv']).content == b'media'
+
+
 def test_snapshot_shares_batch_reads_but_keeps_older_entries_and_fresh_metadata(tmp_path, monkeypatch):
     room = create_app(tmp_path, version='test').state.room
     jobs = [room.store.create(JobRequest(url=f'https://www.youtube.com/watch?v=abcdefghij{i}'), 'test')[0]
@@ -48,7 +63,7 @@ def test_snapshot_shares_batch_reads_but_keeps_older_entries_and_fresh_metadata(
         return read(key)
 
     monkeypatch.setattr(room.store, 'read', read_one)
-    # The third queued song is outside the recent-library batch.
+    # A queued entry missing from the batch still needs its metadata.
     monkeypatch.setattr(room.store, 'list', lambda limit: batches.append(True) or jobs[:2])
     monkeypatch.setattr(room, 'featured', lambda: catalogs.append(True) or featured)
     snapshot = room.snapshot()
