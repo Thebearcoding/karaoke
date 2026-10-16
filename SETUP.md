@@ -1,6 +1,6 @@
 # 安装与运行
 
-所有命令从仓库根目录执行。以下保留目前实际使用的目录结构和版本；第三方源码、权重及生成数据都由 `.gitignore` 排除。
+所有命令从仓库根目录执行。按下面的步骤准备服务、处理环境和模型，再完成第一首歌。
 
 ## 1. 网页与任务服务
 
@@ -12,7 +12,7 @@ python3.12 -m venv .venv
 .venv/bin/python -m karaoke.api
 ```
 
-地址：<http://127.0.0.1:8746/>。初次启动是空曲库。服务会创建 `karaoke/service-data/`；它不是源代码，不要提交。
+地址：<http://127.0.0.1:8746/>。初次启动是空曲库，运行数据保存在 Git 已忽略的 `karaoke/service-data/`。
 
 ## 2. 完整处理环境
 
@@ -20,7 +20,7 @@ python3.12 -m venv .venv
 
 单首处理推荐 Apple Silicon Mac 配备 24 GB 统一内存，NVIDIA 主机配备 32 GB 系统内存和 16 GB 显存。浏览器端不需要加载模型，可以连接另一台处理主机。
 
-macOS 用 `sysctl -n hw.memsize` 查看物理内存（字节），用「活动监视器 → 内存」观察内存压力和交换空间；Linux 可用 `free -h`。同时检查磁盘空间：默认 10 GiB 是歌曲磁盘缓存预算，不是内存上限，模型、依赖和运行时临时空间还需要另留余量。
+macOS 用 `sysctl -n hw.memsize` 查看物理内存（字节），用「活动监视器 → 内存」观察内存压力和交换空间；Linux 可用 `free -h`。磁盘上默认为歌曲缓存设置 10 GiB 预算，另为模型、依赖和运行时临时文件留出空间。
 
 按上述配置运行时，保持单首准备、单个计算工位和最小批次：
 
@@ -42,7 +42,7 @@ export KARAOKE_WHISPER_BATCH_SIZE=1  # 仅本地 Whisper 模式使用
 .venv/bin/python -m pip install -r requirements-dev.txt
 ```
 
-CUDA 机器应选择与驱动兼容的 PyTorch CUDA wheel，保持 torch/torchaudio 版本匹配。CPU 可以执行，但整曲处理会慢。这里记录的是实际用过的主依赖，不是跨平台完整 lockfile；CUDA 4090 尚未完成端到端验证。
+CUDA 机器选择与驱动兼容的 PyTorch CUDA wheel，并保持 torch/torchaudio 版本匹配。CPU 也能执行，整曲处理更适合使用 GPU。
 
 分离使用独立环境，避免 audio-separator 的依赖影响主环境：
 
@@ -53,9 +53,9 @@ python3.12 -m venv .venv-separator
 export KARAOKE_SEPARATOR_PYTHON="$PWD/.venv-separator/bin/python"
 ```
 
-该环境也需安装适合硬件的 PyTorch。`cpu` extra 补齐导入时必需的 ONNX Runtime；本项目的 Roformer 分离仍通过 PyTorch 使用 CUDA / MPS。固定 librosa 0.11.0 是因为分离器仍直接依赖它旧版携带的 audioread，新版 librosa 不再安装该包。`pip check` 不会发现这些未完整声明的导入依赖，因此安装后也检查实际入口。
+该环境也需安装适合硬件的 PyTorch。`cpu` extra 补齐导入时必需的 ONNX Runtime；Roformer 分离通过 PyTorch 使用 CUDA / MPS。固定 librosa 0.11.0 是为了提供分离器需要的 audioread。安装后运行上面的导入命令，确认入口及其依赖可用。
 
-已验证的 Linux 组合为 Ubuntu 24.04、RTX 5090、驱动 580.126.09，以及主环境和分离环境的 `torch==2.11.0` / `torchaudio==2.11.0`（CUDA 13.0 wheel）。Mac 分离环境另使用 torch 2.13.0；不要据此假定其他平台也提供对应版本的 torchaudio。`benchmark_neural.py` 会检查 audio-separator 的版本，并显式设置模型类型、重叠和推理配置；不要只换一份名字相似的权重。
+已验证的 Linux 组合为 Ubuntu 24.04、RTX 5090、驱动 580.126.09，以及主环境和分离环境的 `torch==2.11.0` / `torchaudio==2.11.0`（CUDA 13.0 wheel）。Mac 分离环境另使用 torch 2.13.0。`benchmark_neural.py` 会检查 audio-separator 版本，并按模型配置设置类型、重叠和推理参数；权重使用下表中的配套版本。
 
 ## 3. 对齐器源码
 
@@ -67,7 +67,7 @@ git clone --filter=blob:none --no-checkout https://github.com/qiuqiao/SOFA.git k
 git -C karaoke/research/subtitles-2026-09-18/sofa checkout --detach 9549c6a86d16019c817eefe4bb8183405da524cc
 ```
 
-中文发音测试也需要该源码中的 `dictionary/opencpop-extension.txt`，但不需要模型权重。日文使用 pyopenjtalk；首次调用可能需要下载它自己的发音字典。不要直接覆盖安装 SOFA 的旧版完整 requirements；本项目主环境使用 `requirements-full.txt` 中的依赖。
+中文发音测试需要该源码中的 `dictionary/opencpop-extension.txt`，无需模型权重。日文使用 pyopenjtalk，首次调用会按需下载发音字典。SOFA 在这里提供源码与字典，Python 依赖统一使用本项目的 `requirements-full.txt`。
 
 ### 英文：LyricsAlignment-Multilingual
 
@@ -78,11 +78,11 @@ git -C karaoke/research/word-onset-2026-09-18/lyrics-alignment-multilingual chec
 cp karaoke/dependencies/english-alignment.json karaoke/research/word-onset-2026-09-18/lyrics-alignment-multilingual/source-manifest.json
 ```
 
-需要其中的 `model.py`、`utils.py` 和 `checkpoints/checkpoint_Baseline`。源码和 checkpoint 的 SHA-256 见 [english-alignment.json](karaoke/dependencies/english-alignment.json)。该上游 checkout 含 checkpoint；整个第三方目录在 Git 排除范围内。不要安装它的旧版训练 requirements 覆盖主环境。
+需要其中的 `model.py`、`utils.py` 和 `checkpoints/checkpoint_Baseline`。源码和 checkpoint 的 SHA-256 见 [english-alignment.json](karaoke/dependencies/english-alignment.json)。该 checkout 已包含 checkpoint，整个第三方目录由 Git 忽略；Python 依赖沿用本项目主环境。
 
 ## 4. 模型权重
 
-模型文件不在仓库里。下载后放在下列位置，保留原始文件，不转换、不重命名为另一模型。仓库中的 YAML 是与当前流程配套的配置。
+按下表下载原始权重并放到对应位置，使用仓库中配套的 YAML 配置。
 
 | 用途 | 下载来源 | 本地位置 |
 |---|---|---|
@@ -100,7 +100,7 @@ cp karaoke/dependencies/english-alignment.json karaoke/research/word-onset-2026-
 
 权重和压缩包的校验值分别记录在 [separation.json](karaoke/dependencies/separation.json)、[sofa-mandarin.json](karaoke/dependencies/sofa-mandarin.json)、[sofa-japanese.json](karaoke/dependencies/sofa-japanese.json)。`separation.json` 也保留了早期对照模型的来源；正式流程只需要 F 和 Anvuew。可用 `shasum -a 256 文件路径` 核对下载内容。上游若更新了 `main` 对应的文件，应以这里记录的 SHA-256 判断是否还是同一个模型。
 
-这些模型和上游源码遵循各自的许可，见 [第三方说明](THIRD_PARTY.md)。尤其注意 Anvuew 的 GPL 声明与可选 MMS_FA 的非商业条款。仓库不分发模型权重或第三方研究 checkout；随源码提供的配置及浏览器运行库另列许可。
+模型许可、商业使用条件和署名要求见[第三方说明](THIRD_PARTY.md)，其中列明 Anvuew 的 GPL 声明与可选 MMS_FA 的非商业条款。
 
 MMS_FA 的校验值见 [mms-alignment.json](karaoke/dependencies/mms-alignment.json)。它复核仍然合并的中文字组、中日文歌曲中纯英文句的合并词组，以及疑似提前过久的中日文句首：分别对原音和分离人声对齐，再与 SOFA 的三个上下文结果比较。运行中不自动下载该模型；缺少权重会保留原结果与原因，不能把未能拆开的字词标成通过。没有问题的字词不调用它。
 
@@ -113,7 +113,7 @@ MMS_FA 的校验值见 [mms-alignment.json](karaoke/dependencies/mms-alignment.j
 
 ## 5. 运行配置
 
-通过环境注入 `OPENAI_API_KEY`，不要写进源代码、命令示例或提交 `.env`。普通点歌优先使用已发表歌词；元数据不足时才调用文本模型补充，默认 `gpt-5-mini`。严格音频验收另行使用 ASR，默认在线调用。
+通过本机环境变量设置 `OPENAI_API_KEY`，凭据留在本机配置中。普通点歌优先使用已发表歌词；元数据不足时调用文本模型补充，默认 `gpt-5-mini`。严格音频验收另行使用 ASR，默认在线调用。
 
 可选本地识别：安装 `karaoke/requirements-local-asr.txt`，下载上述完整模型目录，
 设置 `KARAOKE_ASR_BACKEND=local`、`KARAOKE_WHISPER_MODEL=/绝对路径/模型目录`。
@@ -127,11 +127,11 @@ export KARAOKE_DEVICE=auto
 .venv/bin/python -m karaoke.api
 ```
 
-`auto` 按 CUDA → MPS → CPU 选择设备。Linux 还需用 `KARAOKE_FONT_FILE` 指定覆盖目标语言的字体文件，例如已安装的 Noto Serif CJK 字体。程序会检查缺字；不要用缺字方块继续导出。完整环境变量见 [API.md](karaoke/API.md)。
+`auto` 按 CUDA → MPS → CPU 选择设备。Linux 还需用 `KARAOKE_FONT_FILE` 指定覆盖目标语言的字体文件，例如已安装的 Noto Serif CJK 字体；遇到缺字提示时更换字体后重试。完整环境变量见 [API.md](karaoke/API.md)。
 
-保持一个 Uvicorn 进程；不要对同一数据目录启动多个服务进程。`KARAOKE_PREPARATION_CONCURRENCY=none` 允许所有已点歌曲进入阶段流水，默认值为 `1`。下载、分离、识别／对齐、音轨封装和视频编码各有共享工位；不同工位可以交叠，等待工位的任务优先处理当前待唱歌曲，再按歌单顺序处理，不中断已有步骤。任务共用缓存预算，各自保存进度、结果和错误。需要局域网手机播放时再显式设置 `KARAOKE_HOST=0.0.0.0`，手机访问 `http://电脑IP:8746/`。
+每个数据目录运行一个 Uvicorn 服务进程。`KARAOKE_PREPARATION_CONCURRENCY=none` 允许所有已点歌曲进入阶段流水，默认值为 `1`。下载、分离、识别／对齐、音轨封装和视频编码各有共享工位；不同工位可以交叠，等待工位的任务优先处理当前待唱歌曲，再按歌单顺序处理，不中断已有步骤。任务共用缓存预算，各自保存进度、结果和错误。局域网手机播放设置 `KARAOKE_HOST=0.0.0.0`，手机访问 `http://电脑IP:8746/`。
 
-手机和平板上的实时升降调还需要**受信任的 HTTPS 入口**：普通 HTTP 局域网地址没有 AudioWorklet，电脑 `localhost` 的安全例外不适用于手机访问电脑 IP。部署验证应在目标设备的实际网址上播放并操作升降调，不能只检查健康接口或 localhost。
+手机和平板上的实时升降调需要受信任的 HTTPS 入口，以启用 AudioWorklet；电脑上也可使用 `localhost`。配置后在手机／平板的实际网址上播放一首歌并操作升降调。
 
 可以复用现有 Cloudflare Tunnel，将 HTTPS 子域名指向源站 `http://127.0.0.1:8746`，无需再启动一份应用。公开域名前配置 Cloudflare Access 等访问控制，保护整个域名及其 API；应用本身没有公网账号权限隔离。保留已有隧道路由，并验证匿名请求受限、登录后媒体和 SSE 正常。
 
@@ -146,19 +146,19 @@ nohup .venv/bin/python -u -m karaoke.api </dev/null >>karaoke/service-data/serve
 
 新歌一直排队、`running_job` 为空时，检查 `/health` 的 `preparation_paused`。定向回归使用的 `KARAOKE_DATA_DIR/preparation.pause` 会暂停普通点歌处理；恢复日常使用前，确认同一数据目录没有定向处理进程，再移除这个暂停文件。回归清单旁的 `audio.pause` 和 `manifest.pause` 可继续保留，不影响普通点歌。
 
-网页能打开只说明本地服务正常，不代表下载网络可用。若日志出现 `Unable to connect to proxy` / `Tunnel connection failed: 403 Forbidden`，检查启动进程继承的代理环境。通过 Codex 启动长期服务时，应使用已获准访问视频站点的运行环境；不要把工具临时注入的受限代理当作应用代理，也不要在应用代码里擅自删除用户的代理设置。可在同一运行环境先执行 `python -m yt_dlp --ignore-config --skip-download --print title 视频URL` 验证。
+若网页能打开但下载失败，且日志出现 `Unable to connect to proxy` / `Tunnel connection failed: 403 Forbidden`，检查服务进程继承的代理环境。用 `python -m yt_dlp --ignore-config --skip-download --print title 视频URL` 在同一环境验证下载入口。通过编程助手启动长期服务时，沿用本机已验证的视频下载网络配置；工具临时注入的代理可能需要在服务启动配置中调整。
 
-## 6. 完成首歌再交付
+## 6. 准备第一首歌
 
-“网页能打开”和“已经可以唱”是两个验收阶段。完整安装应交付后一种状态：
+安装完成后，完整准备并播放第一首歌，把下载、模型和浏览器一起验证：
 
-1. 选择一首有权下载和处理的完整歌曲，例如周杰伦《稻香》，确认歌手和录音版本。通过网页搜索并点歌，或向 `POST /v1/room/entries` 提交 `{"url":"完整视频链接"}`。不要使用假歌曲、空数据或只跑某个模型步骤代替验收。
-2. 保存返回的待唱项 `id` 和 `job_id`。查看原任务 `GET /v1/jobs/{job_id}`，直到 `status=completed`；同时确认 `GET /v1/room` 中原待唱项仍在、产物可用。界面的可播放状态对应任务的 `completed`，不是把 API 状态手动改成 `ready`。
-3. 按任务清单核对音轨、字幕、完整 MV 的文件大小和 SHA-256；完整解码音视频，检查字幕正文、时间范围与顺序。可复用 `karaoke.tools.soak.verify_outputs(..., playback_policy=True)`。真实模型的隔离排查使用现有 `ProbeSession` / `run_probe` 和共享阶段锁，随后通过正常 worker 完成原任务。
-4. 在实际浏览器确认歌曲加载、定位、字幕显示及主唱开关；需要出声时先取得用户同意。自动文件与时间检查不能替代人工逐字起音准确率验收。
-5. 交付网页地址、歌名和来源、任务 ID、验证结果、启动／停止方法，以及任何仍未解决的问题。保留可唱成品；只清理已验证完成的隔离测试中间文件。来源登录、下载网络或资源不足时明确报告阻塞，不能只展示空曲库就说安装完成。
+1. 选择一首完整歌曲，例如周杰伦《稻香》，确认歌手和录音版本。通过网页搜索并点歌，或向 `POST /v1/room/entries` 提交 `{"url":"完整视频链接"}`。
+2. 保存待唱项 `id` 和 `job_id`。查看原任务 `GET /v1/jobs/{job_id}`，等到 `status=completed`，并确认 `GET /v1/room` 中该待唱项可播放。
+3. 按任务清单核对音轨、字幕、完整 MV 的大小和 SHA-256，完整解码音视频，检查字幕正文、时间范围与顺序。可使用 `karaoke.tools.soak.verify_outputs(..., playback_policy=True)`。
+4. 在实际浏览器验证加载、定位、字幕显示和主唱开关。由编程助手操作时先用静音预览，完成后由使用者开唱。
+5. 记录网页地址、歌名和来源、任务 ID、验证结果，以及启动／停止方法。保留可唱成品，清理已完成的隔离测试中间文件；遇到登录、下载或资源问题时，按错误提示处理后重试原任务。
 
-搜索中的「有歌词」只表示已经读取到该录音对应的已发表歌词候选；「歌词未确认」可能是未收录、网络错误或来源限流。它们都不代替这套首歌验收。
+选歌时可用「有歌词优先」找到已经查到正文的版本。「歌词未确认」的版本仍可点歌，准备流程会继续查询其他来源。需要隔离排查时，使用 [ProbeSession / run_probe](karaoke/API.md#先验证音频) 共用阶段锁，再由正常 worker 完成原任务。
 
 ## 7. 测试与范围
 
@@ -173,4 +173,4 @@ node --test karaoke/test_player.mjs karaoke/test_pitch.mjs karaoke/test_search.m
 
 仓库的 [Tests workflow](.github/workflows/tests.yml) 在 push、PR 和手动触发时分别运行 Python 3.12 与 Node.js 22 测试。Python 任务使用 Ubuntu 24.04、CPU 版 PyTorch／torchaudio 2.11.0、现有开发依赖、上述固定版本的 SOFA 字典及 Noto Serif CJK 字体；先准备日文发音字典，再检查空库启动及全部行为测试。两组 JUnit 测试报告、启动日志和测试子进程日志保留 14 天。CI 不需要配置密钥；真实歌曲的分离质量和逐字起音验收仍单独进行。
 
-正式入口是 `python -m karaoke.api`。`benchmark_neural.py` 和 `experiments/cjk-onsets-v003/run.py` 仍是正式处理链的一部分；其他研究工具可能引用未发布的实验素材或可选模型，不是空仓库一键可运行的演示。入口说明见 [源码导航](karaoke/README.md)。
+正式入口是 `python -m karaoke.api`。`benchmark_neural.py` 和 `experiments/cjk-onsets-v003/run.py` 也是正式处理链的一部分；其他研究工具所需的素材和可选模型见[源码导航](karaoke/README.md)。

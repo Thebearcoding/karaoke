@@ -12,7 +12,7 @@
 | `pipeline.py` | 下载、分离、歌词、对齐、封装和校验的调度 |
 | `song_sources.py`、`lyric_*.py`、`local_asr.py` | 来源身份、歌词检索、文本证据与识别 |
 | `benchmark_neural.py` | 正式流程使用的分离子进程入口；名字沿用早期实验 |
-| `experiments/cjk-onsets-v003/run.py` | 正式流程使用的中日文多窗口对齐；不能作为实验产物删除 |
+| `experiments/cjk-onsets-v003/run.py` | 正式流程使用的中日文多窗口对齐，目录名沿用早期实验 |
 | `align_*.py`、`phoneme_progress.py`、`timing_validation.py` | 声学对齐、字词位置和时间检查 |
 | `exact_stems.py`、`three_stems.py` | 音轨导出、共同增益与完整性检查 |
 | `subtitle*.py`、`render_*.py` | 字幕布局、高亮和视频合成 |
@@ -29,4 +29,4 @@
 - 其他 `benchmark_*.py`、`dsp.py`、`gaussian_align.py`、`duet_templates.py` 保留为算法研究工具，需要自行准备对应数据和可选依赖，不属于默认服务启动路径。
 - `dependencies/` 保存第三方来源与哈希，`models/pretrained/` 保存模型配置。许可范围见[第三方说明](../THIRD_PARTY.md)。
 
-[贡献指南](../CONTRIBUTING.md)列出测试与提交要求。行为测试、时间轴单调和媒体完整解码均不能代替独立的音质、起音准确率验收。
+[贡献指南](../CONTRIBUTING.md)列出测试与提交要求；音质和起音准确率的测量方法见[验收标准](ACCEPTANCE.md)。
