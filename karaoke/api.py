@@ -160,8 +160,19 @@ class Store:
         self.path = self.root/'jobs.sqlite3'
         with self.connect() as db:
             db.execute('PRAGMA journal_mode=WAL')
+            db.execute('BEGIN IMMEDIATE')
             db.execute('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, cache_key TEXT, status TEXT, created_at TEXT, doc TEXT)')
             db.execute('CREATE INDEX IF NOT EXISTS jobs_cache ON jobs(cache_key, status)')
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='library_sources'").fetchone():
+                db.execute('CREATE TABLE library_sources (url TEXT PRIMARY KEY, job_id TEXT, created_at TEXT)')
+                db.execute("""INSERT INTO library_sources
+                    SELECT url, id, created_at FROM (
+                        SELECT json_extract(doc, '$.input.url') AS url, id, created_at,
+                               row_number() OVER (PARTITION BY json_extract(doc, '$.input.url')
+                                                  ORDER BY created_at DESC, rowid DESC) AS newest
+                        FROM jobs) WHERE newest=1""")
+            db.execute("""CREATE INDEX IF NOT EXISTS jobs_library_media ON jobs(id)
+                WHERE status='completed' OR json_extract(doc, '$.restore_video')=1""")
         self.cache = SongCache(self, cache_limit_bytes)
 
     @contextmanager
@@ -315,7 +326,20 @@ class Store:
                     path.write_text(json.dumps(value, ensure_ascii=False)+'\n')
             db.execute('INSERT INTO jobs VALUES (?,?,?,?,?)',
                        (job_id, key, 'queued', stamp, json.dumps(doc, ensure_ascii=False)))
+            db.execute("""INSERT INTO library_sources VALUES (?,?,?)
+                ON CONFLICT(url) DO UPDATE SET job_id=excluded.job_id, created_at=excluded.created_at
+                WHERE excluded.created_at >= library_sources.created_at""", (payload.url, job_id, stamp))
         return doc, False
+
+    def library_jobs(self):
+        # Keep the latest attempt for each song, plus media that may beat it.
+        # The partial index excludes retired attempts without reading their JSON.
+        with self.connect() as db:
+            rows = db.execute("""SELECT doc FROM jobs WHERE id IN (
+                SELECT job_id FROM library_sources
+                UNION SELECT id FROM jobs WHERE status='completed' OR json_extract(doc, '$.restore_video')=1)
+                ORDER BY created_at DESC""")
+            return [json.loads(row[0]) for row in rows]
 
     def list(self, limit=20, status=None):
         with self.connect() as db:
