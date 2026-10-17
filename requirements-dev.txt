@@ -1,3 +1,6 @@
 -r requirements-full.txt
 -r requirements-lint.txt
 pytest==9.0.3
+# Configuration types imported by the optional MIMO benchmark.
+hydra-core==1.3.2
+omegaconf==2.3.0

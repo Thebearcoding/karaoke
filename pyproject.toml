@@ -22,7 +22,6 @@ include = ["karaoke"]
 allowed-unresolved-imports = [
     "audio_separator.**",
     "faster_whisper.**",
-    "hydra",
     "modules.rmvpe.spec",
     "modules.task.forced_alignment",
     "qwen_asr",

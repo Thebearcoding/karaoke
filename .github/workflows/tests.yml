@@ -33,7 +33,6 @@ jobs:
     timeout-minutes: 25
     env:
       PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
-      PYTHONPATH: karaoke
       KARAOKE_FONT_FILE: /usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -98,6 +97,8 @@ jobs:
           assert b"<html" in get("/")
           PY
       - name: Run all Python tests
+        env:
+          PYTHONPATH: karaoke
         run: python -m pytest -q karaoke/test_api.py karaoke/test_room.py karaoke/test_algorithms.py --junitxml=test-results/python.xml --basetemp="${{ runner.temp }}/karaoke-tests"
       - name: Save Python test results
         if: always()

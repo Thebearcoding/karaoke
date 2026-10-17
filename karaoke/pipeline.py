@@ -1027,8 +1027,13 @@ class Pipeline:
         if highlight_errors:
             raise StageFailure('align_words', '部分字词缺少独立的高亮起点；对齐诊断已保留')
         direct = lyrics['provenance'].get('route') == 'lyrics_first'
-        repeats = None if direct else json.loads((output/'asr/lyric-repeats.json').read_text())
-        missing = None if repeats is None else missing_repetitions(repeats['reference_lines'], cues, repeats['words'], language, duration)
+        if direct:
+            missing = None
+            restored_repetitions = len(lyrics['provenance'].get('repetitions', []))
+        else:
+            repeats = json.loads((output/'asr/lyric-repeats.json').read_text())
+            missing = missing_repetitions(repeats['reference_lines'], cues, repeats['words'], language, duration)
+            restored_repetitions = len(repeats['expansions'])
         write_json(output/'lyric-repeat-validation.json', dict(missing=missing))
         if missing:
             raise StageFailure('align_words', '最终字幕仍遗漏已识别出的重复唱段；详情已保留')
@@ -1037,7 +1042,7 @@ class Pipeline:
             lyrics_provenance=lyrics['provenance'], onset_accuracy=None, separation_purity=None,
             english_context_scope=english_context_scope,
             independent_asr_coverage=None if direct else True,
-            restored_repetitions=len(lyrics['provenance'].get('repetitions', [])) if repeats is None else len(repeats['expansions']),
+            restored_repetitions=restored_repetitions,
             fallback_units=sum(u.get('timing_source') == 'prior_word_fallback' for u in units),
             **alignment_recovery_summary(raw),
             line_order_fallback_lines=order_fallbacks,
