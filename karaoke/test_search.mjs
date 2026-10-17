@@ -98,10 +98,12 @@ test('history search matches song and artist while preserving performance order 
 test('artist-page local songs match artist credits rather than song titles or unavailable cache', () => {
   const songs = [
     {id:'solo',title:'One',artist:'ＡＤＥＬＥ',status:'completed'},
-    {id:'credit',title:'Two',artist:'Adele, Guest Vocalist',status:'completed'},
+    {id:'credit',title:'Two',artist:'Adele, Guest Vocalist',artists:[{name:'Adele'}, {name:'Guest Vocalist'}],status:'completed'},
     {id:'title',title:'Adele',artist:'Other',status:'completed'},
     {id:'missing',title:'Three',artist:'Adele',status:'video_evicted'},
     {id:'other',title:'Four',artist:'Other',status:'completed'},
+    {id:'similar',title:'Five',artist:'NotAdele',status:'completed'},
+    {id:'longer',title:'Six',artist:'Adele Tribute',status:'completed'},
   ];
   assert.deepEqual(artistLibrarySongs(songs,'adele').map(s => s.id), ['solo','credit']);
   assert.deepEqual(artistLibrarySongs(songs,'other').map(s => s.id), ['title','other']);
@@ -113,9 +115,14 @@ test('artist-page local songs match artist credits rather than song titles or un
     {id:'different',artist:'Different',status:'completed'},
     {id:'evicted',artist:'Saved credit',status:'video_evicted'},
   ];
-  const catalogue = [{url:'https://music.youtube.com/watch?v=abcdefghijk'}];
+  const catalogue = [{url:'https://music.youtube.com/watch?v=abcdefghijk',artists:[{name:'Translated credit'}]}];
   assert.deepEqual(artistLibrarySongs(translated,'Translated credit',catalogue).map(s => s.id), ['shared','same-credit']);
   assert.deepEqual(artistLibrarySongs(translated,'Unrelated',[]), []);
+  assert.deepEqual(artistLibrarySongs(translated,'Translated credit',[{url:catalogue[0].url}]).map(s => s.id), ['shared']);
+  const duet = [{...catalogue[0],artists:[{name:'Translated credit'},{name:'Guest'}]}];
+  assert.deepEqual(artistLibrarySongs(translated,'Translated credit',duet).map(s => s.id), ['shared']);
+  const jointCredits = translated.map(song => ({...song,artist:'Lead · Guest'}));
+  assert.deepEqual(artistLibrarySongs(jointCredits,'Translated credit',catalogue).map(s => s.id), ['shared']);
 });
 
 test('recent songs use the latest performance of each source', () => {
@@ -173,6 +180,28 @@ test('artist shelf starts with eight Chinese and four English credits using song
   const sparse = [songs[0],songs[10],songs[16]];
   assert.deepEqual(libraryArtists(sparse).map(a => a.name), ['Chinese 0','英文 0','Other']);
   assert.deepEqual(libraryArtists([...songs, ...Array.from({length:3}, () => songs[9])])[0].name, 'Chinese 9');
+});
+
+test('collaborators have separate artist entries while punctuation within a name stays intact', () => {
+  const songs = [
+    {id:'duet',artist:'Lead · Guest',poster:'/duet.jpg',status:'completed'},
+    {id:'solo',artist:'Lead',poster:'/solo.jpg',status:'completed'},
+    {id:'duplicate',artist:'Guest',artists:[{name:'Guest'}, {name:'Ｇｕｅｓｔ'}],status:'completed'},
+    {id:'band',artist:'Combined display',artists:[{name:'Orchestra · North'}],status:'completed'},
+    ...['Earth, Wind & Fire','AC/DC','Simon & Garfunkel','Artist·Name'].map(artist => ({artist,status:'completed'})),
+  ];
+  const original = structuredClone(songs);
+  const artists = libraryArtists(songs);
+  assert.deepEqual(artists.map(a => a.name), ['Lead','Guest','Orchestra · North','Earth, Wind & Fire','AC/DC','Simon & Garfunkel','Artist·Name']);
+  assert.equal(artists[0].count, 2);
+  assert.equal(artists[0].poster, '/solo.jpg');
+  assert.equal(artists[1].count, 2);
+  assert.equal(artists[1].poster, undefined);
+  assert.deepEqual(artistLibrarySongs(songs,'Lead').map(s => s.id), ['duet','solo']);
+  assert.deepEqual(artistLibrarySongs(songs,'Guest').map(s => s.id), ['duet','duplicate']);
+  assert.deepEqual(artistLibrarySongs(songs,'Orchestra · North').map(s => s.id), ['band']);
+  assert.deepEqual(artistLibrarySongs(songs,'North'), []);
+  assert.deepEqual(songs, original);
 });
 
 test('search calls only YouTube and preserves every returned result in order', async () => {

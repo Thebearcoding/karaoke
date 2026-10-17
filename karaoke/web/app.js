@@ -1,7 +1,7 @@
 import { Player } from './player.js';
 import { mountPreview } from './preview.js';
 import { isStaleRoomSnapshot, LocalPlayback, PlaybackTabs, RoomEvents, queueToTop, queueTopCandidates, preparationRetry } from './room-state.js';
-import { createVideoSearch, createViewHistory, previewURL, searchLibrary, artistLibrarySongs, librarySongs, libraryArtists, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, queuePositions, historySuggestions, lyricLabel } from './search.js';
+import { createVideoSearch, createViewHistory, previewURL, searchLibrary, artistLibrarySongs, librarySongs, libraryArtists, songArtists, paginateSongs, filterSongs, playCount, orderResults, queueKey, queuePosition, queuePositions, historySuggestions, lyricLabel } from './search.js';
 
 const $ = id => document.getElementById(id);
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -314,8 +314,9 @@ function songRow(song, index, {artists = false, videos = false, local = false, i
   const tag = playable || catalogueAction ? 'button' : 'a';
   const action = playable ? `<button class="music-add" ${inLibrary ? `data-song="${escape(song.id)}"` : `data-add-video="${index}"`} aria-label="点歌：${escape(song.title)}">${icon('plus')}<span>点歌</span></button>` :
     `<${tag} class="music-add" ${open}>${song.kind === 'album' ? '查看专辑' : catalogueAction ? '查看歌曲' : '打开'} ${icon('arrow')}</${tag}>`;
-  const credits = song.artists?.length ? song.artists.map(a => a.id ? `<button data-artist-id="${escape(a.id)}" data-artist-name="${escape(a.name)}">${escape(a.name)}</button>` : escape(a.name)).join(' · ') : local && song.uploader ? `<button data-search-artist="${escape(song.uploader)}">${escape(song.uploader)}</button>` : escape(song.uploader || '—');
-  const artistText = escape(song.artists?.map(a => a.name).join(' · ') || song.uploader || '—');
+  const performers = local ? songArtists(song) : song.artists || [];
+  const credits = performers.length ? performers.map(a => local ? `<button data-search-artist="${escape(a.name)}">${escape(a.name)}</button>` : a.id ? `<button data-artist-id="${escape(a.id)}" data-artist-name="${escape(a.name)}">${escape(a.name)}</button>` : escape(a.name)).join(' · ') : escape(song.uploader || '—');
+  const artistText = escape(performers.map(a => a.name).join(' · ') || song.uploader || '—');
   const plays = playCount(song.views) === null ? null : formatPlays(song.views);
   const kind = song.kind === 'album' ? '专辑' : song.kind === 'artist' ? '歌手' : song.version || '';
   const status = inLibrary && song.status === 'failed' ? '<span class="library-status is-failed">准备失败</span>' : '';
@@ -325,7 +326,7 @@ function songRow(song, index, {artists = false, videos = false, local = false, i
   return `<article class="music-row" ${inLibrary ? `data-card="${escape(song.id)}"` : `data-result="${index}"`} role="row"><span class="music-rank" role="cell">${String(index+1).padStart(2,'0')}</span>
     <div class="music-song" role="cell"><${tag} class="music-cover" ${open} aria-label="${playable ? '预览' : '打开'}：${escape(song.title)}">${thumbnail}<span>${icon(playable ? 'play' : 'arrow')}</span></${tag}>
       <div class="music-title"><h3><${tag} ${open} title="${escape(song.title)}"><span class="music-name">${escape(song.title)}</span><span class="music-compact-artist"><span>${artistText}</span>${kind ? `<small>${escape(kind)}</small>` : ''}${plays !== null && !local ? `<span class="music-compact-plays" aria-label="播放量 ${plays}">${plays}次</span>` : ''}${song.duration ? `<span class="music-compact-duration" aria-label="时长 ${time(song.duration)}">${time(song.duration)}</span>` : ''}</span></${tag}></h3>${meta}${inLibrary && song.status === 'running' ? `<div class="preparation-slot">${preparationHTML(song)}</div>` : ''}</div></div>
-    <div class="music-credits" role="cell" title="${escape(song.artists?.map(a => a.name).join(' · ') || song.uploader || '')}">${inLibrary ? `<div class="song-info-row">${credits}${preparationElapsedHTML(song)}</div>` : credits}</div>
+    <div class="music-credits" role="cell" title="${artistText}">${inLibrary ? `<div class="song-info-row"><span class="song-credits">${credits}</span>${preparationElapsedHTML(song)}</div>` : credits}</div>
     <div class="music-album" role="cell" title="${escape(song.album || '')}">${escape(song.album || '—')}</div>
     <div class="music-facts"><div class="music-plays${plays === null ? ' is-empty' : ''}" role="cell">${plays !== null ? `${plays}<small>播放</small>` : '—'}</div>
     <div class="music-duration${!song.duration ? ' is-empty' : ''}" role="cell">${song.duration ? time(song.duration) : '—'}</div></div>

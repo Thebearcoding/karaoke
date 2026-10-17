@@ -221,17 +221,33 @@ export function historySuggestions(history) {
   return {recent:[...recent.values()]};
 }
 
+function artistKey(name) {
+  return name.normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+}
+
+export function songArtists(song) {
+  // Only the display separator we use is splittable; punctuation can be part of a name.
+  const credits = song.artists?.length ? song.artists : (song.artist || '').split(/\s+·\s+/).map(name => ({name}));
+  const unique = new Map();
+  for (const credit of credits) {
+    const name = credit.name.trim().replace(/\s+/g, ' '), key = artistKey(name);
+    if (name && !unique.has(key)) unique.set(key, {...credit, name});
+  }
+  return [...unique.values()];
+}
+
 export function libraryArtists(library) {
   const artists = new Map();
   for (const song of librarySongs(library)) {
-    const name = (song.artist || '').trim().replace(/\s+/g, ' ');
-    if (!name) continue;
-    const key = name.normalize('NFKC').toLocaleLowerCase();
-    if (!artists.has(key)) artists.set(key, {name, poster:song.poster, count:0, languages:new Set()});
-    const artist = artists.get(key);
-    artist.count++;
-    artist.poster ||= song.poster;
-    artist.languages.add(song.language);
+    const credits = songArtists(song);
+    for (const {name} of credits) {
+      const key = artistKey(name);
+      if (!artists.has(key)) artists.set(key, {name, count:0, languages:new Set()});
+      const artist = artists.get(key);
+      artist.count++;
+      if (credits.length === 1) artist.poster ||= song.poster;
+      artist.languages.add(song.language);
+    }
   }
   const ranked = [...artists.values()].sort((a,b) => b.count-a.count);
   const selected = new Set();
@@ -249,11 +265,17 @@ export function searchLibrary(library, query) {
 
 export function artistLibrarySongs(library, name, catalogue = []) {
   const ready = librarySongs(library);
-  const sources = new Set(catalogue.map(queueKey).filter(Boolean));
-  const matches = new Set(name ? filterSongs(ready, name, ['artist']) : []);
-  for (const song of ready) if (sources.has(queueKey(song))) matches.add(song);
-  const credits = new Set([...matches].map(song => song.artist).filter(Boolean));
-  return ready.filter(song => matches.has(song) || credits.has(song.artist));
+  const sources = new Map(catalogue.map(song => [queueKey(song), song]).filter(([key]) => key));
+  const selected = artistKey(name), aliases = new Set([selected]);
+  for (const song of ready) {
+    const source = sources.get(queueKey(song));
+    if (!source) continue;
+    const local = songArtists(song), remote = songArtists(source);
+    // A shared duet does not establish which local credit names the selected artist.
+    if (local.length === 1 && remote.length === 1 && artistKey(remote[0].name) === selected)
+      aliases.add(artistKey(local[0].name));
+  }
+  return ready.filter(song => sources.has(queueKey(song)) || songArtists(song).some(artist => aliases.has(artistKey(artist.name))));
 }
 
 export function librarySongs(library, filter = 'all', query = '') {
