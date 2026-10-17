@@ -2,7 +2,7 @@
 
 本目录保存点歌、搜索、待唱列表和字幕播放的六张实际截图，拍摄于隔离的本地演示环境。
 
-歌手栏按独立署名提供入口，合唱参与者分别显示；圆形图片取自该歌手独立署名的歌曲封面，没有这类封面时显示姓名字标。
+桌面演示截图中的歌手头像采用 YouTube Music 的歌手资料图片；歌曲列表中的合唱署名分别展示。
 
 ## 字幕功能
 
@@ -18,6 +18,7 @@
 | YOASOBI《群青》封面及歌曲信息 | [原视频](https://www.youtube.com/watch?v=Y4nEEZwckuU) |
 | 五月天《突然好想你》封面及歌曲信息 | [原视频](https://www.youtube.com/watch?v=oDqWPLRIMdY) |
 | 孙楠、韩红《美丽的神话》封面及歌曲信息 | [原视频](https://www.youtube.com/watch?v=n5sjpCQhTDk) |
+| 桌面歌手栏头像 | YouTube Music 歌手资料：[周杰伦](https://music.youtube.com/channel/UCL2MDNdwEtV6aYUgNjFQGZA)、[五月天](https://music.youtube.com/channel/UCQyweuVOAh3NHGKDDadRSbg)、[林俊杰](https://music.youtube.com/channel/UCUJ3KuIIgvh8eVItvb-EdFQ)、[陈奕迅](https://music.youtube.com/channel/UC2rCynaFhWz7MeRoqJLvcow)、[米津玄师](https://music.youtube.com/channel/UCC_OGcKdYY-aWFvVMFVGbzw)、[YOASOBI](https://music.youtube.com/channel/UCI6B8NkZKqlFWoiC_xE-hzA)。 |
 | 综合搜索、歌手搜索中的封面与曲目信息 | YouTube Music 返回的 “Lemon” 与 “陳奕迅” 搜索结果；结果可能随时间和地区变化。 |
 
 粤拼由当前字幕代码及 PyCantonese 生成，词典数据的署名与许可见 [THIRD_PARTY.md](../../THIRD_PARTY.md#粤拼数据署名)。
