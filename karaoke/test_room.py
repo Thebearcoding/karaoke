@@ -47,7 +47,8 @@ def test_library_keeps_completed_song_after_1000_newer_jobs(tmp_path, path, key)
         assert client.get(song['artifacts']['mv']).content == b'media'
 
 
-def test_progress_snapshots_do_not_read_retired_attempts_after_database_upgrade(tmp_path, monkeypatch):
+@pytest.mark.parametrize('distinct_sources', [False, True])
+def test_progress_snapshots_do_not_read_retired_attempts_after_database_upgrade(tmp_path, monkeypatch, distinct_sources):
     app = create_app(tmp_path, version='test')
     store = app.state.store
     prepared = ready_job(store)
@@ -56,11 +57,16 @@ def test_progress_snapshots_do_not_read_retired_attempts_after_database_upgrade(
     for number in range(10000):
         job = dict(active, id=str(uuid4()), status='failed' if number % 2 else 'evicted',
                    created_at='2000-01-01T00:00:00Z')
+        if distinct_sources:
+            job['input'] = {**job['input'], 'url': f'https://www.youtube.com/watch?v=retired{number:04d}'}
         rows.append((job['id'], 'retired', job['status'], job['created_at'], json.dumps(job)))
     with store.connect() as db:
         db.executemany('INSERT INTO jobs VALUES (?,?,?,?,?)', rows)
         # An existing installation has the history but no source index yet.
         db.execute('DROP TABLE IF EXISTS library_sources')
+        db.execute('DROP INDEX IF EXISTS jobs_library_media')
+        db.execute('DROP INDEX IF EXISTS jobs_library_candidates')
+        db.execute('DROP INDEX IF EXISTS jobs_source_latest')
     app = create_app(tmp_path, version='test')
     store, room = app.state.store, app.state.room
     state = room.read()
@@ -117,6 +123,29 @@ def test_library_keeps_older_media_when_a_newer_completed_attempt_is_incomplete(
     assert card['status'] == 'completed'
 
 
+def test_library_keeps_queue_failures_without_unrelated_retired_sources(tmp_path):
+    app = create_app(tmp_path, version='test')
+    store, room = app.state.store, app.state.room
+    queued, _ = store.create(JobRequest(url=URL, force=True), 'test')
+    newer, _ = store.create(JobRequest(url=URL, force=True), 'test')
+    retired, _ = store.create(JobRequest(url='https://www.youtube.com/watch?v=retired0000'), 'test')
+    for job in (queued, newer, retired):
+        store.update(job['id'], status='failed')
+    state = room.read()
+    state['entries'] = [dict(id='queued', job_id=queued['id'])]
+    room.save(state)
+    snapshot = room.snapshot()
+    assert snapshot['entries'][0]['job_id'] == queued['id']
+    assert snapshot['entries'][0]['status'] == 'failed'
+    assert len(snapshot['library']) == 1
+    assert snapshot['library'][0]['id'] == newer['id']
+    assert snapshot['library'][0]['status'] == 'failed'
+    state['entries'] = []
+    room.save(state)
+    assert room.library() == []
+    assert all(store.read(job['id'])['status'] == 'failed' for job in (queued, newer, retired))
+
+
 def test_snapshot_shares_batch_reads_but_keeps_older_entries_and_fresh_metadata(tmp_path, monkeypatch):
     room = create_app(tmp_path, version='test').state.room
     jobs = [room.store.create(JobRequest(url=f'https://www.youtube.com/watch?v=abcdefghij{i}'), 'test')[0]
@@ -136,7 +165,7 @@ def test_snapshot_shares_batch_reads_but_keeps_older_entries_and_fresh_metadata(
 
     monkeypatch.setattr(room.store, 'read', read_one)
     # A queued entry missing from the batch still needs its metadata.
-    monkeypatch.setattr(room.store, 'library_jobs', lambda: batches.append(True) or jobs[:2])
+    monkeypatch.setattr(room.store, 'library_jobs', lambda queue_job_ids: batches.append(True) or jobs[:2])
     monkeypatch.setattr(room, 'featured', lambda: catalogs.append(True) or featured)
     snapshot = room.snapshot()
     assert [song['title'] for song in snapshot['entries']] == ['Catalog 0', 'Catalog 1', 'Catalog 2', '歌曲已不可用']

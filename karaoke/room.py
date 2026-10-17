@@ -231,7 +231,7 @@ class Room:
 
     def snapshot(self):
         state = self.read()
-        jobs = self.store.library_jobs()
+        jobs = self.store.library_jobs(self.preparation_order(state))
         by_id = {job['id']: job for job in jobs}
         featured = self.featured()
         catalog = {song['url']: song for song in reversed(featured)}
@@ -283,12 +283,14 @@ class Room:
         return json.loads(path.read_text()) if path.exists() else []
 
     def library(self, *, jobs=None, featured=None):
+        if jobs is None:
+            jobs = self.store.library_jobs(self.preparation_order(self.read()))
         featured = self.featured() if featured is None else featured
         catalog = {song['url']: song for song in reversed(featured)}
         songs = [dict(song, status='unprepared') for song in featured]
         by_url = {s['url']: s for s in songs}
         seen = {}
-        for job in self.store.library_jobs() if jobs is None else jobs:
+        for job in jobs:
             url = job['input']['url']
             if seen.get(url) == 2:
                 continue

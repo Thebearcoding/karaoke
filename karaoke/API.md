@@ -20,7 +20,9 @@ API 的依赖文件只安装服务依赖。新检出请按[安装说明](../SETU
 
 网页使用 `GET /v1/room/events` 的 SSE 长连接，不轮询。初次连接和漏过更新时收到 `room` 完整快照；连续更新收到 `room_patch`。同一次状态变化共用一次快照读取和 JSON 编码。
 
-完整快照带 `stream`（服务实例标识）和 `sequence`（推送序号，区别于命令的 `revision`）。补丁带同一 `stream`、`base`、`sequence`、`changes` 和 `collections`：`changes` 替换顶层字段；`entries`、`history`、`library` 按 ID 提供 `upsert`、`remove`，顺序变化时另给完整 ID `order`。包含重复 ID 的旧列表直接整体替换。客户端只有持有同一流的 `base` 才应用补丁，否则重连取完整快照。`server_time` 和本连接的 `playback_entry` 随每帧发送，不放进共享缓存。慢连接只保留一次更新通知，不累积补丁队列。 每份共享快照的待唱列表和曲库复用同一批任务记录，目录信息只读取一次；不在近期任务批次内的待唱项仍按 ID 读取。
+完整快照带 `stream`（服务实例标识）和 `sequence`（推送序号，区别于命令的 `revision`）。补丁带同一 `stream`、`base`、`sequence`、`changes` 和 `collections`：`changes` 替换顶层字段；`entries`、`history`、`library` 按 ID 提供 `upsert`、`remove`，顺序变化时另给完整 ID `order`。包含重复 ID 的旧列表直接整体替换。客户端只有持有同一流的 `base` 才应用补丁，否则重连取完整快照。`server_time` 和本连接的 `playback_entry` 随每帧发送，不放进共享缓存。慢连接只保留一次更新通知，不累积补丁队列。每份共享快照的待唱列表和曲库复用同一批任务记录，目录信息只读取一次。
+
+曲库按索引读取排队／运行任务、已完成／可恢复媒体及所有待唱项，并补齐这些来源的最新记录；任务总数超过 1,000 条也保留旧成品。没有成品媒体且已移出待唱的历史失败不参与快照，任务记录和检查点仍保留，供查询及再次点歌时复用。
 
 断线重连采用有随机抖动的指数退避（起始 0.5–1 秒，上限 15–30 秒）；45 秒未收到数据或心跳也进入退避。收到有效状态或心跳后重置退避。下面的 `GET /v1/jobs/{id}` 仍供脚本按需查询。
 
@@ -30,7 +32,7 @@ API 的依赖文件只安装服务依赖。新检出请按[安装说明](../SETU
 
 | 接口 | 用途 |
 |---|---|
-| `GET /v1/library` | 列出已知歌曲，实际文件完整时才标记为已准备 |
+| `GET /v1/library` | 按来源列出当前任务及已准备／待恢复歌曲，实际文件完整时才标记为已准备 |
 | `GET /v1/room` | 待唱 `entries`、倒序演唱记录 `history`、准备状态和兼容旧客户端的播放字段 |
 | `POST /v1/room/entries` | 传入 `{ "url": "..." }` 点新歌，或 `{ "job_id": "..." }` 复用已准备歌曲 |
 | `POST /v1/room/commands` | 网页共享操作：`finish`、`remove`、`reorder`、`retry`、`reprepare`；另保留旧客户端播放命令 |
