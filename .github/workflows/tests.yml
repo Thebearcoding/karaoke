@@ -27,8 +27,32 @@ jobs:
       - run: python -m pip install -r requirements-lint.txt
       - run: ruff check .
 
+  types:
+    name: Python / ty
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-*.txt
+            karaoke/requirements*.txt
+            .github/workflows/tests.yml
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.11.0 torchaudio==2.11.0
+          python -m pip install -r requirements-dev.txt
+          python -m pip check
+      - name: Check all Python types
+        run: ty check --python "$(command -v python)"
+
   python:
-    name: Python / types, API, queue and algorithms
+    name: Python / API, queue and algorithms
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
@@ -62,8 +86,6 @@ jobs:
           persist-credentials: false
       - name: Prepare the Japanese pronunciation dictionary
         run: python -c 'import pyopenjtalk; pyopenjtalk.run_frontend("こんにちは")'
-      - name: Check all Python types
-        run: ty check --python "$(command -v python)"
       - name: Check startup with an empty library
         env:
           KARAOKE_DATA_DIR: ${{ runner.temp }}/karaoke-empty
