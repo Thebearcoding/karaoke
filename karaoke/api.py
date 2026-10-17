@@ -160,8 +160,17 @@ class Store:
         self.path = self.root/'jobs.sqlite3'
         with self.connect() as db:
             db.execute('PRAGMA journal_mode=WAL')
+            db.execute('BEGIN IMMEDIATE')
             db.execute('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, cache_key TEXT, status TEXT, created_at TEXT, doc TEXT)')
             db.execute('CREATE INDEX IF NOT EXISTS jobs_cache ON jobs(cache_key, status)')
+            db.execute("""CREATE INDEX IF NOT EXISTS jobs_source_latest
+                ON jobs(json_extract(doc, '$.input.url'), created_at DESC)""")
+            db.execute("""CREATE INDEX IF NOT EXISTS jobs_library_available ON jobs(id)
+                WHERE status IN ('queued','running','completed') OR json_extract(doc, '$.restore_video')=1
+                OR (status='audio_ready' AND json_extract(doc, '$.audio_result') IS NOT NULL)""")
+            db.execute('DROP TABLE IF EXISTS library_sources')
+            db.execute('DROP INDEX IF EXISTS jobs_library_media')
+            db.execute('DROP INDEX IF EXISTS jobs_library_candidates')
         self.cache = SongCache(self, cache_limit_bytes)
 
     @contextmanager
@@ -316,6 +325,24 @@ class Store:
             db.execute('INSERT INTO jobs VALUES (?,?,?,?,?)',
                        (job_id, key, 'queued', stamp, json.dumps(doc, ensure_ascii=False)))
         return doc, False
+
+    def library_jobs(self, queue_job_ids=()):
+        # Keep live work/media and queue failures. Only those sources need their
+        # latest attempt, which preserves card identity and metadata on retries.
+        with self.connect() as db:
+            rows = db.execute("""WITH candidates AS (
+                SELECT id, json_extract(doc, '$.input.url') AS url FROM jobs
+                WHERE status IN ('queued','running','completed') OR json_extract(doc, '$.restore_video')=1
+                OR (status='audio_ready' AND json_extract(doc, '$.audio_result') IS NOT NULL)
+                UNION SELECT id, json_extract(doc, '$.input.url') FROM jobs
+                WHERE id IN (SELECT value FROM json_each(?)))
+                SELECT doc FROM jobs WHERE id IN (
+                    SELECT id FROM candidates
+                    UNION SELECT (SELECT id FROM jobs
+                        WHERE json_extract(doc, '$.input.url')=candidates.url
+                        ORDER BY created_at DESC, rowid DESC LIMIT 1) FROM candidates)
+                ORDER BY created_at DESC""", (json.dumps(queue_job_ids),))
+            return [json.loads(row[0]) for row in rows]
 
     def list(self, limit=20, status=None):
         with self.connect() as db:
