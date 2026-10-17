@@ -1,11 +1,11 @@
 """Refine coarse English lyric lines with a dense singing phoneme boundary model."""
 import argparse
-from functools import lru_cache
 import importlib.util
 import json
 import re
 import sys
 import unicodedata
+from functools import lru_cache
 
 import numpy as np
 import torch
@@ -27,8 +27,8 @@ class EnglishSofaAligner:
     def __init__(self, device):
         self.device = device
         sys.path.insert(0, str(ROOT / 'research/subtitles-2026-09-18/sofa'))
-        from modules.task.forced_alignment import LitForcedAlignmentTask
         from modules.rmvpe.spec import MelSpectrogram
+        from modules.task.forced_alignment import LitForcedAlignmentTask
         checkpoint = torch.load(ASSETS / 'model.ckpt', map_location='cpu', weights_only=True)
         self.model = LitForcedAlignmentTask(**checkpoint['hyper_parameters'])
         self.model.load_state_dict(checkpoint['state_dict'])
@@ -44,6 +44,8 @@ class EnglishSofaAligner:
                 self.lexicon.setdefault(fields[0].lower(), fields[1:])
         source = ROOT / 'research/word-onset-2026-09-18/labelmakr/models/g2p_model.py'
         spec = importlib.util.spec_from_file_location('labelmakr_g2p', source)
+        if spec is None or spec.loader is None:
+            raise ImportError(f'Cannot load pronunciation model from {source}')
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         config = yaml.safe_load((ASSETS / 'g2p/cfg.yaml').read_text())

@@ -72,7 +72,7 @@ test('stream retry backs off with jitter and a missing patch base forces a full 
   t.mock.timers.enable({apis:['setTimeout']});
   const streams=[], received=[];
   class Stream extends EventTarget { close() { this.closed=true; } }
-  const events=new RoomEvents(value=>received.push(value),()=>{},url=>{
+  const events=new RoomEvents(value=>received.push(value),()=>{},()=>{
     const stream=new Stream(); streams.push(stream); return stream;
   },()=>0);
   try {

@@ -1,17 +1,18 @@
 """One pass over a frozen corpus using the normal playback policy, without video."""
 import argparse
-from collections import Counter
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import fcntl
 import hashlib
 import json
 import math
-from pathlib import Path
 import shutil
-import sys
 import subprocess
+import sys
 import threading
 import time
+from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -161,7 +162,7 @@ def run_once(manifest, data_dir, report, prepared_dir, base, *, case_urls=(), co
         version = health['pipeline_version']
         if not health.get('preparation_paused') or health.get('running_job'):
             raise ValueError('Pause the normal worker before the one-pass survey')
-        state = json.loads(report.read_text()) if report.exists() else dict(
+        state: dict[str, Any] = json.loads(report.read_text()) if report.exists() else dict(
             run_id=report.parent.name, started_at=stamp(), selection_sha256=selection_hash,
             pipeline_version=version, controller_sha256=digest(Path(__file__)), scope='playback_audio',
             fixed_selection_size=len(selection), cases=[dict(c, audio_attempts=[]) for c in selected])
@@ -235,6 +236,7 @@ def run_once(manifest, data_dir, report, prepared_dir, base, *, case_urls=(), co
             finally:
                 with state_lock:
                     if folder:
+                        assert job is not None
                         diagnostic = {}
                         record_failure(diagnostic, dict(id=job['id'], error=attempt.get('error') or dict(
                             code='survey_diagnostic', message=attempt['outcome'])), folder)

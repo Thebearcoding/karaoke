@@ -1,30 +1,37 @@
 import hashlib
 import io
 import json
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import re
 import subprocess
 import sys
 import threading
 import time
-from urllib.parse import urljoin
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, patch
+from urllib.parse import urljoin
 
-from fastapi.testclient import TestClient
 import numpy as np
 import pytest
+from fastapi.testclient import TestClient
 
+from karaoke.align_lyric_phonemes import protect_line_order
 from karaoke.api import Store, create_app
+from karaoke.cache import GIB, CacheFull, can_restore_video
 from karaoke.exact_stems import validate_preview
 from karaoke.job_schema import JobRequest, video_url
+from karaoke.pipeline import (
+    Pipeline,
+    StageFailure,
+    create_poster,
+    file_hash,
+    processing_error,
+    write_json,
+)
 from karaoke.song_sources import SongText, find_verified_lyrics, prepare_song_text, video_song_info
-from karaoke.align_lyric_phonemes import protect_line_order
-from karaoke.cache import CacheFull, GIB, can_restore_video
-from karaoke.pipeline import Pipeline, StageFailure, create_poster, file_hash, processing_error, write_json
 from karaoke.stage_progress import PREFIX, parse_progress, progress_items
 from karaoke.transcribe_lyrics import repetition_loop, transcribe
-
 
 URL = 'https://www.youtube.com/watch?v=n5sjpCQhTDk'
 
@@ -214,6 +221,7 @@ def test_submission_outputs_cache_and_range_requests(tmp_path):
 @pytest.mark.parametrize('compact', [False, True])
 def test_playback_windows_preserve_channels_gain_and_boundaries_and_release_leases(tmp_path, rate, playback_rate, compact):
     import soundfile as sf
+
     from karaoke.api import playback_window_bytes
     from karaoke.exact_stems import compact_playback_audio
     app = create_app(tmp_path, version='test')
@@ -221,13 +229,13 @@ def test_playback_windows_preserve_channels_gain_and_boundaries_and_release_leas
     job, _ = store.create(JobRequest(url=URL), 'test')
     folder = tmp_path/job['id']
     samples = np.random.default_rng(7).uniform(-.7, .7, (rate*9, 2))
-    artifacts = {}
+    artifacts: dict[str, Any] = {}
     names = ('instrumental', 'backing_vocals', 'lead_vocals')
     for i, name in enumerate(names):
         path = folder/f'{name}.wav'
         sf.write(path, samples/(i+1), rate, subtype='DOUBLE')
         artifacts[name] = dict(path=path.name, bytes=path.stat().st_size)
-    result = dict(artifacts=artifacts, shared_preview_gain=.6)
+    result: dict[str, Any] = dict(artifacts=artifacts, shared_preview_gain=.6)
     if compact:
         result = compact_playback_audio(folder, result)
         assert compact_playback_audio(folder, result) == result
@@ -279,6 +287,7 @@ def test_playback_windows_preserve_channels_gain_and_boundaries_and_release_leas
 @pytest.mark.parametrize('invalid', ['nonfinite', 'clipped'])
 def test_compact_audio_does_not_publish_or_delete_masters_on_failure(tmp_path, invalid):
     import soundfile as sf
+
     from karaoke.exact_stems import compact_playback_audio
     artifacts = {}
     for name in ('instrumental', 'backing_vocals', 'lead_vocals'):
@@ -301,6 +310,7 @@ def test_compact_audio_does_not_publish_or_delete_masters_on_failure(tmp_path, i
 @pytest.mark.parametrize('legacy_flac', [False, True])
 def test_two_track_export_preserves_the_mix_and_streams_only_two_tracks(tmp_path, rate, channels, legacy_flac):
     import soundfile as sf
+
     from karaoke.exact_stems import compact_playback_audio
     from karaoke.tools.soak import verify_stems
     app = create_app(tmp_path)
@@ -345,6 +355,7 @@ def test_two_track_export_preserves_the_mix_and_streams_only_two_tracks(tmp_path
 @pytest.mark.parametrize('video_only', [False, True])
 def test_storage_migration_keeps_identity_and_subtitles_and_releases_intermediates(tmp_path, bad_input, video_only):
     import soundfile as sf
+
     from karaoke.exact_stems import compact_playback_audio
     from karaoke.tools.compact_storage import migrate, video_hash
     store = Store(tmp_path)
@@ -417,6 +428,7 @@ def test_projected_checkpoint_ignores_unused_files_but_rechecks_required_audio(t
 
 def test_runtime_separation_exports_only_its_consumed_target(tmp_path):
     import soundfile as sf
+
     from karaoke.benchmark_neural import run_cases
     wave = np.random.default_rng(2).uniform(-.2, .2, (441, 2)).astype('float32')
     source = tmp_path/'source.wav'
@@ -581,6 +593,7 @@ def test_provider_limit_and_login_hold_survive_restart(tmp_path):
 def test_external_failures_retain_safe_causes_and_do_not_retry_as_software_bugs(tmp_path, rejected):
     import httpx
     from openai import APITimeoutError, ContentFilterFinishReasonError
+
     from karaoke.tools.soak import eligible, record_failure
 
     error = (ContentFilterFinishReasonError() if rejected else
@@ -593,12 +606,12 @@ def test_external_failures_retain_safe_causes_and_do_not_retry_as_software_bugs(
     assert wrapped == direct and 'private' not in str(wrapped)
     assert processing_error(RuntimeError('Request timed out'), tmp_path)['code'] == 'processing_failed'
 
-    attempt = dict(pipeline_version='v1', external_attempt=1)
+    attempt: dict[str, Any] = dict(pipeline_version='v1', external_attempt=1)
     legacy = dict(id=tmp_path.name, error=dict(code='transcribe_failed', message='Generic stage failure'))
     record_failure(attempt, legacy, tmp_path)
     assert attempt['error'] == direct and attempt['retry_provider'] == 'openai'
     assert not attempt['provider_blocked']
-    case = {'attempts': [attempt]}
+    case: dict[str, Any] = {'attempts': [attempt]}
     assert not eligible(case, 'v2', time.time())
     if rejected:
         assert attempt['status'] == 'blocked' and attempt['next_retry_at'] is None
@@ -620,8 +633,9 @@ def test_external_failures_retain_safe_causes_and_do_not_retry_as_software_bugs(
 def test_rate_limit_uses_server_hint_and_distinguishes_request_errors(message, headers, code, delay):
     import httpx
     from openai import RateLimitError
+
     from karaoke.job_schema import provider_error
-    from karaoke.tools.soak import retry_fields, retry_deadline
+    from karaoke.tools.soak import retry_deadline, retry_fields
     response=httpx.Response(429, headers=headers, request=httpx.Request('POST','https://api.openai.com/'))
     error=provider_error(RateLimitError(message,response=response,body={'message':message}))
     assert error['code']=='openai_'+code and error.get('retry_after_seconds')==delay
@@ -683,6 +697,7 @@ def test_download_retry_distinguishes_login_advice_and_respects_long_server_dela
 def test_asr_child_preserves_server_retry_header_for_parent(tmp_path, monkeypatch):
     import httpx
     from openai import RateLimitError
+
     from karaoke import transcribe_lyrics
     response=httpx.Response(429,headers={'Retry-After':'95'},request=httpx.Request('POST','https://api.openai.com/'))
     error=RateLimitError('Rate limit reached',response=response,body=None)
@@ -697,6 +712,7 @@ def test_asr_child_preserves_server_retry_header_for_parent(tmp_path, monkeypatc
 def test_soak_preserves_failed_stage_diagnostics_after_cache_eviction(tmp_path):
     import gzip
     import shutil
+
     from karaoke.tools.soak import record_failure
 
     folder = tmp_path/'job'
@@ -729,11 +745,11 @@ def test_soak_preserves_failed_stage_diagnostics_after_cache_eviction(tmp_path):
     for name, value in final_validation.items():
         (folder/name).write_text(json.dumps(value))
     (folder/'vocals.mp3').write_bytes(b'private audio')
-    attempt = dict(external_attempt=1)
+    attempt: dict[str, Any] = dict(external_attempt=1)
     error = dict(code='align_repeats_failed', message='Generic stage failure')
     record_failure(attempt, dict(id='job', error=error), folder)
     (folder/'repeated-lyrics/run.json').write_text('{"attempts": [{"reason": "changed alignment"}]}')
-    retry = dict(external_attempt=1)
+    retry: dict[str, Any] = dict(external_attempt=1)
     record_failure(retry, dict(id='job', error=error), folder)
     shutil.rmtree(folder)
 
@@ -1043,7 +1059,9 @@ def test_alignment_cache_ignores_unrelated_model_changes(tmp_path, monkeypatch):
 def test_manual_source_captions_are_cached_and_replace_an_asr_draft(tmp_path, monkeypatch, formatting):
     import httpx
     import soundfile as sf
-    from karaoke import source_captions, pipeline as module
+
+    from karaoke import pipeline as module
+    from karaoke import source_captions
     pipeline = Pipeline(dict(url=URL), tmp_path)
     metadata = dict(id='n5sjpCQhTDk', subtitles={'zh-Hant': [dict(ext='json3', url=
         'https://www.youtube.com/api/timedtext?v=n5sjpCQhTDk&lang=zh-Hant&fmt=json3')]})
@@ -1074,7 +1092,7 @@ def test_manual_source_captions_are_cached_and_replace_an_asr_draft(tmp_path, mo
     (tmp_path/'asr').mkdir()
     (tmp_path/'asr/transcription.json').write_text(json.dumps(transcription))
     sf.write(tmp_path/'vocals-16k.wav', np.ones(16000*14)*.1, 16000)
-    draft = dict(title='Song',artist='Singer',language='Chinese',lines=lines,
+    draft: dict[str, Any] = dict(title='Song',artist='Singer',language='Chinese',lines=lines,
                  provenance=dict(kind='asr_draft'),source_url=URL)
     monkeypatch.setattr(module, 'prepare_song_text', lambda *a,**k: json.loads(json.dumps(draft)))
     pipeline.prepare_lyrics(metadata, 14)
@@ -1119,6 +1137,7 @@ def test_only_same_source_manual_language_captions_are_eligible(url):
 
 def test_manual_caption_failure_obeys_backoff_and_keeps_cached_diagnostics(tmp_path, monkeypatch):
     import httpx
+
     from karaoke import source_captions
     from karaoke.stage_cache import StageCache, retained_files
     url = 'https://www.youtube.com/api/timedtext?v=example&lang=en&fmt=json3'
@@ -1149,9 +1168,12 @@ def test_manual_caption_failure_obeys_backoff_and_keeps_cached_diagnostics(tmp_p
 @pytest.mark.parametrize('soundtrack_credit', [False, True])
 @pytest.mark.parametrize('performance', [None, 'same', 'different', 'unspecified'])
 def test_online_lyrics_correct_asr_text_without_using_provider_times(tmp_path, monkeypatch, padded, soundtrack_credit, performance):
-    import soundfile as sf
     from urllib.parse import parse_qs, urlsplit
-    from karaoke import lyric_lookup, pipeline as module
+
+    import soundfile as sf
+
+    from karaoke import lyric_lookup
+    from karaoke import pipeline as module
     pipeline = Pipeline(dict(url=URL), tmp_path)
     (tmp_path/'download').mkdir()
     info = tmp_path/'download/source.info.json'
@@ -1256,9 +1278,9 @@ def test_lyric_text_search_skips_a_title_only_result_before_alignment():
 def test_published_text_can_cross_recordings_without_relaxing_asr_validation(source_title, album, duration, reason):
     from karaoke.lyric_lookup import lyric_candidate
     song = dict(title='Evening', artist='Singer')
-    row = dict(id=1, trackName='Evening', artistName='Singer', albumName=album,
+    row: dict[str, Any] = dict(id=1, trackName='Evening', artistName='Singer', albumName=album,
                duration=duration, instrumental=False, plainLyrics='\n'.join(['Stars above the quiet shore'] * 6))
-    packet = dict(status='ok', results=[dict(row, artistName='Someone else'), row])
+    packet: dict[str, Any] = dict(status='ok', results=[dict(row, artistName='Someone else'), row])
     assert lyric_candidate(packet, song, None, 257., source_title=source_title)[0] is None
     lines, report = lyric_candidate(packet, song, None, 257., source_title=source_title, allow_recording_mismatch=True)
     assert lines == row['plainLyrics'].splitlines() and reason in report['recording_mismatches']
@@ -1274,8 +1296,9 @@ def test_published_text_can_cross_recordings_without_relaxing_asr_validation(sou
 @pytest.mark.parametrize('found', [True, False])
 @pytest.mark.parametrize('audio_only', [True, False])
 def test_online_lyric_candidate_skips_asr_only_for_interactive_playback(tmp_path, monkeypatch, found, audio_only):
-    from karaoke import lyric_lookup
     from concurrent.futures import Future
+
+    from karaoke import lyric_lookup
     pipeline = Pipeline(dict(url=URL), tmp_path, audio_only=audio_only)
     lyrics = dict(title='Evening', artist='Singer', language='English', lines=['Stars above the quiet shore'],
                   provenance=dict(kind='online_lyric_text', route='lyrics_first', needs_review=True))
@@ -1307,11 +1330,12 @@ def test_online_lyric_candidate_skips_asr_only_for_interactive_playback(tmp_path
 @pytest.mark.parametrize('wrong_artist', [False, True])
 def test_empty_lyric_search_broadens_query_without_weakening_identity(tmp_path, monkeypatch, first_found, wrong_artist):
     from urllib.parse import parse_qs, urlsplit
+
     from karaoke import lyric_lookup
     from karaoke.stage_cache import StageCache
     song = dict(title='Evening', artist='Singer')
     metadata = tmp_path/'source.info.json'; metadata.write_text('{}')
-    row = dict(id=1, trackName='Evening', artistName='Other' if wrong_artist else 'Singer',
+    row: dict[str, Any] = dict(id=1, trackName='Evening', artistName='Other' if wrong_artist else 'Singer',
         duration=30., instrumental=False, plainLyrics='Stars above the quiet shore\nWe keep singing once more')
     calls = []
     def fetch(url):
@@ -1329,11 +1353,11 @@ def test_empty_lyric_search_broadens_query_without_weakening_identity(tmp_path, 
 @pytest.mark.parametrize('title', ['晚風', '晚風 (Official Music Video)', '晚風 [Official Audio]',
     '晚風　歌詞付き', '晚風【歌詞付き】', '晚風 (歌詞つき)', '晚風 with lyrics', '晚風 Official Lyric Video'])
 def test_lyrics_first_search_uses_metadata_duration_and_retains_review_status(tmp_path, monkeypatch, title):
-    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     (tmp_path/'download').mkdir()
     (tmp_path/'download/source.info.json').write_text('{"id":"fixture"}')
-    row = dict(id=1, trackName='晚风', artistName='林林', duration=30., instrumental=False,
+    row: dict[str, Any] = dict(id=1, trackName='晚风', artistName='林林', duration=30., instrumental=False,
                plainLyrics='微風裡慢慢歌唱\n星光下靜靜傾聽', syncedLyrics='[99:99]irrelevant')
     queries = []
     def fetch(url):
@@ -1362,7 +1386,7 @@ def test_lyrics_first_search_uses_metadata_duration_and_retains_review_status(tm
 @pytest.mark.parametrize('explicit_identity', [True, False])
 def test_unmatched_lyrics_retry_cached_native_identity_once_without_repeating_blocked_providers(
         tmp_path, monkeypatch, recovered, explicit_identity):
-    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     calls, metadata_calls, limited_calls = [], [], []
     body = ['微風裡慢慢歌唱', '星光下靜靜傾聽']
@@ -1405,9 +1429,10 @@ def test_unmatched_lyrics_retry_cached_native_identity_once_without_repeating_bl
 @pytest.mark.parametrize('same_recording,explicit', [(True,False),(False,False),(True,True)])
 @pytest.mark.parametrize('unusable_body', [False, True])
 def test_lyric_identity_reuses_platform_native_alias_without_model(tmp_path, monkeypatch, same_recording, explicit, unusable_body):
-    from karaoke import lyric_lookup, lyric_consensus
-    from karaoke.stage_cache import StageCache
     from openai import OpenAIError
+
+    from karaoke import lyric_consensus, lyric_lookup
+    from karaoke.stage_cache import StageCache
     body = ['우리 함께 노래해', '밤하늘 별을 바라보며 함께 걸어가']
     calls = []
     def extract(*args):
@@ -1440,9 +1465,10 @@ def test_lyric_identity_reuses_platform_native_alias_without_model(tmp_path, mon
                                     'other_artist', 'no_corroboration', 'already_corroborated'])
 @pytest.mark.parametrize('initial_status', ['insufficient_sources', 'conflicting'])
 def test_unconfirmed_lyrics_recover_linked_channel_bilingual_artist(tmp_path, monkeypatch, scenario, initial_status):
-    from karaoke import lyric_lookup, lyric_consensus
-    from karaoke.stage_cache import StageCache
     from openai import OpenAIError
+
+    from karaoke import lyric_consensus, lyric_lookup
+    from karaoke.stage_cache import StageCache
     romanized = ['Yozora ni chiisana hoshi ga hikaru']
     native = ['夜空に小さな星が光る']
     calls = []
@@ -1475,7 +1501,7 @@ def test_unconfirmed_lyrics_recover_linked_channel_bilingual_artist(tmp_path, mo
 
 @pytest.mark.parametrize('scenario', ['recover', 'explicit', 'other_video', 'no_corroboration', 'similarity_support'])
 def test_conflicting_lyrics_query_recording_native_credit_before_accepting_outlier(tmp_path, monkeypatch, scenario):
-    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     original = ['The first source disagrees with the second']
     native = ['微風裡慢慢歌唱', '星光下靜靜傾聽']
@@ -1503,10 +1529,12 @@ def test_conflicting_lyrics_query_recording_native_credit_before_accepting_outli
 @pytest.mark.parametrize('scenario', ['recover', 'explicit', 'other_video', 'subscription_channel', 'usable', 'artist_error', 'native_recording'])
 def test_lyric_identity_resolves_recording_artist_id_only_after_lookup_fails(tmp_path, monkeypatch, scenario):
     from urllib.parse import parse_qs, urlsplit
-    from karaoke import lyric_lookup, lyric_consensus
-    from karaoke.stage_cache import StageCache
-    from openai import OpenAIError
+
     import ytmusicapi
+    from openai import OpenAIError
+
+    from karaoke import lyric_consensus, lyric_lookup
+    from karaoke.stage_cache import StageCache
     body = ['微風裡慢慢歌唱', '星光下靜靜傾聽']
     calls = []
     class Music:
@@ -1676,7 +1704,7 @@ def test_audio_language_orders_existing_lyric_versions_without_vetoing_fallback(
 
 
 def test_cantonese_source_tag_survives_han_script_detection(tmp_path, monkeypatch):
-    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     text = ['晚風吹過我哋一齊唱歌']
     monkeypatch.setattr(lyric_consensus, 'fetch_lyric_consensus', lambda *a, **kw:
@@ -1691,8 +1719,9 @@ def test_cantonese_source_tag_survives_han_script_detection(tmp_path, monkeypatc
 @pytest.mark.parametrize('hint,detected,expected', [(None,'ko','ko'),('unrecognized', 'fr','fr'),
                                                  ('English',None,'en'),(None,None,'de')])
 def test_audio_language_supplies_the_real_alignment_tokenizer(monkeypatch, hint, detected, expected):
-    from karaoke import local_asr
     from stable_whisper.alignment import get_alignment_tokenizer
+
+    from karaoke import local_asr
     probes = [dict(language=code,probability=p) for code,p in [('en',.6),('fr',.7),('de',.9)]]
     calls = []
     def detect(model, samples):
@@ -1726,10 +1755,9 @@ def test_lyric_language_ignores_invisible_formatting(text, expected, decoration)
     (None,None,'우리 함께 노래해 밤하늘 별을 바라보며 함께 걸어가')])
 def test_new_language_uses_native_metadata_and_multilingual_alignment(tmp_path, monkeypatch, code, name, text):
     from karaoke.job_schema import song_language
-    from karaoke.lyric_lookup import text_language
-    from karaoke.subtitles import highlight_spans
-    from karaoke.subtitles import lyric_cues
     from karaoke.local_asr import whisper_language
+    from karaoke.lyric_lookup import text_language
+    from karaoke.subtitles import highlight_spans, lyric_cues
     request=JobRequest(url=URL,language=code)
     assert request.language==name==song_language(code)
     if code:
@@ -1757,7 +1785,7 @@ def test_new_language_uses_native_metadata_and_multilingual_alignment(tmp_path, 
 
 @pytest.mark.parametrize('corroborated', [True, False])
 def test_isolated_lyric_source_reuses_native_metadata_but_requires_corroboration(tmp_path, monkeypatch, corroborated):
-    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     original=['古い街を歩いている', '知らない道を進んでいる']
     recovered=['星空に色を重ねて', '夜の向こうで歌っている']
@@ -1794,7 +1822,7 @@ def test_isolated_lyric_source_reuses_native_metadata_but_requires_corroboration
 
 @pytest.mark.parametrize('outcome', ['matched', 'ambiguous', 'single_source', 'explicit'])
 def test_uncredited_upload_recovers_lyrics_from_catalogue_without_guessing_artist(tmp_path, monkeypatch, outcome):
-    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     searches, lookups = [], []
     body = ['星空の向こうまであなたと歩いてゆこう'] * 4
@@ -1870,7 +1898,8 @@ def test_catalogue_identity_respects_provider_hold_without_blocking_other_source
 def test_uncredited_different_length_upload_keeps_work_text_without_claiming_a_singer(
         tmp_path, monkeypatch, explicit_artist):
     from openai import OpenAIError
-    from karaoke import lyric_lookup, lyric_consensus
+
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     body = ['星空の向こうまであなたと歩いてゆこう'] * 4
     alternative = ['夜明けの向こうまであなたと歩いてゆこう'] * 4
@@ -1921,9 +1950,11 @@ def test_uncredited_different_length_upload_keeps_work_text_without_claiming_a_s
 @pytest.mark.parametrize('suffix', ['', '(词)'])
 def test_catalogue_recovers_reversed_upload_credit_after_a_non_title_quote(
         tmp_path, monkeypatch, explicit_artist, backoff_expired, suffix):
-    from openai import OpenAIError
     from urllib.parse import parse_qs, urlsplit
-    from karaoke import lyric_lookup, lyric_consensus
+
+    from openai import OpenAIError
+
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     upload = '夜风 - 小河「SQ无损」'+suffix
     label_query = '夜风 - 小河 SQ无损'+(' 词' if suffix else '')
@@ -1985,9 +2016,11 @@ def test_upload_identity_is_grounded_in_catalogue_title_and_separate_credit(
 
 def test_music_catalogue_recovers_missing_release_and_refreshes_lyrics(tmp_path, monkeypatch):
     from types import SimpleNamespace
-    from openai import OpenAIError
+
     import ytmusicapi
-    from karaoke import lyric_lookup, lyric_consensus
+    from openai import OpenAIError
+
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     searches = []
     body = ['微風中我們一起唱歌', '星光下我們靜靜傾聽'] * 3
@@ -2019,6 +2052,7 @@ def test_music_catalogue_recovers_missing_release_and_refreshes_lyrics(tmp_path,
 
 def test_catalogue_search_keeps_credit_when_a_common_title_fills_the_results(tmp_path, monkeypatch):
     from urllib.parse import parse_qs, urlsplit
+
     from karaoke import lyric_lookup
     from karaoke.stage_cache import StageCache
     searches = []
@@ -2038,10 +2072,12 @@ def test_catalogue_search_keeps_credit_when_a_common_title_fills_the_results(tmp
 
 @pytest.mark.parametrize('delimiters', ['《》', '【】', '「」', '『』', '〈〉', '［］', '“”', '""'])
 def test_quoted_upload_recovers_localized_channel_identity_without_a_text_model(tmp_path, monkeypatch, delimiters):
-    from openai import OpenAIError
-    from karaoke import lyric_lookup, lyric_consensus
-    from karaoke.stage_cache import StageCache
     from urllib.parse import parse_qs, urlsplit
+
+    from openai import OpenAIError
+
+    from karaoke import lyric_consensus, lyric_lookup
+    from karaoke.stage_cache import StageCache
     upload = f'纯享|小河/星星 演绎{delimiters[0]}夜风{delimiters[1]}，一起听歌 #音乐的伙伴 第三期'
     metadata = dict(id='abcdefghijk', title=upload, channel='TV Music Channel',
                     channel_id='UCchannel', description='欢迎订阅')
@@ -2080,8 +2116,9 @@ def test_quoted_upload_recovers_localized_channel_identity_without_a_text_model(
 @pytest.mark.parametrize('failure', ['timeout', 'server', 'long_backoff', 'authentication'])
 def test_missing_lyrics_retry_transient_metadata_and_keep_confirmed_artist(tmp_path, monkeypatch, failure):
     import httpx
-    from openai import APITimeoutError, InternalServerError, RateLimitError, AuthenticationError
-    from karaoke import lyric_lookup, lyric_consensus
+    from openai import APITimeoutError, AuthenticationError, InternalServerError, RateLimitError
+
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     request = httpx.Request('POST', 'https://example.test')
     response = httpx.Response(429, request=request, headers={'retry-after': '120'})
@@ -2130,7 +2167,7 @@ def test_missing_lyrics_retry_transient_metadata_and_keep_confirmed_artist(tmp_p
     '林林 Lin Lin - 晚風 Evening Wind (廠牌 official 官方完整版MV)',
 ])
 def test_published_lyrics_use_explicit_video_credits_without_a_text_model(tmp_path, monkeypatch, video_title):
-    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     row = dict(trackId=123, trackTitle='晚風', artists=[dict(artistName='林林')],
                album=dict(albumTitle='春天'), lyrics='歌名：晚風\n詞曲：林林\n\n微風裡慢慢歌唱\n星光下靜靜傾聽')
@@ -2171,7 +2208,7 @@ def test_quoted_video_credits_fill_missing_fields_without_overwriting_music_tags
 
 
 def test_shorter_platform_translation_does_not_discard_the_native_title(tmp_path, monkeypatch):
-    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     body = ['晚風吹過山谷我們一起唱歌', '星光照亮回家的路走向遠方']
     def additional(provider, *args, **kwargs):
@@ -2189,7 +2226,7 @@ def test_shorter_platform_translation_does_not_discard_the_native_title(tmp_path
 
 
 def test_known_video_credits_do_not_skip_lyrics_in_its_description(tmp_path, monkeypatch):
-    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     metadata = dict(title='Lin Lin 林林【Evening Wind 晚風】Official Music Video',
         description='晚風\n詞曲：林林\n微風裡慢慢歌唱\n星光下靜靜傾聽\n#Official')
@@ -2208,7 +2245,7 @@ def test_known_video_credits_do_not_skip_lyrics_in_its_description(tmp_path, mon
 
 
 def test_lyric_sources_start_while_description_is_being_read(tmp_path, monkeypatch):
-    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     source_started = threading.Event()
     text = ['A little song', 'A second line']
@@ -2341,7 +2378,7 @@ def test_consensus_preserves_provider_retry_evidence(tmp_path, monkeypatch):
 @pytest.mark.parametrize('fragment', ['林林 - 晚風', '晚風 / 林林', '這是僅有的一句', 'Singer — Evening'])
 @pytest.mark.parametrize('all_short', [False, True])
 def test_short_lyrics_retry_other_sources_before_alignment(tmp_path, monkeypatch, fragment, all_short):
-    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke import lyric_consensus, lyric_lookup
     body = ['微風裡我們輕輕慢慢地歌唱', '星光下我們靜靜細細地傾聽'] * 3
     monkeypatch.setattr(lyric_lookup, 'fetch_published_lyrics', lambda *a:
         ([fragment], dict(provider='line_music', language='Chinese')))
@@ -2508,8 +2545,8 @@ def test_netease_lyrics_reject_other_recordings_and_strip_lrc_metadata(tmp_path,
 @pytest.mark.parametrize('album', ['Original release', None])
 def test_netease_lyrics_use_release_metadata_before_provider_order(tmp_path, monkeypatch, album):
     from karaoke import lyric_consensus as module
-    from karaoke.stage_cache import StageCache
     from karaoke.song_sources import video_song_info
+    from karaoke.stage_cache import StageCache
     calls = []
     def read(url, **kwargs):
         calls.append(url)
@@ -2532,6 +2569,7 @@ def test_netease_lyrics_use_release_metadata_before_provider_order(tmp_path, mon
 @pytest.mark.parametrize('artist', ['Singer', 'Unrelated performer'])
 def test_netease_broadens_query_without_broadening_result_identity(tmp_path, monkeypatch, artist):
     from urllib.parse import parse_qs, urlsplit
+
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
     calls = []
@@ -2571,9 +2609,10 @@ def test_published_lyric_release_preference_keeps_complete_fallbacks():
 @pytest.mark.parametrize('artist', ['Singer', ''])
 @pytest.mark.parametrize('language', ['English', None])
 def test_music_lyrics_are_bound_to_the_requested_video(tmp_path, monkeypatch, same_recording, artist, language):
+    import ytmusicapi
+
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
-    import ytmusicapi
     calls = []
     body = 'Stars above the quiet shore will guide me home tonight (sing with me)'
     class Music:
@@ -2602,9 +2641,10 @@ def test_music_lyrics_are_bound_to_the_requested_video(tmp_path, monkeypatch, sa
 
 @pytest.mark.parametrize('album_fallback', [False, True])
 def test_music_lyric_header_uses_the_body_recording_names(tmp_path, monkeypatch, album_fallback):
+    import ytmusicapi
+
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
-    import ytmusicapi
     body = ['夜色落在窗边', '远方有人在唱']
     class Music:
         def __init__(self, **kwargs): pass
@@ -2627,7 +2667,7 @@ def test_music_lyric_header_uses_the_body_recording_names(tmp_path, monkeypatch,
 @pytest.mark.parametrize('language', ['English', None])
 @pytest.mark.parametrize('source', ['published', 'lrclib', 'supplied', 'online'])
 def test_lyric_text_survives_an_unknown_language(tmp_path, monkeypatch, language, source):
-    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     body = ['Stars above the quiet shore will guide me home tonight']*8
     song = dict(title='Evening', artist='Singer')
@@ -2654,8 +2694,9 @@ def test_lyric_text_survives_an_unknown_language(tmp_path, monkeypatch, language
 @pytest.mark.parametrize('lyric_response', ['absent', 'failure'])
 @pytest.mark.parametrize('manual_title', [None, 'User title'])
 def test_source_identity_survives_missing_lyrics_and_enables_other_sources(tmp_path, monkeypatch, lyric_response, manual_title):
-    from karaoke import lyric_lookup, lyric_consensus
     import ytmusicapi
+
+    from karaoke import lyric_consensus, lyric_lookup
     calls = []
     class Music:
         def __init__(self, **kwargs): pass
@@ -2687,6 +2728,7 @@ def test_source_identity_survives_missing_lyrics_and_enables_other_sources(tmp_p
 @pytest.mark.parametrize('http_status', [401, 429])
 def test_lyric_rate_limit_is_shared_between_jobs_without_blocking_other_sources(tmp_path, monkeypatch, http_status):
     import httpx
+
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
     clock, calls = [1000.], []
@@ -2715,7 +2757,8 @@ def test_lyric_rate_limit_is_shared_between_jobs_without_blocking_other_sources(
 def test_music_backoff_never_supplies_another_songs_identity(tmp_path, monkeypatch, http_status):
     import httpx
     import ytmusicapi
-    from karaoke import lyric_lookup, lyric_consensus
+
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     calls, authorized = [], [False]
     class Music:
@@ -2753,7 +2796,7 @@ def test_music_backoff_never_supplies_another_songs_identity(tmp_path, monkeypat
 @pytest.mark.parametrize('complete_identity', [False, True])
 @pytest.mark.parametrize('video_title', ['Channel - Evening (cover)', 'Evening'])
 def test_source_metadata_precedes_model_and_keeps_description_vote(tmp_path, monkeypatch, complete_identity, video_title):
-    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     calls, source_started = [], threading.Event()
     body = ['Stars above the quiet shore','Morning light will guide me home']
@@ -2786,7 +2829,7 @@ def test_source_metadata_precedes_model_and_keeps_description_vote(tmp_path, mon
 
 @pytest.mark.parametrize('provider', ['line_music','netease'])
 def test_duration_reselects_cached_lyrics_and_can_fetch_a_later_candidate(tmp_path, monkeypatch, provider):
-    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     song = dict(title='Evening',artist='Singer')
     body = 'Stars above the quiet shore\nMorning light will guide me home along the road (where we belong)'
@@ -2822,6 +2865,7 @@ def test_duration_reselects_cached_lyrics_and_can_fetch_a_later_candidate(tmp_pa
 
 def test_music_cached_body_survives_duration_changes_and_other_song_backoff(tmp_path, monkeypatch):
     import ytmusicapi
+
     from karaoke import lyric_consensus
     from karaoke.stage_cache import StageCache
     calls = []
@@ -2916,7 +2960,7 @@ def test_lyric_headers_share_combined_performer_identity(credit, heading):
 
 @pytest.mark.parametrize('heading', ['晚風-林林', '晚風 — 林林', '林林 - 晚風', '晚風-林林\n詞：林林\n曲：林林'])
 def test_title_artist_credit_is_not_a_lyric_candidate(heading):
-    from karaoke.lyric_lookup import published_candidate, published_lyric_lines, lyric_candidate
+    from karaoke.lyric_lookup import lyric_candidate, published_candidate, published_lyric_lines
     song = dict(title='晚風', artist='林林')
     row = dict(trackId=123, trackTitle='晚風', artists=[dict(artistName='林林')],
         album=dict(albumTitle='春天'), lyrics=heading)
@@ -3054,9 +3098,10 @@ def test_description_keeps_repeated_edge_lines_despite_reference_spelling(edge):
 
 @pytest.mark.parametrize('credits', ['Singer', 'Singer · Guest'])
 def test_music_album_lyrics_are_a_fallback_for_same_work_not_another_artists_song(tmp_path, monkeypatch, credits):
+    import ytmusicapi
+
     from karaoke import lyric_consensus as module
     from karaoke.stage_cache import StageCache
-    import ytmusicapi
     calls = []
     body = ['Stars above the quiet shore', 'We keep singing through the night']
     class Music:
@@ -3091,11 +3136,13 @@ def test_music_album_lyrics_are_a_fallback_for_same_work_not_another_artists_son
 @pytest.mark.parametrize('artist_list', [False, True])
 def test_structured_publisher_reads_only_matching_recording_lyrics(tmp_path, monkeypatch, structured_lyrics_source, page_identity, artist_list, edition, title, aliases, query):
     from contextlib import contextmanager
+
     import httpx
+
     from karaoke import lyric_lookup, lyric_readings
     from karaoke.stage_cache import StageCache
     body = ['Stars above the quiet shore', 'We sing until the morning comes']
-    row = dict(_id='recording-id', song_name=title, artist=dict(artist_name='Singer'),
+    row: dict[str, Any] = dict(_id='recording-id', song_name=title, artist=dict(artist_name='Singer'),
                public_song_url='/song/singer/evening')
     if artist_list:
         row['artist'] = [dict(row['artist'], biography='x'*(3*1024*1024))]
@@ -3162,6 +3209,7 @@ def test_published_lyric_html_entities_keep_the_source_words():
 @pytest.mark.parametrize('status', [None, 401, 403, 429, 503])
 def test_one_bad_lyric_candidate_does_not_discard_other_releases(status):
     import httpx
+
     from karaoke.lyric_lookup import published_candidate
     row = dict(trackTitle='Evening', artists=[dict(artistName='Singer')], album=dict(albumTitle='Album'))
     rows = [None, dict(row, trackId=1), dict(row, trackId=2)]
@@ -3268,7 +3316,7 @@ def test_published_lyrics_reject_wrong_credits_versions_and_empty_text(change):
                                    '國', '國語版', '粵', '韩语版'])
 @pytest.mark.parametrize('bilingual', [False, True])
 def test_explicit_recording_version_keeps_work_identity_and_release_preference(edition, bilingual):
-    from karaoke.lyric_lookup import published_candidate, identity
+    from karaoke.lyric_lookup import identity, published_candidate
     title = 'Evening ('+edition+')'
     if bilingual:
         title = '晚風 ('+edition+') - '+title
@@ -3291,9 +3339,9 @@ def test_explicit_recording_version_keeps_work_identity_and_release_preference(e
 @pytest.mark.parametrize('source,matching,other', [('國', '国语版', '粤语版'),
     ('粵', 'Cantonese Version', 'Mandarin Version'), ('日本語版', 'Japanese Ver.', 'English Version')])
 def test_language_edition_aliases_match_without_merging_other_languages(source, matching, other):
-    from karaoke.lyric_lookup import published_candidate, lyric_candidate
-    song = dict(title=f'Evening ({source})', artist='Singer')
-    row = dict(trackId=1, trackTitle=f'Evening ({matching})', artists=[dict(artistName='Singer')],
+    from karaoke.lyric_lookup import lyric_candidate, published_candidate
+    song: dict[str, Any] = dict(title=f'Evening ({source})', artist='Singer')
+    row: dict[str, Any] = dict(trackId=1, trackTitle=f'Evening ({matching})', artists=[dict(artistName='Singer')],
                album={}, lyrics='We sing through the night\nUntil the morning comes')
     assert published_candidate([row], song, song['title'])[0] == row['lyrics'].splitlines()
     alternate = dict(row, trackId=2, trackTitle=f'Evening ({other})')
@@ -3309,8 +3357,8 @@ def test_language_edition_aliases_match_without_merging_other_languages(source, 
 
 @pytest.mark.parametrize('traditional,simplified', [('什麼時候', '什么时候'), ('乾杯以後', '干杯以后'), ('臺灣', '台湾')])
 def test_mixed_script_identity_is_stable_without_rewriting_lyrics(traditional, simplified):
-    from karaoke.lyric_lookup import canonical_script, identity, published_candidate
     from karaoke.lyric_consensus import compare_lyrics
+    from karaoke.lyric_lookup import canonical_script, identity, published_candidate
     from karaoke.tools.lyric_audit import assess
     body = ['我們一直歌唱', '你在遠方聽見']
     row = dict(trackId=123, trackTitle=simplified, artists=[dict(artistName='林林')], album={}, lyrics='\n'.join(body))
@@ -3352,17 +3400,17 @@ def test_published_lyrics_match_both_languages_of_bilingual_credits(title, artis
 @pytest.mark.parametrize('title', ['Evening (feat. Guest)', 'Evening feat. Guest (feat. Guest)', 'Evening（合作音乐人：Guest）',
                                    'Evening [with Guest]', 'Evening I - Evening Ⅰ'])
 def test_work_title_aliases_preserve_performer_and_recording_checks(title):
-    from karaoke.lyric_lookup import published_candidate, names
+    from karaoke.lyric_lookup import names, published_candidate
     base = 'Evening I' if 'Evening I' in title else 'Evening'
-    row = dict(trackId=123, trackTitle=base, artists=[dict(artistName='Singer')],
+    row: dict[str, Any] = dict(trackId=123, trackTitle=base, artists=[dict(artistName='Singer')],
                album={}, lyrics='Stars above the quiet shore\nWe sing until the morning comes')
-    song = dict(title=title, artist='Singer')
+    song: dict[str, Any] = dict(title=title, artist='Singer')
     assert published_candidate([row], song, title)[0] == row['lyrics'].splitlines()
     assert published_candidate([dict(row, artists=[dict(artistName='Guest')])], song, title)[0] is None
     assert published_candidate([dict(row, trackTitle=base+' (Remix)')], song, title,
                                allow_recording_mismatch=True)[0] is None
     if base == 'Evening':
-        same = dict(row, trackTitle=base+' (feat. Guest)')
+        same: dict[str, Any] = dict(row, trackTitle=base+' (feat. Guest)')
         assert published_candidate([same], song, title)[0] == row['lyrics'].splitlines()
         other = dict(row, trackTitle=base+' (feat. Another guest)')
         assert published_candidate([other], song, title)[0] is None
@@ -3471,7 +3519,7 @@ def test_published_lyrics_match_joined_artist_scripts_without_matching_collabora
     ('林林, 蘇雨 Lin Lin, Su Yu', ['Lin Lin'], False),
 ])
 def test_published_lyrics_match_complete_collaboration_credits(credit, artists, accepted):
-    from karaoke.lyric_lookup import published_candidate, lyric_candidate
+    from karaoke.lyric_lookup import lyric_candidate, published_candidate
     body = 'Stars above the quiet shore'
     song = dict(title='Evening', artist=credit)
     row = dict(trackId=123, trackTitle='Evening', artists=[dict(artistName=a) for a in artists],
@@ -3509,6 +3557,7 @@ def test_netease_reads_duet_lyrics_after_matching_reordered_credit(tmp_path, mon
 ])
 def test_soundtrack_role_aliases_find_lyrics_without_filtering_sung_words(tmp_path, monkeypatch, label, accepted):
     from urllib.parse import parse_qs, urlsplit
+
     from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     calls = []
@@ -3568,7 +3617,7 @@ def test_netease_translated_credits_are_not_lost_when_other_aliases_exist(tmp_pa
 @pytest.mark.parametrize('allow_fallback', [False, True])
 @pytest.mark.parametrize('singer', ['Singer', 'Unrelated singer'])
 def test_composer_or_featured_credits_do_not_block_same_performer_lyric_fallback(allow_fallback, singer):
-    from karaoke.lyric_lookup import published_candidate, lyric_candidate
+    from karaoke.lyric_lookup import lyric_candidate, published_candidate
     song = dict(title='Evening', artist='Singer · Composer · Pianist')
     row = dict(trackId=123, trackTitle='Evening', artists=[dict(artistName=singer)], album={},
                lyrics='Stars above the quiet shore\nWe sing until the morning comes')
@@ -3587,6 +3636,7 @@ def test_composer_or_featured_credits_do_not_block_same_performer_lyric_fallback
     ' (From "Mountain")', ' (2020 Remastered)'])
 def test_published_lyric_search_uses_a_bounded_title_query_only_after_no_match(tmp_path, monkeypatch, first_hit, label):
     from urllib.parse import parse_qs, urlparse
+
     from karaoke import lyric_lookup
     from karaoke.stage_cache import StageCache
     calls = []
@@ -3612,7 +3662,7 @@ def test_published_lyric_search_uses_a_bounded_title_query_only_after_no_match(t
 @pytest.mark.parametrize('provider', ['line_music', 'lrclib', 'netease'])
 @pytest.mark.parametrize('bad_text,reason', [('林林 - 晚風', 'empty_lyric_body'), ('晚風吹', 'lyrics_too_short')])
 def test_short_lyric_release_does_not_hide_later_complete_release(tmp_path, monkeypatch, provider, bad_text, reason):
-    from karaoke import lyric_lookup, lyric_consensus
+    from karaoke import lyric_consensus, lyric_lookup
     from karaoke.stage_cache import StageCache
     song = dict(title='晚風', artist='林林')
     body = '微風裡慢慢歌唱\n星光下靜靜傾聽\n' * 3
@@ -3649,6 +3699,7 @@ def test_short_lyric_release_does_not_hide_later_complete_release(tmp_path, monk
 
 def test_published_lyric_search_does_not_issue_another_query_after_rate_limit(tmp_path, monkeypatch):
     import httpx
+
     from karaoke import lyric_lookup
     from karaoke.stage_cache import StageCache
     calls = []
@@ -3666,6 +3717,7 @@ def test_published_lyric_search_does_not_issue_another_query_after_rate_limit(tm
 @pytest.mark.parametrize('empty_anchor_file', [False, True])
 def test_direct_lyrics_reach_acoustic_aligner_without_asr_anchors(tmp_path, monkeypatch, empty_anchor_file):
     import soundfile as sf
+
     from karaoke import align_lyrics_whisper as aligner
     class ReachedAlignment(Exception):
         pass
@@ -3692,6 +3744,7 @@ def test_direct_lyrics_reach_acoustic_aligner_without_asr_anchors(tmp_path, monk
 @pytest.mark.parametrize('failure', [None, 'changed_text', 'collapsed', 'outside', 'crossing', 'raised', 'empty_attention', 'oom'])
 def test_direct_alignment_repairs_only_bad_lines_with_acoustic_results(failure):
     from copy import deepcopy
+
     from karaoke.align_lyrics_whisper import recover_unresolved_lines
     lines = ['First phrase', 'Middle phrase', 'Last phrase']
     def segment(text, start):
@@ -3756,13 +3809,14 @@ def test_direct_alignment_has_a_shared_local_retry_budget():
                                    'acoustic', 'acoustic_missing', 'acoustic_outside', 'acoustic_oom'])
 def test_isolated_gap_recovery_keeps_both_neighbours_and_prior_diagnostics(failure):
     from copy import deepcopy
+
     from karaoke.align_lyrics_whisper import recover_unresolved_lines
     lines = ['Before', 'Quiet repeated phrase', 'After']
-    segments = [dict(text=t, words=[dict(word=t, start=a, end=b)])
+    segments: list[dict[str, Any]] = [dict(text=t, words=[dict(word=t, start=a, end=b)])
                 for t,a,b in zip(lines, [1.,4.,8.], [2.,4.,9.])]
     if failure == 'missing_neighbour':
         segments[0]['words']=segments[2]['words']=[]
-    block = dict(context=[0,3], range=[0,3], source_range=[0.,10.], result=dict(segments=segments),
+    block: dict[str, Any] = dict(context=[0,3], range=[0,3], source_range=[0.,10.], result=dict(segments=segments),
                  line_recoveries=[dict(accepted=True,lines=[2,2],isolated=False)],
                  asr_localizations=[dict(contradicted_lines=[2],accepted_lines=[])])
     original = deepcopy(block)
@@ -3815,7 +3869,7 @@ def test_isolated_gap_recovery_keeps_both_neighbours_and_prior_diagnostics(failu
 def test_isolated_recovery_uses_recording_edge_only_as_an_audio_search_bound(edge):
     from karaoke.align_lyrics_whisper import recover_unresolved_lines
     lines = ['First phrase', 'Last phrase']
-    segments=[dict(text=t,words=[dict(word=t,start=a,end=b)])
+    segments: list[dict[str, Any]]=[dict(text=t,words=[dict(word=t,start=a,end=b)])
               for t,a,b in zip(lines,[1.,8.],[3.,10.])]
     bad = 0 if edge=='opening' else 1
     segments[bad]['words'][0]['end']=segments[bad]['words'][0]['start']
@@ -3837,6 +3891,7 @@ def test_isolated_recovery_uses_recording_edge_only_as_an_audio_search_bound(edg
 @pytest.mark.parametrize('fault', [None, 'interior_unlocalized', 'changed_text', 'ambiguous_repeat', 'outside_neighbour', 'missing_anchor', 'no_anchors'])
 def test_isolated_recovery_reuses_localization_across_long_instrumentals(edge, fault):
     from copy import deepcopy
+
     from karaoke.align_lyrics_whisper import recover_unresolved_lines
     lines = ['First phrase', 'Middle phrase', 'Another phrase', 'Last phrase']
     first, stop = (0, 3) if edge == 'opening' else (1, 4)
@@ -3844,7 +3899,7 @@ def test_isolated_recovery_reuses_localization_across_long_instrumentals(edge, f
     neighbour = 3 if edge == 'opening' else 0
     segments[neighbour]['words'] = [dict(word=lines[neighbour], start=70. if edge=='opening' else 1.,
                                         end=71. if edge=='opening' else 2.)]
-    anchors = [dict(status='candidate', text=lines[i], start=20.+3*j, end=21.+3*j)
+    anchors: list[dict[str, Any]] = [dict(status='candidate', text=lines[i], start=20.+3*j, end=21.+3*j)
                for j,i in enumerate(range(first, stop))]
     if fault == 'changed_text':anchors[0]['text'] = 'Another phrase'
     if fault == 'ambiguous_repeat':anchors[0]['status'] = 'ambiguous_repeat'
@@ -3879,12 +3934,13 @@ def test_isolated_recovery_reuses_localization_across_long_instrumentals(edge, f
 @pytest.mark.parametrize('ending', [False, True])
 def test_isolated_recovery_splits_long_runs_at_measured_phrase_boundaries(fault, ending):
     from copy import deepcopy
+
     from karaoke.align_lyrics_whisper import recover_unresolved_lines
     lines = ['Before', 'First chorus', 'Second chorus', 'First verse', 'Second verse', 'After']
     starts = [5., 20., 24., 75., 79., 95.]
     segments = [dict(text=t, words=[dict(word=t, start=s, end=s+1.)] if i in (0,5) else [])
                 for i,(t,s) in enumerate(zip(lines, starts))]
-    anchors = [dict(text=lines[i], status='candidate', start=starts[i], end=starts[i]+2.) for i in range(1,5)]
+    anchors: list[dict[str, Any]] = [dict(text=lines[i], status='candidate', start=starts[i], end=starts[i]+2.) for i in range(1,5)]
     if fault == 'unlocated_split':
         for anchor in anchors[1:3]:
             anchor.update(status='unresolved_text', start=None, end=None)
@@ -3926,7 +3982,7 @@ def test_isolated_recovery_splits_long_runs_at_measured_phrase_boundaries(fault,
 def test_direct_alignment_defers_unanchored_or_oversized_repairs(far_neighbour):
     from karaoke.align_lyrics_whisper import recover_unresolved_lines
     lines = ['First phrase', 'Last phrase']
-    segments = [dict(text=text, words=[dict(word=text,start=0.,end=0.)]) for text in lines]
+    segments: list[dict[str, Any]] = [dict(text=text, words=[dict(word=text,start=0.,end=0.)]) for text in lines]
     if far_neighbour:
         segments[1]['words'][0].update(start=200.,end=201.)
     original = dict(context=[0,2],range=[0,2],source_range=[0.,300.],result=dict(segments=segments))
@@ -3941,10 +3997,11 @@ def test_direct_alignment_defers_unanchored_or_oversized_repairs(far_neighbour):
 @pytest.mark.parametrize('failure', [None, 'wrong_words', 'outside_window', 'outside_anchor', 'no_speech', 'boundary_overlap', 'only_overlap', 'collapsed', 'empty_attention', 'oom'])
 def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neighbours(failure):
     from copy import deepcopy
+
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines, starts = ['alpha', 'bravo', 'charlie'], [1., 4., 8.]
     if failure == 'collapsed':lines[1] = 'bravo delta echo foxtrot'
-    segments = [dict(text=text, start=t, end=t+.8, words=[dict(word=text,start=t,end=t+.8)])
+    segments: list[dict[str, Any]] = [dict(text=text, start=t, end=t+.8, words=[dict(word=text,start=t,end=t+.8)])
                 for text,t in zip(lines,starts)]
     if failure != 'only_overlap':
         segments[1]['words'][0]['end'] = 4.
@@ -3964,7 +4021,7 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
         if failure == 'empty_attention' and len(attempts) == 1:
             raise RuntimeError('selected index k out of range')
         assert text.splitlines() == lines
-        result = [dict(text=line,words=[dict(word=line,start=t-begin,end=t+.8-begin)])
+        result: list[dict[str, Any]] = [dict(text=line,words=[dict(word=line,start=t-begin,end=t+.8-begin)])
                   for line,t in zip(lines,starts)]
         if failure == 'wrong_words':result[1]['words'][0]['word'] = 'invented'
         if failure == 'outside_window':result[1]['words'][0]['end'] = end-begin+10
@@ -3999,6 +4056,7 @@ def test_local_recognition_locates_missing_line_without_replacing_lyrics_or_neig
 @pytest.mark.parametrize('offset', [0., 600.])
 def test_partial_word_collapse_localizes_the_whole_phrase_before_merging_fallback(offset):
     from copy import deepcopy
+
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines = ['earlier verse', 'we carry every dream', 'the next verse']
     def segment(text, start):
@@ -4047,6 +4105,7 @@ def test_scattered_missing_tokens_do_not_trigger_whole_song_recognition():
 @pytest.mark.parametrize('gap', [6, 35])
 def test_localized_partial_phrase_preserves_good_word_times_for_phonetic_refinement(gap):
     from copy import deepcopy
+
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines = ['earlier verse', 'we carry every dream', 'the next verse']
     segments = [dict(words=[dict(word=w,start=i*gap+j*.4,end=i*gap+(j+1)*.4)
@@ -4070,7 +4129,7 @@ def test_localized_partial_phrase_preserves_good_word_times_for_phonetic_refinem
 def test_missing_recognition_uses_original_audio_before_spending_alignment_retries():
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines, starts = ['alpha', 'bravo', 'charlie'], [1.,4.,8.]
-    segments = [dict(text=t,start=s,end=s+.8,words=[dict(word=t,start=s,end=s+.8)])
+    segments: list[dict[str, Any]] = [dict(text=t,start=s,end=s+.8,words=[dict(word=t,start=s,end=s+.8)])
                 for t,s in zip(lines,starts)]
     segments[1]['words'][0]['end'] = 4.
     block = dict(range=[0,3],context=[0,3],source_range=[0.,12.],result=dict(segments=segments))
@@ -4215,6 +4274,7 @@ def test_isolated_missing_lines_preserve_budget_for_global_localization():
 @pytest.mark.parametrize('force_global', [False, True])
 def test_missing_lyric_timing_takes_priority_over_collapsed_refinement(force_global):
     from copy import deepcopy
+
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     from karaoke.lyric_progress import partial_alignment_cues
     lines = ['line'+str(i) for i in range(12)]
@@ -4308,6 +4368,7 @@ def test_local_recognition_keeps_context_predictions_through_global_retry(locate
 @pytest.mark.parametrize('outside_old_context', [False, True])
 def test_local_recognition_repairs_a_contradicted_neighbour_too(outside_old_context):
     from copy import deepcopy
+
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines = ['intro', 'alpha', 'bravo', 'omega']
     old = [1., 4., 12., 16.]
@@ -4340,6 +4401,7 @@ def test_local_recognition_repairs_a_contradicted_neighbour_too(outside_old_cont
 @pytest.mark.parametrize('evidence', ['relocated', 'same_time', 'near_boundary', 'unrecognized', 'short_gap'])
 def test_sentence_inside_nonspeech_only_requests_independent_localization(evidence):
     from copy import deepcopy
+
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines, old = ['alpha', 'bravo', 'charlie'], [1.,4.,15.]
     starts = [1.,10.,15.] if evidence=='relocated' else old
@@ -4472,6 +4534,7 @@ def test_local_recognition_broadens_once_when_old_neighbours_miss_the_verse():
     ('misplaced_preferred',3,True), ('misplaced_both',3,False)])
 def test_located_failed_alignment_reuses_bounded_acoustic_fallback(fallback,budget,recovers):
     from copy import deepcopy
+
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines=['opening phrase','dancing in moonlight','gentle evening','closing words']
     starts=[1.,5.,9.,13.] if fallback.startswith('misplaced') else [1.,4.,7.,10.]
@@ -4491,7 +4554,7 @@ def test_located_failed_alignment_reuses_bounded_acoustic_fallback(fallback,budg
         assert 0<begin<starts[0] and starts[-1]<end<=duration
         assert text=='\n'.join(lines)
         if fallback=='error':raise ValueError('No acoustic evidence')
-        view=[];offset=0
+        view: list[dict[str, Any]] =[];offset=0
         for i,line in enumerate(lines):
             view.append(dict(text=line if fallback!='wrong_text' else 'other',first=offset,stop=offset+len(line),
                 start=starts[i]+.2 if fallback!='outside' else end+1,end=starts[i]+1.))
@@ -4536,8 +4599,8 @@ def test_latin_lyric_matching_retains_source_with_cyrillic_lookalikes(written,he
 
 @pytest.mark.parametrize('language', [None, 'English', 'Chinese', 'Japanese', 'Korean', 'Russian'])
 def test_display_words_do_not_inherit_a_phonetic_models_alphabet(language):
-    from karaoke.subtitles import highlight_spans, latin_word_spans
     from karaoke.lyric_progress import map_words
+    from karaoke.subtitles import highlight_spans, latin_word_spans
     text = 'Hello 우리 함께 мой друг'
     assert [text[a:b] for a,b in highlight_spans(text,language)] == text.split()
     assert [text[a:b] for a,b in latin_word_spans(text)] == ['Hello']
@@ -4553,7 +4616,8 @@ def test_display_words_do_not_inherit_a_phonetic_models_alphabet(language):
 @pytest.mark.parametrize('recovery', ['valid', 'partial', 'invalid', 'error'])
 def test_localization_rechecks_untimed_words_without_dropping_refrains(fault, recovery):
     from copy import deepcopy
-    from karaoke.align_lyrics_whisper import recover_recognition_timing, recognized_words
+
+    from karaoke.align_lyrics_whisper import recognized_words, recover_recognition_timing
     words = [dict(word=word, start=1.+i, end=1.8+i) for i,word in enumerate(['glowing', 'lanterns']*4)]
     if fault == 'punctuation':
         words.append(dict(word='!',start=9.,end=9.))
@@ -4648,6 +4712,7 @@ def test_local_recovery_attempts_later_regions_before_deep_retries():
 @pytest.mark.parametrize('drifted_middle', [False, True])
 def test_incomplete_refrain_recognition_cannot_overwrite_bounded_acoustic_alignment(omitted_repeat, drifted_middle):
     from copy import deepcopy
+
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines = ['alpha', 'sing again', 'la la', 'sing again', 'bravo', 'missing', 'charlie']
     starts = [1., 5., 8., 12., 15., 18., 21.]
@@ -4680,6 +4745,7 @@ def test_incomplete_refrain_recognition_cannot_overwrite_bounded_acoustic_alignm
 
 def test_broad_recognition_anchor_cannot_erase_earlier_aligned_lyrics():
     from copy import deepcopy
+
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines = ['morning', 'echo', 'bright horizon', 'clear sky', 'missing phrase', 'finale']
     starts = [1., 4., 14., 18., 22., 26.]
@@ -4708,6 +4774,7 @@ def test_broad_recognition_anchor_cannot_erase_earlier_aligned_lyrics():
 
 def test_ambiguous_refrains_need_independent_bounds_and_cannot_bootstrap_them():
     from copy import deepcopy
+
     from karaoke.align_lyrics_whisper import recovery_anchors
     recognized = [dict(text=t, start=s, end=e, status='candidate' if s is not None else 'unresolved_text')
         for t,s,e in [('echo',1.,2.),('echo',None,None),('omega',20.,21.)]]
@@ -4752,6 +4819,7 @@ def test_unrecognized_run_does_not_use_its_drifted_times_as_search_bounds(durati
 @pytest.mark.parametrize('budget,view', [(1,'vocals'), (2,'vocals'), (3,'original'), (4,'original')])
 def test_unrecognized_edge_uses_the_same_bounded_window_budget_as_an_internal_verse(edge,budget,view):
     from copy import deepcopy
+
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines=['anchor phrase','first missing verse','second missing verse']
     starts=[20.,82.,94.]
@@ -4795,6 +4863,7 @@ def test_unrecognized_edge_uses_the_same_bounded_window_budget_as_an_internal_ve
 @pytest.mark.parametrize('budget', [2, 8])
 def test_failed_global_alignment_relocalizes_only_the_independently_bounded_region(regional_support,budget):
     from copy import deepcopy
+
     from karaoke.align_lyrics_whisper import recover_with_local_asr
     lines=['anchor phrase','quiet verse begins','quiet verse ends']
     starts=[20.,82.,94.]
@@ -4802,7 +4871,7 @@ def test_failed_global_alignment_relocalizes_only_the_independently_bounded_regi
         return [dict(words=[dict(word=t,start=starts[lines.index(t)]-begin,
                     end=starts[lines.index(t)]-begin+(0 if collapsed and t!=lines[0] else 1.))])
                 for t in texts]
-    block=dict(range=[0,3],context=[0,3],source_range=[0.,130.],result=dict(segments=segments(lines,0.,True)))
+    block: dict[str, Any]=dict(range=[0,3],context=[0,3],source_range=[0.,130.],result=dict(segments=segments(lines,0.,True)))
     original=deepcopy(block)
     recognition=[]
     def recognize(begin,end):
@@ -4915,8 +4984,8 @@ def test_failed_long_recognition_uses_bounded_overlapping_context_without_duplic
 
 @pytest.mark.parametrize('prefix', ['recognized', 'scattered', 'too_short'])
 def test_partial_recognition_narrows_acoustic_search_after_a_long_instrumental(prefix):
-    from karaoke.anchors_from_asr import anchors_from_words
     from karaoke.align_lyrics_whisper import recover_with_local_asr
+    from karaoke.anchors_from_asr import anchors_from_words
     lines = ['前一句', '风吹过this long English phrase', '后一句']
     words = [dict(word='前一句',start=1.,end=2.)]
     for i,word in enumerate('风吹过' if prefix != 'too_short' else '风吹'):
@@ -4968,7 +5037,7 @@ def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(part
     ends = {line:start+1 for line,start in starts.items()}
     if asr_gap == 'reuse_context':
         ends = {line:start+2.5 for line,start in starts.items()}
-    block = dict(range=[0,8],context=[0,8],source_range=[0.,duration],result=dict(segments=[
+    block: dict[str, Any] = dict(range=[0,8],context=[0,8],source_range=[0.,duration],result=dict(segments=[
         dict(text=t,words=[dict(word=t,start=float(i),end=float(i if i<5 else i+1))])
         for i,t in enumerate(lines)]))
     if partly_timed:
@@ -5024,6 +5093,7 @@ def test_widespread_alignment_collapse_is_relocalized_from_recognized_words(part
 @pytest.mark.parametrize('padding', ['zero', 'quiet', 'other_channel', 'all_silent', 'nonfinite', 'wrong_duration'])
 def test_lyric_duration_ignores_only_digital_padding(tmp_path, padding):
     import soundfile as sf
+
     from karaoke.lyric_lookup import lyric_candidate
     source = tmp_path/'source.wav'
     audio = np.zeros((20000, 2))
@@ -5050,6 +5120,7 @@ def test_lyric_duration_ignores_only_digital_padding(tmp_path, padding):
 
 def test_online_lyric_fetch_retries_after_backoff_and_invalidates_changed_source(tmp_path, monkeypatch):
     import httpx
+
     from karaoke import lyric_lookup
     from karaoke.stage_cache import StageCache, retained_files
     tmp_path = tmp_path/'song'
@@ -5083,6 +5154,7 @@ def test_online_lyric_fetch_retries_after_backoff_and_invalidates_changed_source
 @pytest.mark.parametrize('failure', ['transient', 'persistent', 'authentication'])
 def test_lyric_audit_waits_for_provider_backoff_and_keeps_success_cached(tmp_path, monkeypatch, failure):
     import httpx
+
     from karaoke import lyric_lookup
     from karaoke.stage_cache import StageCache
     from karaoke.tools.lyric_audit import paced_requests
@@ -5114,9 +5186,11 @@ def test_lyric_audit_waits_for_provider_backoff_and_keeps_success_cached(tmp_pat
 
 @pytest.mark.parametrize('http_status', [429, 503])
 def test_lyric_audit_cached_success_is_available_during_another_queries_retry(tmp_path, monkeypatch, http_status):
-    from concurrent.futures import ThreadPoolExecutor
     import threading
+    from concurrent.futures import ThreadPoolExecutor
+
     import httpx
+
     from karaoke import lyric_lookup
     from karaoke.stage_cache import StageCache
     from karaoke.tools.lyric_audit import paced_requests
@@ -5195,6 +5269,7 @@ def test_soak_selection_is_fixed_distinct_and_does_not_fill_missing_quota():
 @pytest.mark.parametrize('event', ['room', 'room_patch'])
 def test_soak_observes_target_job_in_full_or_incremental_events(status, event):
     import httpx
+
     from karaoke.tools.soak import wait_job
     calls = []
     def respond(request):
@@ -5212,7 +5287,9 @@ def test_soak_observes_target_job_in_full_or_incremental_events(status, event):
 @pytest.mark.parametrize('scope', [None, 'playback_lyrics_first', 'playback_with_lyrics_review'])
 def test_soak_collects_retries_in_submission_order(tmp_path, monkeypatch, scope):
     import hashlib
+
     import httpx
+
     from karaoke.tools import soak
     cases = [dict(url=f'https://youtu.be/{i:011d}', title=str(i), language='English',
         provider='youtube', attempts=[dict(job_id=str(i), status='submitted',
@@ -5255,9 +5332,10 @@ def test_soak_collects_retries_in_submission_order(tmp_path, monkeypatch, scope)
 
 def test_soak_releases_only_finished_entries_not_playing_on_any_device():
     import httpx
+
     from karaoke.tools.soak import release_finished_entries
     removed = []
-    room = dict(current_id='legacy', playing_entry_ids=['tablet'], revision=1,
+    room: dict[str, Any] = dict(current_id='legacy', playing_entry_ids=['tablet'], revision=1,
                 entries=[{'id': name} for name in ('legacy', 'tablet', 'finished', 'running', 'user')])
     state = {'cases': [{'attempts': [dict(entry_id=name, status='running' if name == 'running' else 'passed')
                                    for name in ('legacy', 'tablet', 'finished', 'running')]}]}
@@ -5276,7 +5354,9 @@ def test_soak_releases_only_finished_entries_not_playing_on_any_device():
 @pytest.mark.parametrize('previous_delay', [3600, 14400])
 def test_soak_new_failure_never_shortens_provider_backoff(tmp_path, monkeypatch, provider, login, previous_delay):
     import hashlib
+
     import httpx
+
     from karaoke.tools import soak
     previous_retry = time.time()+previous_delay
     case = dict(url=URL, title='Song', language='English', provider='youtube', attempts=[
@@ -5311,6 +5391,7 @@ def test_soak_new_failure_never_shortens_provider_backoff(tmp_path, monkeypatch,
 @pytest.mark.parametrize('damage', ['nonfinite', 'length', 'channels', 'rate', 'subtype', 'empty', 'truncated'])
 def test_soak_checks_actual_stem_integrity_without_exact_sum(tmp_path, damage):
     import soundfile as sf
+
     from karaoke.tools.soak import verify_stems
     original = np.full((100, 2), 1e-30)
     lead = np.full_like(original, .000288816)
@@ -5352,7 +5433,7 @@ def test_download_failure_has_actionable_reason_without_raw_diagnostics(tmp_path
     if reason == 'DNS':
         from karaoke.tools.soak import eligible, record_failure
         # Also classify retained generic errors from workers predating the fix.
-        attempt = dict(pipeline_version='v1', external_attempt=1)
+        attempt: dict[str, Any] = dict(pipeline_version='v1', external_attempt=1)
         record_failure(attempt, dict(id=tmp_path.name,
             error=dict(code='download_failed', message='Generic download failure')), tmp_path)
         assert attempt['status'] == 'external' and not attempt['provider_blocked']
@@ -5513,6 +5594,7 @@ def test_compute_slots_overlap_up_to_capacity_and_keep_downloads_serial(tmp_path
 
 def test_started_pipelines_respect_provider_backoff_before_taking_download_lane(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
+
     from karaoke.job_schema import download_backoff
     slots = tmp_path/'slots'
     monkeypatch.setenv('KARAOKE_STAGE_LOCK_DIR', str(slots))
@@ -5539,6 +5621,7 @@ def test_started_pipelines_respect_provider_backoff_before_taking_download_lane(
 
 def test_waiting_stages_follow_playlist_priority_without_interrupting_work(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
+
     from karaoke.api import Worker
     worker = Worker(Store(tmp_path), concurrency=None)
     worker.prioritize(['next', 'later'])
@@ -5609,7 +5692,7 @@ def test_fresh_metadata_downloads_stream_without_reextracting_webpage(tmp_path, 
                 self.send_error(status)
             else:
                 super().do_GET()
-        def log_message(self, *args):
+        def log_message(self, format, *args):
             pass
     server = ThreadingHTTPServer(('127.0.0.1', 0), partial(Handler, directory=str(tmp_path)))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -5638,6 +5721,7 @@ def test_fresh_metadata_downloads_stream_without_reextracting_webpage(tmp_path, 
 def test_interactive_probe_resumes_new_songs_and_shares_stage_locks(tmp_path, stage, next_stage):
     from concurrent.futures import ThreadPoolExecutor
     from pathlib import Path
+
     from karaoke.tools.soak import run_probe
     source = str(Path(__file__).resolve().parent.parent)
     code = r"""import json,pathlib,sys,time
@@ -5712,6 +5796,7 @@ def test_external_repair_notifies_subscribers_without_approving_results(tmp_path
     with TestClient(app) as client:
         job = client.post('/v1/room/entries', json={'url':URL}).json()['entries'][-1]['job_id']
         events = app.state.room.updates.events(lambda: ('event: room\ndata: ' + json.dumps(app.state.room.snapshot()) + '\n\n',))
+        assert client.portal is not None
         client.portal.call(anext, events)
         Store(tmp_path).update(job, status='running', active_stages=['render'])
         pending = client.portal.start_task_soon(anext, events)
@@ -5748,7 +5833,9 @@ def test_frontend_changes_invalidate_browser_cache_including_imports(tmp_path, m
         def script_url():
             home = client.get('/')
             assert home.headers['cache-control'] == 'no-cache'
-            return re.search(r'src="([^"]+)"', home.text)[1]
+            match = re.search(r'src="([^"]+)"', home.text)
+            assert match is not None
+            return match[1]
         first = script_url()
         etag = client.get('/').headers['etag']
         assert client.get('/', headers={'If-None-Match':etag}).status_code == 304
@@ -5787,7 +5874,7 @@ def test_poster_uses_thumbnail_or_video_frame_and_failure_is_optional(tmp_path, 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=str(tmp_path), **kwargs)
 
-        def log_message(self, *args):
+        def log_message(self, format, *args):
             pass
 
     with ThreadingHTTPServer(('127.0.0.1', 0), Handler) as server:
@@ -5798,11 +5885,15 @@ def test_poster_uses_thumbnail_or_video_frame_and_failure_is_optional(tmp_path, 
         try:
             assert create_poster(tmp_path/'missing.mp4', poster, thumbnail=base+'/thumbnail.jpg')
             with Image.open(poster) as image:
-                red, _, blue = image.getpixel((0, 0))
+                pixel = image.getpixel((0, 0))
+                assert isinstance(pixel, tuple)
+                red, _, blue = pixel
                 assert red > 240 and blue < 10
             assert create_poster(video, poster, thumbnail=base+'/missing.jpg', seconds=0)
             with Image.open(poster) as image:
-                red, _, blue = image.getpixel((0, 0))
+                pixel = image.getpixel((0, 0))
+                assert isinstance(pixel, tuple)
+                red, _, blue = pixel
                 assert blue > 240 and red < 10
             assert not create_poster(tmp_path/'missing.mp4', tmp_path/'absent.jpg')
             assert not (tmp_path/'absent.jpg').exists()
@@ -6089,11 +6180,11 @@ def test_playback_survives_text_failure_but_audio_and_acceptance_remain_strict(t
 @pytest.mark.parametrize('change', [None, 'url', 'metadata', 'code', 'lyrics_source'])
 def test_prepared_lyrics_preserve_provenance_and_reject_different_inputs(tmp_path, monkeypatch, change):
     from karaoke.lyric_lookup import prepared_lyrics_identity
-    metadata = dict(title='Example', artist='Singer')
-    lyrics = dict(title='Example', artist='Singer', language='English', lines=['A little song'],
+    metadata: dict[str, Any] = dict(title='Example', artist='Singer')
+    lyrics: dict[str, Any] = dict(title='Example', artist='Singer', language='English', lines=['A little song'],
                   source_url=URL, provenance=dict(route='lyrics_first', kind='online_lyric_text',
                   lyric_lookup=dict(provider='line_music', url='https://music-tw.line.me/track/123')))
-    packet = dict(identity=prepared_lyrics_identity(URL, metadata), lyrics=lyrics)
+    packet: dict[str, Any] = dict(identity=prepared_lyrics_identity(URL, metadata), lyrics=lyrics)
     if change == 'url':
         packet['identity']['url'] = 'https://www.youtube.com/watch?v=abcdefghijk'
     elif change == 'metadata':
@@ -6121,12 +6212,12 @@ def test_prepared_lyrics_preserve_provenance_and_reject_different_inputs(tmp_pat
                                     'duration', 'metadata_model', 'legacy_selection'])
 def test_normal_preparation_reuses_bound_lyrics_and_refetches_stale_cache(tmp_path, monkeypatch, change):
     from karaoke.lyric_lookup import prepared_lyrics_identity, read_prepared_lyrics
-    metadata = dict(title='Example', artist='Singer')
-    lyrics = dict(title='Example', artist='Singer', language='English', lines=['Original published text'],
+    metadata: dict[str, Any] = dict(title='Example', artist='Singer')
+    lyrics: dict[str, Any] = dict(title='Example', artist='Singer', language='English', lines=['Original published text'],
                   source_url=URL, provenance=dict(route='lyrics_first', kind='online_lyric_text'))
-    packet = dict(identity=prepared_lyrics_identity(URL, metadata), lyrics=lyrics,
+    packet: dict[str, Any] = dict(identity=prepared_lyrics_identity(URL, metadata), lyrics=lyrics,
                   selection=dict(duration=10, metadata_model='gpt-5-mini'))
-    request = dict(url=URL)
+    request: dict[str, Any] = dict(url=URL)
     if change == 'duration': packet['selection']['duration'] = 30
     if change == 'metadata_model': packet['selection']['metadata_model'] = 'old-model'
     if change == 'legacy_selection': packet.pop('selection')
@@ -6154,10 +6245,10 @@ def test_normal_preparation_reuses_bound_lyrics_and_refetches_stale_cache(tmp_pa
 def test_failed_lyric_source_retries_only_whole_eligible_texts(tmp_path, monkeypatch, mode, prepared):
     from karaoke.lyric_lookup import prepared_lyrics_identity
     primary, alternative = ['First phrase', 'Missing phrase'], ['First phrase', 'Different phrase']
-    lyrics = dict(title='Evening', artist='Singer', language='English', lines=primary,
+    lyrics: dict[str, Any] = dict(title='Evening', artist='Singer', language='English', lines=primary,
         provenance=dict(kind='user_supplied' if mode=='supplied' else 'online_lyric_text',
                         route='lyrics_first', lyric_lookup=dict(provider='primary')))
-    packet = dict(candidate_texts=[primary, alternative, alternative, ['Rejected fragment']],
+    packet: dict[str, Any] = dict(candidate_texts=[primary, alternative, alternative, ['Rejected fragment']],
         crosscheck=dict(selected_source=0, eligible_sources=[0,1,2], status='conflicting',
             rejected_sources=[dict(source=3, reason='lyrics_fragment')],
             sources=[dict(provider=p,language='English') for p in ('primary','alternate','duplicate','rejected')]))
@@ -6474,6 +6565,7 @@ def test_source_fallback_preserves_recording_evidence(tmp_path, monkeypatch, hea
 @pytest.mark.parametrize('gap', ['unrelated', 'scattered_letters', 'brief'])
 def test_source_retry_does_not_confuse_global_text_gain_with_gap_evidence(gap):
     from copy import deepcopy
+
     from karaoke.lyric_consensus import observed_source_alternative
     first = 'The golden lanterns guide us through the evening'
     extra = 'Silver stars appear behind the evening clouds'
@@ -6495,6 +6587,7 @@ def test_source_retry_does_not_confuse_global_text_gain_with_gap_evidence(gap):
 @pytest.mark.parametrize('gap_kind', ['missing', 'covered', 'unrelated'])
 def test_caption_gap_review_requires_substantial_existing_lyric_evidence(gap_kind):
     from copy import deepcopy
+
     from karaoke.align_lyrics_whisper import review_uncovered_lyrics
     line = 'Glowing lanterns guide us through the silent forest'
     cues = [dict(text=line,start=1.,end=3.,status='candidate'),
@@ -6535,6 +6628,7 @@ def test_repeat_proposal_keeps_source_interior_between_observed_outer_phrases(he
 @pytest.mark.parametrize('missing_caption', [False, True])
 def test_repeat_proposal_does_not_expand_a_chant_into_an_unheard_verse(repetitions, missing_caption):
     from copy import deepcopy
+
     from karaoke.lyric_consensus import observed_repetition_candidate
     chant = 'Golden lanterns'
     lines = [chant, 'Every sparrow flies back home', chant, chant, chant, 'Closing phrase']
@@ -6647,7 +6741,7 @@ def test_playback_fallback_omits_only_phrases_without_usable_times(tmp_path, bad
     (tmp_path/'lyrics.json').write_text(json.dumps(dict(title='Example', artist='', language='English',
         lines=['First line', 'Next line'], provenance={})))
     (tmp_path/'alignment').mkdir()
-    cues = [dict(text=text, start=start, end=end, status='candidate')
+    cues: list[dict[str, Any]] = [dict(text=text, start=start, end=end, status='candidate')
             for text, start, end in [('First line', 0, 1), ('Next line', 2, 3)]]
     if bad == 'text': cues[0]['text'] = 'Wrong lyric'
     if bad == 'onset_order': cues[1]['start'] = 0.
@@ -6672,10 +6766,12 @@ def test_playback_fallback_preserves_other_lines_highlights(tmp_path, bad):
     lines = ['一起唱', '今夜']
     (tmp_path/'lyrics.json').write_text(json.dumps(dict(title='Example', artist='', language='Chinese',
         lines=lines, provenance={})))
-    cues = [dict(text=text, start=start, end=start+1, status='candidate',
+    cues: list[dict[str, Any]] = [dict(text=text, start=start, end=start+1, status='candidate',
                  units=[dict(text=char, first=i, stop=i+1, start=start+i*.2, end=start+(i+1)*.2)
                         for i, char in enumerate(text)]) for text, start in zip(lines, [0, 2])]
-    if bad == 'merged': cues[0]['units'] = [dict(text=lines[0], first=0, stop=3, start=0, end=1)]
+    if bad == 'merged':
+        merged: list[dict[str, Any]] = [dict(text=lines[0], first=0, stop=3, start=0, end=1)]
+        cues[0]['units'] = merged
     if bad == 'text': cues[0]['units'][0]['text'] = '错'
     if bad == 'span': cues[0]['units'][0]['stop'] = 2
     if bad == 'nan': cues[0]['units'][0]['start'] = float('nan')
@@ -6845,7 +6941,7 @@ def test_publication_rechecks_known_phrase_location_before_changing_lyrics(tmp_p
             dict(text=text, first=0, stop=len(text), start=start, end=start+1.)])
     original = [cue(lines[0], 8.), cue(lines[1], 30.)]
     corrected = [cue(lines[0], 20.), original[1]]
-    lyrics = dict(lines=lines, language='English', provenance={})
+    lyrics: dict[str, Any] = dict(lines=lines, language='English', provenance={})
     if evidence == 'restored_repetition':
         lyrics['provenance']['repetitions'] = [dict(output_range=[0,1], source_lines=lines[:1],
             boundary_anchors=[dict(start=20., end=21.)]*2)]
@@ -6979,6 +7075,7 @@ def test_ambiguous_global_match_cannot_dismiss_a_local_phrase_conflict(tmp_path,
 @pytest.mark.parametrize('extra_frames', [0, 4])
 def test_timing_review_accepts_one_sample_of_resampling_but_rejects_different_lengths(tmp_path, monkeypatch, extra_frames):
     import soundfile as sf
+
     from karaoke import timing_validation as module
     cue = dict(text='hello', start=.1, end=.3,
                units=[dict(text='hello', first=0, stop=5, start=.1, end=.3)])
@@ -7008,6 +7105,7 @@ def test_timing_review_accepts_one_sample_of_resampling_but_rejects_different_le
 @pytest.mark.parametrize('changed', [None, 'code', 'models', 'protocol', 'legacy', 'lead'])
 def test_timing_constraints_reuse_only_the_same_evidence_method(tmp_path, monkeypatch, changed):
     import soundfile as sf
+
     from karaoke import timing_validation as module
     cue = dict(text='hello', start=.1, end=.3,
                units=[dict(text='hello', first=0, stop=5, start=.1, end=.3)])
@@ -7047,6 +7145,7 @@ def test_timing_constraints_reuse_only_the_same_evidence_method(tmp_path, monkey
 
 def test_context_retry_keeps_other_lines_review_evidence(tmp_path, monkeypatch):
     import soundfile as sf
+
     from karaoke import timing_validation as module
     def cue(text,start):
         return dict(text=text,start=start,end=start+.4,units=[
@@ -7082,7 +7181,9 @@ def test_context_retry_keeps_other_lines_review_evidence(tmp_path, monkeypatch):
 @pytest.mark.parametrize('changed', [None, 'audio', 'code', 'lead', 'unfinished', 'pending', 'language'])
 def test_source_expansion_reuses_only_completed_same_method_audio_evidence(tmp_path, monkeypatch, changed):
     import shutil
+
     import soundfile as sf
+
     from karaoke import timing_validation as module
     def cue(text, start):
         return dict(text=text,start=start,end=start+.4,units=[
@@ -7135,10 +7236,10 @@ def test_playback_fallback_recovers_each_phrase_from_available_stages(tmp_path):
     pipeline = Pipeline(dict(url=URL), tmp_path)
     lines = ['第一句', '第二句', '第三句']
     (tmp_path/'lyrics.json').write_text(json.dumps(dict(language='Chinese', lines=lines, provenance={})))
-    coarse = [dict(text=text, start=2*i, end=2*i+1, status='candidate') for i, text in enumerate(lines)]
+    coarse: list[dict[str, Any]] = [dict(text=text, start=2*i, end=2*i+1, status='candidate') for i, text in enumerate(lines)]
     (tmp_path/'alignment').mkdir()
     (tmp_path/'alignment/cues.json').write_text(json.dumps(coarse))
-    refined = [dict(c, units=[dict(text=x, first=i, stop=i+1, start=c['start']+.2*i,
+    refined: list[dict[str, Any]] = [dict(c, units=[dict(text=x, first=i, stop=i+1, start=c['start']+.2*i,
                                    end=c['start']+.2*(i+1)) for i, x in enumerate(c['text'])]) for c in coarse]
     refined[1]['start'] = None
     (tmp_path/'word-cues.json').write_text(json.dumps(refined))
@@ -7215,7 +7316,7 @@ def test_playback_fallback_retains_raw_aligned_lines_when_whole_block_text_check
     lines = ['First phrase', 'Missing phrase', 'Last phrase']
     (tmp_path/'lyrics.json').write_text(json.dumps(dict(language='English', lines=lines, provenance={})))
     (tmp_path/'alignment').mkdir()
-    raw = [dict(range=[0,3], context=[0,3], source_range=[10,20], result=dict(segments=[
+    raw: list[dict[str, Any]] = [dict(range=[0,3], context=[0,3], source_range=[10,20], result=dict(segments=[
         dict(words=[dict(word=text, start=i*2, end=i*2+1)])
         for i,text in enumerate(['First phrase','incorrect model text','Last phrase'])]))]
     if missing_words:
@@ -7246,7 +7347,7 @@ def test_playback_fallback_prefers_existing_word_times_to_coarse_lines(tmp_path,
     (tmp_path/'alignment').mkdir()
     coarse = [dict(text=text, start=10+i*2, end=11+i*2, status='candidate') for i, text in enumerate(lines)]
     (tmp_path/'alignment/cues.json').write_text(json.dumps(coarse))
-    raw = [dict(range=[0, 2], context=[0, 2], source_range=[10, 15], result=dict(segments=[
+    raw: list[dict[str, Any]] = [dict(range=[0, 2], context=[0, 2], source_range=[10, 15], result=dict(segments=[
         dict(words=[dict(word=w, start=i*2+j*.4, end=i*2+j*.4+.3)
                     for j,w in enumerate(text.split())]) for i,text in enumerate(lines)]))]
     raw[0]['asr_localizations'] = [dict(source_range=[10,15], accepted_lines=[] if contradicted else [2],
@@ -7329,7 +7430,7 @@ def test_auxiliary_intro_and_long_preview_cannot_abort_valid_lyric_video(tmp_pat
     source, output = tmp_path/'source.mp4', tmp_path/'output.mp4'
     subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=320x180:r=30:d=0.4',
         '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.4', '-c:v', 'libx264', '-c:a', 'aac', str(source)], check=True)
-    cues = [dict(text=text, start=i*.2, end=(i+1)*.2,
+    cues: list[dict[str, Any]] = [dict(text=text, start=i*.2, end=(i+1)*.2,
                  units=[dict(first=0, stop=len(text), start=i*.2, end=(i+1)*.2)])
             for i, text in enumerate(['Hello', '星'*42])]
     # A measured tail overlaps the next entrance; the display still advances
@@ -7370,7 +7471,9 @@ def test_lyric_renderer_rejects_unordered_or_empty_intervals(tmp_path, monkeypat
 @pytest.mark.parametrize('rate', ['24', '24000/1001', '25', '30000/1001', '30'])
 def test_lyric_video_preserves_source_frames_and_fractional_cadence(tmp_path, monkeypatch, rate):
     from fractions import Fraction
+
     import numpy as np
+
     import karaoke.render_lyric_progress as renderer
     source, output = tmp_path/'source.mp4', tmp_path/'output.mp4'
     # Every source frame has a distinct luminance, well beyond codec rounding. Counts alone
@@ -7428,6 +7531,7 @@ def test_playback_mux_preserves_packets_and_timestamps_with_only_silent_audio(tm
 @pytest.mark.parametrize('radius', [1, 3, 6])
 def test_caption_outline_preserves_antialiasing_and_canvas_edges(radius):
     from PIL import Image, ImageDraw, ImageFilter
+
     from karaoke.subtitle_style import outline_mask
     for region in (None, (17, 13, 47, 26), (0, 0, 7, 9), (56, 31, 63, 39)):
         mask = Image.new('L', (64, 40))
@@ -7441,6 +7545,7 @@ def test_caption_outline_preserves_antialiasing_and_canvas_edges(radius):
 
 def test_static_lyrics_scrim_preserves_artwork_and_protects_white_and_amber():
     from PIL import Image, ImageDraw
+
     from karaoke.subtitle_style import contrast_scrim
     image = Image.new('RGB', (256, 144), '#f7efce')
     draw = ImageDraw.Draw(image)
@@ -7487,6 +7592,7 @@ def test_picture_analysis_failure_does_not_block_subtitle_rendering(tmp_path):
 @pytest.mark.parametrize('video_only', [False, True])
 def test_static_background_shading_composes_with_intro_and_audio(tmp_path, monkeypatch, video_only):
     from pathlib import Path
+
     import karaoke.render_lyric_progress as renderer
     video, audio, output = tmp_path/'picture.mp4', tmp_path/'audio.wav', tmp_path/'output.mp4'
     subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
@@ -7514,16 +7620,17 @@ def test_static_background_shading_composes_with_intro_and_audio(tmp_path, monke
 @pytest.mark.parametrize('timing_source', [None, 'cross_model_phonemes', 'linear_fallback'])
 def test_linear_playback_sweeps_locally_and_preserves_measured_onsets(monkeypatch, timing_source):
     from PIL import Image
+
     import karaoke.render_lyric_progress as renderer
-    def caption(text, *, layout_out, **kwargs):
+    def fake_caption(text, *, layout_out, **kwargs):
         # The middle span crosses two display rows. All glyphs are visible white
         # squares so exact pixels distinguish gradual fill from a whole-word jump.
         layout_out.update(mask=Image.new('L', (60, 50), 255), characters=[
             dict(index=i, left=3+20*(i%2), right=13+20*(i%2), top=3+25*(i//2),
                  baseline=13+25*(i//2), bottom=13+25*(i//2), line=i//2, character=x) for i, x in enumerate(text)])
         return Image.new('RGBA', (60, 50), (255, 255, 255, 255))
-    monkeypatch.setattr(renderer, 'caption_image', caption)
-    cue = dict(text='甲乙丙丁', units=[
+    monkeypatch.setattr(renderer, 'caption_image', fake_caption)
+    cue: dict[str, Any] = dict(text='甲乙丙丁', units=[
         dict(first=0, stop=1, start=1., end=2.),
         dict(first=1, stop=3, start=2., end=4., **({'timing_source':timing_source} if timing_source else {})),
         dict(first=3, stop=4, start=5., end=6.),
@@ -7594,8 +7701,8 @@ def test_completed_sweep_colors_entire_real_glyph_without_touching_next_line(lan
     ('10月の空', [('10月', 'じゅうがつ'), ('空', 'そら')]),
 ])
 def test_furigana_preserves_compound_readings_okurigana_and_source_offsets(text, expected):
-    from karaoke.subtitle_style import japanese_readings
     from karaoke.render_lyric_progress import Caption
+    from karaoke.subtitle_style import japanese_readings
     spans, warnings = japanese_readings(text)
     assert [(text[a:b], reading) for a,b,reading in spans] == expected
     assert warnings == ()
@@ -7648,6 +7755,7 @@ def test_cantonese_readings_map_words_across_whitespace_to_original_glyphs(gap):
 
 def test_cantonese_dictionary_failure_keeps_timed_subtitles(monkeypatch):
     import pycantonese
+
     from karaoke.render_lyric_progress import Caption
     from subtitle_style import cantonese_readings
     def unavailable(*args):
@@ -7667,7 +7775,9 @@ def test_cantonese_dictionary_failure_keeps_timed_subtitles(monkeypatch):
     ('Cantonese', '晚風輕輕吹過窗邊\n我哋一齊望住星空唱歌')])
 def test_furigana_layout_preserves_timing_and_keeps_readings_out_of_sweep(language, text):
     import copy
+
     from PIL import ImageChops
+
     from karaoke.render_lyric_progress import Caption
     cue = dict(text=text, units=[dict(first=i, stop=i+1, start=i+1., end=i+1.8)
                                 for i,c in enumerate(text) if not c.isspace()])
@@ -7698,6 +7808,7 @@ def test_furigana_layout_preserves_timing_and_keeps_readings_out_of_sweep(langua
 
 def test_furigana_dictionary_failure_does_not_lose_valid_subtitles(monkeypatch):
     import pyopenjtalk
+
     from karaoke.render_lyric_progress import Caption
     from subtitle_style import japanese_readings
     def unavailable(*args):
@@ -7715,9 +7826,10 @@ def test_furigana_dictionary_failure_does_not_lose_valid_subtitles(monkeypatch):
 
 def test_published_readings_preserve_occurrences_text_and_dictionary_fallback(tmp_path, monkeypatch):
     import copy
+
     from karaoke import lyric_readings as readings
-    from karaoke.stage_cache import StageCache
     from karaoke.render_lyric_progress import Caption
+    from karaoke.stage_cache import StageCache
     html = '''<div class="comments">関係のない文字</div><div class="hiragana">
         <span class="ruby"><span class="rb">故郷</span><span class="rt">ふるさと</span></span>へ<br>
         <span class="ruby"><span class="rb">今日</span><span class="rt">きょう</span></span>も帰る<br>
@@ -7730,7 +7842,7 @@ def test_published_readings_preserve_occurrences_text_and_dictionary_fallback(tm
     assert rows[0]['spans'][0] == dict(first=0, stop=2, text='故郷', reading='ふるさと')
     assert rows[1]['spans'][0]['reading'] == 'こきょう'
     assert readings.match_readings(['故郷の別の曲は全く違う歌詞です'], page)[0] is None
-    cue = dict(text=lines[0], start=0., end=5., units=[
+    cue: dict[str, Any] = dict(text=lines[0], start=0., end=5., units=[
         dict(first=i, stop=i+1, start=i*.3, end=i*.3+.2) for i in range(len(lines[0]))])
     before = copy.deepcopy(cue)
     resolved = readings.resolve_readings(cue['text'], rows[0]['spans'])
@@ -7759,7 +7871,8 @@ def test_published_readings_preserve_occurrences_text_and_dictionary_fallback(tm
 @pytest.mark.parametrize('found', [False, True])
 def test_ruby_search_uses_body_alias_but_never_newest_or_recommended_links(tmp_path, monkeypatch, found):
     from urllib.parse import parse_qs, urlsplit
-    from karaoke import lyric_readings, lyric_lookup
+
+    from karaoke import lyric_lookup, lyric_readings
     from karaoke.stage_cache import StageCache
     body = ['故郷へ向かう長い道を今も歩いている', '明日の朝には会えるから今日は一緒に歌おう',
             'あの日の星を見上げながら夜の海を渡ってゆこう']
@@ -7801,7 +7914,7 @@ def test_unavailable_published_readings_do_not_fail_valid_lyrics(tmp_path, monke
 @pytest.mark.parametrize('case', ['native', 'alias', 'wrong_work', 'wrong_title', 'live'])
 @pytest.mark.parametrize('structured', ['absent', 'linked', 'unrelated', 'malformed', 'translated'])
 def test_published_ruby_source_supplies_lyrics_without_singing_the_readings(tmp_path, monkeypatch, case, structured):
-    from karaoke import lyric_readings, lyric_consensus
+    from karaoke import lyric_consensus, lyric_readings
     from karaoke.stage_cache import StageCache
     body = ['故郷へ向かう長い道を今も歩いている', '明日の朝には会えるから今日は一緒に歌おう',
             'あの日の星を見上げながら夜の海を渡ってゆこう', 'We sing together, we will find our way']
@@ -7848,7 +7961,8 @@ def test_published_ruby_source_supplies_lyrics_without_singing_the_readings(tmp_
 
 @pytest.mark.parametrize('extra', ['ふるさと', 'また会おう'])
 def test_explicit_source_readings_do_not_outvote_plain_lyrics_or_remove_sung_responses(tmp_path, monkeypatch, extra):
-    from karaoke import lyric_readings, lyric_consensus as module
+    from karaoke import lyric_consensus as module
+    from karaoke import lyric_readings
     from karaoke.stage_cache import StageCache
     plain = ['故郷へ向かう長い道を今も歩いている', '明日の朝には会えるから今日は一緒に歌おう']
     annotated = [plain[0].replace('故郷', '故郷('+extra+')'), plain[1]]
@@ -7877,7 +7991,8 @@ def test_explicit_source_readings_do_not_outvote_plain_lyrics_or_remove_sung_res
 @pytest.mark.parametrize('reading', ['あす', 'またね'])
 @pytest.mark.parametrize('published', [True, False])
 def test_quoted_inline_reading_needs_published_pair_and_survives_rendering(tmp_path, monkeypatch, reading, published):
-    from karaoke import lyric_readings, lyric_consensus as module
+    from karaoke import lyric_consensus as module
+    from karaoke import lyric_readings
     from karaoke.stage_cache import StageCache
     plain = ['《明日の景色》へ向かう長い道を歩いている', '夜空の星を見上げながら二人で一緒に歌おう']
     annotated = [plain[0].replace('》', '》（'+reading+'）'), plain[1]]
@@ -8008,7 +8123,7 @@ def test_furigana_pages_keep_full_sentence_readings_and_preview_can_shorten():
     from karaoke.render_lyric_progress import Caption
     from karaoke.subtitle_style import compact_caption_image
     text = '今日も君と空を見上げる。'*12
-    cue = dict(text=text, units=[dict(first=i, stop=i+1, start=i+1., end=i+1.8) for i in range(len(text))])
+    cue: dict[str, Any] = dict(text=text, units=[dict(first=i, stop=i+1, start=i+1., end=i+1.8) for i in range(len(text))])
     caption = Caption(cue, 'cinema_focus', 'Japanese')
     assert len(caption.pages) > 1
     assert ''.join(p.cue['text'] for p in caption.pages) == text
@@ -8026,11 +8141,12 @@ def test_furigana_pages_keep_full_sentence_readings_and_preview_can_shorten():
 @pytest.mark.parametrize('spaced', [False, True])
 def test_long_lyric_pages_preserve_all_text_and_only_switch_at_measured_onsets(spaced):
     import copy
+
     from karaoke.render_lyric_progress import Caption
     text = '春日暖阳照过山川河流'*16
     if spaced:
         text = '（ '+' '.join(text)+' ）'
-    cue = dict(text=text, units=[dict(first=i, stop=i+1, text=c, start=1+i*.2, end=1.2+i*.2)
+    cue: dict[str, Any] = dict(text=text, units=[dict(first=i, stop=i+1, text=c, start=1+i*.2, end=1.2+i*.2)
                                   for i,c in enumerate(text) if c.isalnum()])
     before = copy.deepcopy(cue)
     caption = Caption(cue,'cinema_focus','Chinese')
@@ -8049,7 +8165,7 @@ def test_long_lyric_pages_preserve_all_text_and_only_switch_at_measured_onsets(s
 
 def test_playback_fallback_keeps_unverified_asr_draft_out_of_subtitles(tmp_path):
     pipeline = Pipeline(dict(url=URL), tmp_path)
-    draft = dict(title='Example', artist='', language='Chinese', lines=['猜測的文字'],
+    draft: dict[str, Any] = dict(title='Example', artist='', language='Chinese', lines=['猜測的文字'],
                  provenance=dict(kind='asr_draft', needs_review=True))
     (tmp_path/'lyrics.json').write_text(json.dumps(draft))
     cue = dict(text=draft['lines'][0], start=0, end=2, status='candidate', units=[])
@@ -8067,7 +8183,8 @@ def test_playback_fallback_keeps_unverified_asr_draft_out_of_subtitles(tmp_path)
 
 def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv(tmp_path, monkeypatch):
     import soundfile as sf
-    from karaoke.exact_stems import pcm_sha, encode_preview
+
+    from karaoke.exact_stems import encode_preview, pcm_sha
     from karaoke.tools.soak import verify_outputs
     folder = tmp_path/'job'
     pipeline = Pipeline(dict(url=URL), folder, audio_only=True, device='cpu')
@@ -8138,9 +8255,9 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
     # The long-lived controller never imports Pipeline; its clean interpreter
     # must verify results without the research scripts added to sys.path.
     import os
-    from pathlib import Path
     import subprocess
     import sys
+    from pathlib import Path
     env = dict(os.environ)
     env.pop('PYTHONPATH', None)
     subprocess.run([sys.executable, '-c',
@@ -8219,8 +8336,10 @@ def test_audio_pipeline_runs_separation_and_alignment_but_cannot_claim_a_full_mv
 
 @pytest.mark.parametrize('oversized', [False, True])
 def test_focused_probe_obeys_shared_budget_and_preserves_checkpoints(tmp_path, oversized):
-    import httpx
     import os
+
+    import httpx
+
     from karaoke.tools.soak import run_probe
     folder = tmp_path/'job'
     folder.mkdir()
@@ -8256,6 +8375,7 @@ def test_focused_probe_reaps_descendants_after_parent_exit(tmp_path, interactive
     import signal
     from concurrent.futures import ThreadPoolExecutor
     from pathlib import Path
+
     from karaoke.tools.soak import run_probe
     pause = tmp_path/'preparation.pause'
     pause.write_text('probe owner')
@@ -8358,20 +8478,22 @@ def test_complete_audio_ready_releases_intermediates_and_queues_video_only(tmp_p
     assert not (folder/'checkpoints/separate.json').exists()
     assert (folder/'audio-result.json').exists()
     assert json.loads((folder/'prepared-lyrics.json').read_text())['source']=='verified lyric cache'
-    resumed, hit = store.create(JobRequest(**{**job['input'], 'force':False}), 'new-renderer')
+    resumed, hit = store.create(JobRequest.model_validate({**job['input'], 'force':False}), 'new-renderer')
     assert not hit and resumed['id'] == job['id'] and resumed['status'] == 'queued'
     assert resumed['restore_video'] and resumed['pipeline_version'] == job['pipeline_version']
     assert can_restore_video(folder, resumed['result'])
     assert {name:file_hash(folder/a['path']) for name,a in result['artifacts'].items()} == before
-    repeated, hit = store.create(JobRequest(**{**job['input'], 'force':False}), 'new-renderer')
+    repeated, hit = store.create(JobRequest.model_validate({**job['input'], 'force':False}), 'new-renderer')
     assert hit and repeated['id'] == resumed['id']
 
 
 def test_audio_regression_stops_on_software_failure_and_keeps_full_results_separate(tmp_path,monkeypatch):
     import hashlib
-    import httpx
     from pathlib import Path
-    from karaoke.room import AddSong,RoomCommand
+
+    import httpx
+
+    from karaoke.room import AddSong, RoomCommand
     from karaoke.tools import soak
     data=tmp_path/'jobs';data.mkdir();(data/'preparation.pause').write_text('test')
     app=create_app(data,version='test');store=app.state.store;room=app.state.room
@@ -8654,9 +8776,12 @@ def test_english_pronunciation_normalizes_model_input_before_g2p(word, key):
 def test_context_refinement_keeps_tightly_spaced_but_ordered_baseline(tmp_path, monkeypatch, with_original, late_failure):
     import importlib.util
     from pathlib import Path
+
     import soundfile as sf
+
     from timing_validation import validate_timeline
     spec = importlib.util.spec_from_file_location('context_audit', Path(__file__).parent/'experiments/cjk-onsets-v003/run.py')
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     cue = dict(text='あい', start=.1, end=.6, aligned_start=.1, aligned_end=.6, status='candidate', units=[
         dict(text='あ',first=0,stop=1,start=.1,end=.11),dict(text='い',first=1,stop=2,start=.11,end=.6)])
@@ -8713,13 +8838,14 @@ else: print(json.dumps(dict(rejected=False)))
 
 def test_roformer_batches_preserve_window_boundaries_and_partial_tail():
     import torch
+
     from karaoke.benchmark_neural import demix_batched
     class Model(torch.nn.Module):
         def __init__(self):
             super().__init__()
             self.weight = torch.nn.Parameter(torch.tensor(.25))
             self.batches = []
-        def forward(self, x):
+        def forward(self, x):  # ty: ignore[invalid-mutable-override] # nn.Module types forward as a callable attribute.
             self.batches.append(len(x))
             # A context-dependent result exposes misplaced/omitted windows.
             return x*self.weight + x.mean(dim=-1, keepdim=True)
@@ -8745,6 +8871,7 @@ def test_roformer_batches_preserve_window_boundaries_and_partial_tail():
 def test_audio_regression_prioritizes_due_failures_then_unfinished_cases(
         tmp_path, monkeypatch, retry_at, old_repaired, keep_going, expected_index):
     import httpx
+
     from karaoke.tools import soak
     cases = [dict(url=f'https://www.youtube.com/watch?v={i:011d}', title=str(i),
                   language='English', provider='youtube', attempts=[]) for i in range(4)]
@@ -8791,6 +8918,7 @@ def test_audio_regression_prioritizes_due_failures_then_unfinished_cases(
 @pytest.mark.parametrize('kind,resolved', [('model', True), ('download', True), ('old_download', False), ('software', False), ('source_backoff', False)])
 def test_audio_controller_retries_only_resolved_external_failures(tmp_path, monkeypatch, kind, resolved):
     import httpx
+
     from karaoke.tools import soak
     monkeypatch.setenv('KARAOKE_ASR_BACKEND', 'local')
     error = dict(provider='openai', code='openai_access_denied') if kind == 'model' else dict(
@@ -8830,13 +8958,14 @@ def test_audio_controller_retries_only_resolved_external_failures(tmp_path, monk
 @pytest.mark.parametrize('delayed_ledger', ['attempts', 'audio_attempts', 'provider'])
 def test_focused_probe_respects_both_retry_ledgers(tmp_path, monkeypatch, delayed_ledger):
     import httpx
+
     from karaoke.tools import soak
     folder = tmp_path/'job'
     folder.mkdir()
     retained = folder/'separated.wav'
     retained.write_bytes(b'already computed')
-    case = dict(url=URL, provider='youtube', attempts=[], audio_attempts=[])
-    state = dict(cases=[case], provider_backoff={})
+    case: dict[str, Any] = dict(url=URL, provider='youtube', attempts=[], audio_attempts=[])
+    state: dict[str, Any] = dict(cases=[case], provider_backoff={})
     if delayed_ledger == 'provider':
         state['provider_backoff']['youtube'] = 1030
     else:
@@ -9069,6 +9198,7 @@ def test_mixed_language_wrapping_does_not_split_a_word_at_punctuation():
 ])
 def test_asr_wrapping_keeps_a_singleton_tail_with_its_phrase(language, phrase, tail):
     from copy import deepcopy
+
     from karaoke.song_sources import transcript_lines
     transcription = dict(segments=[dict(text=phrase, start=3., end=9.),
                                    dict(text='短句', start=11., end=12.)])
@@ -9120,7 +9250,7 @@ def test_catalog_requires_video_identity_and_matching_duration(tmp_path):
 
 
 def test_automatic_lyrics_are_marked_as_draft_and_user_overrides_survive():
-    parsed = SongText(title='Detected', artist='Singer', language='English', lines=['Invented replacement'])
+    parsed = SongText.model_validate(dict(title='Detected', artist='Singer', language='English', lines=['Invented replacement']))
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))], model='test-model', usage=None)
     with patch('karaoke.song_sources.OpenAI') as client:
         client.return_value.beta.chat.completions.parse.return_value = response
@@ -9175,6 +9305,7 @@ def test_song_metadata_survives_downstream_retries_without_freezing_transcriptio
 
 def test_metadata_inference_is_reused_after_media_eviction_and_new_job(tmp_path):
     import shutil
+
     from karaoke.song_sources import extract_song_metadata
     from karaoke.stage_cache import StageCache
     store = Store(tmp_path)
@@ -9223,6 +9354,7 @@ def test_song_metadata_checkpoint_invalidates_changed_inputs_or_output(tmp_path,
 def test_failed_metadata_request_does_not_poison_the_checkpoint(tmp_path):
     import httpx
     from openai import APITimeoutError
+
     from karaoke.stage_cache import StageCache
     cache = StageCache(tmp_path)
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
@@ -9307,14 +9439,14 @@ def test_bad_description_uses_only_independently_corroborated_transcript(tmp_pat
     import soundfile as sf
     prose = ['今天在海边旅行', '明年我们搬去另一个城市']
     lines = ['清风吹过树林', '晚霞染红天空']
-    request = dict(url=URL)
+    request: dict[str, Any] = dict(url=URL)
     if evidence == 'user_supplied':
         request.update(lyrics=prose, language='zh')
     pipeline = Pipeline(request, tmp_path/'job', catalog_root=None)
     folder = pipeline.output/'asr'
     folder.mkdir()
-    words = [dict(word=text, start=1+2*i, end=2+2*i) for i, text in enumerate(lines)]
-    transcription = dict(language='Chinese', segments=[dict(text=' '.join(lines), start=0., end=5.)], words=words)
+    words: list[dict[str, Any]] = [dict(word=text, start=1+2*i, end=2+2*i) for i, text in enumerate(lines)]
+    transcription: dict[str, Any] = dict(language='Chinese', segments=[dict(text=' '.join(lines), start=0., end=5.)], words=words)
     if evidence == 'mismatched':
         transcription['segments'][0]['text'] = '另一段完全不同的转录'
     (folder/'transcription.json').write_text(json.dumps(transcription))
@@ -9347,7 +9479,7 @@ def test_matching_description_excerpt_cannot_replace_the_whole_song(tmp_path, so
     import soundfile as sf
     lines = ['春风吹过青青山坡', '小河映着远处灯火', '旅人沿着石阶远行', '我们相约明天再见']
     supplied = lines if source == 'complete_description' else lines[-1:]
-    request = dict(url=URL)
+    request: dict[str, Any] = dict(url=URL)
     if source == 'user':
         request.update(lyrics=supplied, language='zh')
     pipeline = Pipeline(request, tmp_path/'job', catalog_root=None)
@@ -9410,6 +9542,7 @@ def vocal_review_response(*, singing=False, speech=True, uncertain=False):
 @pytest.mark.parametrize('verdict', ['speech', 'singing', 'mixed', 'uncertain', 'instrumental', 'invalid'])
 def test_uncovered_dialogue_requires_two_complete_audio_reviews(tmp_path, monkeypatch, verdict):
     import soundfile as sf
+
     from karaoke.vocal_review import speech_intervals
     lines = ['清风吹过树林', '晚霞染红天空']
     speech = dict(word='Please come back tomorrow because the road is closed tonight', start=1., end=4.)
@@ -9458,8 +9591,10 @@ def test_uncovered_dialogue_requires_two_complete_audio_reviews(tmp_path, monkey
 
 
 def test_audio_reviews_revalidate_sources_and_reuse_only_unchanged_inputs(tmp_path):
-    import soundfile as sf
     from copy import deepcopy
+
+    import soundfile as sf
+
     from karaoke.vocal_review import SOURCES, review_gaps, speech_intervals
     words = [dict(word='spoken dialogue', start=1., end=2.)]
     for source in SOURCES:
@@ -9493,8 +9628,9 @@ def test_audio_reviews_revalidate_sources_and_reuse_only_unchanged_inputs(tmp_pa
 @pytest.mark.parametrize('supplied', [False, True])
 def test_description_repeats_require_asr_support_and_preserve_supplied_lyrics(tmp_path, monkeypatch, supplied):
     import soundfile as sf
-    from karaoke.song_sources import missing_repetitions, restore_repetitions
+
     from anchors_from_asr import anchors_from_words
+    from karaoke.song_sources import missing_repetitions, restore_repetitions
     lines = ['An opening by the river', 'Golden lanterns in the window,',
              'Every sparrow flies back home!', 'Winter carries distant thunder', 'The closing of the curtain']
     performed = lines[:4]+lines[1:3]+lines[4:]
@@ -9531,8 +9667,8 @@ def test_description_repeats_require_asr_support_and_preserve_supplied_lyrics(tm
 
 @pytest.mark.parametrize('invalid', ['unrelated', 'nonfinite', 'zero_duration', 'backward', 'moves_existing', 'outside_gap'])
 def test_repetition_recovery_rejects_unsupported_evidence(invalid, monkeypatch):
-    from karaoke.song_sources import restore_repetitions
     from anchors_from_asr import anchors_from_words
+    from karaoke.song_sources import restore_repetitions
     lines = ['Opening by the river', 'Golden lanterns in the window',
              'Every sparrow flies back home', 'Winter brings distant thunder', 'Closing of the curtain']
     performed = lines[:4]+lines[1:3]+lines[4:]
@@ -9639,7 +9775,7 @@ def test_reused_asr_text_keeps_silence_boundaries_but_uses_recovered_word_times(
     pipeline = Pipeline(dict(url=URL), tmp_path/'job', catalog_root=None)
     folder = pipeline.output/'asr'
     folder.mkdir()
-    segments = [dict(text='Hello there.', start=1., end=2.),
+    segments: list[dict[str, Any]] = [dict(text='Hello there.', start=1., end=2.),
                 dict(text='Quiet ending.', start=2.5, end=3.),
                 dict(text='Invented credits.', start=5., end=5.5)]
     text = ' '.join(s['text'] for s in segments) if same_text else 'Different uncorroborated transcript.'
@@ -9708,6 +9844,7 @@ def test_independent_lyrics_can_reuse_valid_original_asr_anchors(tmp_path, initi
 @pytest.mark.parametrize('backend', ['api', 'local'])
 def test_missing_anchors_use_cached_context_without_lyric_prompt(tmp_path, monkeypatch, bad_timing, location, backend):
     import soundfile as sf
+
     from karaoke.anchor_recovery import recover_anchor_words
     from karaoke.stage_cache import StageCache
     lines = ['first line', 'the missing middle passage', 'another missing longer passage', 'last line']
@@ -9719,7 +9856,7 @@ def test_missing_anchors_use_cached_context_without_lyric_prompt(tmp_path, monke
     words = [dict(word=text, start=a, end=b) for text,a,b in
              [('序',0.,.2), *known, ('終',11.,11.2)]]
     begin = 0. if location == 'opening' else .4
-    recovered = [dict(word=text, start=a-begin, end=b-begin) for text,a,b in
+    recovered: list[dict[str, Any]] = [dict(word=text, start=a-begin, end=b-begin) for text,a,b in
                  [(lines[0],1.,2.), (lines[1],3.,4.), (lines[2],5.,6.), (lines[3],8.,9.)]]
     if bad_timing:
         recovered.reverse()
@@ -9762,6 +9899,7 @@ def test_missing_anchors_use_cached_context_without_lyric_prompt(tmp_path, monke
 
 def test_long_anchor_gap_can_use_cached_mix_and_keep_usable_asr_segments(tmp_path):
     import soundfile as sf
+
     from karaoke.anchor_recovery import recover_anchor_words
     from karaoke.stage_cache import StageCache
     lines = ['opening words', 'missing middle phrase', 'another missing sequence', 'closing words']
@@ -9809,7 +9947,7 @@ def test_long_anchor_gap_can_use_cached_mix_and_keep_usable_asr_segments(tmp_pat
     ('Japanese', 'あいうえおかきくけこさしすせそたちつてとなにぬねの。もう一度。'),
 ])
 def test_automatic_line_breaking_only_adds_whitespace(language, text):
-    parsed = SongText(title='Detected', artist='', language=language, lines=['Changed'])
+    parsed = SongText.model_validate(dict(title='Detected', artist='', language=language, lines=['Changed']))
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))], model='test', usage=None)
     with patch('karaoke.song_sources.OpenAI') as client:
         client.return_value.beta.chat.completions.parse.return_value = response
@@ -9842,6 +9980,7 @@ def test_preview_padding_never_hides_missing_or_non_silent_audio(tmp_path, extra
     (48000,57629,2), (48000,57646,2), (48000,57647,2), (44100,57629,1)])
 def test_preview_encoder_preserves_partial_final_frames(tmp_path, rate, frames, channels):
     import soundfile as sf
+
     from karaoke.exact_stems import encode_preview
 
     tone = .1*np.sin(2*np.pi*440*np.arange(frames)/rate)
@@ -9861,6 +10000,7 @@ def test_preview_encoder_preserves_partial_final_frames(tmp_path, rate, frames, 
 @pytest.mark.parametrize('silent', [False, True])
 def test_master_only_package_still_builds_verified_three_stem_previews(tmp_path, previews, silent, cached_native):
     import soundfile as sf
+
     from karaoke import exact_stems
     from karaoke.three_stems import build, verify
 
@@ -9923,6 +10063,7 @@ def test_master_only_package_still_builds_verified_three_stem_previews(tmp_path,
 def test_direct_three_stems_matches_two_step_samples_without_unused_previews(tmp_path, monkeypatch, rate, channels):
     import soundfile as sf
     from scipy.signal import resample_poly
+
     from karaoke import exact_stems, three_stems
     from karaoke.exact_stems import compact_playback_audio
     frames = rate + 13
@@ -9969,7 +10110,7 @@ def test_preview_clipping_reports_measured_peak(tmp_path):
 
 
 def test_preview_group_reencodes_every_track_with_the_same_gain(tmp_path):
-    from karaoke.exact_stems import encode_previews, PreviewClippingError
+    from karaoke.exact_stems import PreviewClippingError, encode_previews
 
     calls = []
     def encode(source, output, gain, frames, channels):
@@ -9989,7 +10130,7 @@ def test_preview_group_reencodes_every_track_with_the_same_gain(tmp_path):
 
 
 def test_preview_group_keeps_format_failures_and_bounds_clipping_retries(tmp_path):
-    from karaoke.exact_stems import encode_previews, PreviewClippingError
+    from karaoke.exact_stems import PreviewClippingError, encode_previews
 
     sources = {'vocals': tmp_path/'vocals.wav'}
     with patch('karaoke.exact_stems.encode_preview', side_effect=ValueError('Missing audio')) as encode:
@@ -10004,7 +10145,7 @@ def test_preview_group_keeps_format_failures_and_bounds_clipping_retries(tmp_pat
 
 @pytest.mark.parametrize('conflicting_start', [.98, 1.])
 def test_cross_line_refinement_falls_back_without_inventing_times(conflicting_start):
-    prior = [dict(text=text, units=[dict(text=text, start=start, end=start+.3)])
+    prior: list[dict[str, Any]] = [dict(text=text, units=[dict(text=text, start=start, end=start+.3)])
              for text, start in [('first',1.), ('second',1.5), ('third',3.)]]
     refined = json.loads(json.dumps(prior))
     refined[1]['units'][0]['start'] = conflicting_start
@@ -10028,7 +10169,7 @@ def cache_fixture(store, suffix, *, restorable=False):
     job, _ = store.create(JobRequest(url='https://youtu.be/0000000000'+suffix, title=suffix, force=True), 'test')
     folder = store.root/job['id']
     (folder/'mv.mp4').write_bytes(b'x'*2048)
-    result = dict(title=suffix, artist='Singer', language='English', duration_seconds=10,
+    result: dict[str, Any] = dict(title=suffix, artist='Singer', language='English', duration_seconds=10,
                   shared_preview_gain=.8, mv_audio='instrumental_backing',
                   reconstruction={'source_pcm_sha256':'fixture'},
                   artifacts={'mv':dict(path='mv.mp4',bytes=2048,sha256='fixture')})
@@ -10223,7 +10364,7 @@ def test_video_restore_url_deduplicates_across_renderer_versions(tmp_path):
     original = cache_fixture(store, '1', restorable=True)
     store.cache.enforce()
     store.cache.set_limit(store.cache.stats['used_bytes']-1)
-    request = JobRequest(**{**original['input'], 'force':False})
+    request = JobRequest.model_validate({**original['input'], 'force':False})
     restored, cached = store.create(request, 'new-renderer')
     duplicate, duplicate_cached = store.create(request, 'new-renderer')
     assert restored['id'] == duplicate['id'] == original['id']
@@ -10257,7 +10398,7 @@ def test_version_refresh_only_keeps_unfinished_stage_checkpoints(tmp_path, statu
     with cache.stage('align', inputs=[separated], outputs=[aligned], code=[code]):
         aligned.write_bytes(b'old timings')
     store.cache.compact(old)
-    refreshed, hit = store.create(JobRequest(**{**old['input'],'force':False}), 'new')
+    refreshed, hit = store.create(JobRequest.model_validate({**old['input'],'force':False}), 'new')
     if status == 'completed':
         assert hit and refreshed['id'] == old['id'] and refreshed['status'] == 'completed'
         assert refreshed['pipeline_version'] == old['pipeline_version']
@@ -10304,7 +10445,9 @@ def test_cached_video_restore_preserves_audio_version_across_upgrade(tmp_path, q
 def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch, source_matches, compact, mv_audio):
     import shutil
     from pathlib import Path
+
     import soundfile as sf
+
     from karaoke.exact_stems import compact_playback_audio, decode_source, pcm_sha
     source = tmp_path/'original.mkv'
     subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-f', 'lavfi', '-i',
@@ -10380,6 +10523,7 @@ def test_video_only_pipeline_uses_retained_audio_and_cues(tmp_path, monkeypatch,
 def test_pipeline_materializes_all_media_before_ready(tmp_path, monkeypatch):
     """Real codecs/packagers around fixed model outputs exercise the full DAG."""
     import soundfile as sf
+
     from karaoke.three_stems import verify
     monkeypatch.setenv('KARAOKE_REQUIRE_CACHED_SOURCE', '1')
     pipeline = Pipeline(dict(url=URL, title='Fixture', artist='Test', language='English',
@@ -10455,16 +10599,16 @@ def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, f
             initial_kind not in ('short_window_recovery', 'short_tail_recovery') and name.endswith('-15s.mp3'))
         if kwargs['model'] != 'whisper-1':
             assert 'timestamp_granularities' not in kwargs
-            data = dict(text=fallback_text)
+            data: dict[str, Any] = dict(text=fallback_text)
         elif name == str(audio) and initial_kind == 'punctuation':
-            data = dict(language='nynorsk', segments=[dict(start=1,end=2,text='...')], words=[])
+            data: dict[str, Any] = dict(language='nynorsk', segments=[dict(start=1,end=2,text='...')], words=[])
         elif name == str(audio) and initial_kind == 'fragmented_loop':
-            data = dict(language='english', segments=[dict(start=i,end=i,text='same empty phrase')
+            data: dict[str, Any] = dict(language='english', segments=[dict(start=i,end=i,text='same empty phrase')
                                                      for i in range(24)], words=[])
         elif name == str(audio) and initial_kind == 'local_loop':
             # A short loop inside an otherwise normal transcript must not be
             # hidden by the proportion of correctly timed verses.
-            data = dict(language='chinese', segments=[
+            data: dict[str, Any] = dict(language='chinese', segments=[
                 *[dict(start=i, end=i+.8, text='正常的一句') for i in range(30)],
                 *[dict(start=30+i*.02, end=30+(i+1)*.02, text='耶') for i in range(21)],
                 *[dict(start=31+i, end=31+i+.8, text='后面的歌词') for i in range(30)]], words=[])
@@ -10472,16 +10616,16 @@ def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, f
             end = 2 if initial_kind == 'suspected_silence' else 1.1
             times = [(1,1.8),(1.8,1.8),(1.8,1.8),(1.8,2)] if end == 2 else [
                 (1,1.02),(1.02,1.04),(1.04,1.06),(1.06,1.1)]
-            data = dict(language='chinese', segments=[dict(start=1, end=end,
+            data: dict[str, Any] = dict(language='chinese', segments=[dict(start=1, end=end,
                         text='A fluent invented phrase', no_speech_prob=.606)],
                         words=[dict(start=a, end=b, word=w) for (a,b),w in zip(times,
                                ['A','fluent','invented','phrase'])])
         elif initial_kind == 'collapsed_words' and (name == str(audio) or bad_chunk):
-            data = dict(language='japanese', segments=[dict(start=1,end=5,text='一緒に歌うこの歌の続きを')],
+            data: dict[str, Any] = dict(language='japanese', segments=[dict(start=1,end=5,text='一緒に歌うこの歌の続きを')],
                         words=[dict(start=1,end=1,word=c) for c in '一緒に歌うこの歌の続きを'])
         elif initial_kind in ('backward_segments', 'backward_words', 'invalid_range') and (
                 name == str(audio) or bad_chunk):
-            data = dict(language='english', segments=[dict(start=1,end=2,text='第一句'),
+            data: dict[str, Any] = dict(language='english', segments=[dict(start=1,end=2,text='第一句'),
                                                       dict(start=3,end=4,text='第二句')],
                         words=[dict(start=1,end=2,word='第一句'), dict(start=3,end=4,word='第二句')])
             if initial_kind == 'invalid_range':
@@ -10489,10 +10633,10 @@ def test_invalid_asr_recovers_in_chunks_without_inventing_word_times(tmp_path, f
             else:
                 data[initial_kind.removeprefix('backward_')][0].update(start=10, end=11)
         elif name == str(audio) or bad_chunk:
-            data = dict(language='chinese', segments=[dict(start=0,end=1,text='呜'*100)], words=[])
+            data: dict[str, Any] = dict(language='chinese', segments=[dict(start=0,end=1,text='呜'*100)], words=[])
         else:
             assert 'language' not in kwargs
-            data = dict(language='chinese', segments=[dict(start=1,end=2,text='歌词')],
+            data: dict[str, Any] = dict(language='chinese', segments=[dict(start=1,end=2,text='歌词')],
                         words=[dict(start=1,end=2,word='歌词')])
         return SimpleNamespace(model_dump=lambda: data)
     client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create)))
@@ -10554,9 +10698,9 @@ def test_repeated_positive_length_phrases_still_reject_collapsed_word_loops(coll
     from karaoke.transcribe_lyrics import needs_recovery
     data = dict(segments=[], words=[])
     for i in range(10):
-        words = [dict(word=char, start=i+j*.2, end=i+j*.2 if collapsed and j<3 else i+(j+1)*.2)
+        words: list[dict[str, Any]] = [dict(word=char, start=i+j*.2, end=i+j*.2 if collapsed and j<3 else i+(j+1)*.2)
                  for j, char in enumerate('甲乙丙丁戊')]
-        segment = dict(start=i, end=i+1., text='甲乙丙丁戊', no_speech_prob=.1)
+        segment: dict[str, Any] = dict(start=i, end=i+1., text='甲乙丙丁戊', no_speech_prob=.1)
         if nested_words:
             segment['words'] = words
         data['segments'].append(segment)
@@ -10569,7 +10713,9 @@ def test_repeated_positive_length_phrases_still_reject_collapsed_word_loops(coll
                                   'silent_parent', 'quiet_parent', 'mismatched_parent', 'shared_parent'])
 def test_asr_checks_exact_silence_before_repeating_full_recording(tmp_path, tail):
     from copy import deepcopy
+
     import soundfile as sf
+
     from karaoke.transcribe_lyrics import needs_recovery
 
     audio, output = tmp_path/'audio.wav', tmp_path/'asr'
@@ -10582,7 +10728,7 @@ def test_asr_checks_exact_silence_before_repeating_full_recording(tmp_path, tail
         pcm = np.column_stack((pcm, -pcm))  # Downmix cancellation is not silence.
     sf.write(audio, pcm, 16000, subtype='FLOAT')
     start = {'negative_time': -.1, 'outside_audio': 9.}.get(tail, 2.8)
-    initial = dict(language='english', text='Soft opening invented ending',
+    initial: dict[str, Any] = dict(language='english', text='Soft opening invented ending',
         segments=[dict(start=.5, end=1.5, text='Soft opening'),
                   dict(start=start, end=start, text=' invented ending')],
         words=[dict(start=.5, end=1.5, word='opening'),
@@ -10631,8 +10777,8 @@ def test_asr_checks_exact_silence_before_repeating_full_recording(tmp_path, tail
 
 
 def test_asr_request_cache_checks_input_parameters_and_response(tmp_path):
-    from karaoke.transcribe_lyrics import cached_recognition
     from karaoke.stage_cache import retained_files
+    from karaoke.transcribe_lyrics import cached_recognition
     audio = tmp_path/'audio.mp3'
     audio.write_bytes(b'first audio')
     output = tmp_path/'asr'
@@ -10659,6 +10805,7 @@ def test_asr_request_cache_checks_input_parameters_and_response(tmp_path):
 def test_local_asr_language_uses_the_recording_instead_of_only_the_intro(tmp_path, monkeypatch, scenario):
     import torch
     import whisper
+
     from karaoke.transcribe_lyrics import cached_local_recognition
 
     audio, weights, output = tmp_path/'audio.wav', tmp_path/'model.pt', tmp_path/'asr'
@@ -10719,6 +10866,7 @@ def test_local_asr_language_uses_the_recording_instead_of_only_the_intro(tmp_pat
 @pytest.mark.parametrize('language', ['en', 'auto', None, 'disagreement', 'mixed_majority'])
 def test_local_whisper_batches_cover_the_recording_and_keep_word_times(monkeypatch, batch_size, language):
     from dataclasses import dataclass
+
     from karaoke import local_asr
     @dataclass
     class Segment:
@@ -10765,6 +10913,7 @@ def test_local_whisper_batches_cover_the_recording_and_keep_word_times(monkeypat
 @pytest.mark.parametrize('failure', [None, 'value', 'fatal'])
 def test_local_recognizer_isolates_libraries_reuses_model_and_cleans_up(tmp_path, monkeypatch, failure):
     import os
+
     from karaoke.local_asr import isolated_recognizer
     (tmp_path/'faster_whisper.py').write_text('''
 import os, sys
@@ -10810,6 +10959,7 @@ class BatchedInferencePipeline:
 @pytest.mark.parametrize('valid', [True, False])
 def test_offline_transcription_never_falls_back_to_an_api(tmp_path, monkeypatch, valid):
     import soundfile as sf
+
     from karaoke import transcribe_lyrics
     audio, output = tmp_path/'audio.wav', tmp_path/'asr'
     output.mkdir()
@@ -10833,7 +10983,7 @@ def test_offline_transcription_never_falls_back_to_an_api(tmp_path, monkeypatch,
 @pytest.mark.parametrize('collapsed,expected', [(1, False), (7, True)])
 def test_silence_warning_includes_collapsed_words_at_the_segment_end(collapsed, expected):
     from karaoke.transcribe_lyrics import needs_recovery
-    words = [dict(word=f'word{i}', start=i, end=i+1) for i in range(5)]
+    words: list[dict[str, Any]] = [dict(word=f'word{i}', start=i, end=i+1) for i in range(5)]
     words += [dict(word=f'tail{i}', start=5., end=5.) for i in range(collapsed)]
     # The following phrase starts at the same boundary, but has real duration.
     words += [dict(word=f'next{i}', start=5., end=6.+i) for i in range(8)]
@@ -10884,6 +11034,7 @@ def test_local_batch_cache_tracks_model_audio_and_batch_size(tmp_path, monkeypat
 @pytest.mark.parametrize('track', ['original', 'lead'])
 def test_unusable_vocal_asr_rechecks_recording_tracks_before_whole_song_retry(tmp_path, monkeypatch, problem, track):
     from copy import deepcopy
+
     import soundfile as sf
 
     audio, original, output = tmp_path/'vocals.wav', tmp_path/'source.wav', tmp_path/'asr'
@@ -10893,7 +11044,7 @@ def test_unusable_vocal_asr_rechecks_recording_tracks_before_whole_song_retry(tm
     initial = dict(language='nynorsk', text='1, '*100,
         segments=[dict(start=.5, end=2.5, text='1, '*100)],
         words=[dict(start=.5, end=2.5, word='1')])
-    candidate = dict(language='en', text='A quiet opening',
+    candidate: dict[str, Any] = dict(language='en', text='A quiet opening',
         segments=[dict(start=.5, end=2.5, text='A quiet opening')],
         words=[dict(start=.5, end=1., word='A'), dict(start=1., end=2., word='quiet'),
                dict(start=2., end=2.5, word='opening')])
@@ -10973,9 +11124,11 @@ def test_failed_original_asr_uses_lead_before_another_remote_request(tmp_path, m
 @pytest.mark.parametrize('initial_error', ['loop', 'silence_warning', 'collapsed_phrase'])
 def test_local_asr_repair_keeps_surrounding_words_and_requires_matching_boundaries(tmp_path, problem, initial_error):
     from copy import deepcopy
-    from karaoke.transcribe_lyrics import repair_loop_window, splice_loop_window
+
     import soundfile as sf
-    original = dict(language='chinese', duration=60, segments=[
+
+    from karaoke.transcribe_lyrics import repair_loop_window, splice_loop_window
+    original: dict[str, Any] = dict(language='chinese', duration=60, segments=[
         dict(start=3., end=5., text='此刻一起唱着歌'),
         # The decoder starts at 6s but only emits loop words much later. A
         # repair must include the lost audio before those words, not just 30s+.
@@ -10988,12 +11141,12 @@ def test_local_asr_repair_keeps_surrounding_words_and_requires_matching_boundari
         text = '不应出现的虚构歌词内容'
         original['segments'][1].update(text=text,
             no_speech_prob=.9 if initial_error == 'silence_warning' else .1)
-        words = [dict(start=32., end=32., word=c) for c in text]
+        words: list[dict[str, Any]] = [dict(start=32., end=32., word=c) for c in text]
         if initial_error == 'silence_warning':
             words[0]['start'] = 30.
         original['words'][1:2] = words
     original['segments'].append(dict(start=55., end=60., text=''))
-    replacement = dict(language='chinese', segments=[
+    replacement: dict[str, Any] = dict(language='chinese', segments=[
         dict(start=.5,end=2.5,text='此刻一起唱着歌'),
         dict(start=8.,end=10.,text='轻轻唱出这一句'),
         dict(start=20.,end=22.,text='然后听见你的回答'),
@@ -11049,8 +11202,10 @@ def test_local_asr_repair_keeps_surrounding_words_and_requires_matching_boundari
 @pytest.mark.parametrize('distant_boundary', [True, False])
 def test_local_asr_repair_anchors_outside_corrupted_decoder_window(tmp_path, decoder_window, matching_boundary, distant_boundary):
     from copy import deepcopy
-    from karaoke.transcribe_lyrics import repair_loop_window
+
     import soundfile as sf
+
+    from karaoke.transcribe_lyrics import repair_loop_window
 
     segments = [dict(start=3., end=5., text='此刻一起唱着歌'),
         dict(start=6., end=8., text='貌似完整的错误句子', seek=decoder_window),
@@ -11090,6 +11245,7 @@ def test_local_asr_repair_anchors_outside_corrupted_decoder_window(tmp_path, dec
 @pytest.mark.parametrize('independent_source', [None, 'description', 'user', 'unrelated'])
 def test_truncated_recovery_text_cannot_drop_later_sung_words(tmp_path, recoverable, independent_source):
     import soundfile as sf
+
     from karaoke.transcribe_lyrics import select_recovery_text
     greeting = "Hello, I'm here."
     lines = ['沿着山路走到远方', '听见晚风轻轻歌唱', '抬头又见漫天星光']
@@ -11129,7 +11285,7 @@ def test_truncated_recovery_text_cannot_drop_later_sung_words(tmp_path, recovera
         assert recovery['text_selection']['selected'] is None
         # Usable word evidence must survive a rejected text draft. Only an
         # independent source that passes the unchanged audio gate can use it.
-        request = dict(url=URL)
+        request: dict[str, Any] = dict(url=URL)
         supplied = [greeting, *lines]
         if independent_source == 'user':
             request['lyrics'] = supplied
@@ -11165,13 +11321,14 @@ def test_truncated_recovery_text_cannot_drop_later_sung_words(tmp_path, recovera
 @pytest.mark.parametrize('ending', ['hallucinated', 'genuine', 'clean', 'earlier_anchor', 'wrong_anchor', 'outside_audio'])
 @pytest.mark.parametrize('requested_language', ['auto', 'en', None])
 def test_repeated_asr_ending_is_redecoded_locally_without_dropping_genuine_repeats(tmp_path, monkeypatch, ending, requested_language):
-    import soundfile as sf
     from copy import deepcopy
     from pathlib import Path
+
+    import soundfile as sf
     audio, output = tmp_path/'audio.wav', tmp_path/'asr'
     sf.write(audio, np.full(18000, .01), 1000)
     output.mkdir()
-    prefix = [dict(start=0., end=1., text='Before the ending'),
+    prefix: list[dict[str, Any]] = [dict(start=0., end=1., text='Before the ending'),
               dict(start=3., end=5., text='A familiar opening phrase')]
     # A failed decoder's language guess must not force the local retry.
     initial = dict(language='japanese', segments=prefix+[
@@ -11182,7 +11339,7 @@ def test_repeated_asr_ending_is_redecoded_locally_without_dropping_genuine_repea
     repeated = ending == 'genuine'
     parts = deepcopy(prefix)+[
         dict(start=8.+i, end=8.7+i, text='Sing this phrase') for i in range(8 if repeated else 1)]
-    replacement = dict(language='english', segments=parts,
+    replacement: dict[str, Any] = dict(language='english', segments=parts,
         words=[dict(start=s['start'], end=s['end'], word=s['text']) for s in parts])
     if ending == 'earlier_anchor':
         replacement['segments'][1]['text'] = 'A corrected nearby phrase'
@@ -11280,6 +11437,7 @@ def test_new_survey_reuses_verified_ready_sources(tmp_path, status):
 @pytest.mark.parametrize('media_kind', ['video', 'audio'])
 def test_media_access_does_not_block_health(tmp_path, monkeypatch, access_error, media_kind):
     from concurrent.futures import ThreadPoolExecutor
+
     import soundfile as sf
     app = create_app(tmp_path, version='test')
     job = cache_fixture(app.state.store, '1')
@@ -11319,6 +11477,7 @@ def test_media_access_does_not_block_health(tmp_path, monkeypatch, access_error,
 @pytest.mark.parametrize(('max_bytes', 'max_entries'), [(5, 99), (99, 2)])
 def test_audio_window_cache_coalesces_reads_and_bounds_retained_bytes(max_bytes, max_entries):
     from concurrent.futures import ThreadPoolExecutor
+
     from karaoke.api import AudioWindowCache
     cache = AudioWindowCache(max_bytes=max_bytes, max_entries=max_entries)
     calls = []
@@ -11362,6 +11521,7 @@ def test_audio_window_cache_coalesces_reads_and_bounds_retained_bytes(max_bytes,
 
 def test_playback_cache_reuses_audio_but_rechecks_source_and_gain(tmp_path, monkeypatch):
     import soundfile as sf
+
     from karaoke.api import playback_window_bytes
     app = create_app(tmp_path, version='test')
     store = app.state.store
@@ -11400,9 +11560,11 @@ def test_playback_cache_reuses_audio_but_rechecks_source_and_gain(tmp_path, monk
 
 
 def test_audio_encoding_does_not_starve_video_streams(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
     import anyio.to_thread
     import soundfile as sf
-    from concurrent.futures import ThreadPoolExecutor
+
     from karaoke.api import playback_window_bytes
     app = create_app(tmp_path, version='test')
     job = cache_fixture(app.state.store, '1')
@@ -11422,6 +11584,7 @@ def test_audio_encoding_does_not_starve_video_streams(tmp_path, monkeypatch):
         return anyio.to_thread.current_default_thread_limiter()
 
     with TestClient(app) as client, ThreadPoolExecutor(2) as pool:
+        assert client.portal is not None
         limiter = client.portal.call(io_limiter)
         previous, limiter.total_tokens = limiter.total_tokens, 1
         monkeypatch.setattr('karaoke.api.playback_window_bytes', slow_encode)
@@ -11441,8 +11604,10 @@ def test_audio_encoding_does_not_starve_video_streams(tmp_path, monkeypatch):
 @pytest.mark.parametrize('cancel_index', [0, 15])
 def test_playback_burst_is_bounded_and_disconnect_keeps_running_reads_protected(tmp_path, monkeypatch, cancel_index):
     import asyncio
+
     import httpx
     import soundfile as sf
+
     from karaoke.api import playback_window_bytes
     app = create_app(tmp_path, version='test')
     store = app.state.store
@@ -11485,7 +11650,8 @@ def test_playback_burst_is_bounded_and_disconnect_keeps_running_reads_protected(
             finally:
                 release.set()
                 replies = await asyncio.gather(*pending, return_exceptions=True)
-            assert all(response.status_code == 200 for i, response in enumerate(replies) if i != cancel_index)
+            assert all(not isinstance(response, BaseException) and response.status_code == 200
+                       for i, response in enumerate(replies) if i != cancel_index)
             for _ in range(100):
                 if not store.cache.leases:
                     break
@@ -11781,6 +11947,7 @@ def test_music_catalogue_keeps_provider_order_versions_and_distinct_artist_ids(m
 @pytest.mark.parametrize('section', ['songs', 'videos', 'releases', 'empty'])
 def test_artist_without_playlist_keeps_native_available_works(monkeypatch, section):
     from ytmusicapi import YTMusic
+
     from karaoke.video_search import music_entries
     artist = dict(name='Singer', songs=dict(browseId=None),
                   albums=dict(results=[dict(title='Album', browseId='MPREalbum')]),
@@ -11820,6 +11987,7 @@ def test_music_metadata_does_not_expose_arbitrary_links_or_invent_missing_counts
 
 def test_unfiltered_music_search_keeps_native_sections_translated_titles_and_collections(monkeypatch):
     from ytmusicapi import YTMusic
+
     from karaoke.video_search import music_entries
     artist_id = 'UC'+'a'*22
     artist_run = dict(text='Singer', navigationEndpoint=dict(browseEndpoint=dict(browseId=artist_id)))
@@ -11854,6 +12022,7 @@ def test_unfiltered_music_search_keeps_native_sections_translated_titles_and_col
 @pytest.mark.parametrize('first_page', [True, False])
 def test_artist_song_play_counts_survive_native_playlist_parsing(monkeypatch, first_page):
     from ytmusicapi import YTMusic
+
     from karaoke.video_search import music_entries
     artist_id = 'UC'+'a'*22
     def column(text, endpoint=None):
@@ -11882,6 +12051,7 @@ def test_artist_song_play_counts_survive_native_playlist_parsing(monkeypatch, fi
 
 def test_music_album_browse_keeps_every_track_and_its_order(monkeypatch):
     from ytmusicapi import YTMusic
+
     from karaoke.video_search import music_entries
     tracks = [dict(title=f'Track {i}', videoId=f'{i:011d}') for i in range(32)]
     monkeypatch.setattr(YTMusic, 'get_album', lambda self, query: dict(title='An album',
@@ -11894,6 +12064,7 @@ def test_music_album_browse_keeps_every_track_and_its_order(monkeypatch):
 
 def test_artist_playlist_preserves_richer_shelf_metadata_by_video_id(monkeypatch):
     from ytmusicapi import YTMusic
+
     from karaoke.video_search import music_entries
     shelf = [dict(videoId='abcdefghijk', title='Same title', views='1136万次观看'),
              dict(videoId='00000000000', title='Same title', views='8万次观看')]
@@ -11949,6 +12120,7 @@ def test_search_api_failure_is_distinct_from_empty_and_creates_no_jobs(tmp_path,
 
 def test_video_search_deduplicates_inflight_queries_and_bounds_load(monkeypatch):
     import asyncio
+
     from karaoke import video_search
     async def scenario():
         service = video_search.VideoSearch()
@@ -11992,6 +12164,7 @@ def test_video_search_deduplicates_inflight_queries_and_bounds_load(monkeypatch)
 
 def test_cancelling_video_search_terminates_its_subprocess(monkeypatch):
     import asyncio
+
     from karaoke import video_search
     async def scenario():
         original = asyncio.create_subprocess_exec
@@ -12074,8 +12247,9 @@ def test_search_matches_song_and_performer_without_related_song_padding(query, t
 
 
 def test_youtube_search_fetches_one_native_page_and_resumes_its_continuation(monkeypatch):
-    from karaoke.video_search import youtube_entries
     from yt_dlp.extractor.youtube import YoutubeSearchIE
+
+    from karaoke.video_search import youtube_entries
     calls = []
     def respond(self, **kwargs):
         calls.append(kwargs)
@@ -12129,6 +12303,7 @@ def test_soak_sampling_consumes_search_page_and_preserves_source_evidence(tmp_pa
     ('songs', True), ('artists', True), ('songs', False), ('artists', False), ('artist', False)])
 def test_music_pages_keep_localized_names_and_request_only_the_requested_page(monkeypatch, kind, first_page):
     from ytmusicapi import YTMusic
+
     from karaoke.video_search import music_entries
     artist_id = 'UC'+'a'*22
     title_run = dict(text='Next song', navigationEndpoint=dict(watchEndpoint=dict(videoId='abcdefghijk')))
@@ -12245,10 +12420,10 @@ else:
 
 def test_playback_survey_records_source_disagreements_and_actual_provider_failures():
     from karaoke.tools.playback_sweep import soft_failures
-    crosscheck = dict(status='conflicting',sources=[dict(provider='line_music'),dict(provider='lrclib')],
+    crosscheck: dict[str, Any] = dict(status='conflicting',sources=[dict(provider='line_music'),dict(provider='lrclib')],
         unavailable_sources=[dict(provider='netease',status='unavailable',http_status=429,error='HTTPStatusError'),
                              dict(provider='youtube_music',status='missing_video_identity')])
-    packet = dict(lookup=dict(status='candidate',provider='line_music',crosscheck=crosscheck))
+    packet: dict[str, Any] = dict(lookup=dict(status='candidate',provider='line_music',crosscheck=crosscheck))
     events = soft_failures({},packet)
     assert [e['code'] for e in events] == ['lyric_source_disagreement','lyric_provider_unavailable']
     assert events[0]['sources'] == ['line_music','lrclib']
@@ -12262,7 +12437,7 @@ def test_playback_survey_records_source_disagreements_and_actual_provider_failur
     assert soft_failures({},packet) == [dict(module='lyrics', code='lyric_recording_mismatch',
         provider='line_music', reasons=['duration', 'live_performance'])]
     del packet['lookup']['recording_mismatches']
-    recovered = dict(provider='line_music', status='candidate', rejected_candidates=[
+    recovered: dict[str, Any] = dict(provider='line_music', status='candidate', rejected_candidates=[
         dict(reason='candidate_unavailable', track_id='123', error='ReadTimeout'),
         dict(reason='text_too_short', track_id='456')])
     packet['lookup']['published_lookup'] = recovered
@@ -12287,6 +12462,7 @@ def test_playback_survey_records_source_disagreements_and_actual_provider_failur
 @pytest.mark.parametrize('mode', ['serial', 'parallel', 'cache_limited', 'pause', 'skip_large', 'unlimited'])
 def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monkeypatch, hard_code, has_full_mv, targeted, mode):
     from contextlib import nullcontext
+
     from karaoke.tools import playback_sweep as sweep
     data = tmp_path/'data'
     data.mkdir()
@@ -12410,9 +12586,11 @@ def test_playback_survey_runs_each_case_once_and_keeps_user_queue(tmp_path, monk
 
 @pytest.mark.parametrize('budget', ['normal', 'quota_full', 'unlimited', 'disk_full', 'transient_disconnect', 'disconnected'])
 def test_probe_session_overlaps_children_and_stops_them_together(tmp_path, budget):
-    from concurrent.futures import ThreadPoolExecutor
-    import httpx
     import os
+    from concurrent.futures import ThreadPoolExecutor
+
+    import httpx
+
     from karaoke.tools.soak import ProbeSession, run_probe
     folders = [tmp_path/name for name in ('one', 'two')]
     for folder in folders:
@@ -12468,7 +12646,9 @@ def test_probe_session_overlaps_children_and_stops_them_together(tmp_path, budge
 def test_probe_session_shares_fresh_monitoring_with_the_controller(tmp_path, monkeypatch, failed_endpoint):
     from collections import Counter
     from concurrent.futures import ThreadPoolExecutor
+
     import httpx
+
     from karaoke.tools import soak
     now = [0.]
     monkeypatch.setattr(soak.time, 'monotonic', lambda: now[0])
@@ -12536,6 +12716,7 @@ def test_download_transport_preserves_bytes_on_range_and_whole_file_servers(tmp_
                 self.send_error(403)
                 return
             if requires_range:
+                assert value is not None
                 first, last = value.removeprefix('bytes=').split('-')
                 first, last = int(first), min(int(last), len(payload)-1)
                 chunk = payload[first:last+1]
@@ -12548,7 +12729,7 @@ def test_download_transport_preserves_bytes_on_range_and_whole_file_servers(tmp_
             self.send_header('Content-Length', str(len(chunk)))
             self.end_headers()
             self.wfile.write(chunk)
-        def log_message(self, *args):
+        def log_message(self, format, *args):
             pass
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -12620,6 +12801,7 @@ def test_lyric_availability_checks_actual_source_bound_text(tmp_path, monkeypatc
 
 def test_lyric_checks_share_work_for_ten_thousand_readers_and_bound_distinct_load(monkeypatch):
     import asyncio
+
     from karaoke import lyric_availability as module
     async def scenario():
         service = module.LyricAvailability()
@@ -12644,7 +12826,7 @@ def test_lyric_checks_share_work_for_ten_thousand_readers_and_bound_distinct_loa
         readers[0].cancel()  # Other readers still own the shared lookup.
         release.set()
         result = await asyncio.gather(*readers, return_exceptions=True)
-        assert all(row['status'] == 'available' for row in result[1:])
+        assert all(not isinstance(row, BaseException) and row['status'] == 'available' for row in result[1:])
         assert peak == 2 and sorted(calls) == ids
         assert not service.pending
         await asyncio.gather(*(service.check(ids[i % 8]) for i in range(10000)))
@@ -12661,6 +12843,7 @@ def test_lyric_checks_share_work_for_ten_thousand_readers_and_bound_distinct_loa
 
 def test_lyric_provider_failure_is_unknown_and_backoff_is_shared(monkeypatch):
     import asyncio
+
     from karaoke import lyric_availability as module
     async def scenario():
         service = module.LyricAvailability()
@@ -12700,6 +12883,7 @@ def test_lyric_api_validates_and_batches_without_creating_jobs(tmp_path, monkeyp
 
 def test_cancelling_lyric_check_reaps_its_process(monkeypatch):
     import asyncio
+
     from karaoke import lyric_availability as module
     async def scenario():
         original = asyncio.create_subprocess_exec

@@ -1,18 +1,18 @@
 """Shared, transparent subtitle typography for previews and exported videos."""
 
-from functools import lru_cache
 import io
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import time
 import unicodedata
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
 
 from fontTools.ttLib import TTFont, TTLibError
 from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFilter, ImageFont
-
 
 TOKENS = json.loads(Path(__file__).with_name('subtitle-styles.json').read_text())
 STYLES = TOKENS['styles']
@@ -69,7 +69,7 @@ def static_video_scrim(video, output, text_top, colors):
     """Sample the original picture, never the rendered captions; keep motion intact."""
     import numpy as np
     started = time.perf_counter()
-    report = dict(status='unchecked', sample_times=[], max_mean_difference=0., max_pixel_difference=0)
+    report: dict[str, Any] = dict(status='unchecked', sample_times=[], max_mean_difference=0., max_pixel_difference=0)
     try:
         duration = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',
             'format=duration', '-of', 'default=nw=1:nk=1', str(video)], stderr=subprocess.PIPE, timeout=10))
@@ -208,7 +208,9 @@ def annotated_lines(text, readings, font, ruby_font, tracking, maximum, balanced
     while cursor < len(text):
         stop, reading = spans.get(cursor, (None, None))
         if stop is None:
-            token = re.match(r"[A-Za-z0-9’'\-]+|[^\S\n]+|[^\n]|\n", text[cursor:])[0]
+            match = re.match(r"[A-Za-z0-9’'\-]+|[^\S\n]+|[^\n]|\n", text[cursor:])
+            assert match is not None  # The alternatives cover every character.
+            token = match[0]
             stop = cursor+len(token)
         token = text[cursor:stop]
         width = max(line_width(token, font, tracking),
@@ -280,9 +282,10 @@ def script_for(text, language='auto'):
 def coverage(path, index):
     try:
         with TTFont(str(path), fontNumber=index, lazy=True) as font:
-            if font['head'].flags & (1 << 14):  # OpenType: generic last-resort symbols, not glyph support.
+            # OpenType flag 14 marks last-resort glyphs, not real text coverage.
+            if font['head'].flags & (1 << 14):  # ty: ignore[unresolved-attribute]  # fontTools loads the OpenType flags field dynamically.
                 return set()
-            return set(font.getBestCmap())
+            return set(font.getBestCmap() or {})
     except TTLibError:
         # Fontconfig can return Type 1 fonts, which have no OpenType cmap.
         return set()
@@ -425,7 +428,7 @@ def caption_image(text, width=1280, height=None, font_file=None,
         offset = text.find(line, cursor)
         if offset < 0:
             raise ValueError('Wrapped caption no longer matches its source text')
-        row = rows[i] if readings else [dict(text=line, first=offset, width=length, reading=None)]
+        row: list[dict[str, Any]] = rows[i] if readings else [dict(text=line, first=offset, width=length, reading=None)]
         for item in row:
             glyph_x = x+(item['width']-line_width(item['text'], font, tracking))/2
             for j, character in enumerate(item['text']):

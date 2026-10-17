@@ -1,0 +1,13 @@
+{
+  "name": "tuixue-ktv",
+  "private": true,
+  "scripts": {
+    "lint": "eslint eslint.config.mjs karaoke/web karaoke/test_*.mjs",
+    "test": "node --test karaoke/test_player.mjs karaoke/test_pitch.mjs karaoke/test_search.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.12.0",
+    "globals": "17.13.0"
+  }
+}

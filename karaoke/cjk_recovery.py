@@ -1,6 +1,7 @@
 """Recover merged highlights with independent acoustic corroboration."""
-from copy import deepcopy
 import re
+from copy import deepcopy
+from typing import Any, cast
 
 import numpy as np
 import soundfile as sf
@@ -29,6 +30,7 @@ class AcousticWitness:
             self.bundle = torchaudio.pipelines.MMS_FA
             self.model = self.bundle.get_model(dl_kwargs={'model_dir': str(weights.parent),
                                                           'progress': False}).to(self.device).eval()
+        assert self.bundle is not None
         if language == 'Japanese':
             units = spoken_units(cue['text'], language)
             spans = [(u['first'], u['stop']) for u in units]
@@ -44,7 +46,7 @@ class AcousticWitness:
                 offset = stop
         elif language == 'Chinese':
             spans = list(highlight_spans(cue['text'], language))
-            syllables = lazy_pinyin(chinese_pronunciation_text(cue['text']), errors=lambda value: list(value))
+            syllables = lazy_pinyin(chinese_pronunciation_text(cue['text']), errors=lambda value: list(value))  # ty: ignore[invalid-argument-type] # pypinyin accepts list-returning error callbacks.
             if len(syllables) != len(cue['text']):
                 raise ValueError('Independent pronunciation changes character positions')
             tokens = [re.sub("[^a-z']", '', ''.join(syllables[a:b]).lower()) for a, b in spans]
@@ -66,8 +68,8 @@ class AcousticWitness:
             if self.romanizer is None:
                 self.romanizer = Uroman()
             spans = list(highlight_spans(cue['text'], language))
-            tokens = [re.sub("[^a-z']", '', self.romanizer.romanize_string(
-                      cue['text'][a:b]).lower()) for a, b in spans]
+            tokens = [re.sub("[^a-z']", '', cast(str, self.romanizer.romanize_string(
+                      cue['text'][a:b])).lower()) for a, b in spans]
         if not tokens or not all(tokens):
             raise ValueError('Unsupported independent pronunciation')
         left, right = cue.get('audio_bounds', (0., len(wave)/44100))
@@ -79,8 +81,10 @@ class AcousticWitness:
                                 stop=round(end*original.samplerate), dtype='float32', always_2d=True)
         views = [(wave[round(begin*44100):round(end*44100)], 44100), (mixture.mean(axis=1), rate)]
         minimum_samples = 1
-        for layer in reversed(self.model.model.feature_extractor.conv_layers):
-            conv = layer.conv
+        layers = cast(torch.nn.ModuleList, self.model.get_submodule('model.feature_extractor.conv_layers'))
+        for layer in reversed(layers):
+            conv = cast(torch.nn.Conv1d, layer.get_submodule('conv'))
+            assert not isinstance(conv.padding, str)  # MMS uses explicit convolution padding.
             minimum_samples = ((minimum_samples-1)*conv.stride[0]-2*conv.padding[0]
                                + conv.dilation[0]*(conv.kernel_size[0]-1)+1)
         result = []
@@ -92,7 +96,8 @@ class AcousticWitness:
             with torch.inference_mode():
                 emissions, _ = self.model(torch.from_numpy(audio).unsqueeze(0).to(self.device))
             emissions = emissions.cpu()
-            encoded = self.bundle.get_tokenizer()(['*', *tokens, '*'])
+            # The upstream abstract tokenizer says str, but emits integer token IDs.
+            encoded = cast(list[list[int]], self.bundle.get_tokenizer()(['*', *tokens, '*']))
             targets = [token for word in encoded for token in word]
             if emissions.shape[1] < len(targets)+sum(a==b for a,b in zip(targets,targets[1:])):
                 raise ValueError('Insufficient acoustic frames for required phonemes')
@@ -154,7 +159,7 @@ def corroborated_group(group, predictions, witnesses, wave, bounds, protocol, *,
         return None, 'missing or mismatched character evidence'
     if floor is None:
         floor = audio_floor(wave, protocol)
-    result = []
+    result: list[dict[str, Any]] = []
     for index in range(len(expected)):
         primary = [v[index] for v in predictions]
         secondary = [v[index] for v in witnesses]
@@ -272,10 +277,10 @@ def recover_latin_groups(cues, wave, witness, protocol, model=None):
                 following = cue['units'][hi] if hi < len(cue['units']) else (
                     cues[line+1]['units'][0] if line+1 < len(cues) else None)
                 left, right = previous['end'] if previous else 0., following['start'] if following else right
-                context = dict(cue, text=cue['text'][first:stop], aligned_start=members[0]['start'],
+                context: dict[str, Any] = dict(cue, text=cue['text'][first:stop], aligned_start=members[0]['start'],
                     aligned_end=members[-1]['end'], audio_bounds=[left, right],
                     units=[dict(u, first=u['first']-first, stop=u['stop']-first) for u in members])
-            report = dict(line=line+1, language='English', context=[first, stop], groups=[])
+            report: dict[str, Any] = dict(line=line+1, language='English', context=[first, stop], groups=[])
             reports.append(report)
             try:
                 if model is None:
@@ -365,7 +370,7 @@ def recover_context_groups(cues, wave, model, witness, protocol):
                           if (u['first'], u['stop']) == (group['first'], group['stop'])), None)
             if index is None:  # An earlier joint repair already covered this group.
                 continue
-            report = dict(line=line+1, first=group['first'], stop=group['stop'],
+            report: dict[str, Any] = dict(line=line+1, first=group['first'], stop=group['stop'],
                           phase='neighbor_context', attempts=[], accepted=False)
             reports.append(report)
             seen_contexts = set()
@@ -437,8 +442,9 @@ def recover_context_groups(cues, wave, model, witness, protocol):
 
 def recover_repeated_groups(cues, wave, witness, protocol):
     """Transfer verified onsets through four audio paths, then check the target."""
-    from align_repeated_lyrics import agree_onset, audio_features, repeated_paths, audible
     from librosa.util.exceptions import ParameterError
+
+    from align_repeated_lyrics import agree_onset, audible, audio_features, repeated_paths
     from lyric_progress import canonical_positions
 
     result, reports, features = deepcopy(cues), [], None
@@ -467,7 +473,7 @@ def recover_repeated_groups(cues, wave, witness, protocol):
                     continue
                 reference = {len(canonical_positions(source['text'][:u['first']], 'Chinese')[0]): u
                              for u in source['units']}
-                report = dict(line=line+1, first=group['first'], stop=group['stop'],
+                report: dict[str, Any] = dict(line=line+1, first=group['first'], stop=group['stop'],
                               reference_line=source_line+1, phase='verified_repeat', accepted=False, attempts=[])
                 reports.append(report)
                 try:
@@ -503,13 +509,16 @@ def recover_repeated_groups(cues, wave, witness, protocol):
                                 result[line+1]['units'][0] if line+1 < len(cues) else None)
                             lower, upper = previous['end'] if previous else 0., following['start'] if following else len(wave)/44100
                             if hi < len(current):
+                                assert following is not None
                                 boundary = [next((u for u in view if u['first'] == following['first']), None) for view in observed]
-                                if (len(boundary) == 2 and all(u is not None and np.isfinite(u['start'])
+                                if (len(boundary) == 2 and boundary[0] is not None and boundary[1] is not None
+                                        and all(u is not None and np.isfinite(u['start'])
                                         and abs(u['start']-upper) > .1 for u in boundary)
                                         and abs(boundary[0]['start']-boundary[1]['start']) <= .1):
                                     raise ValueError('Following boundary disagrees with target audio')
-                            replacement = []
+                            replacement: list[dict[str, Any]] = []
                             for (a, b), unit in zip(spans, units):
+                                assert unit is not None  # verified_reference rejected missing units above.
                                 values = [float(np.interp(unit['start'], x, y)) for _, (x, y, _) in paths]
                                 attempt['estimates'].append(values)
                                 onset = agree_onset(values, protocol['maximum_spread_seconds'], cue['aligned_start'], cue['aligned_end'])
@@ -517,8 +526,11 @@ def recover_repeated_groups(cues, wave, witness, protocol):
                                 if (onset is None or not lower <= onset < upper or len(matches) != 2 or
                                         any(u is None or u['text'] != cue['text'][a:b] or
                                             not np.isfinite([u['start'], u['end']]).all() or u['end'] <= u['start'] or
-                                            abs(u['start']-onset) > .1 for u in matches) or
-                                        abs(matches[0]['start']-matches[1]['start']) > .1):
+                                            abs(u['start']-onset) > .1 for u in matches)):
+                                    raise ValueError('Repeated onset lacks independent target support')
+                                a_match, b_match = matches
+                                assert a_match is not None and b_match is not None
+                                if abs(a_match['start']-b_match['start']) > .1:
                                     raise ValueError('Repeated onset lacks independent target support')
                                 replacement.append(dict(first=a, stop=b, text=cue['text'][a:b], start=onset,
                                     timing_source='repeated_lyric_audio', reference_line=source_line+1))
@@ -554,7 +566,7 @@ def recover_groups(cues, wave, model, witness, protocol):
                     or any(c.isalnum() and not '\u3400' <= c <= '\u9fff' for c in group['text'])
                     or group.get('timing_source') == 'repeated_lyric_audio'):
                 continue
-            report = dict(line=line+1, first=group['first'], stop=group['stop'], accepted=False)
+            report: dict[str, Any] = dict(line=line+1, first=group['first'], stop=group['stop'], accepted=False)
             reports.append(report)
             try:
                 foreign = [i for i, c in enumerate(cue['text']) if c.isalnum() and not '\u3400' <= c <= '\u9fff']

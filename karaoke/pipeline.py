@@ -1,35 +1,44 @@
 """URL-to-karaoke adapter for the existing, versioned separation/alignment stages."""
 import argparse
-from contextlib import ExitStack, contextmanager
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
 import hashlib
 import inspect
 import json
 import logging
 import math
 import os
-from pathlib import Path
 import re
 import selectors
-import subprocess
 import shutil
+import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, contextmanager
+from datetime import UTC, datetime
+from io import BufferedReader
+from pathlib import Path
+from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parent
 # The research stages predate the package API and use sibling imports.
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from .job_schema import JobRequest, download_backoff, provider_error, retry_fields, song_language
-from .song_sources import (independent_transcript_support, lyric_coverage, missing_repetitions, prepare_song_text,
-                           restore_repetitions, transcript_lines, video_song_info)
-from .stage_progress import parse_progress
-from .cache import can_restore_video
-from .stage_cache import StageCache
 from . import local_asr
+from .cache import can_restore_video
+from .job_schema import JobRequest, download_backoff, provider_error, retry_fields, song_language
+from .song_sources import (
+    independent_transcript_support,
+    lyric_coverage,
+    missing_repetitions,
+    prepare_song_text,
+    restore_repetitions,
+    transcript_lines,
+    video_song_info,
+)
+from .stage_cache import StageCache
+from .stage_progress import parse_progress
 
 
 def write_json(path, value):
@@ -209,7 +218,8 @@ class Pipeline:
         self.strict_audio = audio_only and not playback_policy
         self.prepared_lyrics = Path(prepared_lyrics) if prepared_lyrics else None
         self.active, self.timings, self.lock = set(), {}, threading.Lock()
-        self.timeline, self.clock_start = {}, time.perf_counter()
+        self.timeline: dict[str, dict[str, Any]] = {}
+        self.clock_start = time.perf_counter()
         self.metadata_ready = None
         self.audio_first = False
         self.source_announced = False
@@ -273,7 +283,7 @@ class Pipeline:
         inputs, outputs, code = specs[name]
         if name in ('align_words', 'validate_timing') and json.loads((self.output/'lyrics.json').read_text())['language'] == 'Cantonese':
             code = code+[ROOT/'subtitle_style.py', ROOT/'subtitle-styles.json', ROOT/'requirements-subtitles.txt']
-        config = dict(command=[str(a) for a in command], compute_concurrency=self.compute_concurrency)
+        config: dict[str, Any] = dict(command=[str(a) for a in command], compute_concurrency=self.compute_concurrency)
         if name == 'validate_timing':
             from .timing_validation import acoustic_model_files
             if json.loads((self.output/'lyrics.json').read_text())['language'] not in ('Chinese', 'Japanese', 'English'):
@@ -353,7 +363,7 @@ class Pipeline:
     def publish_progress(self):
         # Caller holds the lock: parallel stages publish one coherent snapshot.
         progress = dict(active_stages=sorted(self.active), stage_progress=self.stage_progress,
-            updated_at=datetime.now(timezone.utc).isoformat(), timings=self.timings,
+            updated_at=datetime.now(UTC).isoformat(), timings=self.timings,
             song_info=self.song_info)
         write_json(self.output/'progress.json', progress)
         if os.getenv('KARAOKE_EVENTS_STDOUT') == '1':
@@ -361,10 +371,11 @@ class Pipeline:
 
     def stage_event(self, name, event, **fields):
         with self.lock:
-            record = self.timeline.setdefault(name, {})
+            record: dict[str, Any] = self.timeline.setdefault(name, {})
             if event == 'ready' and 'finished' in record:
                 history = record.pop('previous_attempts', [])
-                self.timeline[name] = record = {'previous_attempts': [*history, record]}
+                record = {'previous_attempts': [*history, record]}
+                self.timeline[name] = record
             instant = round(time.perf_counter()-self.clock_start, 6)
             if event == 'finished':
                 record[event] = instant
@@ -487,7 +498,9 @@ class Pipeline:
                 with subprocess.Popen([str(a) for a in command], cwd=ROOT.parent,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         env={**os.environ, 'PYTHONUNBUFFERED': '1'}) as result:
-                    selector.register(result.stdout, selectors.EVENT_READ)
+                    assert result.stdout is not None
+                    stdout = cast(BufferedReader, result.stdout)
+                    selector.register(stdout, selectors.EVENT_READ)
                     pending = b''
                     try:
                         while True:
@@ -496,7 +509,7 @@ class Pipeline:
                                 raise subprocess.TimeoutExpired(command, timeout)
                             if not selector.select(remaining):
                                 raise subprocess.TimeoutExpired(command, timeout)
-                            block = result.stdout.read1(65536)
+                            block = stdout.read1(65536)
                             log.write(block)
                             log.flush()
                             lines = (pending+block).split(b'\n')
@@ -671,7 +684,11 @@ class Pipeline:
 
     def prepare_text(self, metadata, duration, lead_task=None):
         if not self.strict_audio:
-            from .lyric_lookup import prepare_online_lyrics, read_prepared_lyrics, prepared_lyrics_identity
+            from .lyric_lookup import (
+                prepare_online_lyrics,
+                prepared_lyrics_identity,
+                read_prepared_lyrics,
+            )
             self.phase('prepare_lyrics', True)
             self.stage_event('prepare_lyrics', 'ready')
             self.stage_event('prepare_lyrics', 'started')
@@ -761,10 +778,11 @@ class Pipeline:
         return lyrics
 
     def prepare_lyrics(self, metadata, duration):
+        import soundfile as sf
+
+        from anchor_recovery import recover_anchor_words
         from anchors_from_asr import anchors_from_words
         from transcribe_lyrics import filter_silent_transcription
-        from anchor_recovery import recover_anchor_words
-        import soundfile as sf
         transcription = json.loads((self.output/'asr/transcription.json').read_text())
         report_path = self.output/'asr/run.json'
         report = json.loads(report_path.read_text()) if report_path.is_file() else {}
@@ -920,7 +938,13 @@ class Pipeline:
 
     def align(self, lyrics, duration):
         from lyric_progress import build
-        from subtitles import presentation_cues, countdown_events, normalized, highlight_coverage_errors, collapsed_phrase
+        from subtitles import (
+            collapsed_phrase,
+            countdown_events,
+            highlight_coverage_errors,
+            normalized,
+            presentation_cues,
+        )
         language = lyrics['language']
         output = self.output
         write_json(output/'alignment-jobs.json', [dict(audio=str(output/'vocals-16k.wav'),
@@ -1004,7 +1028,7 @@ class Pipeline:
             raise StageFailure('align_words', '部分字词缺少独立的高亮起点；对齐诊断已保留')
         direct = lyrics['provenance'].get('route') == 'lyrics_first'
         repeats = None if direct else json.loads((output/'asr/lyric-repeats.json').read_text())
-        missing = None if direct else missing_repetitions(repeats['reference_lines'], cues, repeats['words'], language, duration)
+        missing = None if repeats is None else missing_repetitions(repeats['reference_lines'], cues, repeats['words'], language, duration)
         write_json(output/'lyric-repeat-validation.json', dict(missing=missing))
         if missing:
             raise StageFailure('align_words', '最终字幕仍遗漏已识别出的重复唱段；详情已保留')
@@ -1013,14 +1037,19 @@ class Pipeline:
             lyrics_provenance=lyrics['provenance'], onset_accuracy=None, separation_purity=None,
             english_context_scope=english_context_scope,
             independent_asr_coverage=None if direct else True,
-            restored_repetitions=len(lyrics['provenance'].get('repetitions', [])) if direct else len(repeats['expansions']),
+            restored_repetitions=len(lyrics['provenance'].get('repetitions', [])) if repeats is None else len(repeats['expansions']),
             fallback_units=sum(u.get('timing_source') == 'prior_word_fallback' for u in units),
             **alignment_recovery_summary(raw),
             line_order_fallback_lines=order_fallbacks,
             countdown_events=countdown_events(cues)))
 
     def align_candidates(self, lyrics, metadata, duration, lead=None):
-        from .lyric_consensus import alternative_lyric_candidates, observed_source_alternative, observed_repetition_candidate, expanded_lyric_anchors
+        from .lyric_consensus import (
+            alternative_lyric_candidates,
+            expanded_lyric_anchors,
+            observed_repetition_candidate,
+            observed_source_alternative,
+        )
         from .lyric_lookup import published_lyric_lines
         from .subtitles import normalized
         packet = lyrics.get('provenance', {}).get('lyric_lookup', {}) if not self.strict_audio else {}
@@ -1262,6 +1291,7 @@ class Pipeline:
             render_info = dict(title=lyrics['title'], artist=lyrics['artist'], language=lyrics['language'],
                                duration_seconds=duration)
             def prepare_picture():
+                assert video is not None
                 source_metadata = video.result()
                 self.render_picture(render_info)
                 return source_metadata
@@ -1275,7 +1305,7 @@ class Pipeline:
             artifacts['mv'] = 'mv.mp4'
         if (self.output/'poster.jpg').is_file():
             artifacts['poster'] = 'poster.jpg'
-        result = dict(title=lyrics['title'], artist=lyrics['artist'], language=lyrics['language'],
+        result: dict[str, Any] = dict(title=lyrics['title'], artist=lyrics['artist'], language=lyrics['language'],
             duration_seconds=duration, mv_audio=self.request['mv_audio'], shared_preview_gain=stems['preview_shared_gain'],
             source_format=metadata.get('format_id'), artifacts={key: dict(path=value) for key, value in artifacts.items()},
             quality=json.loads((self.output/'quality.json').read_text()),
@@ -1305,8 +1335,8 @@ class Pipeline:
 
     def validate_localization(self, lyrics, duration, cues=None):
         """Reuse observed text to check both misplaced and omitted passages."""
-        from .anchors_from_asr import timeline_support, observed_context
         from .align_lyrics_whisper import recognized_words
+        from .anchors_from_asr import observed_context, timeline_support
         observations, word_views = [], []
         raw_path = self.output/'alignment/raw.json'
         if raw_path.is_file():
@@ -1482,9 +1512,10 @@ class Pipeline:
     def playback_fallback(self, metadata, duration, error, *, constraints=()):
         """Keep singing available without presenting unverified word times as valid."""
         from subtitles import playback_units, presentation_cues
+
         from .timing_validation import timing_violations, validate_timeline
         lyrics_path = self.output/'lyrics.json'
-        lyrics = dict(
+        lyrics: dict[str, Any] = dict(
             title=self.request.get('title') or metadata.get('track') or metadata.get('title') or 'Untitled',
             artist=self.request.get('artist') or metadata.get('artist') or '',
             language=self.request.get('language') or 'English', lines=[], provenance={})
@@ -1559,8 +1590,11 @@ class Pipeline:
                 # the following gap. Prefer the located phrase, retaining the
                 # other candidate only if it is needed for a complete path.
                 location = locations.get(line)
-                low, high = ((location['start'], location['end']) if location else
-                             (located['units'][0]['start'], located['units'][-1]['end']))
+                if location:
+                    low, high = location['start'], location['end']
+                else:
+                    assert located is not None
+                    low, high = located['units'][0]['start'], located['units'][-1]['end']
                 options[-1].sort(key=lambda pair: pair[1]['units'][-1]['end'] <= low or
                                  pair[1]['units'][0]['start'] >= high)
         def follows(previous, current):

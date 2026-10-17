@@ -1,14 +1,14 @@
 """Package unmodified vocal estimates and their complement as float64 WAVs."""
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
 import hashlib
 import json
-from pathlib import Path
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
+from pathlib import Path
 
 import numpy as np
 import soundfile as sf

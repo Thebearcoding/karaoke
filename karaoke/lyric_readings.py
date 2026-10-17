@@ -1,12 +1,13 @@
 """Source-bound Japanese readings and cached Cantonese dictionary readings."""
-from difflib import SequenceMatcher
 import hashlib
 import inspect
-from html.parser import HTMLParser
 import json
 import re
 import time
 import unicodedata
+from difflib import SequenceMatcher
+from html.parser import HTMLParser
+from typing import Any
 from urllib.parse import urlencode
 
 
@@ -49,6 +50,8 @@ def separate_inline_readings(lines, evidence):
 
 class ReadingPage(HTMLParser):
     """Read UtaTen's ruby body; navigation, romanization and comments are excluded."""
+    page_url: str | None
+    script: str | None
     def __init__(self, html):
         super().__init__(convert_charrefs=True)
         self.text, self.spans, self.links, self.identity = '', [], [], {}
@@ -65,7 +68,7 @@ class ReadingPage(HTMLParser):
             if not isinstance(lyric, dict) or not isinstance(recording, dict):
                 continue
             page = lyric.get('mainEntityOfPage')
-            if not self.page_url or not isinstance(page, dict) or page.get('url') != self.page_url:
+            if not self.page_url or not isinstance(page, dict) or page.get('url') != self.page_url:  # ty: ignore[redundant-condition] # HTMLParser.feed populates page_url.
                 continue
             artist = recording.get('byArtist')
             if not isinstance(artist, dict) or not all(isinstance(v, str) and v.strip()
@@ -136,14 +139,14 @@ class ReadingPage(HTMLParser):
                 self.spans.append(dict(self.ruby, stop=len(self.text)))
                 self.ruby = None
 
-    def handle_data(self, text):
+    def handle_data(self, data):
         if self.script is not None:
-            self.script += text
+            self.script += data
         if self.depth:
             if self.in_reading and self.ruby is not None:
-                self.ruby['reading'] += text
+                self.ruby['reading'] += data
             else:
-                self.text += text
+                self.text += data
 
 
 def text_positions(text):
@@ -175,8 +178,10 @@ def match_readings(lines, page):
     for span in page.spans:
         reading = hiragana(span['reading'].strip())
         indexes = [by_source[i] for i in range(span['first'], span['stop']) if i in by_source]
-        target = [mapping.get(i) for i in indexes]
-        if (not target or None in target or target != list(range(target[0], target[0]+len(target)))
+        if any(i not in mapping for i in indexes):
+            continue
+        target = [mapping[i] for i in indexes]
+        if (not target or target != list(range(target[0], target[0]+len(target)))
                 or not re.fullmatch('[ぁ-ゖー]+', reading)):
             continue
         line, first = owners[positions[target[0]]]
@@ -217,8 +222,9 @@ def prepare_readings(lines, source_url, cache, language='Japanese'):
     if language == 'Japanese':
         identity['parser_sha256'] = hashlib.sha256(inspect.getsource(ReadingPage).encode()).hexdigest()
     if language == 'Cantonese':
-        from subtitle_style import cantonese_readings
         from importlib.metadata import PackageNotFoundError, version
+
+        from subtitle_style import cantonese_readings
         try:
             installed = version('pycantonese')
         except PackageNotFoundError:
@@ -231,7 +237,7 @@ def prepare_readings(lines, source_url, cache, language='Japanese'):
             return path
     except (OSError, ValueError, KeyError, TypeError):
         pass
-    packet = dict(identity=identity, status='unavailable', lines=[], attempts=[])
+    packet: dict[str, Any] = dict(identity=identity, status='unavailable', lines=[], attempts=[])
     try:
         if language == 'Cantonese':
             for text in lines:
@@ -272,7 +278,7 @@ def prepare_readings(lines, source_url, cache, language='Japanese'):
 
 
 def resolve_readings(text, annotations=(), language='Japanese'):
-    from subtitle_style import japanese_readings, cantonese_readings
+    from subtitle_style import cantonese_readings, japanese_readings
     if language not in ('Japanese', 'Cantonese'):
         return (), ()
     fallback, warnings = (japanese_readings if language == 'Japanese' else cantonese_readings)(text)

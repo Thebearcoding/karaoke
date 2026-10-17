@@ -1,17 +1,18 @@
 """Prepare song text from this recording, retaining its source and uncertainty."""
 import hashlib
-from contextlib import nullcontext
 import json
 import math
-from pathlib import Path
 import re
+from contextlib import nullcontext
+from pathlib import Path
+from typing import Any
 
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, Field
 
 from .job_schema import provider_error, song_language, thumbnail_url, video_url
-from .subtitles import highlight_spans
 from .local_asr import offline
+from .subtitles import highlight_spans
 
 
 class SongText(BaseModel):
@@ -94,8 +95,9 @@ def independent_transcript_support(transcription, report, language):
     if not recovery.get('triggered') or not any(
             not c.get('word_times_discarded', True) for c in recovery.get('chunks', [])):
         return None
-    from .anchors_from_asr import text_units
     from rapidfuzz.distance import Levenshtein
+
+    from .anchors_from_asr import text_units
     expected = text_units(' '.join(s['text'] for s in transcription.get('segments', [])) or
                           transcription.get('text', ''), language)
     observed = [u for w in transcription.get('words', []) for u in text_units(w['word'], language)]
@@ -105,8 +107,9 @@ def independent_transcript_support(transcription, report, language):
 
 def lyric_coverage(cues, words, language, duration, *, other_words=(), speech_intervals=()):
     """Check omitted recognition, not just whether the chosen lyrics match."""
-    from .anchors_from_asr import text_units
     from rapidfuzz.distance import Levenshtein
+
+    from .anchors_from_asr import text_units
 
     intervals = sorted((c['start'], c['end']) for c in cues
                        if c.get('start') is not None and c.get('end') is not None
@@ -139,10 +142,11 @@ def lyric_coverage(cues, words, language, duration, *, other_words=(), speech_in
                 status='complete' if fraction >= .55 and not gaps else 'incomplete')
 
 
-def missing_repetitions(reference, cues, words, language, duration):
+def missing_repetitions(reference, cues, words, language, duration) -> list[dict[str, Any]]:
     """Find supplied lyric passages recognized in gaps of the current timeline."""
-    from .anchors_from_asr import anchors_from_words, text_units
     from rapidfuzz.fuzz import partial_ratio, ratio
+
+    from .anchors_from_asr import anchors_from_words, text_units
     from .subtitles import normalized
 
     keys = [text_units(line, language) for line in reference]
@@ -150,9 +154,9 @@ def missing_repetitions(reference, cues, words, language, duration):
              and 0 <= w['start'] < w['end'] <= duration+.05]
     if any(b['start'] < a['start'] for a, b in zip(timed, timed[1:])):
         raise ValueError('Cannot recover repeated lyrics from unordered ASR words')
-    edges = [dict(start=0., end=0., status='candidate'), *cues,
+    edges: list[dict[str, Any]] = [dict(start=0., end=0., status='candidate'), *cues,
              dict(start=duration, end=duration, status='candidate')]
-    found = []
+    found: list[dict[str, Any]] = []
     for after, (left, right) in enumerate(zip(edges, edges[1:])):
         if left['status'] != 'candidate' or right['status'] != 'candidate':
             continue
@@ -266,7 +270,8 @@ def missing_repetitions(reference, cues, words, language, duration):
                  other[0] >= item[0] and texts[item[1:3]] != texts[other[1:3]] and texts[item[1:3]] in texts[other[1:3]])
                 and other[4][0]['start'] <= item[4][0]['start'] and item[4][-1]['end'] <= other[4][-1]['end']
                 for other in verified)]
-            best, identity, complete_passage = None, None, False
+            best: dict[str, Any] | None = None
+            identity, complete_passage = None, False
             for score, first, stop, clip, anchors in sorted(scores, key=lambda x: -x[0]):
                 if best and score < best['similarity']-1e-9:
                     break
@@ -300,7 +305,7 @@ def restore_repetitions(reference, anchors, words, language, duration, *, allow_
     from .anchors_from_asr import anchors_from_words
 
     lines = list(reference)
-    report = dict(reference_lines=reference, words=words, expansions=[], status='complete')
+    report: dict[str, Any] = dict(reference_lines=reference, words=words, expansions=[], status='complete')
     for _ in range(4):
         found = missing_repetitions(reference, anchors, words, language, duration)
         if not found:
@@ -417,6 +422,7 @@ def extract_song_metadata(evidence, model, cache=None):
                         config=dict(evidence=evidence, model=model)) if cache else nullcontext(False)
     with stage as reused:
         if reused:
+            assert path is not None
             return json.loads(path.read_text())
         response = OpenAI(timeout=30, max_retries=0).beta.chat.completions.parse(
             model=model, response_format=SongText, messages=[
@@ -442,6 +448,7 @@ def extract_song_metadata(evidence, model, cache=None):
 
 
 def prepare_song_text(request, metadata, transcription, duration, *, catalog_root, model, cache=None):
+    result: dict[str, Any] | None
     detected = song_language(transcription.get('language'))
     if request.get('lyrics'):
         language = request.get('language') or detected

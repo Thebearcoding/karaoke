@@ -77,6 +77,7 @@ def fetch_manual_captions(metadata_path, language, cache):
 def caption_candidate(packet, transcription, language, duration):
     """Check source text against audio; caption display times are never word times."""
     from rapidfuzz.distance import Levenshtein
+
     from .song_sources import transcript_lines
     if packet.get('error'):
         return None, dict(status='unavailable', error=packet['error'], retry_at=packet.get('retry_at'))

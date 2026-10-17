@@ -1,14 +1,15 @@
 import asyncio
-from contextlib import contextmanager
 import hashlib
 import json
 import sys
 import time
+from contextlib import contextmanager
+from typing import Any
 from uuid import uuid4
 
-from fastapi.testclient import TestClient
-from fastapi import HTTPException
 import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from karaoke.api import Store, Worker, create_app
 from karaoke.job_schema import JobRequest
@@ -55,7 +56,7 @@ def test_progress_snapshots_do_not_read_retired_attempts_after_database_upgrade(
     active, _ = store.create(JobRequest(url=URL, force=True), 'test')
     rows = []
     for number in range(10000):
-        job = dict(active, id=str(uuid4()), status='failed' if number % 2 else 'evicted',
+        job: dict[str, Any] = dict(active, id=str(uuid4()), status='failed' if number % 2 else 'evicted',
                    created_at='2000-01-01T00:00:00Z')
         if distinct_sources:
             job['input'] = {**job['input'], 'url': f'https://www.youtube.com/watch?v=retired{number:04d}'}
@@ -585,8 +586,9 @@ def test_soak_adds_all_cases_to_room_and_only_removes_finished_owned_entries(tmp
     from karaoke.tools.soak import queue_cases, release_finished_entries
     app = create_app(tmp_path, worker_command=fake_worker, version='test')
     user_job = ready_job(app.state.store)
-    state = {'provider_backoff': {}, 'cases': [dict(url=f'https://www.youtube.com/watch?v={i:011d}',
-        title=f'Test {i}', provider='youtube', attempts=[]) for i in range(3)]}
+    cases: list[dict[str, Any]] = [dict(url=f'https://www.youtube.com/watch?v={i:011d}',
+        title=f'Test {i}', provider='youtube', attempts=[]) for i in range(3)]
+    state = {'provider_backoff': {}, 'cases': cases}
     original_urls = [case['url'] for case in state['cases']]
     for case, status in zip(state['cases'], ('passed', 'failed', 'failed')):
         case['attempts'].append(dict(status=status, pipeline_version='previous'))
@@ -635,7 +637,7 @@ def test_replaying_completed_song_keeps_media_by_id_or_url_across_versions(tmp_p
         app.state.room.save(state)
     (tmp_path/'preparation.pause').touch()
     with TestClient(app) as client:
-        request = {'job_id':old['id']} if by_id else {'url':URL}
+        request: dict[str, Any] = {'job_id':old['id']} if by_id else {'url':URL}
         request['if_absent'] = True
         first = client.post('/v1/room/entries',json=request).json()
         assert len(first['entries']) == 1
@@ -870,6 +872,7 @@ def test_removing_during_process_creation_waits_for_cleanup(tmp_path, monkeypatc
 def test_remove_stops_descendants_and_resumes_only_completed_checkpoints(tmp_path, readd_during_cancel, force):
     import os
     import signal
+
     import httpx
 
     # A stubborn grandchild closes stdout, so waiting for the parent alone
@@ -1074,7 +1077,7 @@ def test_library_keeps_existing_media_after_playlist_removal_and_new_attempt(tmp
     if video_evicted:
         (folder/'mv.mp4').unlink()
         store.update(old['id'], status='video_evicted', restore_video=True)
-    newer, _ = store.create(JobRequest(**{**old['input'], 'force': True}), 'new-version')
+    newer, _ = store.create(JobRequest.model_validate({**old['input'], 'force': True}), 'new-version')
     store.update(newer['id'], status=new_status)
     cards = [s for s in room.library() if s['url'] == old['input']['url']]
     assert len(cards) == 1
@@ -1092,7 +1095,7 @@ def test_library_does_not_prefer_an_incomplete_old_result(tmp_path):
     old = cache_fixture(store, '1', restorable=True)
     (tmp_path/old['id']/'instrumental').unlink()
     store.update(old['id'], status='video_evicted', restore_video=True)
-    newer, _ = store.create(JobRequest(**{**old['input'], 'force': True}), 'new-version')
+    newer, _ = store.create(JobRequest.model_validate({**old['input'], 'force': True}), 'new-version')
     card = next(s for s in room.library() if s['url'] == old['input']['url'])
     assert card['job_id'] == newer['id'] and card['status'] == 'queued'
 

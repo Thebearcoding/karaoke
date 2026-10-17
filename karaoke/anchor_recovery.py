@@ -1,15 +1,15 @@
 """Recover missing coarse lyric anchors with bounded, cached ASR windows."""
 import hashlib
 import json
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 from openai import OpenAI
 
+import local_asr
 from job_schema import song_language
 from local_asr import whisper_language
 from transcribe_lyrics import needs_recovery
-import local_asr
 
 
 def recover_anchor_words(client, audio, lines, words, language, output, cache, minimum_coverage, duration, fallback_audio=None):

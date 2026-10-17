@@ -7,7 +7,6 @@ background. No target stems, lyrics, song IDs or learned weights enter masks.
 import numpy as np
 from scipy import linalg, ndimage, signal
 
-
 RATE = 44100
 FFT = 2048
 HOP = 512

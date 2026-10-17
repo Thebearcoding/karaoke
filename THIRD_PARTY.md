@@ -54,6 +54,10 @@ Ulf Hermjakob, Jonathan May, and Kevin Knight. 2018. *Out-of-the-box universal r
 
 Python 包由各 `requirements*.txt` 固定版本，Node.js、FFmpeg、LAME 和系统字体另行安装。制作容器、安装包或公开演示服务时，按实际包含的直接依赖、间接依赖和模型逐项核对许可。
 
+## 开发检查工具
+
+Ruff 和 ty 的版本固定在 [requirements-lint.txt](requirements-lint.txt)；ESLint、`@eslint/js` 和 globals 固定在 [package.json](package.json)，间接依赖由 [package-lock.json](package-lock.json) 锁定。这些工具仅用于开发和 CI，许可证见 [Ruff](https://github.com/astral-sh/ruff/blob/main/LICENSE)、[ty](https://github.com/astral-sh/ty/blob/main/LICENSE)、[ESLint](https://github.com/eslint/eslint/blob/main/LICENSE) 和 [globals](https://github.com/sindresorhus/globals/blob/main/license)。
+
 ## 音乐和在线来源
 
 歌曲、MV、封面和歌词的使用与分发遵循内容权利人的授权；访问和下载同时遵循来源平台条款，例如 [YouTube 条款](https://www.youtube.com/static?template=terms)。README 截图的展示范围、出处和授权状态见[截图素材说明](docs/images/README.md)，数据与凭据的提交方式见[贡献指南](CONTRIBUTING.md#数据与凭据)。

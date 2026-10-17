@@ -1,11 +1,12 @@
 """Map verified lyric lines to rough ASR word times, preserving recording order."""
 
 import argparse
+import json
+import re
 from array import array
 from difflib import SequenceMatcher
-import json
 from pathlib import Path
-import re
+from typing import Any
 
 from Bio.Align import PairwiseAligner
 
@@ -19,7 +20,7 @@ def text_units(text, language):
     value = normalized(text).lower()
     if language == 'Chinese':
         from pypinyin import lazy_pinyin
-        return lazy_pinyin(value, errors=lambda s: list(s))
+        return lazy_pinyin(value, errors=lambda s: list(s))  # ty: ignore[invalid-argument-type]  # pypinyin supports a list-returning error callback.
     return list(value)
 
 
@@ -286,7 +287,7 @@ def combine_anchor_views(views):
     texts = [a['text'] for a in views[0]]
     if any([a['text'] for a in view] != texts for view in views[1:]):
         raise ValueError('Recognition views must describe the same lyric text')
-    nodes = []
+    nodes: list[dict[str, Any]] = []
     for index, alternatives in enumerate(zip(*views)):
         for view, anchor in enumerate(alternatives):
             if anchor['status'] != 'candidate':

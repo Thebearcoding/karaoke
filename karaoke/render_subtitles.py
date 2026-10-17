@@ -1,15 +1,26 @@
 """Render line captions with Pillow and FFmpeg, without requiring libass."""
 
 import argparse
-from fractions import Fraction
 import json
-from pathlib import Path
 import subprocess
 import time
+from fractions import Fraction
+from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
-from subtitle_style import (TOKENS, STYLES, DEFAULT_STYLE, caption_height, caption_image,
-                            japanese_readings, resolve_font, script_for, with_opacity, cue_opacity)
+
+from subtitle_style import (
+    DEFAULT_STYLE,
+    STYLES,
+    TOKENS,
+    caption_height,
+    caption_image,
+    cue_opacity,
+    japanese_readings,
+    resolve_font,
+    script_for,
+    with_opacity,
+)
 
 
 def video_frame_rate(video):

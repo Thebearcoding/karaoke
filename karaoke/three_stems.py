@@ -2,16 +2,24 @@
 
 import argparse
 import json
-from pathlib import Path
 import shutil
 import subprocess
 import time
+from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
-from exact_stems import (decode_source, encode_previews, complementary_split, native_vocals,
-                         read_masters, reconstruction_report, sha, source_samples)
+from exact_stems import (
+    complementary_split,
+    decode_source,
+    encode_previews,
+    native_vocals,
+    read_masters,
+    reconstruction_report,
+    sha,
+    source_samples,
+)
 
 
 def check_three(source, lead, backing_vocals, instrumental):
@@ -28,6 +36,8 @@ def build(existing, estimate, output, video=None, *, source_pcm=None, karaoke_pr
         raise FileExistsError(f'Preserve existing output: {output}')
     started = time.perf_counter()
     if source_path is not None:
+        if vocals_estimate is None:
+            raise ValueError('vocals_estimate is required with source_path')
         source_path, vocals_estimate = (Path(p).resolve() for p in (source_path, vocals_estimate))
         source, rate, decoder = decode_source(source_path)
         spec = dict(path=str(source_path), container_sha256=sha(source_path), decoder=decoder,

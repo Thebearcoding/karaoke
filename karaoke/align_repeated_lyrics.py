@@ -5,17 +5,18 @@ exact repeated lyric, a stable reference, and agreement between two audio
 feature alignments. It never copies a fixed time offset between choruses.
 """
 import argparse
-from collections import defaultdict
-from copy import deepcopy
 import hashlib
 import json
-from pathlib import Path
 import time
+from collections import defaultdict
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
 
 import numpy as np
+import soundfile as sf
 from librosa.util.exceptions import ParameterError
 from scipy.signal import resample_poly
-import soundfile as sf
 
 from align_lyric_phonemes import SingingAligner
 from lyric_progress import canonical_positions
@@ -109,7 +110,7 @@ def reference_units(aligner, cues, index, samples, rate, language):
             offset = len(text)
         anchors.extend(dict(u, first=u['first']+len(text), stop=u['stop']+len(text)) for u in cues[i]['units'])
         text += cues[i]['text']+' '
-    context = dict(text=text.strip(), units=anchors,
+    context: dict[str, Any] = dict(text=text.strip(), units=anchors,
                    aligned_start=cues[first]['aligned_start'], aligned_end=cues[stop-1]['aligned_end'])
     begin, end = max(0, context['aligned_start']-.6), context['aligned_end']+.6
     divisor = np.gcd(rate, 44100)

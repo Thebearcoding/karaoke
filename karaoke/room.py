@@ -1,18 +1,18 @@
 """One persistent karaoke room, with a playlist independent of preparation jobs."""
 import asyncio
-from collections import Counter
 import json
-from pathlib import Path
 import time
-from typing import Literal
+from collections import Counter
+from pathlib import Path
+from typing import Any, Literal
 from urllib.parse import urlencode
 from uuid import uuid4
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from .job_schema import JobRequest, thumbnail_url, download_backoff
 from .cache import can_restore_video
+from .job_schema import JobRequest, download_backoff, thumbnail_url
 
 PRESETS = {
     'instrumental': dict(instrumental=1., backing_vocals=0., lead_vocals=0.),
@@ -83,7 +83,7 @@ class Updates:
                         async with asyncio.timeout(15):
                             await queue.get()
                         break
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         yield 'event: ping\ndata: {}\n\n'
         finally:
             self.subscribers.discard(queue)
@@ -287,7 +287,7 @@ class Room:
             jobs = self.store.library_jobs(self.preparation_order(self.read()))
         featured = self.featured() if featured is None else featured
         catalog = {song['url']: song for song in reversed(featured)}
-        songs = [dict(song, status='unprepared') for song in featured]
+        songs: list[dict[str, Any]] = [dict(song, status='unprepared') for song in featured]
         by_url = {s['url']: s for s in songs}
         seen = {}
         for job in jobs:
@@ -435,6 +435,7 @@ class Room:
             state.update(current_id=entry['id'] if entry else None, position=0,
                          started_at=None, playing=bool(entry))
         elif action in ('remove', 'finish'):
+            assert entry is not None  # Missing entries were handled above.
             if action == 'finish' and command.playback_started_at is not None:
                 entry['played_at'] = min(time.time(), command.playback_started_at)
             if entry == current or action == 'finish':
@@ -469,6 +470,7 @@ class Room:
                 raise HTTPException(422, '请提供升降调半音数')
             state['pitch_semitones'] = command.pitch_semitones
         elif action in ('retry', 'reprepare'):
+            assert entry is not None  # Missing entries were handled above.
             old = self.store.read(entry['job_id'])
             waiting = old['status'] == 'queued' and (old.get('download_retry') or {}).get('next_retry_at')
             if (action == 'reprepare' and old['status'] != 'completed') or (

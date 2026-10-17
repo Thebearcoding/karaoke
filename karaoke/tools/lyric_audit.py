@@ -1,14 +1,16 @@
 """Resumable, lyric-only audit of frozen real inputs; never marks consensus as accuracy."""
 import argparse
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
 import hashlib
 import json
-from pathlib import Path
 import threading
 import time
 import traceback
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 
 from rapidfuzz.distance import Levenshtein
 
@@ -111,11 +113,8 @@ def paced_requests(interval, protected_root=None):
                     raise
                 time.sleep(max(0, retry_at-time.time()))
 
-    lyric_lookup.cached_lyric_request = cached
-    try:
+    with patch.object(lyric_lookup, 'cached_lyric_request', cached):
         yield
-    finally:
-        lyric_lookup.cached_lyric_request = original
 
 
 def run_case(case, output, model):
@@ -143,7 +142,7 @@ def run_case(case, output, model):
             lookup = lyrics.get('provenance',{}).get('lyric_lookup') or {}
     except Exception:
         error = traceback.format_exc()
-    result = dict(case_id=case['case_id'], url=case['url'], title=case.get('title'), artist=case.get('artist'),
+    result: dict[str, Any] = dict(case_id=case['case_id'], url=case['url'], title=case.get('title'), artist=case.get('artist'),
         stratum=case.get('stratum'), origin=case.get('origin'), identity=identity,
         started_at=started, finished_at=time.time(), seconds=round(time.time()-started,3),
         lyrics=lyrics, lookup=lookup, error=error, assessment=assess(lyrics,lookup,case.get('reference')))

@@ -4,6 +4,7 @@ import argparse
 import difflib
 import json
 from pathlib import Path
+from typing import Any
 
 from subtitles import normalized, write_captions
 
@@ -40,7 +41,7 @@ def main():
     anchors = json.loads(args.anchors.read_text())
     assert [a['text'] for a in anchors] == lyrics
     keys = [normalized(line) for line in lyrics]
-    matched = []
+    matched: list[dict[str, Any]] = []
     for frame in raw:
         variants = [normalized(t['text']) for t in frame['texts']]
         if len(variants) > 1:

@@ -1,9 +1,5 @@
 """Local persistent jobs API. Run one server worker for one GPU queue."""
 import asyncio
-from collections import OrderedDict
-from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import asynccontextmanager, contextmanager
-from datetime import datetime, timezone
 import fcntl
 import hashlib
 import io
@@ -12,14 +8,18 @@ import logging
 import math
 import mimetypes
 import os
-from pathlib import Path
 import re
 import signal
 import sqlite3
 import sys
 import threading
 import time
-from typing import Literal
+from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import asynccontextmanager, contextmanager
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -29,12 +29,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from .cache import CacheFull, GIB, SongCache, can_restore_video
-from .job_schema import JobRequest, download_backoff, playback_stems, retry_after_seconds, retry_fields as source_retry_fields
+from .cache import GIB, CacheFull, SongCache, can_restore_video
+from .job_schema import JobRequest, download_backoff, playback_stems, retry_after_seconds
+from .job_schema import retry_fields as source_retry_fields
+from .lyric_availability import LyricAvailability
 from .room import AddSong, Room, RoomCommand, Updates, artifact_url
 from .video_search import SearchCursorExpired, VideoSearch
-from .lyric_availability import LyricAvailability
-
 
 ROOT = Path(__file__).resolve().parent
 
@@ -101,7 +101,7 @@ def playback_window_bytes(path, info, chunk, gain):
 
 
 def now():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class AudioWindowCache:
@@ -299,7 +299,7 @@ class Store:
                         db.execute('UPDATE jobs SET doc=? WHERE id=?', (json.dumps(doc, ensure_ascii=False), doc['id']))
                         return doc, True
             job_id, stamp = str(uuid4()), now()
-            doc = dict(id=job_id, status='queued', active_stages=[], created_at=stamp, updated_at=stamp,
+            doc: dict[str, Any] = dict(id=job_id, status='queued', active_stages=[], created_at=stamp, updated_at=stamp,
                        last_accessed_at=stamp, input=payload.model_dump(), result=None, error=None, pipeline_version=version)
             previous = db.execute("SELECT doc FROM jobs WHERE json_extract(doc, '$.input.url')=? ORDER BY created_at DESC",
                                   (payload.url,)).fetchall()
@@ -543,7 +543,7 @@ class Worker:
                 pass
             try:
                 await asyncio.wait_for(process.wait(), 5)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             finally:
                 # The parent can exit while a descendant ignores SIGTERM or
@@ -697,8 +697,8 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
                worker_concurrency='env'):
     store = Store(data_dir or os.getenv('KARAOKE_DATA_DIR', str(ROOT/'service-data')), cache_limit_bytes)
     if version is None:
-        from .pipeline import pipeline_fingerprint
         from .local_asr import configuration
+        from .pipeline import pipeline_fingerprint
         settings = {key: os.getenv(key) for key in ('KARAOKE_TEXT_MODEL', 'KARAOKE_ASR_FALLBACK_MODEL', 'KARAOKE_DEVICE',
             'KARAOKE_DISABLE_LYRIC_CATALOG', 'KARAOKE_FONT_FILE', 'KARAOKE_SEPARATOR_PYTHON',
             'KARAOKE_SEPARATION_BATCH_SIZE', 'KARAOKE_COMPUTE_CONCURRENCY')}
@@ -990,7 +990,7 @@ def create_app(data_dir=None, *, worker_command=None, version=None, cache_limit_
         nonlocal frontend, frontend_checked
         # Hot deployments remain visible within a second. Concurrent arrivals
         # reuse the same HTML instead of rereading/hashing every asset per user.
-        if time.monotonic() - frontend_checked >= 1:
+        if frontend is None or time.monotonic() - frontend_checked >= 1:
             web = ROOT/'web'
             digest = hashlib.sha256(b''.join(p.read_bytes() for p in sorted(web.rglob('*'))
                 if p.suffix in ('.js', '.mjs', '.css'))).hexdigest()[:16]

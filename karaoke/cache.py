@@ -1,5 +1,4 @@
 """Song cache with an optional quota and mandatory disk-space protection."""
-from collections import Counter
 import hashlib
 import json
 import logging
@@ -7,10 +6,12 @@ import os
 import shutil
 import stat
 import time
+from collections import Counter
+from typing import TypedDict
 from uuid import UUID
 
-from .stage_cache import retained_files
 from .job_schema import playback_stems
+from .stage_cache import retained_files
 
 GIB = 1024**3
 
@@ -42,12 +43,21 @@ class CacheFull(RuntimeError):
     pass
 
 
+class CacheStats(TypedDict, total=False):
+    used_bytes: int
+    limit_bytes: int | None
+    evictable_bytes: int
+    protected_bytes: int
+    free_bytes: int
+    can_prepare: bool
+
+
 class SongCache:
     def __init__(self, store, limit_bytes=None):
         self.store = store
         self.leases = Counter()
         self.minimum_free = GIB
-        self.stats = {}
+        self.stats: CacheStats = {}
         self.revision = 0
         configured = os.getenv('KARAOKE_CACHE_MAX_GIB', '10').strip().lower()
         default = limit_bytes if limit_bytes is not None else (0 if configured == 'none' else int(float(configured)*GIB))
@@ -331,12 +341,12 @@ class SongCache:
         retained_paths = [self.folder(j['id'])/name for j in candidates for name in self.source_files(j)]
         blocked = self.total_size([self.folder(j['id']) for j in jobs if j['id'] not in candidate_ids] + retained_paths)
         evictable = max(0, used-blocked)
-        stats = dict(used_bytes=used, limit_bytes=self.limit, evictable_bytes=evictable,
+        stats: CacheStats = dict(used_bytes=used, limit_bytes=self.limit, evictable_bytes=evictable,
                      protected_bytes=self.total_size([self.folder(i) for i in protected] + retained_paths),
                      free_bytes=free, can_prepare=self.within_limit(used-evictable+self.headroom) and
                      free+evictable >= self.minimum_free+self.headroom)
         # Disk free-space changes from unrelated apps need not generate SSE traffic.
-        if any(stats[k] != self.stats.get(k) for k in stats if k != 'free_bytes'):
+        if any(value != self.stats.get(key) for key, value in stats.items() if key != 'free_bytes'):
             self.revision += 1
             self.stats = stats
             self.store.on_change()

@@ -10,8 +10,8 @@ from scipy import signal
 from align import align_lines
 from benchmark_alignment import DATA, ROOT, measure, prepare
 from dsp import separate
-from phonetic_align import alignment_features, align_phonetic, templates
 from experiment_output import output_directory
+from phonetic_align import align_phonetic, alignment_features, templates
 
 
 def build(row):

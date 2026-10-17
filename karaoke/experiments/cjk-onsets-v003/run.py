@@ -1,28 +1,29 @@
 """Compare fixed CJK display units across three acoustic contexts."""
-import copy
 import argparse
+import copy
 import hashlib
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
+from typing import Any
 
 import numpy as np
-from scipy.signal import resample_poly
 import soundfile as sf
 import torch
+from scipy.signal import resample_poly
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT))
-from align_lyric_phonemes import SingingAligner, protect_units, protect_line_order
+from align_lyric_phonemes import SingingAligner, protect_line_order, protect_units
 from lyric_progress import canonical_positions
 from phoneme_progress import spoken_units
-from subtitles import presentation_cues, highlight_spans, highlight_coverage_errors
 from stage_progress import progress_items
+from subtitles import highlight_coverage_errors, highlight_spans, presentation_cues
 
 
 def write(path, value):
@@ -56,7 +57,7 @@ def repair_character_groups(cues, baseline, wave, model, protocol):
                   and u.get('timing_source') != 'repeated_lyric_audio']
         if not groups:
             continue
-        report = dict(line=index+1, attempts=[], groups=[])
+        report: dict[str, Any] = dict(line=index+1, attempts=[], groups=[])
         reports.append(report)
         first, stop = max(0, index-1), min(len(baseline), index+2)
         text, anchors, offset = '', [], 0
@@ -66,7 +67,7 @@ def repair_character_groups(cues, baseline, wave, model, protocol):
             anchors.extend(dict(u, first=u['first']+len(text), stop=u['stop']+len(text))
                            for u in baseline[line]['units'])
             text += baseline[line]['text']+' '
-        context = dict(text=text.strip(), units=anchors,
+        context: dict[str, Any] = dict(text=text.strip(), units=anchors,
                        aligned_start=baseline[first]['aligned_start'],
                        aligned_end=baseline[stop-1]['aligned_end'])
         try:
@@ -138,7 +139,7 @@ def process(job, model, protocol):
     raw, decisions = [], []
     started = time.perf_counter()
     for line, (cue, old) in enumerate(zip(progress_items(cues, 'lines'), baseline), 1):
-        attempts = []
+        attempts: list[dict[str, Any]] = []
         try:
             units = fixed_units(cue, job['language'])
             for pad in protocol['context_padding_seconds']:
@@ -206,7 +207,12 @@ def process(job, model, protocol):
     if job['language'] == 'Chinese':
         cues, character_repairs = repair_character_groups(cues, baseline, wave, model, protocol)
         if job.get('original_audio'):
-            from cjk_recovery import AcousticWitness, recover_groups, recover_context_groups, recover_repeated_groups
+            from cjk_recovery import (
+                AcousticWitness,
+                recover_context_groups,
+                recover_groups,
+                recover_repeated_groups,
+            )
             witness = AcousticWitness(job['original_audio'], model.device)
             cues, verified_repairs = recover_groups(cues, wave, model,
                 witness, protocol)

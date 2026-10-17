@@ -9,9 +9,10 @@ import argparse
 import json
 import math
 import os
-from pathlib import Path
 import sys
 import time
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import soundfile as sf
@@ -56,7 +57,7 @@ def main():
         cpu_outputs = [model.inference(probe, iters=[3])[0].numpy() for probe in probes]
         model.to('mps')
         mps_outputs = [model.inference(probe.to('mps'), iters=[3])[0].cpu().numpy() for probe in probes]
-    diagnostics = []
+    diagnostics: list[dict[str, Any]] = []
     for (name, start, seconds), probe, cpu, mps in zip(probe_specs, probes, cpu_outputs, mps_outputs):
         errors = [float(np.linalg.norm(cpu[:, s]-mps[:, s])/max(np.linalg.norm(cpu[:, s]), 1e-8)) for s in range(2)]
         diagnostics.append({'probe': name, 'start_within_input_seconds': start,

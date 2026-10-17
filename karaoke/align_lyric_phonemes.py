@@ -1,21 +1,23 @@
 """Refine lyric progress with singing phonemes inside existing lyric windows."""
 import argparse
-from copy import deepcopy
 import hashlib
-from importlib.metadata import version
 import json
-from pathlib import Path
 import sys
 import time
+from copy import deepcopy
+from importlib.metadata import version
+from pathlib import Path
+from typing import Any
 
 import numpy as np
-from scipy.signal import resample_poly
 import soundfile as sf
 import torch
+from scipy.signal import resample_poly
 
 from lyric_progress import canonical_positions
 from phoneme_progress import ROOT, phoneme_sequence, spoken_units
 from stage_progress import progress_items, report_progress
+
 
 def overlapping(unit, anchors):
     return [i for i,a in enumerate(anchors) if a['first']<unit['stop'] and a['stop']>unit['first']]
@@ -65,7 +67,7 @@ def protect_units(cue, candidate, language):
             if parents & bad:
                 bad.update(parents)
         changed=len(bad)>before
-    result=[dict(u,timing_source='singing_phonemes') for u in candidate
+    result: list[dict[str, Any]] = [dict(u,timing_source='singing_phonemes') for u in candidate
             if not set(overlapping(u,anchors)) & bad]
     result.extend(dict(anchors[i],timing_source='prior_word_fallback') for i in sorted(bad))
     result.sort(key=lambda u:u['first'])
@@ -145,8 +147,8 @@ def ctc_word_units(logits, units, vocab, begin, frame_seconds):
 class SingingAligner:
     def __init__(self,language,device):
         sys.path.insert(0,str(ROOT/'research/subtitles-2026-09-18/sofa'))
-        from modules.task.forced_alignment import LitForcedAlignmentTask
         from modules.rmvpe.spec import MelSpectrogram
+        from modules.task.forced_alignment import LitForcedAlignmentTask
         folder=ROOT/'models/alignment/sofa'/('japanese' if language=='Japanese' else 'mandarin')
         self.checkpoint=next(folder.rglob('*.ckpt'))
         weights=torch.load(self.checkpoint,map_location='cpu',weights_only=True)
@@ -223,7 +225,7 @@ def main():
             begin=max(0,cue['aligned_start']-.35)
             end=min(len(audio)/44100,cue['aligned_end']+.35)
             chunk=audio[round(begin*44100):round(end*44100)]
-            attempts=[]
+            attempts: list[dict[str, Any]] = []
             seen=set()
             for isolated in ([False,True] if language=='Japanese' else [False]):
                 try:

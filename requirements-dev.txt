@@ -1,2 +1,3 @@
 -r requirements-full.txt
+-r requirements-lint.txt
 pytest==9.0.3

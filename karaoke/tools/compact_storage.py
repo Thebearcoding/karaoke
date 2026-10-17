@@ -6,8 +6,8 @@ fully checked and published. Job identities, versions and queue are unchanged.
 import argparse
 import fcntl
 import json
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 from karaoke.api import Store
 from karaoke.exact_stems import compact_playback_audio, sha

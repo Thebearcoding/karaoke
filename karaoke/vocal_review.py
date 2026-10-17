@@ -1,12 +1,12 @@
 """Review uncovered speech without treating ASR words as proof of singing."""
 import base64
+import hashlib
 import io
 import json
-import hashlib
 from pathlib import Path
 
-from .stage_cache import StageCache, digest
 from .local_asr import offline
+from .stage_cache import StageCache, digest
 
 MODEL = 'gpt-audio-1.5'
 PROMPT = ('Classify the audible human vocal sounds in this audio clip. Singing includes sustained melodic vowels, '
@@ -76,8 +76,8 @@ def review_gaps(folder, gaps, words, *, client=None):
                     client = client or OpenAI(timeout=90, max_retries=0)
                     audio = review_clip(path, start, end)
                     response = client.chat.completions.create(model=MODEL, modalities=['text'], temperature=0,
-                        max_completion_tokens=500, messages=[dict(role='user', content=[dict(type='text', text=PROMPT),
-                        dict(type='input_audio', input_audio=dict(data=base64.b64encode(audio).decode(), format='wav'))])])
+                        max_completion_tokens=500, messages=[{'role': 'user', 'content': [{'type': 'text', 'text': PROMPT},
+                        {'type': 'input_audio', 'input_audio': {'data': base64.b64encode(audio).decode(), 'format': 'wav'}}]}])
                     record = dict(config, source=source, source_sha256=digest(path),
                                   input_sha256=hashlib.sha256(audio).hexdigest(), response=response.model_dump(mode='json'))
                     output.write_text(json.dumps(record, ensure_ascii=False, indent=2)+'\n')

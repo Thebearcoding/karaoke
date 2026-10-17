@@ -1,13 +1,13 @@
 """Public job inputs, safe provider errors and single-video platform URLs."""
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
-from functools import lru_cache
 import fcntl
 import json
 import math
 import os
-from pathlib import Path
 import re
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 from urllib.parse import parse_qs, urlsplit
 
@@ -98,7 +98,7 @@ def retry_after_seconds(value):
             hints.append(float(headers[name])*scale)
         except ValueError:
             try:
-                hints.append((parsedate_to_datetime(headers[name])-datetime.now(timezone.utc)).total_seconds())
+                hints.append((parsedate_to_datetime(headers[name])-datetime.now(UTC)).total_seconds())
             except (TypeError, ValueError):
                 pass
     for amount, unit in re.findall(r'try again in\s+(\d+(?:\.\d+)?)\s*(ms|seconds?|s|minutes?|m)\b', str(value), re.I):
@@ -108,7 +108,7 @@ def retry_after_seconds(value):
             hints.append(float(raw)*(.001 if name.lower().endswith('-ms') else 1))
         except ValueError:
             try:
-                hints.append((parsedate_to_datetime(raw)-datetime.now(timezone.utc)).total_seconds())
+                hints.append((parsedate_to_datetime(raw)-datetime.now(UTC)).total_seconds())
             except (TypeError, ValueError):
                 pass
     return max((v for v in hints if math.isfinite(v) and v >= 0), default=None)

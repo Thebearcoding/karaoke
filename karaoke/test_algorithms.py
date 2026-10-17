@@ -1,23 +1,39 @@
+import tempfile
 import unittest
 from pathlib import Path
-import tempfile
+from typing import Any
 
 import numpy as np
 import soundfile as sf
 
 from align import activity, align_lines
+from align_lyric_phonemes import guided_scores, protect_line_order, protect_units
+from align_lyrics_whisper import (
+    alignment_blocks,
+    recover_changed_text,
+    recover_skipped_repeats,
+    stitch_blocks,
+)
+from align_repeated_lyrics import agree_onset, audible, reference_pairs
+from anchors_from_asr import anchors_from_words
 from dsp import apply_masks, istft, masks_for, stft
 from exact_stems import complementary_split, reconstruction_report
-from phonetic_align import FormantSynth, alignment_features, align_phonetic, templates
-from subtitles import countdown_events, countdown_state, highlight_coverage_errors, lyric_cues, presentation_cues, read_ahead_state, timestamp, write_captions
+from lyric_progress import build as build_progress
+from lyric_progress import map_words
 from match_video_lyrics import caption_similarity, strongest_cluster
-from anchors_from_asr import anchors_from_words
+from phoneme_progress import japanese_phone_groups, reading_parts, spoken_units
+from phonetic_align import FormantSynth, align_phonetic, alignment_features, templates
+from subtitles import (
+    countdown_events,
+    countdown_state,
+    highlight_coverage_errors,
+    lyric_cues,
+    presentation_cues,
+    read_ahead_state,
+    timestamp,
+    write_captions,
+)
 from three_stems import check_three
-from lyric_progress import map_words, build as build_progress
-from align_lyric_phonemes import guided_scores, protect_line_order, protect_units
-from phoneme_progress import reading_parts, japanese_phone_groups, spoken_units
-from align_repeated_lyrics import agree_onset, audible, reference_pairs
-from align_lyrics_whisper import alignment_blocks, recover_changed_text, recover_skipped_repeats, stitch_blocks
 from transcribe_lyrics import filter_silent_transcription
 from word_onset_metrics import score_onsets, word_events
 
@@ -35,7 +51,7 @@ class LyricRetrievalAudit(unittest.TestCase):
     def test_agreement_preserves_missing_verses_and_repetitions(self):
         from karaoke.tools.lyric_audit import assess
         lines = ['獨自走過這一條街', '再次相遇在遠方']
-        lookup = dict(candidate_texts=[lines, ['独自走过这一条街。 再次相遇在远方']],
+        lookup: dict[str, Any] = dict(candidate_texts=[lines, ['独自走过这一条街。 再次相遇在远方']],
                       crosscheck=dict(sources=[dict(provider='a'), dict(provider='b')]))
         self.assertEqual(assess(dict(lines=lines), lookup)['status'], 'corroborated_text')
         lookup['candidate_texts'][1] = lines * 2
@@ -55,8 +71,9 @@ class LyricRetrievalAudit(unittest.TestCase):
 
     def test_resume_and_reference_do_not_change_retrieval_inputs(self):
         from unittest.mock import patch
+
         from karaoke.tools.lyric_audit import run_case
-        case = dict(case_id='case', url='https://www.youtube.com/watch?v=abcdefghijk',
+        case: dict[str, Any] = dict(case_id='case', url='https://www.youtube.com/watch?v=abcdefghijk',
                     metadata=dict(id='abcdefghijk', title='Original title'), duration=180,
                     reference=dict(lines=['Secret reference'], publisher='manual-reference'))
         with tempfile.TemporaryDirectory() as directory, patch(
@@ -201,6 +218,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_japanese_tokenizer_width_normalization_preserves_display_spans(self):
         from unittest.mock import patch
+
         from phoneme_progress import spoken_units
         readings = []
         for text in ('2つが重なる 12人', '２つが重なる １２人'):
@@ -240,6 +258,7 @@ class SubtitleIntegrity(unittest.TestCase):
     def test_repeat_recovery_keeps_prior_timing_when_no_audio_path_exists(self):
         import json
         from unittest.mock import patch
+
         from align_repeated_lyrics import main
 
         cues = [dict(text='甲乙丙丁戊己', aligned_start=start, aligned_end=end,
@@ -266,11 +285,12 @@ class SubtitleIntegrity(unittest.TestCase):
             self.assertIn('No valid sub-sequence warping path', attempt['error'])
 
     def test_repeat_recovery_preserves_local_work_until_shared_order_repair(self):
+        import json
         from copy import deepcopy
         from itertools import product
-        import json
         from types import SimpleNamespace
         from unittest.mock import patch
+
         from align_repeated_lyrics import main
         from subtitles import playback_units
 
@@ -330,7 +350,9 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_unbiased_phoneme_review_does_not_reuse_a_previous_word_prior(self):
         from types import SimpleNamespace
+
         import torch
+
         from align_lyric_phonemes import SingingAligner
         model = SimpleNamespace(vocab={'SP': 0, 'a': 1})
         def decode(ids, probabilities, edges):
@@ -373,11 +395,12 @@ class SubtitleIntegrity(unittest.TestCase):
         import importlib.util
         from unittest.mock import patch
         spec = importlib.util.spec_from_file_location('cjk_context', Path(__file__).parent/'experiments/cjk-onsets-v003/run.py')
+        assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         protocol = dict(context_padding_seconds=[.35, .6, 1.], maximum_spread_seconds=.08,
                         maximum_change_seconds=.4, minimum_relative_rms=.03)
-        before = [dict(text='前', aligned_start=.8, aligned_end=.98,
+        before: list[dict[str, Any]] = [dict(text='前', aligned_start=.8, aligned_end=.98,
                        units=[dict(text='前', first=0, stop=1, start=.8, end=.98)]),
                   dict(text='甲乙丙', aligned_start=1., aligned_end=2.7,
                        units=[dict(text='甲乙', first=0, stop=2, start=1., end=1.9),
@@ -438,6 +461,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_coarse_word_refinement_does_not_require_a_large_offset(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
         for source in ('prior_word_fallback', 'linear_fallback', 'singing_phonemes'):
@@ -467,9 +491,10 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_timing_observation_context_does_not_expand_the_local_edit(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
-        units = [dict(first=i, stop=i+1, text=c, start=t, end=t+.2,
+        units: list[dict[str, Any]] = [dict(first=i, stop=i+1, text=c, start=t, end=t+.2,
                       timing_source='prior_word_fallback')
                  for i, (c, t) in enumerate(zip('甲乙', [1.2, 2.8]))]
         target = dict(text='甲乙', start=1.2, end=3., units=units)
@@ -482,7 +507,7 @@ class SubtitleIntegrity(unittest.TestCase):
             with self.subTest(mode=mode):
                 times = {'left_context': [.2, 2.2], 'outside_left_edit': [.2, .8],
                          'outside_right_edit': [3.2, 3.6]}.get(mode, [2., 3.6])
-                measured = [dict(u, start=t, end=t+.2) for u, t in zip(units, times)]
+                measured: list[dict[str, Any]] = [dict(u, start=t, end=t+.2) for u, t in zip(units, times)]
                 views = [deepcopy(measured), deepcopy(measured)]
                 predictions = [deepcopy(measured) for _ in range(3)]
                 if mode == 'disagree': predictions[0][0]['start'] += .2
@@ -519,7 +544,8 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_leading_punctuation_does_not_hide_a_displaced_word_onset(self):
         from copy import deepcopy
-        from timing_validation import reconcile_timing, displaced_units, validate_timeline
+
+        from timing_validation import displaced_units, reconcile_timing, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
         for prefix in ('(', '“', '  ', ''):
             for agrees in (True, False):
@@ -529,7 +555,7 @@ class SubtitleIntegrity(unittest.TestCase):
                     cue = dict(text=text, start=1., end=5., units=[
                         dict(first=0, stop=n+3, text=text[:n+3], start=1., end=4.),
                         dict(first=n+3, stop=n+6, text='now', start=4., end=5.)])
-                    words = [dict(first=n, stop=n+2, text='go', start=3., end=3.5),
+                    words: list[dict[str, Any]] = [dict(first=n, stop=n+2, text='go', start=3., end=3.5),
                              dict(first=n+3, stop=n+6, text='now', start=4., end=5.)]
                     views = [deepcopy(words), deepcopy(words)]
                     predictions = [deepcopy(words) for _ in range(3)]
@@ -548,10 +574,11 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_timing_contract_relocates_the_minimum_span_and_never_resurrects_old_times(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, timing_violations, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
         text = 'あいうえお'
-        old = [dict(first=i, stop=i+1, text=c, start=a, end=b, timing_source='prior_word_fallback')
+        old: list[dict[str, Any]] = [dict(first=i, stop=i+1, text=c, start=a, end=b, timing_source='prior_word_fallback')
                for i,(c,a,b) in enumerate(zip(text,[1.,1.2,1.4,4.5,5.],[1.2,1.4,2.,4.9,5.5]))]
         original = [dict(text=text,start=1.,end=5.5,aligned_start=1.,aligned_end=5.5,units=old)]
         for mode in ('valid','suffix_disagreement','one_view','text_mismatch','prefix_disagreement',
@@ -559,7 +586,7 @@ class SubtitleIntegrity(unittest.TestCase):
                      'label_peak','label_outside_event','label_in_display_hold','untyped_peak'):
             with self.subTest(mode=mode):
                 times = [1.,1.2,1.4,4.5,5.] if mode=='held_note' else [3.,3.2,3.6,4.5,5.]
-                measured = [dict(u,start=t,end=t+.15) for u,t in zip(old,times)]
+                measured: list[dict[str, Any]] = [dict(u,start=t,end=t+.15) for u,t in zip(old,times)]
                 views = [deepcopy(measured),deepcopy(measured)]
                 if mode=='one_view': views.pop()
                 if mode=='text_mismatch': views[1][0]['text']='ん'
@@ -568,7 +595,7 @@ class SubtitleIntegrity(unittest.TestCase):
                     views[1][1]['end']+=.2
                 if mode=='suffix_disagreement': views[1][-1]['start']-=.2
                 if mode=='invalid': views[1][0]['start']=float('nan')
-                predictions = [[dict(u,timing_evidence='ctc_event',emission_end=u['start']+.04)
+                predictions: list[list[dict[str, Any]]] = [[dict(u,timing_evidence='ctc_event',emission_end=u['start']+.04)
                                 for u in measured] for _ in range(3)]
                 if mode.startswith('label_') or mode=='untyped_peak':
                     for view in views:
@@ -609,6 +636,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_only_phonetic_spans_can_contain_a_later_grapheme_event(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
         for evidence in ('phonetic_span', 'attention_span'):
@@ -661,6 +689,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_reversed_local_replacement_cannot_establish_a_new_onset_constraint(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
         old = [dict(first=0, stop=3, text='one', start=3., end=3.7),
@@ -685,6 +714,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_long_coarse_phrase_can_be_localized_before_short_phonetic_review(self):
         from copy import deepcopy
+
         from timing_validation import AcousticReview, reconcile_timing
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4,
                         minimum_relative_rms=.03, context_padding_seconds=[1.,1.5,2.])
@@ -728,9 +758,10 @@ class SubtitleIntegrity(unittest.TestCase):
         from copy import deepcopy
         from types import SimpleNamespace
         from unittest.mock import patch
-        from timing_validation import AcousticReview
-        from subtitles import highlight_spans
+
         from local_asr import whisper_language
+        from subtitles import highlight_spans
+        from timing_validation import AcousticReview
         for language, text in [('Korean', '우리 함께 노래해'), ('Russian', 'Привет мой друг'),
                                ('French', 'Chantons avec joie'), (None, '우리 함께 노래해')]:
             with self.subTest(language=language), tempfile.TemporaryDirectory() as directory:
@@ -771,14 +802,15 @@ class SubtitleIntegrity(unittest.TestCase):
     def test_mixed_chinese_english_review_keeps_source_spans_and_uses_each_phonetic_model(self):
         from copy import deepcopy
         from types import SimpleNamespace
-        from timing_validation import AcousticReview
+
         from subtitles import highlight_spans, latin_word_text
+        from timing_validation import AcousticReview
         protocol = dict(context_padding_seconds=[.2, .4, .6])
         wave = np.arange(12*44100, dtype=np.float32)/44100
         for text in ('甲乙 go now 丙丁', 'go 甲乙', '甲乙 now', '甲乙', 'go now', '甲乙 gо nоw 丙丁'):
             with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
                 spans = list(highlight_spans(text, 'Chinese'))
-                measured = [dict(first=a, stop=b, text=text[a:b], start=4.+i*.5, end=4.3+i*.5)
+                measured: list[dict[str, Any]] = [dict(first=a, stop=b, text=text[a:b], start=4.+i*.5, end=4.3+i*.5)
                             for i, (a,b) in enumerate(spans)]
                 positions = {u['text']:u['start'] for u in measured}
                 calls = []
@@ -826,7 +858,8 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_relocalized_phrase_needs_fresh_acoustic_proof_to_supersede_a_bad_crop(self):
         from copy import deepcopy
-        from timing_validation import reconcile_timing, localized_constraints, timing_violations
+
+        from timing_validation import localized_constraints, reconcile_timing, timing_violations
         protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
         units=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
                for i,(c,t) in enumerate(zip('甲乙',[10.,10.5]))]
@@ -869,12 +902,13 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_relocalized_clause_can_retire_an_interior_proof_without_moving_the_whole_line(self):
         from copy import deepcopy
+
         from timing_validation import localized_constraints
-        old = dict(line=1,text='甲乙 丙丁',first=3,stop=4,onset=2.5,start_min=2.1,start_max=2.9)
+        old: dict[str, Any] = dict(line=1,text='甲乙 丙丁',first=3,stop=4,onset=2.5,start_min=2.1,start_max=2.9)
         new = dict(old,onset=8.1,start_min=7.7,start_max=8.5)
         for mode in ('complete','clause','no_new_proof','other_word','no_edge','ambiguous','fragment','nearby'):
             with self.subTest(mode=mode):
-                anchor=dict(text=old['text'],status='candidate',start=1.,end=9.,
+                anchor: dict[str, Any]=dict(text=old['text'],status='candidate',start=1.,end=9.,
                     match_basis='complete_phrase',observed_edges=[dict(first=3,stop=5,start=8.,end=9.)])
                 revised=deepcopy(new)
                 if mode=='clause': anchor['match_basis']='complete_clause'
@@ -894,6 +928,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_contradicted_revision_retains_valid_input_without_losing_other_repairs(self):
         from copy import deepcopy
+
         from timing_validation import retain_consistent_input, timing_violations, validate_timeline
         def cue(text, start):
             return dict(text=text,start=start,end=start+.4,status='candidate',units=[
@@ -926,6 +961,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_expanded_lyrics_retain_only_unambiguous_reviewed_occurrences(self):
         from copy import deepcopy
+
         from timing_validation import reuse_expanded_timeline, validate_timeline
         def cue(text, start):
             return dict(text=text, start=start, end=start+.4, status='candidate', units=[
@@ -956,13 +992,14 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_isolated_matching_syllable_does_not_establish_a_conflicting_phrase(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_views
         protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
         text='甲乙丙丁戊'
-        units=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
+        units: list[dict[str, Any]]=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
                for i,(c,t) in enumerate(zip(text,[.1,.5,3.,4.,4.5]))]
         cue=dict(text=text,start=.1,end=4.7,units=units)
-        ambiguous=[dict(u,start=t,end=t+.2) for u,t in zip(units,[.1,.5,1.,2.,4.5])]
+        ambiguous: list[dict[str, Any]]=[dict(u,start=t,end=t+.2) for u,t in zip(units,[.1,.5,1.,2.,4.5])]
         other=deepcopy(ambiguous);other[2].update(start=1.8,end=1.9)
         uncertain=[deepcopy(ambiguous) for _ in range(3)]
         for j in (0,1):uncertain[0][j]['start']+=.1
@@ -980,9 +1017,10 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_uncertain_phrase_rechecks_audio_beyond_its_stale_end(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_views, validate_timeline
         protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
-        units=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
+        units: list[dict[str, Any]]=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
                for i,(c,t) in enumerate(zip('甲乙',[1.,3.]))]
         cue=dict(text='甲乙',start=1.,end=3.2,units=units)
         measured=[dict(u,start=t,end=t+.2) for u,t in zip(units,[6.,7.])]
@@ -1010,12 +1048,13 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_supplied_phrase_context_only_requests_new_acoustic_measurements(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_views
         protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
-        units=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='singing_window_consensus')
+        units: list[dict[str, Any]]=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='singing_window_consensus')
                for i,(c,t) in enumerate(zip('甲乙',[1.,1.5]))]
         cue=dict(text='甲乙',start=1.,end=1.7,units=units)
-        measured=[dict(u,start=t,end=t+.2) for u,t in zip(units,[6.,6.5])]
+        measured: list[dict[str, Any]]=[dict(u,start=t,end=t+.2) for u,t in zip(units,[6.,6.5])]
         for agrees in (False,True):
             with self.subTest(agrees=agrees):
                 calls=[]
@@ -1034,13 +1073,14 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_short_phoneme_can_start_the_right_boundary_group(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, validate_timeline
         protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
         text='甲乙丙丁戊'
-        old=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
+        old: list[dict[str, Any]]=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
              for i,(c,t) in enumerate(zip(text,[1.,1.2,3.4,3.8,4.3]))]
         cue=dict(text=text,start=1.,end=4.5,units=old)
-        measured=[dict(u,start=t,end=t+.2) for u,t in zip(old,[3.,3.2,3.4,3.8,4.3])]
+        measured: list[dict[str, Any]]=[dict(u,start=t,end=t+.2) for u,t in zip(old,[3.,3.2,3.4,3.8,4.3])]
         views=[deepcopy(measured),deepcopy(measured)];views[1][1].update(start=3.35,end=3.38)
         predictions=[dict(u,timing_evidence='ctc_event',emission_end=u['start']+.01) for u in measured]
         predictions[2]['end']=3.42
@@ -1054,6 +1094,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_adjacent_repeated_phrases_are_localized_in_one_text_context(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
         cues = [dict(text='one two', start=t, end=t+1., units=[
@@ -1071,7 +1112,7 @@ class SubtitleIntegrity(unittest.TestCase):
                     # joint transcript must preserve every repetition in order.
                     joint = cue['text']=='one two\none two'
                     starts = [.5, 1., 5.5, 6.] if joint else ([.5, 1.] if cue['aligned_end']<3 else [5.5, 6.])
-                    words = [dict(text=word, first=(i//2)*8+(i%2)*4, stop=(i//2)*8+(i%2)*4+3,
+                    words: list[dict[str, Any]] = [dict(text=word, first=(i//2)*8+(i%2)*4, stop=(i//2)*8+(i%2)*4+3,
                                   start=t, end=t+.3, timing_evidence='ctc_label_event')
                              for i,(word,t) in enumerate(zip(cue['text'].split(), starts))]
                     if mode=='missing_occurrence': words=words[:2]
@@ -1085,7 +1126,7 @@ class SubtitleIntegrity(unittest.TestCase):
                             word.update(start=word['start']+.6,end=word['end']+.6)
                     return views
                 def predict(cue, views, bounds, language):
-                    predictions = [[dict(u, timing_evidence='phonetic_span') for u in views[-1]] for _ in range(3)]
+                    predictions: list[list[dict[str, Any]]] = [[dict(u, timing_evidence='phonetic_span') for u in views[-1]] for _ in range(3)]
                     if mode in ('unstable_fine','retry_unstable'):
                         for word in predictions[-1]:
                             word.update(start=word['start']+.2,end=word['end']+.2)
@@ -1119,18 +1160,19 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_timing_reuses_measured_evidence_instead_of_assigning_a_constraint_bound(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_views
         protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
-        old=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
+        old: list[dict[str, Any]]=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
              for i,(c,t) in enumerate(zip('甲乙',[1.,4.]))]
-        measured=[dict(u) for u in old];measured[0].update(start=3.,end=3.2)
-        cue=dict(text='甲乙',start=1.,end=4.2,units=old)
+        measured: list[dict[str, Any]]=[dict(u) for u in old];measured[0].update(start=3.,end=3.2)
+        cue: dict[str, Any]=dict(text='甲乙',start=1.,end=4.2,units=old)
         proof=dict(line=1,text='甲乙',first=0,stop=1,onset=3.,start_min=2.6,start_max=3.4)
         def unavailable(*args,**kwargs):
             raise ValueError('Current observation unavailable')
         for mode in ('measured','wrong_text','silent'):
             with self.subTest(mode=mode):
-                row=dict(line=1,observation='vocals_ctc',witnesses=[deepcopy(measured),deepcopy(measured)],
+                row: dict[str, Any]=dict(line=1,observation='vocals_ctc',witnesses=[deepcopy(measured),deepcopy(measured)],
                          predictions=[deepcopy(measured) for _ in range(3)])
                 if mode=='wrong_text':row['witnesses'][0][0]['text']='丙'
                 wave=np.ones(5*44100)*(.0 if mode=='silent' else .1)
@@ -1142,13 +1184,14 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_timing_composition_keeps_all_measured_onsets_and_rejects_unsupported_interiors(self):
         from copy import deepcopy
+
         from timing_validation import compose_timing_bounds, validate_timeline
         protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
         text='甲乙丙丁戊己'
-        units=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
+        units: list[dict[str, Any]]=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
                for i,(c,t) in enumerate(zip(text,[1.,1.5,4.1,4.3,4.5,5.5]))]
         cue=dict(text=text,start=1.,end=5.7,units=units)
-        heard=[dict(u,start=t,end=t+.2) for u,t in zip(units,[1.,2.,2.5,3.,4.,5.])]
+        heard: list[dict[str, Any]]=[dict(u,start=t,end=t+.2) for u,t in zip(units,[1.,2.,2.5,3.,4.,5.])]
         initial_proofs=[dict(line=1,text=text,first=i,stop=i+1,onset=t,start_min=t-.4,start_max=t+.4)
                 for i,t in [(3,3.),(4,4.)]]
         for mode in ('complete','outside','wrong_text','disagreed_onset','silent',
@@ -1184,6 +1227,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_coarse_interior_reuses_confirmed_bounds_without_moving_them(self):
         from copy import deepcopy
+
         from cjk_recovery import audio_floor
         from timing_validation import compose_timing_bounds, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
@@ -1225,6 +1269,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_playback_preserves_proposed_onsets_around_a_colliding_coarse_word(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
         text = '甲乙丙丁戊己'
@@ -1261,9 +1306,10 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_alternate_acoustic_views_only_revisit_unsettled_lines(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_views, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
-        cues = [dict(text=text, start=start, end=start+2, units=[
+        cues: list[dict[str, Any]] = [dict(text=text, start=start, end=start+2, units=[
             dict(first=0, stop=1, text=text[0], start=start, end=start+.2, timing_source='prior_word_fallback'),
             dict(first=1, stop=2, text=text[1], start=start+1.7, end=start+2, timing_source='singing_phonemes')])
             for text, start in [('甲乙', 1.), ('丙丁', 5.)]]
@@ -1300,8 +1346,9 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_timing_contract_checks_middle_words_and_all_languages(self):
         from copy import deepcopy
-        from timing_validation import reconcile_timing
+
         from subtitles import highlight_spans
+        from timing_validation import reconcile_timing
         protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
         for language,text,spoken in [('Chinese','甲乙丙','Chinese'),('Japanese','あいう','Japanese'),
                                      ('English','one two three','English'),('Japanese','onе two three','English')]:
@@ -1322,11 +1369,12 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_timing_context_retry_uses_confirmed_crop_without_relaxing_evidence(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
-        units = [dict(first=i, stop=i+1, text=text, start=start, end=start+.2,
+        units: list[dict[str, Any]] = [dict(first=i, stop=i+1, text=text, start=start, end=start+.2,
                       timing_source='prior_word_fallback') for i, (text, start) in enumerate([('甲', 1.), ('乙', 1.5)])]
-        cue = dict(text='甲乙', start=1., end=4., aligned_start=1., aligned_end=4., units=units)
+        cue: dict[str, Any] = dict(text='甲乙', start=1., end=4., aligned_start=1., aligned_end=4., units=units)
         neighbour = dict(text='丙', start=5., end=5.5,
             units=[dict(first=0, stop=1, text='丙', start=5., end=5.5, timing_source='singing_phonemes')])
         measured = [dict(unit, start=start, end=start+.2) for unit, start in zip(units, [3., 3.4])]
@@ -1369,11 +1417,12 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_uncertain_displacement_rechecks_context_without_assigning_hint_times(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing
         protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
-        units=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
+        units: list[dict[str, Any]]=[dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
                for i,(c,t) in enumerate(zip('甲乙',[1.,4.]))]
-        cue=dict(text='甲乙',start=1.,end=4.2,units=units)
+        cue: dict[str, Any]=dict(text='甲乙',start=1.,end=4.2,units=units)
         for mode in ('recovered','coarse_agrees','coarse_agrees_still_unstable',
                      'still_disagrees','one_bad_view','held_note','bad_prediction','no_support'):
             with self.subTest(mode=mode):
@@ -1411,13 +1460,13 @@ class SubtitleIntegrity(unittest.TestCase):
     def test_label_boundary_uncertainty_does_not_preserve_a_displaced_first_word(self):
         from timing_validation import reconcile_timing, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
-        cue = dict(text='あいう', start=.2, end=4.6, units=[
+        cue: dict[str, Any] = dict(text='あいう', start=.2, end=4.6, units=[
             dict(first=i, stop=i+1, text=c, start=s, end=e)
             for i,(c,s,e) in enumerate(zip('あいう', [.2,4.,4.3], [2.8,4.2,4.6]))])
         for mode in ('label_span', 'untyped', 'different_end', 'different_phrase',
                      'silent', 'unstable', 'display_hold'):
             with self.subTest(mode=mode):
-                views = [[dict(u, timing_evidence='ctc_label_event') for u in cue['units']] for _ in range(2)]
+                views: list[list[dict[str, Any]]] = [[dict(u, timing_evidence='ctc_label_event') for u in cue['units']] for _ in range(2)]
                 views[0][0].update(start=3., end=3.78)
                 views[1][0].update(start=3.16, end=3.78)
                 predictions = [[dict(u, timing_evidence='ctc_event', emission_end=u['end']-.02)
@@ -1447,6 +1496,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_internal_merged_word_reobserves_a_stale_phrase_window_once(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, validate_timeline
         protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
         text='甲乙丙丁'
@@ -1484,13 +1534,14 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_short_onset_events_can_form_a_verified_playback_group(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, validate_timeline
         protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
-        cue=dict(text='甲乙丙',start=.2,end=3.5,units=[
+        cue: dict[str, Any]=dict(text='甲乙丙',start=.2,end=3.5,units=[
             dict(first=0,stop=1,text='甲',start=.2,end=.4,timing_source='prior_word_fallback'),
             dict(first=1,stop=2,text='乙',start=2.02,end=2.5),
             dict(first=2,stop=3,text='丙',start=3.,end=3.5)])
-        measured=[dict(u,start=t,end=e) for u,t,e in zip(cue['units'],[2.,2.02,3.],[2.02,2.5,3.5])]
+        measured: list[dict[str, Any]] =[dict(u,start=t,end=e) for u,t,e in zip(cue['units'],[2.,2.02,3.],[2.02,2.5,3.5])]
         for mode in ('valid','silent_onset','disagreement','missing_text','protected_interior','strict','later_label_in_group'):
             with self.subTest(mode=mode):
                 views=[deepcopy(measured),deepcopy(measured)]
@@ -1529,13 +1580,14 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_playback_timing_groups_only_uncertain_words_between_measured_boundaries(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
-        units = [dict(first=i, stop=i+1, text=char, start=start, end=start+.2,
+        units: list[dict[str, Any]] = [dict(first=i, stop=i+1, text=char, start=start, end=start+.2,
                       timing_source='prior_word_fallback')
                  for i,(char,start) in enumerate(zip('甲乙丙丁', [1.,1.5,4.1,5.]))]
-        cue = dict(text='甲乙丙丁', start=1., end=5.2, units=units)
-        measured = [dict(u,start=start,end=start+.2) for u,start in zip(units,[3.,3.4,4.2,5.])]
+        cue: dict[str, Any] = dict(text='甲乙丙丁', start=1., end=5.2, units=units)
+        measured: list[dict[str, Any]] = [dict(u,start=start,end=start+.2) for u,start in zip(units,[3.,3.4,4.2,5.])]
         for mode in ('playback','strict','missing_right_anchor','contradicted_interior',
                      'interior_outside_bounds','silent_anchor','text_mismatch'):
             with self.subTest(mode=mode):
@@ -1570,13 +1622,14 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_playback_timing_repairs_existing_groups_without_losing_guard_words(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, validate_timeline
         text = 'We are here for you'
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
         old = [dict(first=0, stop=12, text=text[:12], start=1., end=3.5, timing_source='linear_fallback'),
                dict(first=12, stop=19, text=text[12:], start=3.5, end=4.5, timing_source='linear_fallback')]
         cue = dict(text=text, start=1., end=4.5, units=old)
-        measured = [dict(first=a, stop=b, text=text[a:b], start=t, end=t+.2)
+        measured: list[dict[str, Any]] = [dict(first=a, stop=b, text=text[a:b], start=t, end=t+.2)
                     for a,b,t in [(0,2,.5),(3,6,1.5),(7,11,2.5),(12,15,3.5),(16,19,4.)]]
         for mode in ('grouped', 'partial_guard', 'partial_guard_constraint', 'missing_guard_word', 'contradicted_interior'):
             with self.subTest(mode=mode):
@@ -1610,13 +1663,14 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_playback_timing_closes_left_conflict_at_confirmed_onsets_without_splitting_guard(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, validate_timeline
         protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
         text='甲乙丙丁戊己庚'
         old=[dict(first=a,stop=b,text=text[a:b],start=t,end=t+.15,timing_source='prior_word_fallback')
              for a,b,t in [(0,1,1.),(1,2,1.3),(2,3,2.1),(3,4,2.5),(4,6,2.7),(6,7,3.4)]]
         cue=dict(text=text,start=1.,end=3.55,units=old)
-        measured=[dict(first=i,stop=i+1,text=c,start=t,end=t+.05)
+        measured: list[dict[str, Any]]=[dict(first=i,stop=i+1,text=c,start=t,end=t+.05)
                   for i,(c,t) in enumerate(zip(text,[1.,1.3,1.65,1.9,2.,2.3,3.4]))]
         for mode in ('playback','strict','missing_prefix','guard_constraint'):
             with self.subTest(mode=mode):
@@ -1646,6 +1700,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_grouped_timing_revisits_an_edit_after_its_neighbour_is_repaired(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, validate_timeline
         protocol=dict(maximum_spread_seconds=.08,maximum_change_seconds=.4,minimum_relative_rms=.03)
         text='甲乙丙丁戊己'
@@ -1682,6 +1737,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_timing_repair_closes_over_different_token_boundaries(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing
         text = 'あいうえおか'
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
@@ -1693,7 +1749,7 @@ class SubtitleIntegrity(unittest.TestCase):
                     old = [dict(first=a, stop=b, text=text[a:b], start=t, end=t+.2,
                                 timing_source='prior_word_fallback')
                            for (a,b),t in zip(old_spans,[.1,.4,2.5,4.5])]
-                    measured = [dict(first=a, stop=b, text=text[a:b], start=t, end=t+.2)
+                    measured: list[dict[str, Any]] = [dict(first=a, stop=b, text=text[a:b], start=t, end=t+.2)
                                 for (a,b),t in zip(new_spans,[1.5,2.5,4.5])]
                     views = [deepcopy(measured),deepcopy(measured)]
                     if disagreement:
@@ -1711,9 +1767,10 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_local_timing_repair_distinguishes_a_closure_from_missing_voice(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
-        cue = dict(text='あがっこう', start=.2, end=5., units=[
+        cue: dict[str, Any] = dict(text='あがっこう', start=.2, end=5., units=[
             dict(first=0, stop=1, text='あ', start=.2, end=.4),
             dict(first=1, stop=5, text='がっこう', start=4.5, end=5., timing_source='prior_word_fallback')])
         measured = [dict(first=i, stop=i+1, text=c, start=t, end=t+.1)
@@ -1753,12 +1810,13 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_timing_repair_keeps_the_evidence_support_contract(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
-        cue = dict(text='but hey', start=1., end=3.3, units=[
+        cue: dict[str, Any] = dict(text='but hey', start=1., end=3.3, units=[
             dict(first=0, stop=4, text='but ', start=1., end=1.3),
             dict(first=4, stop=7, text='hey', start=3., end=3.3)])
-        measured = [dict(first=0, stop=3, text='but', start=2., end=2.2),
+        measured: list[dict[str, Any]] = [dict(first=0, stop=3, text='but', start=2., end=2.2),
                     dict(first=4, stop=7, text='hey', start=3., end=3.3)]
         for mode in ('phonetic', 'ctc', 'silent'):
             with self.subTest(mode=mode):
@@ -1783,17 +1841,18 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_coarse_companion_uses_its_measured_interval_without_claiming_a_fine_onset(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
-        old = [dict(first=a, stop=b, text=word, start=t, end=t+.3, timing_source='prior_word_fallback')
+        old: list[dict[str, Any]] = [dict(first=a, stop=b, text=word, start=t, end=t+.3, timing_source='prior_word_fallback')
                for a,b,word,t in [(0,3,'one',3.),(4,7,'two',3.5),(8,13,'three',4.)]]
         cue = dict(text='one two three',start=3.,end=4.3,units=old)
         for mode in ('quiet_lead', 'silent_interval', 'next_word_only', 'untyped', 'view_disagreement'):
             with self.subTest(mode=mode):
-                measured = [dict(u,start=t,end=t+.4,timing_evidence='ctc_label_event')
+                measured: list[dict[str, Any]] = [dict(u,start=t,end=t+.4,timing_evidence='ctc_label_event')
                             for u,t in zip(old,[1.,1.5,4.])]
                 views = [deepcopy(measured),deepcopy(measured)]
-                predictions = [[dict(u,timing_evidence='phonetic_span') for u in measured] for _ in range(3)]
+                predictions: list[list[dict[str, Any]]] = [[dict(u,timing_evidence='phonetic_span') for u in measured] for _ in range(3)]
                 predictions[0][0]['start'] += .2  # The companion's fine onset is unconfirmed.
                 wave = np.full(5*44100,.1)
                 quiet_end = 1.07 if mode in ('quiet_lead','untyped','view_disagreement') else 1.5
@@ -1816,9 +1875,10 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_merged_timing_repair_reuses_corroborated_interior_onsets(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
-        cue = dict(text='甲乙丙丁', start=.2, end=5., units=[
+        cue: dict[str, Any] = dict(text='甲乙丙丁', start=.2, end=5., units=[
             dict(first=0, stop=1, text='甲', start=.2, end=.4),
             dict(first=1, stop=4, text='乙丙丁', start=4.5, end=5., timing_source='prior_word_fallback')])
         measured = [dict(first=i, stop=i+1, text=c, start=t, end=t+.2)
@@ -1850,12 +1910,13 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_playback_timing_can_close_a_tail_group_without_inventing_a_next_onset(self):
         from copy import deepcopy
+
         from timing_validation import reconcile_timing, validate_timeline
         protocol = dict(maximum_spread_seconds=.08, maximum_change_seconds=.4, minimum_relative_rms=.03)
-        units = [dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
+        units: list[dict[str, Any]] = [dict(first=i,stop=i+1,text=c,start=t,end=t+.2,timing_source='prior_word_fallback')
                  for i,(c,t) in enumerate(zip('甲乙丙丁',[.2,1.,1.5,2.]))]
         cue = dict(text='甲乙丙丁',start=.2,end=3.9,units=units)
-        measured = [dict(u,start=t,end=t+.2) for u,t in zip(units,[.2,3.,3.3,3.6])]
+        measured: list[dict[str, Any]] = [dict(u,start=t,end=t+.2) for u,t in zip(units,[.2,3.,3.3,3.6])]
         for mode in ('valid','short_word_event','display_hold','strict','end_disagreement','context_end_disagreement',
                      'context_start_disagreement','disjoint_word_events',
                      'missing_emission_end','wrong_tail_text','interior_constraint','neighbor_overlap'):
@@ -1868,7 +1929,7 @@ class SubtitleIntegrity(unittest.TestCase):
                                 for u in measured] for _ in range(3)]
                 for v in predictions:v[-1].update(end=3.85,emission_end=3.85)
                 constraints=[]
-                neighbour=dict(text='戊',start=5.,end=5.5,
+                neighbour: dict[str, Any]=dict(text='戊',start=5.,end=5.5,
                     units=[dict(first=0,stop=1,text='戊',start=5.,end=5.5,timing_source='singing_phonemes')])
                 if mode=='display_hold':
                     for v in predictions:v[-1]['end']=5.
@@ -1904,9 +1965,10 @@ class SubtitleIntegrity(unittest.TestCase):
     def test_cross_model_recovery_preserves_foreign_words_and_rejects_unverified_changes(self):
         import copy
         from unittest.mock import patch
+
         from cjk_recovery import audio_floor, recover_groups
         protocol = dict(maximum_spread_seconds=.08, minimum_relative_rms=.03)
-        original = [dict(text='go', aligned_start=.1, aligned_end=.4,
+        original: list[dict[str, Any]] = [dict(text='go', aligned_start=.1, aligned_end=.4,
                          units=[dict(text='go', first=0, stop=2, start=.1, end=.4)]),
                     dict(text='甲乙 no', aligned_start=1.2, aligned_end=2.2,
                          units=[dict(text='甲乙 ', first=0, stop=3, start=1.2, end=1.8),
@@ -1969,8 +2031,9 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_english_groups_in_cjk_songs_require_independent_acoustic_agreement(self):
         from copy import deepcopy
+
         from cjk_recovery import recover_latin_groups
-        original = [dict(text='前', aligned_start=.2, aligned_end=.8,
+        original: list[dict[str, Any]] = [dict(text='前', aligned_start=.2, aligned_end=.8,
                          units=[dict(first=0, stop=1, text='前', start=.2, end=.8)]),
                     dict(text='go home now', aligned_start=2., aligned_end=3.8, units=[
                         dict(first=0, stop=8, text='go home ', start=2., end=3.4),
@@ -2018,7 +2081,7 @@ class SubtitleIntegrity(unittest.TestCase):
                             units.extend(dict(u, first=u['first']+len(text), stop=u['stop']+len(text))
                                          for u in cue['units'])
                             text += cue['text']
-                        before = [dict(text=text, aligned_start=.2, aligned_end=5.8, units=units)]
+                        before: list[dict[str, Any]] = [dict(text=text, aligned_start=.2, aligned_end=5.8, units=units)]
                     unchanged = deepcopy(before)
                     wave = np.arange(44100*6)/44100+.1
                     actual, report = recover_latin_groups(before, wave, witness, protocol, Model())
@@ -2053,7 +2116,7 @@ class SubtitleIntegrity(unittest.TestCase):
                         return [dict(text=text, start=2.05-begin, end=2.55-begin)], None, .01
                 def witness(cue, wave):
                     return [[dict(first=0, stop=4, text=text, start=2.06, end=2.54)] for _ in range(2)]
-                cue = dict(text=text, aligned_start=2., aligned_end=2.8, units=[
+                cue: dict[str, Any] = dict(text=text, aligned_start=2., aligned_end=2.8, units=[
                     dict(first=0, stop=2, text=text[:2], start=2., end=2.4),
                     dict(first=2, stop=4, text='me', start=2.4, end=2.8)])
                 if mode == 'foreign':
@@ -2076,7 +2139,9 @@ class SubtitleIntegrity(unittest.TestCase):
     def test_independent_witness_keeps_both_audio_views_inside_foreign_word_bounds(self):
         from types import SimpleNamespace
         from unittest.mock import patch
+
         import torch
+
         from cjk_recovery import AcousticWitness
 
         with tempfile.TemporaryDirectory() as directory:
@@ -2093,16 +2158,17 @@ class SubtitleIntegrity(unittest.TestCase):
             def model(audio):
                 observed.append((audio.shape[1], audio.mean().item()))
                 return torch.zeros(1, 100, 3), None
-            model.model = SimpleNamespace(feature_extractor=SimpleNamespace(conv_layers=[
-                SimpleNamespace(conv=torch.nn.Conv1d(1, 1, kernel, stride=stride))
-                for kernel, stride in [(10,5),(3,2),(3,2),(3,2),(3,2),(2,2),(2,2)]]))
+            from unittest.mock import Mock
+            model = Mock(side_effect=model)
+            layers = torch.nn.ModuleList([torch.nn.ModuleDict({'conv': torch.nn.Conv1d(1, 1, kernel, stride=stride)})
+                for kernel, stride in [(10,5),(3,2),(3,2),(3,2),(3,2),(2,2),(2,2)]])
+            model.get_submodule.return_value = layers
             witness = AcousticWitness(root/'original.wav', 'cpu')
-            witness.model = model
-            witness.bundle = SimpleNamespace(get_tokenizer=lambda: lambda words: words,
+            bundle = SimpleNamespace(get_tokenizer=lambda: lambda words: words,
                 get_aligner=lambda: lambda emissions, words:
                     [[SimpleNamespace(start=i*5, end=i*5+2)] for i in range(len(words))])
             cue = dict(text='go home', aligned_start=2., aligned_end=3.8)
-            with patch('cjk_recovery.ROOT', root):
+            with patch('cjk_recovery.ROOT', root), patch.object(witness, 'model', model), patch.object(witness, 'bundle', bundle):
                 bounded = witness(dict(cue, audio_bounds=[1.8, 4.]), voice)
                 self.assertEqual([n for n, _ in observed], [35200, 35200])
                 self.assertTrue(all(abs(mean-.1) < .001 for _, mean in observed))
@@ -2112,7 +2178,7 @@ class SubtitleIntegrity(unittest.TestCase):
                 self.assertEqual([n for n, _ in observed], [48000, 48000])
                 self.assertTrue(all(mean > .2 for _, mean in observed))
                 tokens = []
-                witness.bundle.get_tokenizer = lambda: lambda words: tokens.append(words) or words
+                bundle.get_tokenizer = lambda: lambda words: tokens.append(words) or words
                 japanese = witness(dict(cue, text='君が笑う'), voice, language='Japanese')
                 self.assertEqual(tokens, [['*', 'kimi', 'ga', 'wara', 'u', '*']]*2)
                 self.assertEqual([(u['first'], u['stop'], u['text']) for u in japanese[0]],
@@ -2153,18 +2219,18 @@ class SubtitleIntegrity(unittest.TestCase):
                 observed.clear()
                 witness(dict(cue, audio_bounds=[2.,2.025]), voice)
                 self.assertEqual([n for n, _ in observed], [400,400])
-                short_emissions = lambda audio: (torch.zeros(1, 1, 3), None)
-                short_emissions.model = model.model
-                witness.model = short_emissions
-                with self.assertRaisesRegex(ValueError, 'Insufficient acoustic frames'):
+                short_emissions = Mock(return_value=(torch.zeros(1, 1, 3), None))
+                short_emissions.get_submodule.return_value = layers
+                with patch.object(witness, 'model', short_emissions), self.assertRaisesRegex(ValueError, 'Insufficient acoustic frames'):
                     witness(cue, voice)
                 with patch.object(witness, 'model', side_effect=RuntimeError('CUDA out of memory')) as broken:
-                    broken.model = model.model
+                    broken.get_submodule.return_value = layers
                     with self.assertRaisesRegex(RuntimeError, 'CUDA out of memory'):
                         witness(cue, voice)
 
     def test_joint_recovery_rechecks_stale_neighbor_without_moving_foreign_words(self):
         from unittest.mock import patch
+
         from cjk_recovery import audio_floor, recover_context_groups
         from phoneme_progress import spoken_units
         original = [dict(text='go', aligned_start=.1, aligned_end=.4,
@@ -2215,10 +2281,11 @@ class SubtitleIntegrity(unittest.TestCase):
                     self.assertFalse(report[0]['accepted'])
 
     def test_repeated_characters_need_verified_reference_and_target_audio_agreement(self):
-        from unittest.mock import patch
-        from cjk_recovery import recover_repeated_groups
         import copy
-        cues = [dict(text='甲乙丙丁戊', aligned_start=1., aligned_end=2.5, units=[
+        from unittest.mock import patch
+
+        from cjk_recovery import recover_repeated_groups
+        cues: list[dict[str, Any]] = [dict(text='甲乙丙丁戊', aligned_start=1., aligned_end=2.5, units=[
                     dict(text='甲乙', first=0, stop=2, start=1., end=1.9),
                     *[dict(text=c, first=i+2, stop=i+3, start=s, end=e)
                       for i, (c, s, e) in enumerate(zip('丙丁戊', [1.9, 2.1, 2.3], [2.1, 2.3, 2.5]))]]),
@@ -2244,7 +2311,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
                     def __call__(self, cue, audio):
                         starts = [1.11, 1.71, 1.91, 2.11, 2.31]
-                        values = [[dict(text=c, first=i, stop=i+1, start=s, end=s+.1)
+                        values: list[list[dict[str, Any]]] = [[dict(text=c, first=i, stop=i+1, start=s, end=s+.1)
                                    for i, (c, s) in enumerate(zip('甲乙丙丁戊', starts))]
                                   for _ in range(2)]
                         if mode == 'divergent_witness':
@@ -2327,6 +2394,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_alternate_witness_keeps_raw_invalid_timestamps_and_checks_word_identity(self):
         from types import SimpleNamespace
+
         from qwen_witness import raw_units
         cue = dict(text="甲乙 let's go")
         values = [SimpleNamespace(text=text, start_time=start, end_time=end)
@@ -2341,6 +2409,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_ctc_onsets_follow_phone_events_not_emission_width_or_equal_spacing(self):
         import torch
+
         from align_lyric_phonemes import ctc_word_units
         units = [dict(text=c, first=i, stop=i+1, phones=phones)
                  for i, (c, phones) in enumerate(zip('甲乙丙', [['a', 'b'], ['c'], ['d']]))]
@@ -2365,9 +2434,10 @@ class SubtitleIntegrity(unittest.TestCase):
         from align_english_onsets import EnglishOnsetAligner
         aligner = EnglishOnsetAligner.__new__(EnglishOnsetAligner)
         aligner.method, aligner.device = 'wav2vec2', 'cpu'
-        aligner.tokenize = lambda words: ([1, 1], [(0, 2)])
+        from unittest.mock import patch
+        tokenization = ([1, 1], [(0, 2)])
         aligner.model = lambda audio: (torch.zeros(1, 1, 3), None)
-        with self.assertRaisesRegex(ValueError, 'Insufficient acoustic frames'):
+        with patch.object(aligner, 'tokenize', return_value=tokenization), self.assertRaisesRegex(ValueError, 'Insufficient acoustic frames'):
             aligner.align(np.zeros(400, dtype='float32'), ['keep'])
         logits[0, 0, 0] = float('nan')
         with self.assertRaisesRegex(ValueError, 'Invalid CTC'):
@@ -2375,6 +2445,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_internal_ctc_recovery_still_requires_independent_audio_agreement(self):
         from unittest.mock import patch
+
         from cjk_recovery import recover_groups
         original = [dict(text='甲乙丙', aligned_start=.5, aligned_end=2., units=[
             dict(text='甲乙', first=0, stop=2, start=.5, end=1.5),
@@ -2389,7 +2460,7 @@ class SubtitleIntegrity(unittest.TestCase):
                 class Model:
                     def infer(self, audio, begin, units, cue, *, decoder='phonemes'):
                         calls.append(decoder)
-                        result = [dict(u, start=s, end=e, emission_end=s+.01)
+                        result: list[dict[str, Any]] = [dict(u, start=s, end=e, emission_end=s+.01)
                                   for u, s, e in zip(units, [.5, 1., 1.5], [1., 1.5, 2.])]
                         if decoder == 'phonemes':
                             result[0]['end'] = .51
@@ -2455,7 +2526,7 @@ class SubtitleIntegrity(unittest.TestCase):
         from subtitles import normalized
         for language in ('Chinese', 'English'):
             with self.subTest(language=language):
-                cue = dict(text="Hello, I'm here.", start=1., end=5.)
+                cue: dict[str, Any] = dict(text="Hello, I'm here.", start=1., end=5.)
                 words = [dict(word=text, start=i+1., end=i+1.8)
                          for i, text in enumerate(['Hello', 'I', 'm', 'here'])]
                 units = map_words(cue, words, 0., language)
@@ -2498,6 +2569,7 @@ class SubtitleIntegrity(unittest.TestCase):
 
     def test_traditional_chinese_pronunciation_uses_phrase_context(self):
         from unittest.mock import patch
+
         from phoneme_progress import chinese_units
         cases = {
             '透著光與著作': ['tou', 'zhe', 'guang', 'yu', 'zhu', 'zuo'],
@@ -2767,7 +2839,7 @@ class SubtitleIntegrity(unittest.TestCase):
         text = 'All our distant memories turn to light'
         words = [dict(word=w,start=60.+i*.3,end=60.+(i+1)*.3)
                  for i,w in enumerate('All our distant memories fade to light'.split())]
-        cue = dict(text=text,start=30.,end=63.,units=[
+        cue: dict[str, Any] = dict(text=text,start=30.,end=63.,units=[
             dict(text='All ',start=30.,end=30.3),
             dict(text=text[4:],start=60.3,end=63.)])
         support = timeline_support([cue],words,'English')
@@ -2936,9 +3008,10 @@ class SubtitleIntegrity(unittest.TestCase):
 class WordOnsetScoring(unittest.TestCase):
     def test_risk_checker_keeps_weak_missing_words_and_measures_its_own_errors(self):
         from copy import deepcopy
+
         from word_onset_metrics import onset_risks, score_risks
 
-        reference = [dict(id=i, text=t, start=float(i+1)) for i, t in enumerate(['a', 'b', 'c', 'd'])]
+        reference: list[dict[str, Any]] = [dict(id=i, text=t, start=float(i+1)) for i, t in enumerate(['a', 'b', 'c', 'd'])]
         predictions, verifier = deepcopy(reference), deepcopy(reference)
         predictions[0]['start'] += .4  # An independently detected real error.
         verifier[1]['start'] += .4     # The verifier itself is wrong: false alert.
@@ -2989,8 +3062,8 @@ class WordOnsetScoring(unittest.TestCase):
             word_events([dict(text='日本語', units=[])], 'Japanese')
 
     def test_missing_and_late_words_stay_in_accuracy_denominator(self):
-        reference = [dict(id=i, text=str(i), start=float(i+1)) for i in range(4)]
-        predictions = [dict(r) for r in reference]
+        reference: list[dict[str, Any]] = [dict(id=i, text=str(i), start=float(i+1)) for i in range(4)]
+        predictions: list[dict[str, Any]] = [dict(r) for r in reference]
         predictions[0]['start'] -= .05
         predictions[1]['start'] += .05
         predictions[2]['start'] += .3
@@ -3063,6 +3136,7 @@ class StemQualityScoring(unittest.TestCase):
         import json
         import tempfile
         from pathlib import Path
+
         from karaoke.tools.quality import evaluate
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -3098,6 +3172,7 @@ class AlignmentIntegrity(unittest.TestCase):
     def test_untimed_line_recovery_retains_measured_times_and_rejects_bad_candidates(self):
         from copy import deepcopy
         from unittest.mock import Mock
+
         from align_lyrics_whisper import recover_unresolved_block
 
         lines = ['opening', 'context', 'long-vocalization']
@@ -3105,7 +3180,7 @@ class AlignmentIntegrity(unittest.TestCase):
                    dict(status='candidate', start=8., end=9.), dict(status='unresolved_text')]
         def segment(text, start, end):
             return dict(text=text, start=start, end=end, words=[dict(word=text, start=start, end=end)])
-        original = dict(range=[2, 3], context=[1, 3], source_range=[7.4, 20.], result=dict(segments=[
+        original: dict[str, Any] = dict(range=[2, 3], context=[1, 3], source_range=[7.4, 20.], result=dict(segments=[
             segment(lines[1], .7, 1.5), segment(lines[2], 12.6, 12.6)]))
         candidate = dict(segments=[segment(lines[0], .7, 1.7), segment(lines[1], 7.7, 8.5),
                                   segment(lines[2], 10.9, 18.7)])
@@ -3144,10 +3219,12 @@ class AlignmentIntegrity(unittest.TestCase):
     def test_singing_phonemes_keep_hyphenated_syllables_separate(self):
         import os
         from unittest.mock import patch
+
         import espeakng_loader
         from phonemizer.backend import EspeakBackend
         from phonemizer.backend.espeak.wrapper import EspeakWrapper
         from phonemizer.separator import Separator
+
         from align_english_onsets import EnglishOnsetAligner
 
         with patch.dict(os.environ, ESPEAK_DATA_PATH=espeakng_loader.get_data_path()):
@@ -3155,7 +3232,7 @@ class AlignmentIntegrity(unittest.TestCase):
             aligner = object.__new__(EnglishOnsetAligner)
             aligner.method = 'singing'
             aligner.phonemizer = EspeakBackend('en-us')
-            aligner.separator = Separator(phone=';', word=None)
+            aligner.separator = Separator(phone=';', word='')
             aligner.vocab, aligner.space = {'uː': 1, 'h': 2, 'm': 4}, 3
             targets, spans = aligner.tokenize(['Ooh-ooh-ooh-ooh', 'Ooh', 'Mmm'])
         # The written h is silent: deleting the hyphens invents consonants
@@ -3167,6 +3244,7 @@ class AlignmentIntegrity(unittest.TestCase):
         import json
         from types import SimpleNamespace
         from unittest.mock import Mock
+
         from align_english_onsets import align_job
         from onset_consensus import context_scope_violations
 
@@ -3220,6 +3298,7 @@ class AlignmentIntegrity(unittest.TestCase):
         import json
         from types import SimpleNamespace
         from unittest.mock import Mock
+
         from align_english_onsets import align_job
 
         with tempfile.TemporaryDirectory() as directory:
@@ -3258,6 +3337,7 @@ class AlignmentIntegrity(unittest.TestCase):
         import json
         from types import SimpleNamespace
         from unittest.mock import Mock
+
         from align_english_onsets import align_job
 
         lines = ['morning', 'river through the evening', 'closing']
@@ -3299,6 +3379,7 @@ class AlignmentIntegrity(unittest.TestCase):
         import json
         from types import SimpleNamespace
         from unittest.mock import Mock, patch
+
         from align_english_onsets import align_job
 
         lines = ['opening', 'river runs through town', 'ending']
@@ -3310,7 +3391,7 @@ class AlignmentIntegrity(unittest.TestCase):
                 for basis in (None, 'complete_phrase', 'complete_clause', 'aligned_words'):
                     for recovered in (False, True):
                         with self.subTest(side=side, basis=basis, recovered=recovered):
-                            anchors = [dict(text=t, start=a, end=b, status='candidate')
+                            anchors: list[dict[str, Any]] = [dict(text=t, start=a, end=b, status='candidate')
                                        for t,a,b in zip(lines, [1.,8.,20.], [2.,14.,21.])]
                             if basis == 'aligned_words':
                                 anchors[1]['units'] = [dict(text=w, start=t, end=t+.3)
@@ -3353,6 +3434,7 @@ class AlignmentIntegrity(unittest.TestCase):
     def test_late_coarse_boundary_does_not_cut_off_a_sustained_syllable(self):
         import json
         from types import SimpleNamespace
+
         from align_english_onsets import align_job
 
         def align(audio, words):
@@ -3384,13 +3466,14 @@ class AlignmentIntegrity(unittest.TestCase):
         import json
         from types import SimpleNamespace
         from unittest.mock import Mock
+
         from align_english_onsets import align_job
         from karaoke.pipeline import phrase_locations
 
         lines=['morning','again','evening']
-        coarse=[dict(text=t,start=s,end=s+.5,status='candidate') for t,s in zip(lines,[1.,5.,10.])]
+        coarse: list[dict[str, Any]]=[dict(text=t,start=s,end=s+.5,status='candidate') for t,s in zip(lines,[1.,5.,10.])]
         located=[dict(coarse[1],start=8.,end=9.),coarse[2]]
-        evidence=dict(context=[1,3],source_range=[4.,12.],anchors=located,
+        evidence: dict[str, Any]=dict(context=[1,3],source_range=[4.,12.],anchors=located,
                       recognition=dict(segments=[{}]),accepted_lines=[2])
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);sf.write(root/'audio.wav',np.zeros(15*16000),16000)
@@ -3398,7 +3481,7 @@ class AlignmentIntegrity(unittest.TestCase):
             for mode in ('accepted','unaccepted','complete_phrase','complete_clause',
                          'other_block','wrong_text','no_recognition','no_context'):
                 with self.subTest(mode=mode):
-                    raw=[dict(range=[1,3],asr_localizations=[copy.deepcopy(evidence)])]
+                    raw: list[dict[str, Any]]=[dict(range=[1,3],asr_localizations=[copy.deepcopy(evidence)])]
                     observed=raw[0]['asr_localizations'][0]
                     if mode=='unaccepted':observed['accepted_lines']=[]
                     if mode in ('complete_phrase','complete_clause'):
@@ -3432,6 +3515,7 @@ class AlignmentIntegrity(unittest.TestCase):
         import json
         from types import SimpleNamespace
         from unittest.mock import Mock
+
         from align_english_onsets import align_job
 
         with tempfile.TemporaryDirectory() as directory:
@@ -3473,6 +3557,7 @@ class AlignmentIntegrity(unittest.TestCase):
         import json
         from types import SimpleNamespace
         from unittest.mock import Mock, patch
+
         from align_english_onsets import align_job
 
         lines = ['first', 'second', 'third', 'fourth', 'fifth', 'last']
@@ -3518,6 +3603,7 @@ class AlignmentIntegrity(unittest.TestCase):
         import json
         from types import SimpleNamespace
         from unittest.mock import Mock
+
         from align_english_onsets import align_job
         from onset_consensus import blend_cues
 
@@ -3551,6 +3637,7 @@ class AlignmentIntegrity(unittest.TestCase):
         import json
         from types import SimpleNamespace
         from unittest.mock import Mock
+
         from align_english_onsets import align_job
 
         with tempfile.TemporaryDirectory() as directory:
@@ -3603,9 +3690,9 @@ class AlignmentIntegrity(unittest.TestCase):
         from copy import deepcopy
         from unittest.mock import Mock
 
-        words = [dict(word=word, start=float(i), end=i+.5)
+        words: list[dict[str, Any]] = [dict(word=word, start=float(i), end=i+.5)
                  for i, word in enumerate(['keep', 'these', 'words'])]
-        candidate = dict(segments=[dict(words=words, text='keep these words')])
+        candidate: dict[str, Any] = dict(segments=[dict(words=words, text='keep these words')])
         original = deepcopy(candidate)
         original['segments'][0]['words'].insert(2, dict(word='these', start=4., end=4.))
         original['segments'][0]['words'][-1].update(start=4., end=4.)
@@ -3645,7 +3732,7 @@ class AlignmentIntegrity(unittest.TestCase):
         from copy import deepcopy
         from unittest.mock import Mock
         lines = ['one line', 'two lines', 'three lines', 'four lines', 'five lines']
-        good = dict(segments=[dict(text=text, start=i*3+1., end=i*3+2., words=[
+        good: dict[str, Any] = dict(segments=[dict(text=text, start=i*3+1., end=i*3+2., words=[
             dict(word=word, start=i*3+1.+j*.5, end=i*3+1.5+j*.5)
             for j, word in enumerate(text.split())]) for i, text in enumerate(lines)])
         original = deepcopy(good)
@@ -3677,6 +3764,7 @@ class AlignmentIntegrity(unittest.TestCase):
         import shutil
         from types import SimpleNamespace
         from unittest.mock import Mock, patch
+
         from align_lyrics_whisper import main
 
         lines, starts = ['Guten Morgen', 'Komm zurück', 'あしたもLOVE歌おう'], [1., 4., 8.]
@@ -3761,6 +3849,7 @@ class AlignmentIntegrity(unittest.TestCase):
         import json
         from types import SimpleNamespace
         from unittest.mock import Mock, patch
+
         from align_lyrics_whisper import main
         from subtitles import highlight_spans
 
@@ -3833,6 +3922,7 @@ class AlignmentIntegrity(unittest.TestCase):
         import json
         import shutil
         from unittest.mock import Mock, patch
+
         from align_lyrics_whisper import main
         from timing_validation import validate_timeline
 
@@ -3967,7 +4057,7 @@ class AlignmentIntegrity(unittest.TestCase):
         def segment(text, start, end):
             return dict(text=text, words=[dict(word=text, start=start, end=end)])
 
-        raw = [dict(range=[0, 1], context=[0, 2], source_range=[0., 6.], result=dict(segments=[
+        raw: list[dict[str, Any]] = [dict(range=[0, 1], context=[0, 2], source_range=[0., 6.], result=dict(segments=[
                    segment('first', 0., 1.), segment('middle', 1.2, 2.)])),
                dict(range=[1, 2], context=[1, 2], source_range=[0., 6.], result=dict(segments=[
                    segment('middle', 2.6, 5.)])),
@@ -3985,14 +4075,15 @@ class AlignmentIntegrity(unittest.TestCase):
 
     def test_missing_line_does_not_prevent_reusing_a_complete_context_prediction(self):
         from copy import deepcopy
+
         from karaoke.pipeline import alignment_recovery_summary
         lines = ['first', 'middle', 'last']
         def segment(text, start):
             return dict(text=text, words=[dict(word=text,start=start,end=start+.5)])
-        missing = dict(range=[0,3],context=[0,3],source_range=[0.,6.],result=dict(segments=[
+        missing: dict[str, Any] = dict(range=[0,3],context=[0,3],source_range=[0.,6.],result=dict(segments=[
             segment('first',1.),dict(text='middle',words=[]),segment('last',5.)]))
         missing['asr_localizations'] = [dict(contradicted_lines=[2], accepted_lines=[])]
-        context = dict(range=[0,0],context=[0,3],source_range=[0.,6.],result=dict(segments=[
+        context: dict[str, Any] = dict(range=[0,0],context=[0,3],source_range=[0.,6.],result=dict(segments=[
             segment(text,start) for text,start in zip(lines,[1.,3.,5.])]))
         original = deepcopy(missing)
         cues, stitched, repairs = stitch_blocks(lines,[missing,context],6.,'English')
@@ -4013,7 +4104,7 @@ class AlignmentIntegrity(unittest.TestCase):
 
     def test_missing_line_can_be_recovered_inside_measured_context(self):
         lines = ['alpha','bravo','charlie','delta','echo','foxtrot']
-        good = [dict(text=text,words=[dict(word=text,start=float(i+1),end=i+1.5)]) for i,text in enumerate(lines)]
+        good: list[dict[str, Any]] = [dict(text=text,words=[dict(word=text,start=float(i+1),end=i+1.5)]) for i,text in enumerate(lines)]
         raw = dict(range=[0,6],context=[0,6],source_range=[0.,8.],result=dict(segments=[
             dict(text=s['text'],words=[]) if i==2 else s for i,s in enumerate(good)]))
         for succeeds in (True,False):
@@ -4080,7 +4171,7 @@ class AlignmentIntegrity(unittest.TestCase):
             return dict(text=text, words=[dict(word=first, start=start, end=middle),
                                          dict(word=last, start=middle, end=end)])
 
-        raw = [dict(range=[0, 1], context=[0, 2], source_range=[2., 7.], result=dict(segments=[
+        raw: list[dict[str, Any]] = [dict(range=[0, 1], context=[0, 2], source_range=[2., 7.], result=dict(segments=[
                    segment(lines[0], 0., 1., 1.2), segment(lines[1], 1.2, 1.6, 2.)])),
                dict(range=[1, 3], context=[1, 3], source_range=[3., 8.], result=dict(segments=[
                    segment(lines[1], -.01, .4, .9), segment(lines[2], 2., 3., 4.)]))]
@@ -4173,7 +4264,7 @@ class AlignmentIntegrity(unittest.TestCase):
                          [(1.,2.), (10.,11.), (23.,23.4), (22.7,24.4), (96.,97.), (110.,111.)])
                 if gap == 'inside_core':
                     times[2:4] = [(93.,93.4), (12.,94.4)]
-                segments = [dict(text=t,words=[dict(word=t,start=a,end=b)]) for t,(a,b) in zip(lines,times)]
+                segments: list[dict[str, Any]] = [dict(text=t,words=[dict(word=t,start=a,end=b)]) for t,(a,b) in zip(lines,times)]
                 raw = dict(range=[0,6],context=[0,6],source_range=[0.,120.],result=dict(segments=segments))
                 original, calls = deepcopy(raw), []
                 def align(begin,end,text,**options):

@@ -9,7 +9,6 @@ import numpy as np
 from benchmark_separation import ROOT, evaluate, select, summarize
 from experiment_output import output_directory
 
-
 BASELINE = {'name': 'spatial-v2', 'method': 'spatial', 'strength': .99, 'protection': .5}
 
 

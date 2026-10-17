@@ -4,17 +4,31 @@ A disagreement is a screening signal. Only corroborated acoustic predictions
 invalidate an old onset; unavailable evidence never turns a quiet voice into
 silence. Invalidations outlive individual fallback candidates.
 """
+from collections.abc import Iterable
 from copy import deepcopy
 from itertools import groupby
+from typing import Any
 
 import numpy as np
 
 if __package__:
     from .anchors_from_asr import phrase_conflict
-    from .subtitles import acoustic_end, collapsed_phrase, normalized, highlight_coverage_errors, latin_word_text
+    from .subtitles import (
+        acoustic_end,
+        collapsed_phrase,
+        highlight_coverage_errors,
+        latin_word_text,
+        normalized,
+    )
 else:
     from anchors_from_asr import phrase_conflict
-    from subtitles import acoustic_end, collapsed_phrase, normalized, highlight_coverage_errors, latin_word_text
+    from subtitles import (
+        acoustic_end,
+        collapsed_phrase,
+        highlight_coverage_errors,
+        latin_word_text,
+        normalized,
+    )
 
 
 def timing_violations(cues, constraints):
@@ -207,7 +221,9 @@ def reconcile_views(cues, observations, protocol, language, constraints=(), *, p
     onset constraints. The iterator may load a different audio view lazily.
     """
     from cjk_recovery import audio_floor
-    result, report, pending = deepcopy(cues) if contexts else cues, dict(lines=[], constraints=list(constraints)), None
+    result = deepcopy(cues) if contexts else cues
+    report: dict[str, Any] = dict(lines=[], constraints=list(constraints))
+    pending = None
     requested = set(contexts or {})
     for index, (begin, end) in (contexts or {}).items():
         result[index].update(aligned_start=begin, aligned_end=end)
@@ -336,7 +352,7 @@ def compose_timing_bounds(cues, index, row, measured, constraints, wave, protoco
             group = dict(first=left['first'],stop=right['first'],text=cue['text'][left['first']:right['first']],
                          start=left['start'],end=right['start'],acoustic_end=None,
                          timing_source='linear_fallback',bounds_source='cross_model_onsets')
-            candidate = dict(cue,units=[*units[:lo],group,*units[hi:]])
+            candidate: dict[str, Any] = dict(cue,units=[*units[:lo],group,*units[hi:]])
             try:
                 validate_timeline([candidate],[cue['text']],len(wave)/44100,
                                   [dict(p,line=1) for p in proofs],language)
@@ -344,7 +360,7 @@ def compose_timing_bounds(cues, index, row, measured, constraints, wave, protoco
                 continue
             return candidate
         return None
-    points = {}
+    points: dict[int, float] = {}
     def supports(first, time):
         from cjk_recovery import label_events_support
         if any(first not in view for view in views):
@@ -402,7 +418,7 @@ def compose_timing_bounds(cues, index, row, measured, constraints, wave, protoco
             groups = [dict(first=a,stop=b,text=cue['text'][a:b],start=start,end=end,acoustic_end=None,
                            timing_source='linear_fallback',bounds_source='cross_model_onsets')
                       for (a,start),(b,end) in zip(marks,marks[1:])]
-            candidate = dict(cue,units=[*cue['units'][:lo],*groups,
+            candidate: dict[str, Any] = dict(cue,units=[*cue['units'][:lo],*groups,
                 dict(guard,start=points[right],acoustic_end=None,timing_source='linear_fallback',
                      bounds_source='cross_model_onset_prior_acoustic_end'),*cue['units'][hi+1:]])
             candidate.update(start=candidate['units'][0]['start'],aligned_start=candidate['units'][0]['start'])
@@ -415,7 +431,7 @@ def compose_timing_bounds(cues, index, row, measured, constraints, wave, protoco
     return None
 
 
-def reconcile_timing(cues, wave, witness, predict, protocol, language, constraints=(), *,
+def reconcile_timing(cues, wave, witness, predict, protocol, language, constraints: Iterable[dict[str, Any]]=(), *,
                      playback=False, _retry_context=True, _repeat_context=True, _review_lines=None):
     """Corroborate displaced onsets, then replace only a compatible local span.
 
@@ -423,7 +439,8 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
     context predictions without old word priors. Both are cacheable adapters.
     """
     from cjk_recovery import corroborated_group, same_acoustic_event
-    result, reports, ledger = deepcopy(cues), [], deepcopy(list(constraints))
+    result, reports = deepcopy(cues), []
+    ledger = deepcopy(list(constraints))
     context_hints = {}
     repeated = {}
     for _, group in groupby(range(len(result)), key=lambda i: normalized(result[i]['text']).casefold()):
@@ -447,7 +464,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
         selected = screened_units(cue, wave, protocol, floor=floor)
         if not selected and _review_lines is None and not timing_violations(result, [p for p in ledger if p['line']==index+1]):
             continue
-        report = dict(line=index+1, screened_units=selected, status='unverified', repairs=[])
+        report: dict[str, Any] = dict(line=index+1, screened_units=selected, status='unverified', repairs=[])
         reports.append(report)
         try:
             # A stale first word can stretch the coarse search across an
@@ -531,7 +548,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
             report['predictions'] = predictions
             confirmed, proposals = {}, {}
             for group in views[0]:
-                choose = lambda vs: [[u for u in v if (u['first'],u['stop'])==(group['first'],group['stop'])] for v in vs]
+                choose = lambda vs, group=group: [[u for u in v if (u['first'],u['stop'])==(group['first'],group['stop'])] for v in vs]
                 replacement, reason = corroborated_group(group, choose(predictions), choose(views), wave,
                     bounds, protocol, spans=[(group['first'],group['stop'])], floor=floor)
                 if replacement is None:
@@ -567,7 +584,7 @@ def reconcile_timing(cues, wave, witness, predict, protocol, language, constrain
                 if units[lo]['first']==first and units[lo]['start']==anchor['start']:
                     continue
                 while True:
-                    members = [dict(a,timing_source='prior_word_fallback',
+                    members: list[dict[str, Any]] = [dict(a,timing_source='prior_word_fallback',
                                     localization_source='mms_original_and_vocals',acoustic_end=None)
                                for a in views[0] if a['first']<units[hi-1]['stop'] and a['stop']>units[lo]['first']]
                     # Close the edit over both tokenizations before checking
@@ -835,7 +852,7 @@ def grouped_timing_fallback(cue, report, proof, constraints, wave, bounds, proto
                 break
         else:
             return None, None
-    guard = None
+    guard: list[dict[str, Any]] | None = None
     for hi in range(lo+1, len(units)):
         if units[hi]['first'] < anchor['stop']:
             continue
@@ -962,6 +979,7 @@ class AcousticReview:
     """Lazily load models and persist bounded acoustic requests, not decisions."""
     def __init__(self, original, device, cache, identity, protocol):
         from pathlib import Path
+
         from cjk_recovery import AcousticWitness
         self.device,self.cache,self.identity,self.protocol=device,Path(cache),identity,protocol
         self.witness=AcousticWitness(original,device)
@@ -969,7 +987,8 @@ class AcousticReview:
         self.cache.mkdir(parents=True,exist_ok=True)
 
     def cached(self, kind, request, compute):
-        import hashlib,json
+        import hashlib
+        import json
         key=hashlib.sha256(json.dumps([self.identity,kind,request],sort_keys=True).encode()).hexdigest()
         path=self.cache/(key+'.json')
         if path.is_file():return json.loads(path.read_text())
@@ -1045,8 +1064,9 @@ class AcousticReview:
                                        for (s,e),u in zip(spans,predicted)])
                     elif language not in ('Chinese','Japanese'):
                         from scipy.signal import resample_poly
-                        from lyric_progress import map_words
+
                         from local_asr import alignment_language
+                        from lyric_progress import map_words
                         clip=resample_poly(audio,160,441).astype('float32')
                         selected_language, probes=alignment_language(model,clip,language)
                         aligned=model.align(clip,
@@ -1076,11 +1096,16 @@ class AcousticReview:
 
 
 def main():
-    import argparse,hashlib,json,time
+    import argparse
+    import hashlib
+    import json
+    import time
     from pathlib import Path
+
     import soundfile as sf
     import torch
     from scipy.signal import resample_poly
+
     from phoneme_progress import ROOT
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--input',type=Path,required=True)

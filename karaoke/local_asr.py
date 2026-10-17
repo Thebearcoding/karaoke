@@ -1,22 +1,22 @@
 """Offline Whisper inference with explicit, fully covered audio batches."""
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import asdict
 from importlib.metadata import version
-import hashlib
-import json
-import os
 from pathlib import Path
-import subprocess
-import sys
-import tempfile
 
 if __package__:
-    from .stage_cache import StageCache, digest
     from .job_schema import language_code, song_language
+    from .stage_cache import StageCache, digest
 else:
-    from stage_cache import StageCache, digest
     from job_schema import language_code, song_language
+    from stage_cache import StageCache, digest
 
 
 def whisper_language(value):
@@ -178,6 +178,7 @@ def detect_singing_language(samples, rate, detect):
 def detect_recording_language(audio, output):
     """Use SenseVoice language labels only; never replace the supplied lyrics."""
     import time
+
     import sherpa_onnx
     import soundfile as sf
     started = time.perf_counter()
@@ -206,12 +207,14 @@ def isolated_recognizer(config, device, scratch):
         process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
             '--worker', device, json.dumps(config)], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, text=True, bufsize=1)
+        assert process.stdin is not None and process.stdout is not None
+        writer, reader = process.stdin, process.stdout
         try:
             def recognize(samples):
                 np.save(audio, samples, allow_pickle=False)
-                process.stdin.write(str(audio)+'\n')
-                process.stdin.flush()
-                response = process.stdout.readline()
+                writer.write(str(audio)+'\n')
+                writer.flush()
+                response = reader.readline()
                 if not response:
                     raise RuntimeError(f'Local recognizer exited ({process.wait()}); see stage log')
                 data = json.loads(response)
@@ -220,7 +223,7 @@ def isolated_recognizer(config, device, scratch):
                 return data
             yield recognize
         finally:
-            process.stdin.close()
+            writer.close()
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -230,7 +233,7 @@ def isolated_recognizer(config, device, scratch):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
-            process.stdout.close()
+            reader.close()
 
 
 def recognition_worker(device, config):

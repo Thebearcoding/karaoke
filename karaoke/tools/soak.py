@@ -1,14 +1,10 @@
 """Reproducible whole-song acceptance runs through the room's song queue."""
 import argparse
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack, nullcontext
-from datetime import datetime, timezone
 import fcntl
 import gzip
 import hashlib
 import json
 import os
-from pathlib import Path
 import random
 import re
 import signal
@@ -17,12 +13,16 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, nullcontext
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 import httpx
 
 from karaoke.job_schema import playback_stems, provider_error, retry_fields, video_url
 from karaoke.local_asr import offline
-
 
 REQUIRED = {'mv', 'instrumental', 'backing_vocals', 'lead_vocals', 'subtitles',
             'instrumental_preview', 'backing_vocals_preview', 'lead_vocals_preview'}
@@ -37,7 +37,7 @@ GROUPS = {
 
 
 def stamp():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def save(path, value):
@@ -79,11 +79,11 @@ def select_cases(pool, quotas, seed):
 
 
 def sample(path, data_dir, seed):
-    from karaoke.video_search import youtube_entries, matches_query
+    from karaoke.video_search import matches_query, youtube_entries
     if path.exists():
         raise ValueError('The fixed manifest already exists; refusing to replace its cases')
     pool_path = path.with_name('candidate-pool.json')
-    pool = json.loads(pool_path.read_text()) if pool_path.exists() else {'queries': {}, 'items': []}
+    pool: dict[str, Any] = json.loads(pool_path.read_text()) if pool_path.exists() else {'queries': {}, 'items': []}
     with sqlite3.connect(f'file:{data_dir}/jobs.sqlite3?mode=ro', uri=True) as db:
         excluded = {json.loads(row[0])['input']['url'] for row in db.execute('SELECT doc FROM jobs')}
     for lyrics in (data_dir.parent/'lyrics').glob('*.json'):
@@ -192,7 +192,7 @@ def verify_stems(paths, duration, *, storage=None):
 
 
 def verify_outputs(client, base, data_dir, job, *, audio_only=False, playback_policy=False):
-    from karaoke.subtitles import normalized, highlight_coverage_errors, collapsed_phrase
+    from karaoke.subtitles import collapsed_phrase, highlight_coverage_errors, normalized
     folder = (data_dir/job['id']).resolve()
     result = json.loads((folder/('audio-result.json' if audio_only else 'result.json')).read_text())
     required = REQUIRED-{'mv'} if audio_only else REQUIRED
@@ -369,6 +369,7 @@ class ProbeSession:
 
     def __exit__(self, *error):
         self.cancelled.set()
+        assert self.lock is not None
         self.lock.close()
 
 
@@ -406,8 +407,10 @@ def run_probe(client, base, folder, command, *, resume_preparation=None, session
                     if pause.read_text() != resume_preparation:
                         raise ValueError('Preparation pause ownership changed')
                     pause.unlink()
+                    assert process.stdout is not None
+                    stdout = process.stdout
                     def read_output():
-                        for line in process.stdout:
+                        for line in stdout:
                             log.write(line)
                             log.flush()
                             if line.startswith(b'KARAOKE_PROGRESS '):
@@ -460,7 +463,7 @@ def probe(path, data_dir, base, job_id):
             (case.get(key) or [{}])[-1].get('next_retry_at') or 0
             for key in ('attempts', 'audio_attempts')))
         if time.time() < retry_at:
-            raise ValueError(f'Provider backoff lasts until {datetime.fromtimestamp(retry_at, timezone.utc).isoformat()}')
+            raise ValueError(f'Provider backoff lasts until {datetime.fromtimestamp(retry_at, UTC).isoformat()}')
         folder = (data_dir/job['id']).resolve()
         command = [sys.executable, '-u', '-m', 'karaoke.pipeline', '--request', str(folder/'request.json'),
                    '--output', str(folder), '--audio-only']

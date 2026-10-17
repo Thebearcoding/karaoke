@@ -1,12 +1,12 @@
 """Map aligned text units back to source lyric lines and write timed captions."""
 
 import json
-from bisect import bisect_right
 import math
 import re
-from pathlib import Path
 import unicodedata
-
+from bisect import bisect_right
+from pathlib import Path
+from typing import Any
 
 LATIN_LOOKALIKES = str.maketrans('АВЕКМНОРСТХаеорсхуіј', 'ABEKMHOPCTXaeopcxyij')
 
@@ -122,14 +122,15 @@ def collapsed_phrase(cue, language):
     covered = {i for first, stop in atoms for i in range(first, stop)}
     atoms.extend((i, i+1) for i, char in enumerate(cue['text'])
                  if i not in covered and unicodedata.category(char)[0] in ('L', 'N'))
-    spans = [dict(first=0, stop=len(cue['text']),
+    spans: list[dict[str, Any]] = [dict(first=0, stop=len(cue['text']),
                   start=cue.get('aligned_start', cue.get('start')),
                   end=cue.get('aligned_end', cue.get('end'))), *(cue.get('units') or [])]
     for span in spans:
         if not isinstance(span, dict):
             continue
         first, stop, start, end = (span.get(k) for k in ('first', 'stop', 'start', 'end'))
-        if not all(isinstance(t, (int, float)) and math.isfinite(t) for t in (first, stop, start, end)):
+        if (not isinstance(start, (int, float)) or not isinstance(end, (int, float))
+                or not all(isinstance(t, (int, float)) and math.isfinite(t) for t in (first, stop, start, end))):
             continue
         count = sum(first <= a and b <= stop for a, b in atoms)
         # More than 25 complete words/characters per second is a collapsed

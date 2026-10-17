@@ -1,11 +1,12 @@
 """Bounded, source-bound lyric checks for discovery; never a preparation verdict."""
 import asyncio
-from collections import OrderedDict
 import json
 import sys
 import tempfile
 import time
+from collections import OrderedDict
 from pathlib import Path
+from typing import Any
 
 
 def lookup(video_id, folder):
@@ -66,6 +67,7 @@ class LyricAvailability:
         return await asyncio.shield(self.pending[video_id])
 
     async def _load(self, video_id):
+        result: dict[str, Any]
         try:
             try:
                 async with asyncio.timeout(25):

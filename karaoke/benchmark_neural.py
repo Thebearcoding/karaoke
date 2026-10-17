@@ -11,14 +11,14 @@ import inspect
 import json
 import logging
 import os
-from pathlib import Path
 import time
 from importlib.metadata import version
+from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-from stage_progress import progress_items, report_progress
 
+from stage_progress import progress_items, report_progress
 
 ROOT = Path(__file__).resolve().parent
 EXPERIMENT = ROOT/'experiments'/'neural-v001'

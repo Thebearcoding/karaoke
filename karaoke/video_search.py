@@ -1,7 +1,5 @@
 """YouTube video search and YouTube Music catalogues in provider order."""
 import asyncio
-from collections import OrderedDict
-from html import unescape
 import json
 import math
 import re
@@ -9,12 +7,14 @@ import secrets
 import sys
 import time
 import unicodedata
+from collections import OrderedDict
+from html import unescape
+from typing import Any
 from urllib.parse import urlsplit
 
 from opencc import OpenCC
 
 from .job_schema import thumbnail_url, video_url
-
 
 _RELEASE = re.compile(r'\bofficial\b|官方|オフィシャル', re.I)
 _UNOFFICIAL = re.compile(r'\b(?:fan[ -]?made|unofficial)\b|饭制|飯製|搬运|搬運|非官方', re.I)
@@ -64,17 +64,17 @@ def youtube_entries(query, continuation=None):
         next_page = None
         visitor_data = None
 
-        def _extract_response(self, **kwargs):
+        def _extract_response(self, *args, **kwargs):
             if continuation:
                 kwargs['query'].update(continuation['query'])
                 kwargs['headers'] = self.generate_api_headers(ytcfg=kwargs['ytcfg'],
                     visitor_data=continuation.get('visitor_data'), default_client=kwargs['default_client'])
-            response = super()._extract_response(**kwargs)
+            response = super()._extract_response(*args, **kwargs)
             self.visitor_data = self._extract_visitor_data(response)
             return response
 
-        def _extract_entries(self, renderer, continuation_list):
-            yield from super()._extract_entries(renderer, continuation_list)
+        def _extract_entries(self, parent_renderer, continuation_list):
+            yield from super()._extract_entries(parent_renderer, continuation_list)
             self.next_page = continuation_list[0]
             continuation_list[:] = [None]  # One native page per request.
 
@@ -144,7 +144,7 @@ def music_results(entries, kind):
                 results.append(dict(common, kind='artist', version='歌手', browse_id=browse_id,
                     url='https://music.youtube.com/channel/'+browse_id))
             continue
-        artists = [dict(name=a['name'], id=a.get('id') if re.fullmatch(r'UC[\w-]{22}', a.get('id') or '') else None)
+        artists: list[dict[str, Any]] = [dict(name=a['name'], id=a.get('id') if re.fullmatch(r'UC[\w-]{22}', a.get('id') or '') else None)
                    for a in (item.get('artists') or []) if isinstance(a, dict) and isinstance(a.get('name'), str)]
         common.update(artists=artists, uploader=' · '.join(a['name'] for a in artists) or item.get('artist') or '')
         if result_type not in ('song', 'video', 'episode'):
@@ -191,9 +191,9 @@ def _renderer(value, name):
 
 def music_entries(kind, query, continuation=None):
     from ytmusicapi import YTMusic
-    from ytmusicapi.continuations import get_continuation_token, get_continuation_params
-    from ytmusicapi.parsers.search import get_search_params, parse_search_results, parse_top_result
+    from ytmusicapi.continuations import get_continuation_params, get_continuation_token
     from ytmusicapi.parsers.playlists import parse_playlist_items
+    from ytmusicapi.parsers.search import get_search_params, parse_search_results, parse_top_result
     from ytmusicapi.parsers.songs import parse_song_run
 
     def playlist_entries(contents):

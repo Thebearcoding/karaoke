@@ -1,10 +1,10 @@
 """Isolated optional Qwen alignment evidence, with timestamp repair disabled."""
 import argparse
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
-from subtitles import highlight_spans, highlight_coverage_errors
+from subtitles import highlight_coverage_errors, highlight_spans
 
 ROOT = Path(__file__).resolve().parent
 
@@ -30,9 +30,9 @@ def main():
     sys.path.insert(0, str(ROOT/'research/subtitles-2026-09-18/python-deps'))
     import numpy as np
     import soundfile as sf
-    from scipy.signal import resample_poly
     import torch
     from qwen_asr import Qwen3ForcedAligner
+    from scipy.signal import resample_poly
     torch.set_num_threads(4)
     torch.set_grad_enabled(False)
     model = Qwen3ForcedAligner.from_pretrained(str(ROOT/'models/alignment/qwen3-forced-aligner-0.6b'),

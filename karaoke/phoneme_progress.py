@@ -1,12 +1,12 @@
 """Map displayed Chinese/Japanese lyric spans to sung phoneme sequences."""
-from functools import lru_cache
-from pathlib import Path
 import re
 import unicodedata
+from functools import lru_cache
+from pathlib import Path
 
-from pypinyin import lazy_pinyin
 import pykakasi
 from opencc import OpenCC
+from pypinyin import lazy_pinyin
 
 from lyric_progress import canonical_positions, japanese_tokenization
 
@@ -153,7 +153,7 @@ def chinese_units(text):
     if len(spoken) != len(normalized):
         raise ValueError('Chinese pronunciation conversion changes display alignment')
     normalized = spoken
-    pinyins = lazy_pinyin(normalized,errors=lambda value:list(value))
+    pinyins = lazy_pinyin(normalized,errors=lambda value:list(value))  # ty: ignore[invalid-argument-type] # pypinyin accepts list-returning error callbacks.
     if len(pinyins) != len(positions):
         raise ValueError('Chinese pronunciation does not map to displayed characters')
     dictionary = mandarin_dictionary()

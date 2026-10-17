@@ -1,17 +1,18 @@
 """Optional independent lyric text; provider timestamps never become onsets."""
 import hashlib
 import html
-from html.parser import HTMLParser
-from difflib import SequenceMatcher
-from functools import lru_cache, partial
-from itertools import product
 import json
 import math
 import os
-from pathlib import Path
 import re
 import time
 import unicodedata
+from difflib import SequenceMatcher
+from functools import lru_cache, partial
+from html.parser import HTMLParser
+from itertools import product
+from pathlib import Path
+from typing import Any
 from urllib.parse import urlencode
 
 import httpx
@@ -21,11 +22,21 @@ from opencc import OpenCC
 from rapidfuzz.distance import Levenshtein
 
 from .anchors_from_asr import text_units
-from .job_schema import language_code, provider_error, retry_after_seconds, retry_fields, song_language
-from .song_sources import (SongText, extract_song_metadata, find_verified_lyrics,
-                           join_punctuation_lines, video_song_info)
+from .job_schema import (
+    language_code,
+    provider_error,
+    retry_after_seconds,
+    retry_fields,
+    song_language,
+)
+from .song_sources import (
+    SongText,
+    extract_song_metadata,
+    find_verified_lyrics,
+    join_punctuation_lines,
+    video_song_info,
+)
 from .source_captions import read_document
-
 
 _traditional, _simplified = OpenCC('s2t'), OpenCC('tw2s')
 _versioned_title = re.compile(r'(.+?)\s*\(([^()]*(?:\b(?:version|ver\.?)|版本?)|[国國粤粵])\)\s*$', re.I)
@@ -175,7 +186,11 @@ def names(value, *, title=False):
     match = re.fullmatch(rf'({native})(?:\s+(?:[-–—]\s+)?({latin})|\s*\(({latin})\))', value)
     reverse = re.fullmatch(rf'({latin})(?:\s+({native})|\s*\(({native})\))', value)
     if match or reverse:
-        local, english = (match[1], match[2] or match[3]) if match else (reverse[2] or reverse[3], reverse[1])
+        if match:
+            local, english = match[1], match[2] or match[3]
+        else:
+            assert reverse is not None
+            local, english = reverse[2] or reverse[3], reverse[1]
         if any(c.isalpha() and 'LATIN' not in unicodedata.name(c, '') for c in local) and not re.search(r'\b(live|remix|acoustic|instrumental|karaoke|remaster\w*)\b', english, re.I) and not re.search(
                 r'라이브|리믹스|어쿠스틱|인스트루멘탈|버전', local):
             result.extend((english, local))
@@ -262,7 +277,7 @@ def fetch_lyrics(song, metadata_path, cache):
     with cache.stage(stage, inputs=[metadata_path], outputs=[path], config=queries,
                      code=[Path(__file__), Path(__file__).with_name('source_captions.py')]) as reused:
         if not reused:
-            packet = dict(status='ok', queries=queries, results=[])
+            packet: dict[str, Any] = dict(status='ok', queries=queries, results=[])
             try:
                 for query in queries:
                     if query == simplified and simplified != native and packet['results']:
@@ -286,6 +301,7 @@ def unpadded_duration(audio_path, duration):
     """Measure exact-zero padding in the original PCM, without trimming audio."""
     import numpy as np
     import soundfile as sf
+
     from .stage_cache import digest
     audio_path = Path(audio_path)
     if not audio_path.is_file():
@@ -588,7 +604,7 @@ def published_candidate(rows, song, source_title, *, read_lyrics=None, allow_rec
         seconds = row.get('duration_seconds')
         seconds = seconds if isinstance(seconds, (int, float)) and math.isfinite(seconds) and seconds > 0 else None
         difference = abs(seconds-duration) if seconds is not None and duration is not None else math.inf
-        if math.isfinite(difference) and difference > max(3., min(10., duration*.02)):
+        if duration is not None and math.isfinite(difference) and difference > max(3., min(10., duration*.02)):
             mismatch = [*mismatch, 'duration']
         if mismatch and not allow_recording_mismatch:
             continue
@@ -748,7 +764,7 @@ def catalogue_lyric_identity(song, duration, cache):
             else:
                 from ytmusicapi import YTMusic
                 with requests.Session() as session:
-                    session.request = partial(session.request, timeout=10)
+                    session.request = partial(session.request, timeout=10)  # ty: ignore[invalid-assignment] # Bind a default timeout to this third-party session only.
                     session.hooks['response'].append(lambda response, *a, **kw: response.raise_for_status())
                     music = YTMusic(language='en', requests_session=session)
                     packet = cached_lyric_request(provider, dict(method='search', query=provider_query, locale='en'), cache,
@@ -1027,7 +1043,7 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 delay = max(0, deadline-time.time()) if deadline else None
                 metadata_retries.append(dict(error=error, next_retry_at=deadline,
                                              attempted=delay is not None and delay <= 60))
-                if metadata_retries[-1]['attempted']:
+                if delay is not None and delay <= 60:
                     time.sleep(delay)
                     metadata_read = False
             try:
@@ -1124,7 +1140,7 @@ def prepare_online_lyrics(request, metadata, duration, cache, model, catalog_roo
                 song.clear()
                 song.update(retained_song)
             if attempts:
-                report = dict(report, identity_recovery=dict(original=original,
+                report: dict[str, Any] = dict(report, identity_recovery=dict(original=original,
                     resolved={key: song.get(key) for key in original}, recovered=accepted,
                     attempts=attempts, previous_lookup=previous))
             if artist_resolution:

@@ -1,12 +1,13 @@
 """Compare published lyric text from distinct sources before acoustic alignment."""
-from concurrent.futures import ThreadPoolExecutor
-from difflib import SequenceMatcher
 import functools
 import hashlib
-from itertools import combinations
 import json
-from pathlib import Path
 import re
+from concurrent.futures import ThreadPoolExecutor
+from difflib import SequenceMatcher
+from itertools import combinations
+from pathlib import Path
+from typing import Any
 from urllib.parse import urlencode
 
 import requests
@@ -69,7 +70,7 @@ def resolve_recording_artists(recording, cache):
     from ytmusicapi import YTMusic
     resolved = []
     with requests.Session() as session:
-        session.request = functools.partial(session.request, timeout=10)
+        session.request = functools.partial(session.request, timeout=10)  # ty: ignore[invalid-assignment] # Bind a default timeout to this third-party session only.
         session.hooks['response'].append(lambda response, *a, **kw: response.raise_for_status())
         music = YTMusic(language='zh_CN', requests_session=session)
         for artist in recording.get('artists') or []:
@@ -152,7 +153,7 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
                     video = metadata.get('id', '')
                     lyric_video, release = video, None
                     with requests.Session() as session:
-                        session.request = functools.partial(session.request, timeout=10)
+                        session.request = functools.partial(session.request, timeout=10)  # ty: ignore[invalid-assignment] # Bind a default timeout to this third-party session only.
                         session.hooks['response'].append(lambda response, *a, **kw: response.raise_for_status())
                         music = YTMusic(language='zh_CN', requests_session=session)
                         listing = lookup.cached_lyric_request(provider, dict(video_id=video, method='watch', locale='zh_CN'), cache,
@@ -220,7 +221,7 @@ def fetch_additional_lyrics(provider, song, metadata, cache, duration=None, *, r
                     language = song.get('language') or lookup.text_language('\n'.join(lines))
                     if lines and (len(lines) > 1000 or any(len(line) > 200 for line in lines)):
                         raise ValueError('Invalid Music lyric lines')
-                    report = dict(status='candidate' if lines else 'unavailable', language=language,
+                    report: dict[str, Any] = dict(status='candidate' if lines else 'unavailable', language=language,
                         recording_identity=recording_identity,
                         url='https://music.youtube.com/watch?v='+lyric_video, source_credit=(result or {}).get('source'),
                         text_sha256=hashlib.sha256((text or '').encode()).hexdigest(), excluded_credit_lines=excluded,
@@ -281,10 +282,11 @@ def observed_source_alternative(lyrics, alternatives, observations, *, cues=None
     After a usable alignment, require an observed uncovered passage as well.
     Extra matching ad-libs over an existing sung line cannot invalidate it.
     """
-    from .anchors_from_asr import text_units
-    from .align_lyrics_whisper import recognized_words
-    from .song_sources import missing_repetitions
     from rapidfuzz.distance import Levenshtein
+
+    from .align_lyrics_whisper import recognized_words
+    from .anchors_from_asr import text_units
+    from .song_sources import missing_repetitions
 
     language = lyrics['language']
     recognized = (o for o in observations if o.get('recognition'))
@@ -304,11 +306,12 @@ def observed_source_alternative(lyrics, alternatives, observations, *, cues=None
                 missing = None if cues is None else missing_repetitions(
                     candidate['lines'], [dict(c, status='candidate') for c in cues], words, language, duration)
                 if cues is not None and not missing:
+                    assert missing is not None
                     # A misspelled observed word need not prevent trying a
                     # published alternative. Require substantial matching text
                     # in a real caption gap, using the coverage floor shared
                     # with lyric_coverage. This proposes text, never timings.
-                    edges = [dict(end=0.), *cues, dict(start=duration)]
+                    edges: list[dict[str, Any]] = [dict(end=0.), *cues, dict(start=duration)]
                     for left, right in zip(edges, edges[1:]):
                         low, high = left['end'], right['start']
                         if high <= low:
@@ -390,7 +393,7 @@ def observed_repetition_candidate(lyrics, cues, observations, duration):
         if any(r['output_range'][0] < f['insertion_index'] < r['output_range'][1]
                for f in found for r in provenance.get('repetitions', []) if 'output_range' in r):
             continue
-        copies = []
+        copies: list[dict[str, Any]] = []
         for item in found:
             first, stop = item['source_range']
             anchors = item['boundary_anchors']

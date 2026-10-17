@@ -1,22 +1,32 @@
 """Render stationary lyrics with a left-to-right word sweep or an underline."""
 import argparse
-from bisect import bisect_right
 import json
-from pathlib import Path
 import subprocess
 import time
+from bisect import bisect_right
+from pathlib import Path
 
 from PIL import Image, ImageChops, ImageColor, ImageDraw
 
-from subtitle_style import (TOKENS, STYLES, CaptionOverflow, caption_height, caption_image,
-                            compact_caption_image, song_intro_image, static_video_scrim)
-from subtitles import countdown_events, countdown_state, normalized, read_ahead_state
-from stage_progress import progress_items, report_progress
 from lyric_readings import load_readings, resolve_readings
 from render_subtitles import video_frame_rate
+from stage_progress import progress_items, report_progress
+from subtitle_style import (
+    STYLES,
+    TOKENS,
+    CaptionOverflow,
+    caption_height,
+    caption_image,
+    compact_caption_image,
+    song_intro_image,
+    static_video_scrim,
+)
+from subtitles import countdown_events, countdown_state, normalized, read_ahead_state
 
 
 class Caption:
+    readings: tuple[tuple[int, int, str], ...]
+
     def __init__(self, cue, style, language, readings=None):
         self.cue = cue
         self.readings, self.reading_warnings = (readings if readings is not None else
@@ -240,6 +250,7 @@ def main():
         filters += f'[base][{scrim_index}:v]overlay=0:0:format=auto[readable];'
     filters += f'[{"readable" if scrim_path else "base"}][text]overlay=0:H-{main_height}-{args.bottom_margin}:format=auto'
     if intro_path:
+        assert intro is not None
         filters += (f'[captioned];[captioned][{intro_index}:v]overlay=0:{intro["top"]}:format=auto:'
                     f'enable=\'lt(t,{intro["end"]-args.start:.9f})\'')
     command += ['-filter_complex', filters+',format=yuv420p[v]', '-map', '[v]']
@@ -262,6 +273,7 @@ def main():
     log = args.output.with_suffix('.ffmpeg.log')
     with log.open('w') as errors:
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=errors)
+        assert process.stdin is not None
         try:
             for frame in progress_items(range(round(args.duration*fps)), 'frames'):
                 instant = args.start+frame/fps
@@ -286,6 +298,7 @@ def main():
                         if args.language in ('Japanese', 'Cantonese'):
                             readings_report[index+1] = dict(spans=caption.readings, warnings=caption.reading_warnings)
                         previous = index
+                    assert caption is not None
                     current = caption.frame(instant, args.mode, page_at=entry['onset'] if entry is not None else None)
                     if preview_height:
                         picture.alpha_composite(current)
@@ -305,6 +318,7 @@ def main():
                                 'size': 34, 'minimum_size': 26, 'single_line_floor': 34,
                                 'maximum_lines': 1, 'balanced_wrap': False, 'baseline_inset': 22})
                         preview_previous = preview
+                    assert preview_image is not None
                     picture.alpha_composite(preview_image, (0, main_height))
                 process.stdin.write(picture.tobytes())
             process.stdin.close()

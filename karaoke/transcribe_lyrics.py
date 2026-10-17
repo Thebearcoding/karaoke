@@ -1,25 +1,27 @@
 """Obtain an ASR draft and coarse word times from an existing vocal preview."""
 
 import argparse
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import inspect
-from itertools import groupby
 import json
 import math
 import os
-from pathlib import Path
 import re
 import subprocess
 import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from itertools import groupby
+from pathlib import Path
+from typing import Any
 
 from openai import OpenAI
+
+import local_asr
 from job_schema import song_language
 from local_asr import whisper_language
-from stage_progress import progress_items, report_progress
 from stage_cache import StageCache, digest
-import local_asr
+from stage_progress import progress_items, report_progress
 
 
 def cached_recognition(client, audio, request, output):
@@ -71,13 +73,13 @@ def cached_local_recognition(audio, language, output, *, weights=None):
             model.to(device)
             model.register_buffer('alignment_heads', heads, persistent=False)
             if device == 'mps':
-                timing.dtw = lambda matrix: timing.dtw_cpu(matrix.detach().cpu().double().numpy())
+                timing.dtw = lambda x: timing.dtw_cpu(x.detach().cpu().double().numpy())  # ty: ignore[invalid-assignment] # Replace the third-party DTW function for MPS support.
             detection = None
             if language in (None, 'auto'):
                 code, detection = recording_language(model, audio)
             else:
                 code = whisper_language(language)
-            options = dict(fp16=False, temperature=0, condition_on_previous_text=False,
+            options: dict[str, Any] = dict(fp16=False, temperature=0, condition_on_previous_text=False,
                            word_timestamps=True, verbose=False)
             mixed = detection and len({w['language'] for w in detection['windows']}) > 1
             if mixed or code is None:
@@ -89,7 +91,7 @@ def cached_local_recognition(audio, language, output, *, weights=None):
                     segments.extend(local_asr.offset_segments(response['segments'], first/16000))
                     windows.append(dict(start=first/16000, end=(first+len(clip))/16000,
                                         language=response.get('language')))
-                data = dict(language=None, text=''.join(s.get('text', '') for s in segments),
+                data: dict[str, Any] = dict(language=None, text=''.join(s.get('text', '') for s in segments),
                             segments=segments, decoded_windows=windows)
             else:
                 data = whisper.transcribe(model, str(audio), language=code, **options)
@@ -195,11 +197,12 @@ def needs_recovery(data):
 
 def select_recovery_text(text, initial_text, words, language):
     """Keep full-recording text; detect a response containing only an intro."""
-    from anchors_from_asr import text_units
     from rapidfuzz.distance import Levenshtein
+
+    from anchors_from_asr import text_units
     observed = [unit for word in words for unit in text_units(word['word'], language)]
     recovered = text_units(text, language)
-    report = dict(recovered_units=len(recovered), timed_units=len(observed), selected='recovered_text')
+    report: dict[str, Any] = dict(recovered_units=len(recovered), timed_units=len(observed), selected='recovered_text')
     if len(recovered) >= len(observed)/2:
         return text, report
     initial = text_units(initial_text, language)
@@ -219,6 +222,7 @@ def select_recovery_text(text, initial_text, words, language):
 def splice_loop_window(original, replacement, left, right, begin, end=None):
     """Replace a broken passage only between independently matched sung anchors."""
     from rapidfuzz.distance import Levenshtein
+
     from subtitles import normalized
     segments = original['segments']
     parts = replacement.get('segments') or []
@@ -374,7 +378,7 @@ def transcribe(client, audio, language, hint, output, *, allow_unresolved_text=F
         return cached_recognition(client, path, request, output)
 
     data = recognize(audio)
-    recovery = dict(triggered=False, chunks=[])
+    recovery: dict[str, Any] = dict(triggered=False, chunks=[])
     if not needs_recovery(data):
         return data, recovery
     (output/'initial-transcription.json').write_text(json.dumps(data, ensure_ascii=False)+'\n')
@@ -382,6 +386,7 @@ def transcribe(client, audio, language, hint, output, *, allow_unresolved_text=F
     # another whole-song request. Do not use a loudness threshold: weak words
     # remain evidence. Invalid timestamps still need recovery, not deletion.
     from io import BytesIO
+
     import soundfile as sf
     pcm, rate = sf.read(BytesIO(subprocess.check_output(['ffmpeg', '-v', 'error', '-nostdin',
         '-i', str(audio), '-c:a', 'pcm_f32le', '-f', 'wav', '-'])), dtype='float32')

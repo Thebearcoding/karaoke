@@ -1,6 +1,7 @@
 """Score fixed lyric-word onset events against independent reference times."""
 import math
 import unicodedata
+from typing import Any
 
 import numpy as np
 
@@ -50,9 +51,9 @@ def onset_risks(predictions, verifier, tolerance=.1):
     for p, v in zip(predictions, verifier):
         times = [t if t is not None and math.isfinite(t) else None
                  for t in (p.get('start'), v.get('start'))]
-        valid = all(t is not None for t in times)
-        delta = times[1]-times[0] if valid else None
-        reason = ('missing_acoustic_evidence' if not valid else
+        predicted, verified = times
+        delta = verified-predicted if predicted is not None and verified is not None else None
+        reason = ('missing_acoustic_evidence' if delta is None else
                   'incomplete_or_merged_highlight' if any(
                       x.get('merged') or x.get('incomplete_highlight') for x in (p, v)) else
                   'onset_disagreement' if abs(delta) > tolerance+1e-9 else None)
@@ -116,7 +117,7 @@ def score_onsets(reference, predictions, fps=None):
     total = len(rows)
     missing = total-len(errors)
     hits = {str(t):int(np.sum(absolute <= t+1e-7)) for t in [50, 100, 250]}
-    summary = dict(units=total, missing=missing, coverage=(total-missing)/total,
+    summary: dict[str, Any] = dict(units=total, missing=missing, coverage=(total-missing)/total,
                    hits=hits, pco={t:n/total for t,n in hits.items()},
                    catastrophic_or_missing=(int(np.sum(absolute > 250+1e-7))+missing)/total,
                    early_over_100ms=int(np.sum(errors < -100-1e-7))/total,

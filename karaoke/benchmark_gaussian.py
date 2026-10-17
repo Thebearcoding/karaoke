@@ -6,9 +6,9 @@ import numpy as np
 
 from benchmark_alignment import DATA, ROOT, measure
 from benchmark_alignment_joint import build
+from experiment_output import output_directory
 from gaussian_align import make_model, phones, train
 from phonetic_align import align_phonetic
-from experiment_output import output_directory
 
 
 def evaluate(song,acoustic,prior_weight):

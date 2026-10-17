@@ -1,10 +1,11 @@
 """Map existing audio-aligned word groups onto the original displayed lyrics."""
 import argparse
 import json
-from pathlib import Path
 import unicodedata
+from pathlib import Path
 
 from opencc import OpenCC
+
 from subtitles import highlight_spans, latin_word_text
 
 CHINESE = OpenCC('t2s')
@@ -25,6 +26,7 @@ def canonical_positions(text, language):
 def japanese_tokenization(text):
     """Keep original spans when Open JTalk rewrites width, marks or numbers."""
     import re
+
     import pyopenjtalk
     from num2words import num2words
 
@@ -100,7 +102,7 @@ def map_words(cue, words, offset, language):
 
 def partial_alignment_cues(lines, raw_blocks, duration, language):
     """Keep independently usable lines when a different line prevents stitching."""
-    from subtitles import lyric_cues, collapsed_phrase
+    from subtitles import collapsed_phrase, lyric_cues
     cues = [dict(text=text, status='unresolved_timing') for text in lines]
     for block in raw_blocks:
         first, stop = block['context']

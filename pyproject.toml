@@ -1,0 +1,32 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = [".", "karaoke"]
+
+[tool.ruff.lint]
+select = ["E4", "E9", "F", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# These script entry points set up import paths before loading pipeline modules.
+"karaoke/pipeline.py" = ["E402"]
+"karaoke/experiments/cjk-onsets-v003/run.py" = ["E402"]
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+include = ["karaoke"]
+
+[tool.ty.analysis]
+# Optional workers and model source checkouts use separate runtime environments.
+allowed-unresolved-imports = [
+    "audio_separator.**",
+    "faster_whisper.**",
+    "hydra",
+    "modules.rmvpe.spec",
+    "modules.task.forced_alignment",
+    "qwen_asr",
+]
+
+[tool.ty.terminal]
+error-on-warning = true

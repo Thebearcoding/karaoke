@@ -2,10 +2,11 @@
 import argparse
 import json
 import os
-from pathlib import Path
 import re
 import sys
 import time
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import soundfile as sf
@@ -13,10 +14,10 @@ import torch
 import torchaudio
 
 from align_lyrics_whisper import alignment_blocks, sha
-from stage_progress import progress_items
-from word_onset_metrics import canonical
 from onset_consensus import context_scope_violations
+from stage_progress import progress_items
 from subtitles import latin_word_spans, latin_word_text
+from word_onset_metrics import canonical
 
 ROOT = Path(__file__).resolve().parent
 SINGING_ROOT = ROOT / 'research/word-onset-2026-09-18/lyrics-alignment-multilingual'
@@ -68,16 +69,16 @@ class EnglishOnsetAligner:
             self.model_identity = json.loads((ROOT / 'models/alignment/wav2vec2/manifest.json').read_text())
         else:
             sys.path.insert(0, str(SINGING_ROOT))
-            from model import AcousticModel, train_audio_transforms
-            from utils import phone2int
             import espeakng_loader
+            from model import AcousticModel, train_audio_transforms  # ty: ignore[unresolved-import] # Optional LyricsAlignment-Multilingual source checkout.
             from phonemizer.backend import EspeakBackend
             from phonemizer.backend.espeak.wrapper import EspeakWrapper
             from phonemizer.separator import Separator
+            from utils import phone2int  # ty: ignore[unresolved-import] # Optional LyricsAlignment-Multilingual source checkout.
             os.environ['ESPEAK_DATA_PATH'] = espeakng_loader.get_data_path()
             EspeakWrapper.set_library(espeakng_loader.get_library_path())
             self.phonemizer = EspeakBackend('en-us')
-            self.separator = Separator(phone=';', word=None)
+            self.separator = Separator(phone=';', word='')
             self.model = AcousticModel(1, 256, 72, 32, 1, .1)
             checkpoint = torch.load(SINGING_ROOT / 'checkpoints/checkpoint_Baseline',
                                     map_location='cpu', weights_only=True)
@@ -192,7 +193,7 @@ def align_job(aligner, job, full_song=False):
     else:
         blocks = context_blocks(context_anchors, audio) if anchors and (not full_song or unsupported) else [
             (0, len(lines), 0, len(lines), 0., len(audio)/rate)]
-    cues = [dict(text=s, start=0., end=0., units=[]) for s in lines]
+    cues: list[dict[str, Any]] = [dict(text=s, start=0., end=0., units=[]) for s in lines]
     failures = []
     started = time.perf_counter()
 
@@ -236,6 +237,7 @@ def align_job(aligner, job, full_song=False):
     scope_blocks = context_blocks(context_anchors, audio) if full_song and anchors and aligner.method != 'sofa' else None
     context_retries = []
     if scope_blocks and not failures:
+        assert anchors is not None
         retries = []
         for original in context_scope_violations(cues, scope_blocks):
             first, stop, left, right, begin, end = original
@@ -270,6 +272,7 @@ def align_job(aligner, job, full_song=False):
     def repair_boundaries():
         if not scope_blocks or failures:
             return
+        assert anchors is not None
         for initial in sorted(order_conflicts()):
             if initial not in order_conflicts():
                 continue
@@ -308,6 +311,7 @@ def align_job(aligner, job, full_song=False):
     # phrase into the following dialogue. Revisit only disjoint phrases, with
     # neighbouring text for context; never clamp words to the rough anchor.
     def displaced(i):
+        assert anchors is not None
         a, c = anchors[i], cues[i]
         return a['status'] == 'candidate' and (
             c['end']+2 < a['start'] or c['start']-2 > a['end'] or
@@ -316,6 +320,7 @@ def align_job(aligner, job, full_song=False):
             len(c['units']) > 1 and (a.get('units') or a.get('match_basis') == 'complete_phrase') and (
                 c['start']+2 < a['start'] or c['units'][-1]['start'] > a['end']+2))
     def needs_phrase_retry(i):
+        assert anchors is not None
         a, c = anchors[i], cues[i]
         # Mere overlap can hide a compressed prefix or suffix. The coarse
         # envelope requests a fresh decode; it never supplies word times.
@@ -324,6 +329,7 @@ def align_job(aligner, job, full_song=False):
         return displaced(i) or len(c['units']) > 1 and a['status'] == 'candidate' and (
             c['start'] > a['start']+2 or c['end']+2 < a['end'])
     if scope_blocks and not failures and not order_conflicts():
+        assert anchors is not None
         for i in range(len(cues)):
             if not needs_phrase_retry(i):
                 continue

@@ -24,7 +24,7 @@
     apply();
     document.getElementById('theme-toggle').addEventListener('click', () => {
       preference = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-      try { localStorage.setItem(key, preference); } catch {}
+      try { localStorage.setItem(key, preference); } catch { /* Apply the theme even when it cannot be saved. */ }
       apply();
     });
   }, {once:true});

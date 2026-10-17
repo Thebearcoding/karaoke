@@ -137,7 +137,7 @@ export class PlaybackTabs {
     const change = `${this.id}:${++this.sequence}`;
     this.record = {revision:current.revision+1, change, session:claim ? change : current.session,
       owner:release ? null : this.id, playback};
-    try { this.storage?.setItem(this.key, JSON.stringify(this.record)); } catch {}
+    try { this.storage?.setItem(this.key, JSON.stringify(this.record)); } catch { /* Keep this tab's in-memory state when storage is unavailable. */ }
     return this.read().change === change;
   }
   suspend(playback) {

@@ -6,12 +6,12 @@ import json
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
 from align import activity, align_lines
 from experiment_output import output_directory
-
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT/'data'/'jamendo'
@@ -70,7 +70,7 @@ def main():
     for weight in [0.25,1,3]:
         for threshold in [0.2,0.4,0.6]:
             configs.append({'mode':'dp','boundary_weight':weight,'threshold':threshold})
-    calibration=[]
+    calibration: list[dict[str, Any]] =[]
     for config in configs:
         rows=[measure(song,config) for song in train]
         loss=float(np.mean([r['onset']['p95_seconds']+r['offset']['p95_seconds'] if r['onset'] else 1e6 for r in rows]))

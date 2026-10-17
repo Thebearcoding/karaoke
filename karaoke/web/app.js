@@ -8,9 +8,9 @@ const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const time = seconds => `${Math.floor(Math.max(0, seconds || 0)/60)}:${String(Math.floor(Math.max(0, seconds || 0)%60)).padStart(2,'0')}`;
 let savedPlayback;
-try { savedPlayback = JSON.parse(sessionStorage.getItem('karaokePlayback')); } catch {}
+try { savedPlayback = JSON.parse(sessionStorage.getItem('karaokePlayback')); } catch { /* Start fresh if tab storage is unavailable or invalid. */ }
 let tabStorage;
-try { tabStorage = localStorage; } catch {}
+try { tabStorage = localStorage; } catch { /* PlaybackTabs also supports in-memory state. */ }
 const tabs = new PlaybackTabs(tabStorage, `${Date.now()}-${Math.random()}`, savedPlayback);
 let playback = new LocalPlayback(tabs.read().playback);
 if (!tabs.record.owner) tabs.write(playback.save(), {claim:true});
@@ -1124,7 +1124,7 @@ $('storage-form').onsubmit = async event => {
 };
 $('seek').oninput = () => { renderRange($('seek')); seeking = true; $('current-time').textContent = time(Number($('seek').value)); };
 $('seek').onchange = async () => { await command('seek', {position:Number($('seek').value)}); seeking = false; };
-try { sessionStorage.removeItem('karaokeVolume'); } catch {}
+try { sessionStorage.removeItem('karaokeVolume'); } catch { /* Clearing an obsolete preference is optional. */ }
 async function fullscreen() {
   switchView('player');
   try { if (document.fullscreenElement) await document.exitFullscreen(); else await $('player-stage').requestFullscreen(); }
@@ -1172,7 +1172,7 @@ function savePlayback(position) {
   const saved = playback.save(position);
   if (!tabs.write(saved)) { followPlayback(); return; }
   tabChange = tabs.record.change;
-  try { sessionStorage.setItem('karaokePlayback', JSON.stringify(saved)); } catch {}
+  try { sessionStorage.setItem('karaokePlayback', JSON.stringify(saved)); } catch { /* Playback continues without tab persistence. */ }
 }
 function followPlayback() {
   const record = tabs.read();

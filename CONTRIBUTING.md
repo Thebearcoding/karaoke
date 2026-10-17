@@ -9,14 +9,26 @@
 - 在独立、空的数据目录验证服务启动；测试使用隔离房间和合成数据，真实下载另行验证。
 - UI 改动检查桌面、手机和全屏；音频／字幕改动遵循[验收标准](karaoke/ACCEPTANCE.md)，保留完整失败样本与测量结果。
 
+安装开发工具并运行检查：
+
+```sh
+.venv/bin/python -m pip install -r requirements-dev.txt
+npm ci
+.venv/bin/ruff check .
+.venv/bin/ty check --python .venv/bin/python
+npm run lint
+```
+
+Ruff 检查自有 Python 代码的错误、导入顺序和现代 Python 写法；ty 检查整个 `karaoke/`，包括算法、工具和测试；ESLint 检查前端 JavaScript、测试和自身配置。工具版本已固定，第三方源码和生成文件不纳入检查。类型问题优先补准数据边界；只有第三方声明不准确或必要的运行时替换，才在具体行注明原因并局部忽略。
+
 完整回归命令：
 
 ```sh
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=karaoke .venv/bin/python -m pytest -q karaoke/test_api.py karaoke/test_room.py karaoke/test_algorithms.py
-node --test karaoke/test_player.mjs karaoke/test_pitch.mjs karaoke/test_search.mjs
+npm test
 ```
 
-测试需要主环境依赖和 SOFA / pyopenjtalk 发音字典，不需要歌曲库、模型权重或 API key。CI 运行同一组测试及空数据启动检查。
+测试需要主环境依赖和 SOFA / pyopenjtalk 发音字典，不需要歌曲库、模型权重或 API key。CI 运行同一套 lint、类型检查、行为测试及空数据启动检查。
 
 ## 文档写法
 

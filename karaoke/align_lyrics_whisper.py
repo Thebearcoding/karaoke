@@ -1,29 +1,30 @@
 """Force-align lyrics to vocal audio without video or external subtitle times."""
 
 import argparse
-from contextlib import nullcontext
-from copy import deepcopy
 import hashlib
-from importlib.metadata import version
 import inspect
 import json
-from pathlib import Path
 import time
+from collections.abc import Iterable
+from contextlib import nullcontext
+from copy import deepcopy
+from importlib.metadata import version
+from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import regex
-from scipy.ndimage import binary_closing
 import soundfile as sf
 import stable_whisper
-from stable_whisper import timing as whisper_timing
 import torch
+from scipy.ndimage import binary_closing
+from stable_whisper import timing as whisper_timing
 from whisper.timing import dtw_cpu
 
-from lyric_progress import map_words
-from subtitles import lyric_cues, normalized, presentation_cues, write_captions
-from stage_progress import progress_items, report_progress
 from local_asr import alignment_language
-
+from lyric_progress import map_words
+from stage_progress import progress_items, report_progress
+from subtitles import lyric_cues, normalized, presentation_cues, write_captions
 
 SCRIPT_BOUNDARY = regex.compile(
     r'(?<=[\p{Han}\p{Hiragana}\p{Katakana}\p{Hangul}ー])(?=\p{Latin})|'
@@ -119,7 +120,7 @@ def recover_unresolved_block(block, lines, anchors, duration, align):
     report = dict(original_context=block['context'], original_source_range=block['source_range'],
                   original_result=block['result'], context=[left, right], source_range=[begin, end],
                   retry_result=candidate, accepted=accepted)
-    block = dict(block, unresolved_recovery=report)
+    block: dict[str, Any] = dict(block, unresolved_recovery=report)
     if accepted:
         block.update(context=[left, right], source_range=[begin, end], result=candidate)
     return block
@@ -149,7 +150,7 @@ def recover_unresolved_lines(block, lines, duration, language, align, max_attemp
         if isolated:
             begin = cues[left]['end'] if left < begin_line else block['source_range'][0]
             end = cues[right-1]['start'] if right > end_line else block['source_range'][1]
-        report = dict(lines=[begin_line+1, end_line], context=[call_left, call_right],
+        report: dict[str, Any] = dict(lines=[begin_line+1, end_line], context=[call_left, call_right],
                       source_range=[begin, end], accepted=False, isolated=isolated)
         reports.append(report)
         has_neighbour = left < begin_line or right > end_line
@@ -280,9 +281,14 @@ def acoustic_segments(lines, units, begin, end):
 
 def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                           force_global=False, max_alignment_attempts=24, recovery_contexts=None, localize=None,
-                          align_original=None, recognize_original=None, _revisited_conflicts=()):
+                          align_original=None, recognize_original=None, _revisited_conflicts: Iterable[int]=()):
     """Use recognition only to locate failed lyrics, never as replacement text."""
-    from anchors_from_asr import anchors_from_words, observed_context, combine_anchor_views, phrase_conflict
+    from anchors_from_asr import (
+        anchors_from_words,
+        combine_anchor_views,
+        observed_context,
+        phrase_conflict,
+    )
     from lyric_progress import partial_alignment_cues
     if localize is not None:
         acoustic_cache, acoustic_request = {}, localize
@@ -368,7 +374,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
     newly_conflicting = set()
     revisited = set(_revisited_conflicts)
     for left, right, begin, end in windows[:8]:
-        report = dict(context=[left, right], source_range=[begin, end], global_localization=global_recovery,
+        report: dict[str, Any] = dict(context=[left, right], source_range=[begin, end], global_localization=global_recovery,
                       accepted_lines=[], attempts=[], activity_screened_lines=sorted(i+1 for i in quiet))
         reports.append(report)
         if needs_relocation and not untimed.intersection(range(left, right)):
@@ -506,7 +512,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
             if not selected:
                 continue
             region = (start, stop_line, cf, cs, ab, ae)
-            attempt = dict(lines=[start+left+1, stop_line+left], context=[cf+left, cs+left], source_range=[ab, ae])
+            attempt: dict[str, Any] = dict(lines=[start+left+1, stop_line+left], context=[cf+left, cs+left], source_range=[ab, ae])
             report['attempts'].append(attempt)
             # Independent anchors can enclose a verse plus an instrumental
             # gap. Charge longer windows to the same total work budget instead
@@ -617,7 +623,7 @@ def recover_with_local_asr(block, lines, audio, language, recognize, align, *,
                 # through the same failed attention path again.
                 relocalized.add(region)
                 budget -= 1
-                regional = dict(context=[cf+left, cs+left], source_range=[ab, ae])
+                regional: dict[str, Any] = dict(context=[cf+left, cs+left], source_range=[ab, ae])
                 attempt['regional_localization'] = regional
                 try:
                     response = report['recognition'] if (ab, ae) == (begin, end) else recognize(ab, ae)
@@ -901,7 +907,7 @@ def recognize_in_windows(recognize, begin, end, chunks):
     edges = np.linspace(begin, end, chunks+1)
     for left, right in zip(edges, edges[1:]):
         start, stop = max(begin, left-5), min(end, right+5)
-        report = dict(source_range=[start, stop], retained_range=[left, right])
+        report: dict[str, Any] = dict(source_range=[start, stop], retained_range=[left, right])
         reports.append(report)
         try:
             response = recognize(start, stop)
@@ -985,7 +991,7 @@ def recover_skipped_repeats(result, duration, align):
         left, right = run[index:index+2]
         if left['end'] >= right['start'] or right['end']-left['start']+1.2 > 45:
             continue
-        report = dict(lines=[stop-len(run)+1, stop], gap=[left['end'], right['start']], accepted=False)
+        report: dict[str, Any] = dict(lines=[stop-len(run)+1, stop], gap=[left['end'], right['start']], accepted=False)
         reports.append(report)
         predictions = []
         for name, begin, end, count in (
@@ -1091,15 +1097,17 @@ def stitch_blocks(lines, raw_blocks, duration, language, align=None):
             prediction[index] = (cue, words)
         return prediction
 
-    predictions, owners = [], [None]*len(lines)
+    predictions = []
+    assigned: list[int | None] = [None]*len(lines)
     for block_index, block in enumerate(raw_blocks):
         predictions.append(prediction_for(block))
         for index in range(*block['range']):
-            if owners[index] is not None:
+            if assigned[index] is not None:
                 raise ValueError(f'Duplicate core lyric line: {index}')
-            owners[index] = block_index
-    if None in owners:
+            assigned[index] = block_index
+    if None in assigned:
         raise ValueError('Raw alignment does not cover exactly the displayed lyrics')
+    owners = cast(list[int], assigned)  # Every lyric line has an owner after the coverage check.
     original_owners = owners.copy()
 
     def conflicts(selection):
@@ -1257,7 +1265,7 @@ def refine_chinese_onsets(cues, raw_blocks, audio, language):
     frames = audio[:len(audio)//320*320].reshape(-1, 320)
     rms = np.sqrt(np.mean(frames**2, axis=1))
     threshold = max(.008, np.quantile(rms, .9)*.12)
-    active = binary_closing(rms > threshold, structure=np.ones(5))
+    active = binary_closing(rms > threshold, structure=np.ones(5, dtype=bool))
     changes = []
     for block in raw_blocks:
         offset = block['source_range'][0]
@@ -1297,7 +1305,7 @@ def refine_chinese_onsets(cues, raw_blocks, audio, language):
 
 def load_aligner(name, device):
     if device == 'mps':
-        whisper_timing.dtw = lambda matrix: dtw_cpu(matrix.detach().cpu().double().numpy())
+        whisper_timing.dtw = lambda x: dtw_cpu(x.detach().cpu().double().numpy())  # ty: ignore[invalid-assignment] # Replace the third-party DTW function for MPS support.
     model = stable_whisper.load_model(name, device='cpu',
         download_root=str(Path(__file__).resolve().parent/'models/alignment/whisper'))
     # Sparse attention-head indices must stay on the host, including on MPS.
@@ -1350,8 +1358,9 @@ def main():
         acoustic = acoustic_audio = acoustic_hash = singing = None
         def localize_audio(start, stop, text):
             nonlocal acoustic, acoustic_audio, acoustic_hash, singing
-            from cjk_recovery import AcousticWitness
             from scipy.signal import resample_poly
+
+            from cjk_recovery import AcousticWitness
             if acoustic_audio is None:
                 acoustic_audio = resample_poly(audio, 441, 160).astype('float32')
             pronunciation_error = None
@@ -1418,8 +1427,8 @@ def main():
 
             def recognize_audio(start, stop, *, original_mix=False):
                 nonlocal recognition_config
-                from stage_cache import StageCache
                 import local_asr
+                from stage_cache import StageCache
                 fallback = None
                 if original_mix and local_asr.offline():
                     if recognition_config is None:
@@ -1480,7 +1489,7 @@ def main():
                 lambda: align_piece(0., len(piece)/16000, '\n'.join(lines), gap_padding=None, dynamic_heads=True),
                 align=align_piece, language=lyrics['language'])
             result, repeat_recoveries = recover_skipped_repeats(result, len(piece)/16000, align_piece)
-            block = dict(range=[first, stop], context=[context_first, context_stop],
+            block: dict[str, Any] = dict(range=[first, stop], context=[context_first, context_stop],
                 source_range=[begin, end], result=result, repeat_recoveries=repeat_recoveries,
                 text_recovery=text_recovery)
             if anchors:

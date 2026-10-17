@@ -1,10 +1,10 @@
 """Content-checked checkpoints inside the existing, budgeted job directory."""
-from contextlib import contextmanager
 import hashlib
 import json
-from pathlib import Path
 import shutil
 import time
+from contextlib import contextmanager
+from pathlib import Path
 
 
 def digest(path):

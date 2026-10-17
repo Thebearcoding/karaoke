@@ -6,13 +6,13 @@ solo sections; only simultaneous singing uses the learned spectral masks.
 
 import argparse
 import json
-from pathlib import Path
 import time
+from pathlib import Path
 
 import numpy as np
-from scipy.ndimage import gaussian_filter, gaussian_filter1d
-from scipy.signal import stft, istft
 import soundfile as sf
+from scipy.ndimage import gaussian_filter, gaussian_filter1d
+from scipy.signal import istft, stft
 
 
 def learn_dictionary(values, rank, rng, iterations=70):

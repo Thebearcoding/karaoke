@@ -46,6 +46,16 @@
 
 ## 验证与交付
 
+安装开发依赖和 `npm ci` 后，先运行全仓检查：
+
+```sh
+.venv/bin/ruff check .
+.venv/bin/ty check --python .venv/bin/python
+npm run lint
+```
+
+再运行行为测试：
+
 ```sh
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=karaoke .venv/bin/python -m pytest -q karaoke/test_api.py karaoke/test_room.py karaoke/test_algorithms.py
 node --test karaoke/test_player.mjs karaoke/test_pitch.mjs karaoke/test_search.mjs

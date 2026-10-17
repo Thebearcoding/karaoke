@@ -13,8 +13,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    name: Python / Ruff
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements-lint.txt
+      - run: ruff check .
+
   python:
-    name: Python / API, queue and algorithms
+    name: Python / types, API, queue and algorithms
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
@@ -49,6 +63,8 @@ jobs:
           persist-credentials: false
       - name: Prepare the Japanese pronunciation dictionary
         run: python -c 'import pyopenjtalk; pyopenjtalk.run_frontend("こんにちは")'
+      - name: Check all Python types
+        run: ty check --python "$(command -v python)"
       - name: Check startup with an empty library
         env:
           KARAOKE_DATA_DIR: ${{ runner.temp }}/karaoke-empty
@@ -94,7 +110,7 @@ jobs:
           retention-days: 14
 
   javascript:
-    name: JavaScript / player, pitch and search
+    name: JavaScript / lint, player, pitch and search
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -104,7 +120,11 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
-          package-manager-cache: false
+          cache: npm
+      - name: Install lint dependencies
+        run: npm ci
+      - name: Check all owned JavaScript
+        run: npm run lint
       - name: Run all JavaScript tests
         run: |
           mkdir -p test-results

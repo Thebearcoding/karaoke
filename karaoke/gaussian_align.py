@@ -9,7 +9,6 @@ import re
 import cmudict
 import numpy as np
 
-
 DICTIONARY=cmudict.dict()
 VOWELS={'AA','AE','AH','AO','AW','AY','EH','ER','EY','IH','IY','OW','OY','UH','UW'}
 
