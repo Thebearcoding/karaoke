@@ -8314,7 +8314,8 @@ def test_audio_ready_job_releases_queue_protection_and_resumes_its_checkpoints(t
             output.write_bytes(b'computed audio')
         app.state.store.update(entry['job_id'],status=status)
         room=client.post('/v1/room/commands',json={'action':'remove','entry_id':entry['id']}).json()
-        assert client.get('/v1/library').json()['songs'][0]['status']=='unprepared'
+        assert client.get('/v1/library').json()['songs'] == []
+        assert client.get(f"/v1/jobs/{entry['job_id']}").json()['status'] == status
         assert client.get('/health').json()['queued']==0
         assert entry['job_id'] not in app.state.store.cache.protected(app.state.store.list(-1))
         app.state.store.cache.compact(app.state.store.read(entry['job_id']))
@@ -8336,7 +8337,8 @@ def test_audio_ready_job_releases_queue_protection_and_resumes_its_checkpoints(t
 
 def test_complete_audio_ready_releases_intermediates_and_queues_video_only(tmp_path):
     from karaoke.stage_cache import StageCache
-    store = Store(tmp_path)
+    app = create_app(tmp_path, version='test')
+    store = app.state.store
     original = cache_fixture(store, '1', restorable=True)
     folder = tmp_path/original['id']
     result = original['result']
@@ -8348,6 +8350,8 @@ def test_complete_audio_ready_releases_intermediates_and_queues_video_only(tmp_p
     with StageCache(folder).stage('separate', inputs=[folder/'request.json'], outputs=[working]):
         working.write_bytes(b'no longer required')
     job = store.update(original['id'], status='audio_ready', result=None, audio_result=result)
+    song = next(s for s in app.state.room.library() if s['id'] == job['id'])
+    assert song['status'] == 'unprepared'
     before = {name:file_hash(folder/a['path']) for name,a in result['artifacts'].items()}
     store.cache.compact(job)
     assert not working.exists()
@@ -11527,10 +11531,15 @@ def test_concurrent_media_access_coalesces_writes_but_persists_later_usage(tmp_p
     assert store.read(jobs[0]['id'])['last_accessed_at'] == '103.5'
 
 
-def test_lru_uses_real_access_persists_and_evicted_song_can_be_requested_again(tmp_path):
+@pytest.mark.parametrize('audio_only', [False, True])
+def test_lru_uses_real_access_persists_and_evicted_song_can_be_requested_again(tmp_path, audio_only):
     app = create_app(tmp_path, worker_command=fake_worker, version='test')
     store = app.state.store
-    first, second, third = [cache_fixture(store, str(i)) for i in (1,2,3)]
+    first, second, third = [cache_fixture(store, str(i), restorable=audio_only and i == 2) for i in (1,2,3)]
+    if audio_only:
+        result = {**second['result'], 'artifacts': {k: v for k, v in second['result']['artifacts'].items() if k != 'mv'}}
+        (store.root/second['id']/'mv.mp4').unlink()
+        store.update(second['id'], status='audio_ready', result=None, audio_result=result)
     with TestClient(app) as client:
         # Reading a list is not a song access. Fetching media, including a range, is.
         response = client.get(f"/v1/jobs/{first['id']}/artifacts/mv", headers={'Range':'bytes=0-3'})
@@ -11545,7 +11554,7 @@ def test_lru_uses_real_access_persists_and_evicted_song_can_be_requested_again(t
         assert client.get(f"/v1/jobs/{second['id']}/artifacts/mv").status_code == 410
         library = client.get('/v1/library').json()['songs']
         assert next(s for s in library if s['id']==first['id'])['job_id']
-        assert next(s for s in library if s['id']==second['id'])['job_id'] is None
+        assert all(s['id'] != second['id'] for s in library)
         assert Store(tmp_path).read(first['id'])['last_accessed_at'] == store.read(first['id'])['last_accessed_at']
         # A stale library button can transparently enqueue the evicted song again.
         store.cache.set_limit(GIB)

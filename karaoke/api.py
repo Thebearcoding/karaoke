@@ -165,10 +165,12 @@ class Store:
             db.execute('CREATE INDEX IF NOT EXISTS jobs_cache ON jobs(cache_key, status)')
             db.execute("""CREATE INDEX IF NOT EXISTS jobs_source_latest
                 ON jobs(json_extract(doc, '$.input.url'), created_at DESC)""")
-            db.execute("""CREATE INDEX IF NOT EXISTS jobs_library_candidates ON jobs(id)
-                WHERE status IN ('queued','running','completed') OR json_extract(doc, '$.restore_video')=1""")
+            db.execute("""CREATE INDEX IF NOT EXISTS jobs_library_available ON jobs(id)
+                WHERE status IN ('queued','running','completed') OR json_extract(doc, '$.restore_video')=1
+                OR (status='audio_ready' AND json_extract(doc, '$.audio_result') IS NOT NULL)""")
             db.execute('DROP TABLE IF EXISTS library_sources')
             db.execute('DROP INDEX IF EXISTS jobs_library_media')
+            db.execute('DROP INDEX IF EXISTS jobs_library_candidates')
         self.cache = SongCache(self, cache_limit_bytes)
 
     @contextmanager
@@ -331,6 +333,7 @@ class Store:
             rows = db.execute("""WITH candidates AS (
                 SELECT id, json_extract(doc, '$.input.url') AS url FROM jobs
                 WHERE status IN ('queued','running','completed') OR json_extract(doc, '$.restore_video')=1
+                OR (status='audio_ready' AND json_extract(doc, '$.audio_result') IS NOT NULL)
                 UNION SELECT id, json_extract(doc, '$.input.url') FROM jobs
                 WHERE id IN (SELECT value FROM json_each(?)))
                 SELECT doc FROM jobs WHERE id IN (

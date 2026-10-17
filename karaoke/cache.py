@@ -322,7 +322,7 @@ class SongCache:
             else:
                 shutil.rmtree(folder)
                 remaining = 0
-                self.store.update(job['id'], status='evicted' if job.get('result') else job['status'],
+                self.store.update(job['id'], status='evicted' if job.get('result') or job.get('audio_result') else job['status'],
                                   restore_video=False, active_stages=[], evicted_at=time.time())
             used = self.total_size(self.folder(j['id']) for j in jobs)
             sizes[job['id']] = remaining

@@ -66,6 +66,7 @@ def test_progress_snapshots_do_not_read_retired_attempts_after_database_upgrade(
         db.execute('DROP TABLE IF EXISTS library_sources')
         db.execute('DROP INDEX IF EXISTS jobs_library_media')
         db.execute('DROP INDEX IF EXISTS jobs_library_candidates')
+        db.execute('DROP INDEX IF EXISTS jobs_library_available')
         db.execute('DROP INDEX IF EXISTS jobs_source_latest')
     app = create_app(tmp_path, version='test')
     store, room = app.state.store, app.state.room
